@@ -22,6 +22,7 @@ let serving = false
 const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
 
   bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
+              [--workers N]
               [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
               [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
               [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
@@ -224,6 +225,7 @@ async function serve(args: ParsedArgs): Promise<void> {
   const host = str(args, "host")
   const node = str(args, "node")
   const adminKey = str(args, "admin-key")
+  const workers = num(args, "workers")
   const replicaOf = str(args, "replica-of")
   const clusterSecret = str(args, "cluster-secret")
   const follow = str(args, "follow")
@@ -231,11 +233,12 @@ async function serve(args: ParsedArgs): Promise<void> {
   const advertise = str(args, "advertise")
   const zone = str(args, "zone")
   if (dir !== undefined) overrides.data = { dir }
-  if (port !== undefined || host !== undefined || node !== undefined) {
+  if (port !== undefined || host !== undefined || node !== undefined || workers !== undefined) {
     overrides.server = {
       ...(port !== undefined ? { port } : {}),
       ...(host !== undefined ? { host } : {}),
       ...(node !== undefined ? { node } : {}),
+      ...(workers !== undefined ? { workers } : {}),
     }
   }
   if (adminKey !== undefined) overrides.auth = { adminKey }
@@ -298,6 +301,10 @@ async function serve(args: ParsedArgs): Promise<void> {
     ? `\nbunql: shipping to s3://${config.s3.bucket}/${config.s3.prefix}, retention ` +
       `${config.s3.retention}`
     : ""
+  const threads =
+    handle.workers > 1
+      ? `\nbunql: ${handle.workers} worker threads; databases are sharded across them by name`
+      : ""
   const cluster = config.cluster.enabled
     ? `\nbunql: cluster ${config.cluster.id}, peers ${config.cluster.peers.join(", ") || "(none)"}` +
       `, lease ${config.cluster.leaseTtlMs}ms guard ${config.cluster.leaseGuardMs}ms`
@@ -312,7 +319,7 @@ async function serve(args: ParsedArgs): Promise<void> {
   console.log(
     `bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
       `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
-      `ack ${config.durability.defaultAck}${replication}${cluster}${storage}`,
+      `ack ${config.durability.defaultAck}${threads}${replication}${cluster}${storage}`,
   )
   let stopping = false
   const stop = (signal: string): void => {

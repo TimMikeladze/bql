@@ -45,7 +45,8 @@
     "bench:tenant": "bun run bench/tenant.ts",
     "bench:http": "bun run bench/http.ts",
     "bench:replication": "bun run bench/replication.ts",
-    "bench:storage": "bun run bench/storage.ts"
+    "bench:storage": "bun run bench/storage.ts",
+    "bench:workers": "bun run bench/workers.ts"
   },
   "engines": {
     "bun": ">=1.4.0"

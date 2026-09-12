@@ -1,0 +1,157 @@
+// What `[server] workers` is worth (`docs/c4-workers.md`, phase-2 milestone 4).
+//
+//   bun run bench/workers.ts [--workers 1,2,4] [--dbs 8] [--concurrent 64] [--seconds 5]
+//
+// The shape is exactly the one `docs/performance.md` §5 measured across processes: N databases,
+// single-row writes, many concurrent clients. There it was one process against four; here it is
+// one process with one worker against the same process with N, over one port.
+//
+// The server runs in its own process and so does the load client, because a client that shares the
+// server's event loop measures the loop rather than the server — the correction `bench/http.ts`
+// already carries.
+
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { emit, parseReport, type Sample } from "./report.ts"
+
+function flag(name: string, fallback: string): string {
+  const at = Bun.argv.indexOf(`--${name}`)
+  return at >= 0 ? (Bun.argv[at + 1] as string) : fallback
+}
+
+const LADDER = flag("workers", "1,2,4")
+  .split(",")
+  .map((one) => Number(one.trim()))
+  .filter((one) => Number.isFinite(one) && one >= 1)
+const DBS = Number(flag("dbs", "8"))
+const CONCURRENT = Number(flag("concurrent", "64"))
+const SECONDS = Number(flag("seconds", "5"))
+const ADMIN = "bench-admin-key"
+const NAMES = Array.from({ length: DBS }, (_, i) => `bench${i}`)
+
+const results: { workers: number; rate: number }[] = []
+
+for (const workers of LADDER) {
+  results.push({ workers, rate: await run(workers) })
+}
+
+const base = results[0]?.rate ?? 0
+console.log(
+  `bunql workers bench · ${DBS} databases · ${CONCURRENT} sockets · ${SECONDS}s · ` +
+    `Bun ${Bun.version} · ${process.platform}/${process.arch} · ${os.cpus().length} cores\n`,
+)
+console.log("workers    writes/s    speedup")
+console.log("-".repeat(31))
+for (const { workers, rate } of results) {
+  console.log(
+    `${String(workers).padStart(7)}  ${rate.toFixed(0).padStart(10)}  ${(base ? rate / base : 1).toFixed(2).padStart(9)}x`,
+  )
+}
+
+const legs: Record<string, Sample> = {}
+for (const { workers, rate } of results) {
+  legs[`single-row writes, ${workers} worker${workers === 1 ? "" : "s"}`] = {
+    p50: rate,
+    p90: rate,
+    p99: rate,
+    unit: "rps",
+  }
+}
+emit({
+  bench: "workers",
+  info: { databases: String(DBS), sockets: String(CONCURRENT), seconds: String(SECONDS) },
+  legs,
+})
+
+/** Starts a node with `workers` threads, seeds it, runs the load client, returns writes/s. */
+async function run(workers: number): Promise<number> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-workers-${workers}-`))
+  const port = 4400 + workers
+  const server = Bun.spawn(
+    [
+      process.execPath,
+      "run",
+      path.join(import.meta.dir, "..", "src", "cli.ts"),
+      "serve",
+      "--dir",
+      root,
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+      "--workers",
+      String(workers),
+    ],
+    {
+      stdout: "ignore",
+      stderr: "inherit",
+      env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+    },
+  )
+  try {
+    const url = `http://127.0.0.1:${port}`
+    await waitFor(url)
+    for (const name of NAMES) {
+      await post(url, "/v1/db", { name })
+      await post(url, `/v1/db/${name}/query`, {
+        sql: "create table t(id integer primary key, v text)",
+      })
+    }
+    const client = Bun.spawn(
+      [
+        process.execPath,
+        "run",
+        path.join(import.meta.dir, "workers-client.ts"),
+        "--url",
+        url,
+        "--token",
+        ADMIN,
+        "--dbs",
+        NAMES.join(","),
+        "--concurrent",
+        String(CONCURRENT),
+        "--seconds",
+        String(SECONDS),
+      ],
+      { stdout: "pipe", stderr: "inherit" },
+    )
+    const output = await new Response(client.stdout).text()
+    if ((await client.exited) !== 0) throw new Error("the load client failed")
+    const report = parseReport(output) as unknown as { rate?: number } | null
+    if (!report || typeof report.rate !== "number") throw new Error("the load client printed no rate")
+    return report.rate
+  } finally {
+    server.kill()
+    await server.exited
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+async function post(url: string, route: string, body: unknown): Promise<void> {
+  const response = await fetch(`${url}${route}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${ADMIN}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok && response.status !== 409) {
+    throw new Error(`${route}: ${response.status} ${await response.text()}`)
+  }
+  await response.arrayBuffer()
+}
+
+async function waitFor(url: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    try {
+      const response = await fetch(`${url}/healthz`)
+      if (response.ok) {
+        await response.arrayBuffer()
+        return
+      }
+    } catch {
+      // Not listening yet.
+    }
+    await Bun.sleep(50)
+  }
+  throw new Error(`${url} never became ready`)
+}

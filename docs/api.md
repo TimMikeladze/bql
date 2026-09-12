@@ -173,6 +173,11 @@ should be told about three:
 The body is judged **after** the token and the database, so a request that may not be here is still
 `401` or `404` rather than a `400` describing what the route would have taken.
 
+`WORKERS_UNSUPPORTED` is the one code raised at startup rather than for a request: `[server]
+workers` above 1 shards databases across threads, and a database's replication stream is served
+from the thread that owns its writer, so a node configured for both refuses to start and names
+which one to drop. `docs/c4-workers.md` §5.
+
 | code | status | when |
 |---|---|---|
 | `BAD_REQUEST` | 400 | malformed body, unknown option, bad SQL that SQLite reports as `SQLITE_ERROR` |
@@ -1384,6 +1389,29 @@ bunql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acm
 
 ---
 
+## Workers
+
+`[server] workers = N` (or `bunql serve --workers N`) runs the node's databases on **N worker
+threads** and keeps the listener, every socket, the catalog and the authenticator on the main
+thread, which owns no database of its own. A database belongs to the worker its name hashes to;
+every `/v1/db/{db}/…` request, every WebSocket frame and every libsql socket is routed there. The
+default, `1`, is exactly the single-threaded node this has always been: no thread is spawned and
+nothing is routed. `0` means one per core, capped at 8.
+
+It exists because write throughput was bound by the process rather than by the database. Measured
+on eight databases over one port, single-row writes from 64 sockets: **28 809 writes/s at one
+worker, 72 817 at six** — 2.67x (`bun run bench/workers.ts`, `docs/c4-workers.md` §9).
+
+Two things change in what a sharded node reports, both in reporting rather than in data: `GET
+/v1/db` says `"open": false` for every database, because "open" is a fact about one worker's LRU;
+and `GET /metrics` sums every worker's counters but omits the replication and storage gauges.
+
+**`workers > 1` cannot be combined with `[replication] secret`, `[replication] primary` or
+`[cluster] enabled`** — the node refuses to start with `WORKERS_UNSUPPORTED` and says which. A
+replication stream is served from the `Tenant` itself, which lives on the thread that owns it and
+not on the thread holding the socket; `docs/c4-workers.md` §5 and §10 argue it out and name the
+milestone that lifts it.
+
 ## Configuration
 
 `bunql.toml` in the working directory, then `BUNQL_*` in the environment, which wins.
@@ -1401,6 +1429,7 @@ the canonical one wins when both are set.
 | `[server] node` | hash of the hostname | `BUNQL_SERVER_NODE` | `BUNQL_NODE` |
 | `[server] tenantFromHost` | `false` | `BUNQL_SERVER_TENANT_FROM_HOST` | `BUNQL_TENANT_FROM_HOST` |
 | `[server] cors` | `true` | `BUNQL_SERVER_CORS` | `BUNQL_CORS` |
+| `[server] workers` | `1` | `BUNQL_SERVER_WORKERS` | — |
 | `[data] dir` | `"./data"` | `BUNQL_DATA_DIR` | `BUNQL_DIR` |
 | `[data] maxOpen` | `1024` | `BUNQL_DATA_MAX_OPEN` | `BUNQL_MAX_OPEN` |
 | `[data] readers` | `2` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |

@@ -22,12 +22,12 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 |---|---|---|
 | 0 | engine, tenancy, HTTP/WS/SSE, tokens, WAL log, snapshots, PITR, realtime, client, embedded, CLI | built |
 | 1 | replica streaming and bootstrap, write forwarding, `ack` levels, read-your-writes across nodes, S3 shipper and restore, Hrana, Kysely and Drizzle | built |
-| 2 | Raft control plane, per-database leases, promotion and failover, Linux packaging and CI | built |
-| 2 | placement, `workers: N`, replica apply mechanism A | open |
+| 2 | Raft control plane, per-database leases, promotion and failover, Linux packaging and CI, `workers: N` | built |
+| 2 | placement, replica apply mechanism A | open |
 | — | one operation model rendered as REST + OpenAPI + GraphQL (`bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1312 tests across 105 files, green on macOS (arm64) and Linux (x64).
+1346 tests across 107 files, green on macOS (arm64) and Linux (x64).
 
 ## Quickstart
 
@@ -471,10 +471,14 @@ pipeline is within a microsecond of both. Everything, read against the design §
 [docs/benchmarks.md](docs/benchmarks.md) — including the one missed target, 130k msg/s against a
 150k WebSocket budget, which is writes serialising on the single writer.
 
-Throughput, per process: ~220k reads/s on a socket, ~50k/s over HTTP, and 25–30k writes/s no
-matter how many databases they are spread over. [docs/performance.md](docs/performance.md) takes
-both hot paths apart stage by stage — SQLite is 29% of a write and 0.79 µs of a read — and says
-what to do about each ceiling and how the thing scales.
+Throughput on one thread: ~220k reads/s on a socket, ~50k/s over HTTP, and 25–30k writes/s no
+matter how many databases they are spread over — the bound is the thread, not the database.
+`[server] workers = N` shards databases across worker threads behind one port and lifts exactly
+that: 8 databases, 64 sockets, single-row writes go from **28 809 writes/s at one worker to
+72 817 at six**, 2.67x (`bun run bench/workers.ts`, [docs/c4-workers.md](docs/c4-workers.md)).
+[docs/performance.md](docs/performance.md) takes both hot paths apart stage by stage — SQLite is
+29% of a write and 0.79 µs of a read — and says what to do about each ceiling and how the thing
+scales.
 
 ## Tests
 

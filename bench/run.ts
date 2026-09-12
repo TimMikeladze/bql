@@ -4,6 +4,10 @@
 //   bun run bench                 # everything
 //   bun run bench --quick         # fewer rounds, for a laptop on battery
 //   bun run bench --only http     # one of driver | wal | tenant | http | replication | storage
+//
+// `bench/workers.ts` and `bench/profile.ts` are deliberately not in this set: both measure a
+// configuration the node does not run by default (`[server] workers`, and attribution for
+// `docs/performance.md`), and both spawn whole servers. `bun run bench:workers`.
 //   bun run bench --json          # every report as JSON, for docs/benchmarks.md
 //
 // Each benchmark runs as its own process: `bench/driver.ts` loads bun:sqlite, `bench/http.ts`

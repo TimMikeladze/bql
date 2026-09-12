@@ -67,6 +67,31 @@ export interface MetricsSnapshot {
   uptimeMs: number
 }
 
+/** `Metrics` as flat, clonable data — what crosses the worker channel. See `Metrics.state`. */
+export interface MetricsState {
+  requests: number
+  byClass: [string, number][]
+  buckets: number[]
+  sumUs: number
+  queries: number
+  writes: number
+  batches: number
+  transactions: number
+  vmSteps: number
+  forwarded: number
+  ackTimeouts: number
+  txQueued: number
+  errors: number
+  wsConnections: number
+  wsOpen: number
+  wsMessages: number
+  sseOpen: number
+  sseTotal: number
+  liveSubs: number
+  changeSubs: number
+  droppedLive: number
+}
+
 export class Metrics {
   readonly startedAt = Date.now()
 
@@ -91,6 +116,68 @@ export class Metrics {
   #liveSubs = 0
   #changeSubs = 0
   #droppedLive = 0
+
+  /**
+   * Every counter, flat, so one process's numbers can cross a thread and be added to another's
+   * (`docs/c4-workers.md`: a node with `workers: N` serves `/metrics` from the router, which owns
+   * none of the requests). Gauges are summed too — open sockets and subscriptions really are the
+   * sum over the workers holding them — and `startedAt` is not carried, because uptime is the
+   * router's.
+   */
+  state(): MetricsState {
+    return {
+      requests: this.#requests,
+      byClass: [...this.#byClass],
+      buckets: [...this.#buckets],
+      sumUs: this.#sumUs,
+      queries: this.#queries,
+      writes: this.#writes,
+      batches: this.#batches,
+      transactions: this.#transactions,
+      vmSteps: this.#vmSteps,
+      forwarded: this.#forwarded,
+      ackTimeouts: this.#ackTimeouts,
+      txQueued: this.#txQueued,
+      errors: this.#errors,
+      wsConnections: this.#wsConnections,
+      wsOpen: this.#wsOpen,
+      wsMessages: this.#wsMessages,
+      sseOpen: this.#sseOpen,
+      sseTotal: this.#sseTotal,
+      liveSubs: this.#liveSubs,
+      changeSubs: this.#changeSubs,
+      droppedLive: this.#droppedLive,
+    }
+  }
+
+  /** Adds another process's counters to these. */
+  absorb(state: MetricsState): void {
+    this.#requests += state.requests
+    for (const [klass, count] of state.byClass) {
+      this.#byClass.set(klass, (this.#byClass.get(klass) ?? 0) + count)
+    }
+    for (let i = 0; i < this.#buckets.length; i++) {
+      this.#buckets[i] = (this.#buckets[i] as number) + (state.buckets[i] ?? 0)
+    }
+    this.#sumUs += state.sumUs
+    this.#queries += state.queries
+    this.#writes += state.writes
+    this.#batches += state.batches
+    this.#transactions += state.transactions
+    this.#vmSteps += state.vmSteps
+    this.#forwarded += state.forwarded
+    this.#ackTimeouts += state.ackTimeouts
+    this.#txQueued += state.txQueued
+    this.#errors += state.errors
+    this.#wsConnections += state.wsConnections
+    this.#wsOpen += state.wsOpen
+    this.#wsMessages += state.wsMessages
+    this.#sseOpen += state.sseOpen
+    this.#sseTotal += state.sseTotal
+    this.#liveSubs += state.liveSubs
+    this.#changeSubs += state.changeSubs
+    this.#droppedLive += state.droppedLive
+  }
 
   /** One finished HTTP request: its status class and how long it took. */
   request(status: number, durationUs: number): void {

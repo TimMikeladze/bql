@@ -396,12 +396,20 @@ fenced on reconnect.
 - Failover with `ack: "local"` can lose un-replicated txns (bounded by lag); with `"replica"`
   or `"quorum"` it cannot, because promotion picks the highest acked txid.
 
-### 5.5 Multi-core
-v1 is one thread. Scale-out is more processes/nodes with tenant placement. Planned option:
-`workers: N` runs N `Bun.serve` instances (`reusePort`, verified to bind and load-balance on
-Linux; macOS routes everything to one listener, so it is Linux-only) in Workers; any worker
-serves reads for any tenant (WAL snapshot isolation); writes hop to the owning worker via
-`postMessage` (~20 µs). Realtime fan-out crosses workers via `BroadcastChannel`.
+### 5.5 Multi-core — built, and not the way this section first planned it
+`[server] workers = N` shards databases across N Worker threads. **The `reusePort` plan above was
+rejected**: it is dead on macOS (four listeners bound one port, every connection went to the first)
+and, more importantly, a listener in every worker turns each per-process singleton — the realtime
+fan-out, the replication server, the Raft node — into an N-way distributed object. A single
+accepting thread does the opposite: the main thread keeps the listener, every socket, the catalog
+and the authenticator and owns no database, so the singletons stay singular and the only thing
+distributed is the databases. Measured: a request hopped to a Worker and back still sustains 128k
+req/s and 307k msg/s on the router thread, well above the 50k/130k a node actually reaches, so the
+router is not the bottleneck; and one node went from 28 809 writes/s to 72 817 at six workers.
+Realtime crosses workers through the router's own `server.publish` rather than through
+`BroadcastChannel`, because there is no subscriber on a worker to broadcast to.
+`workers > 1` refuses to start with replication or the cluster, for the reason in
+`docs/c4-workers.md` §5. Scale-out beyond one node is still more nodes with tenant placement.
 
 ## 6. HTTP API (JSON)
 
@@ -683,7 +691,7 @@ bunql cluster status|join|leave
 |---|---|---|
 | 0 (2 wks) | FFI driver + engine, registry, HTTP/WS/SSE, JSON codec, tokens, WAL tailer + log + snapshots + PITR (local), changes + live queries, CLI `serve/db/token`, embedded API | standalone product usable end to end |
 | 1 (2 wks) | replica streaming, bootstrap, forwarding, `ack` levels, RYW, S3 shipper/restore, Hrana compat, client SDK + Kysely/Drizzle, fork | primary/replica in production shape |
-| 2 (2 wks) | cluster: Raft control plane, placement, leases, failover, `moved`; `workers: N` | HA |
+| 2 (2 wks) | cluster: Raft control plane, placement, leases, failover, `moved`; `workers: N` (built, `docs/c4-workers.md`) | HA |
 | 3 | WAL-decoded logical CDC (row events on replicas without hooks), snapshot reads across requests (`sqlite3_snapshot`), per-tenant encryption at rest, query-plan cache | frontier extras |
 
 Tests: WAL codec property tests against SQLite's own files; a deterministic replication

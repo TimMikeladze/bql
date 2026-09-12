@@ -1,18 +1,22 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-12 at the end of the session that closed what H6 left behind (H8). Read this,
-then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans of
-record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL),
-`docs/h6-mount.md`, `docs/h8-validated-requests.md` (this session), `docs/p1-pragmas.md` and
-`docs/p2-group-commit.md`.
+Rewritten 2026-09-12 at the end of the session that built `workers: N` (C4). Read this,
+then `docs/c4-workers.md`, then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then
+`docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP,
+OpenAPI, GraphQL), `docs/c4-workers.md`, `docs/h6-mount.md`, `docs/h8-validated-requests.md`,
+`docs/p1-pragmas.md` and `docs/p2-group-commit.md`.
 
 ## Where things stand
 
-Phases 0 and 1 are complete; phase 2 has its control plane, its failover and its packaging. On
-`main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree
-clean). `bun test` → **1319 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
-`bun run bytes` and `bun run routes:check` clean. **CI green on macOS and Linux.** Zero runtime
-dependencies.
+Phases 0 and 1 are complete; phase 2 has its control plane, its failover, its packaging and now its
+multi-core story. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private;
+`origin/main` current, tree clean). `bun test` → **1346 pass, 2 skip, 0 fail** across 107 files.
+`bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and
+Linux.** Zero runtime dependencies.
+
+**A node uses its cores.** `[server] workers = N` (`bunql serve --workers N`) shards databases
+across worker threads behind one port: **28 809 writes/s at one worker, 72 817 at six, 2.67x**, on
+the same eight databases and the same load the ceiling was measured on. `docs/c4-workers.md`.
 
 **The surfaces are no longer dark.** `GET|POST|PATCH|DELETE /v1/db/{db}/api/*`,
 `GET /v1/db/{db}/openapi.json`, `POST /v1/db/{db}/graphql` (GraphiQL on `GET`) and
@@ -31,10 +35,10 @@ checksums 8.0, zstd 10.2 (36%) and the segment append 2.0. A point read is 0.79 
 and 2.5 µs serialised, against 28 µs over a socket and 48 over HTTP — so the transport is the cost
 and the query is a rounding error on top.
 
-Throughput, per process: **~220k reads/s on a socket, ~50k/s over HTTP, 25–30k writes/s** no
-matter how many databases they are spread over. Writes are bound by the process, not the database:
-one process with eight databases does 17 214 writes/s, four processes with two each do 39 734.
-That is the case for `workers: N` below, measured rather than assumed.
+Throughput, per *thread*: **~220k reads/s on a socket, ~50k/s over HTTP, 25–30k writes/s** no
+matter how many databases they are spread over. That was the case for `workers: N`, measured rather
+than assumed, and C4 acted on it: the same eight databases across six worker threads now do 72 817
+writes/s behind one port (`docs/c4-workers.md` §9).
 
 | landed in the performance session | commit | what it is |
 |---|---|---|
@@ -48,6 +52,7 @@ That is the case for `workers: N` below, measured rather than assumed.
 
 | landed in this session | what it is |
 |---|---|
+| C4: `workers: N` | `src/server/workers/` (shard, protocol, pool, entry, router), `[server] workers`, `--workers`, `WORKERS_UNSUPPORTED`, `Metrics.state/absorb`, `bench/workers.ts`. The main thread is a router owning the listener, every socket, the catalog and the authenticator and no database; N workers each hold a whole `ServerRuntime` over a hash shard. `ws.ts`, `routes.ts`, `runtime.ts` and `tenant/` are untouched. `docs/c4-workers.md` |
 | H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
 | H8: `NOT_FOUND: 404` | the data API's `/{pk}` routes answer 404 rather than 200-with-null; GraphQL still answers `null`, through `nullOnNotFound` |
 | H8: `problems` published end to end | `errorBodySchema` declares it, `ErrorInfo` names it, `BunQLClientError.problems` carries it |
@@ -93,9 +98,12 @@ C1, C2 and C6 are done (see the table above). What remains, in the order it make
    node has every reason to believe it is still in charge.
 3. **Placement and the `[cluster]` config section**, so a database has a home node and a client
    that lands on the wrong one is told where to go rather than answered slowly.
-4. **`workers: N`.** One process owns every writer today. The design's answer is one worker per
-   subset of databases with the router in front; the hard part is that the registry, the realtime
-   bus and the replication socket are all per-process singletons.
+4. ~~**`workers: N`.**~~ **Done (C4).** `docs/c4-workers.md`. The decision the milestone really made:
+   a worker owns a **shard of databases**, not a shared listener via `reusePort` — which is dead on
+   macOS (measured) and which would turn every per-process singleton into an N-way distributed
+   object. The router keeps them singular instead. What is left is **C4b**: a `Tenant` proxy over
+   the channel so `/v1/replication` can be served for a database a worker owns, which is what
+   `workers > 1` refusing to start beside replication or the cluster is waiting on.
 5. **Replica apply mechanism A (§4.5).** Write pages into the DB file and rewrite the shm header
    under the WAL locks, LiteFS-style. Mechanism B works but rescans the WAL per apply, which is
    the 48 µs "replica read" leg in `bench/wal.ts`.
@@ -108,6 +116,20 @@ served route that is not in the registry. **H7** adds GraphQL subscriptions over
 `src/realtime/` already has. `docs/plan-surfaces.md` has both.
 
 ## Known gaps worth fixing along the way
+
+Added by C4 (2026-09-12), all in reporting rather than in data, and all only with `workers > 1`:
+
+- **`GET /v1/db` reports `"open": false` for every database.** "Open" is a fact about one worker's
+  LRU and the router holds none. The rest of the row comes from the catalog and is exact. Fixing it
+  means asking every worker, which is a round trip on a route that is otherwise a single catalog
+  read.
+- **`GET /metrics` omits the replication and storage gauges.** Every worker's counters are summed
+  (`Metrics.state`/`absorb`) and so are the router's own, but replication is refused with
+  `workers > 1` anyway and the S3 shipper's gauges are per worker with no summing rule that is not
+  a lie.
+- **A hopped request body crosses as one `Uint8Array`**, so `POST /v1/db/{db}/import` of a large
+  SQLite file is copied once more than on a single-threaded node. `[limits] maxImportBytes` bounds
+  it. The response side already streams above 1 MiB.
 
 Added by the performance session (2026-09-12):
 
@@ -241,23 +263,18 @@ What phase 1 added to the list:
 they can run in parallel. Each is written so it can be started cold, with the evidence for why it
 is worth doing. C was H6's, and H8 closed everything C left behind except H7 — see under it.
 
-### A. `workers: N` (phase 2, C4) — the biggest throughput lever left
+### A. ~~`workers: N`~~ **Done (C4).** What it left behind
 
-**Why.** Write throughput is bound by the process, not by the database. Measured: one process
-holding eight databases does **17 214 writes/s**; four processes holding two each do **39 734**
-(2.31x on 18 cores, with the load client itself likely the next limit). Spreading writes over more
-databases inside one process changes nothing — 28.8k vs 28.1k msg/s — because one thread owns every
-writer. `docs/performance.md` §5.
+`docs/c4-workers.md` is the decision, the measurements that forced it and the as-built §9.
+**28 809 → 72 817 writes/s at six workers, one port.** The follow-on, **C4b**, is the one thing it
+could not do: `src/replication/primary.ts` serves a replica from the `Tenant` itself —
+`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()`, `tenant.epoch`, `registry.pin` — and
+one replication socket follows databases across every shard while the socket is on the router,
+which owns no tenant. So `loadConfig` refuses `workers > 1` beside `[replication] secret`,
+`[replication] primary` or `[cluster] enabled`, with `WORKERS_UNSUPPORTED` naming which. Lifting it
+is a `Tenant` proxy over the channel, and it is the most interesting remaining piece of C4.
 
-**What.** `docs/plan-phase2.md` milestone 4: one worker per subset of databases with a router in
-front. The hard part is named there and is still true — the registry, the realtime bus and the
-replication socket are all per-process singletons. Decide first whether a worker owns a *shard of
-databases* (simplest: routing by database name hash, each worker a whole `ServerRuntime` minus the
-listener) or whether workers share one listener via `reusePort`.
-
-**Watch for.** The realtime bus and the change feed are per-process today, so a subscriber on
-worker 1 must still see commits from worker 2 — that is the design decision this milestone really
-makes. `GET /v1/cluster`, promotion and the Raft node must stay on exactly one worker.
+Three smaller things C4 left, all in reporting rather than in data, listed under "Known gaps".
 
 ### B. Replica apply mechanism A (phase 2, C5) — and it pays twice
 

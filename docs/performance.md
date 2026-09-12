@@ -75,8 +75,10 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
 2. **Token verification per HTTP request** — 28 µs, unbatched, uncached, on every request.
 3. ~~**Unconditional zstd**~~ — 9.5 µs, 36% of a write. Now `[durability] compress`; off is 28%
    faster and 4.4x larger (§4C).
-4. **One writer thread per process.** Spreading writes over 8 databases changes nothing (28.8k vs
-   28.1k msg/s), so the bound is the process, not the database.
+4. ~~**One writer thread per process.**~~ **Addressed by `[server] workers` (C4).** Spreading writes
+   over 8 databases inside one thread changed nothing (28.8k vs 28.1k msg/s) — the bound was the
+   thread, not the database. Sharding those 8 databases over 6 worker threads takes the same load
+   to 72 817 writes/s. §5.
 5. **HTTP framing** — 35 µs before any query runs. Nothing to fix in BunQL; it is a reason to
    prefer the socket, and a reason the Data API (§H4) should be reachable over the socket too.
 6. **`recorder.poll` at 8 µs** — and it is **memory-bound, not overhead-bound**, which was worth
@@ -172,18 +174,34 @@ read capacity is per node. Measured per process: 219k–259k reads/s on a socket
 against an engine that can do ~1.3M/s in process — so reads are transport-bound, and adding nodes
 adds close to linear capacity.
 
-**Writes scale by sharding databases across processes, and that works — but nothing routes for you
-yet.** Measured, same client, same 8 databases, same total load:
+**Writes scale by sharding databases across threads, and `[server] workers` now does the routing.**
+The original measurement, same client, same 8 databases, same total load, across *processes*:
 
 | | writes/s |
 |---|---|
 | 1 process, 8 databases | 17 214 |
 | 4 processes, 2 databases each | 39 734 |
 
-2.31x on 4 processes, with the single load client likely the next limit. This is exactly what
-`workers: N` (phase 2, milestone 4) would do inside one process and what placement (milestone 3)
-would route to. Until both land, the scale-out path is manual: run several nodes and put databases
-on different ones.
+2.31x on 4 processes, with the single load client likely the next limit. **C4 did that inside one
+process, on one port** (`docs/c4-workers.md`, `bun run bench/workers.ts` — 8 databases, 64 sockets,
+server and load client in separate processes):
+
+| workers | writes/s | speedup |
+|---|---|---|
+| 1 | 28 809 | 1.00x |
+| 2 | 46 964 | 1.63x |
+| 4 | 68 572 | 2.38x |
+| 6 | **72 817** | **2.67x** |
+| 8 | 66 502 | 2.44x |
+
+The one-worker baseline is §3's own "8 databases in one process" figure — 28.8k — so this ladder is
+measured against exactly the ceiling it was meant to lift. It peaks at six on 18 cores: the router
+is one thread, and eight databases over eight shards is a lumpy split.
+
+What is *not* lifted: one database still has one writer, and `workers > 1` refuses to start
+alongside replication or the cluster, because a replication stream is served from the `Tenant`,
+which lives on the thread that owns it (`docs/c4-workers.md` §5). Placement (milestone 3) is still
+what routes across *nodes*.
 
 **The ladder, in the order it pays off**
 
@@ -191,8 +209,8 @@ on different ones.
 2. Move clients to the socket — ~40% off every read, and no token verification per request.
 3. Cache token verification — 28 µs off every HTTP request (A).
 4. Group commit on the server — up to 30x on concurrent single-row writes (B).
-5. `workers: N` + placement — 2.3x measured across processes, and the thing that makes a single
-   node use its cores.
+5. ✅ `workers: N` — **2.67x measured, one node, one port** (`docs/c4-workers.md`). Placement
+   (milestone 3) is the remaining half, across nodes rather than threads.
 6. Replicas for reads, which already work, and placement for writes, which does not yet.
 
 **What does not scale, and cannot be made to.** One database has one writer — that is SQLite, and

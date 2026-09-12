@@ -150,13 +150,19 @@ Consistent hashing with zone awareness picks a database's home node and its `rf-
 client that lands on the wrong node is told where to go (`307` + `BunQL-Primary`) instead of being
 served slowly through a forward. Replica set membership drives which node subscribes to which.
 
-### C4 — `workers: N`
+### C4 — `workers: N` ✅ **Built.** `docs/c4-workers.md`
 
-One `Bun.serve` per worker with `reusePort` (Linux only — macOS routes every connection to one
-listener, verified in §5.5), any worker serving reads for any tenant, writes hopping to the owning
-worker. The hard part is not the routing, it is that the registry, the realtime bus and the
-replication socket are per-process singletons today: one worker owns a subset of databases, the
-router in front owns none, and `BroadcastChannel` carries realtime fan-out across workers.
+The `reusePort` sketch above was **rejected**, and the measurements are in `docs/c4-workers.md` §2:
+it does not load-balance on macOS, and a listener in every worker turns every per-process singleton
+into an N-way distributed object. What was built instead: the main thread keeps the listener, every
+socket, the catalog and the authenticator and owns no database; N worker threads each hold a whole
+`ServerRuntime` over the shard of databases their names hash to. Realtime crosses workers through
+the router's own `server.publish` — there is no subscriber on a worker, so there is nothing to
+`BroadcastChannel` to. A WebSocket is relayed through a *virtual* socket on the worker, so
+`src/server/ws.ts` is unchanged.
+
+**28 809 writes/s → 72 817 at six workers, 2.67x, on one port.** `workers > 1` refuses to start with
+replication or the cluster (`WORKERS_UNSUPPORTED`); C4b is the milestone that lifts that.
 
 ### C5 — replica apply mechanism A
 

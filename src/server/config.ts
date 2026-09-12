@@ -28,6 +28,12 @@ export interface ServerSection {
   tenantFromHost: boolean
   /** Answer CORS preflights and echo the origin, so browser tokens work from anywhere. */
   cors: boolean
+  /**
+   * Worker threads to shard databases over (`docs/c4-workers.md`). 1, the default, is a single
+   * thread and exactly the process this has always been — no worker is spawned and no channel
+   * exists. 0 means one per core, capped at 8.
+   */
+  workers: number
 }
 
 export interface DataSection {
@@ -350,6 +356,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     node: "bunql",
     tenantFromHost: false,
     cors: true,
+    workers: 1,
   },
   data: { dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },
   sqlite: {
@@ -703,6 +710,8 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     )
   }
 
+  assertWorkers(config)
+
   // `s3://bucket/prefix` in one variable, because that is how an operator writes a bucket.
   if (config.s3.bucket.startsWith("s3://")) {
     const rest = config.s3.bucket.slice("s3://".length)
@@ -734,6 +743,41 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   if (config.api.defaultLimit < 1) config.api.defaultLimit = 1
   if (config.api.maxLimit < config.api.defaultLimit) config.api.maxLimit = config.api.defaultLimit
   return config
+}
+
+/**
+ * What `[server] workers` may be combined with. More than one worker shards databases across
+ * threads, and a database's replication stream is served from the `Tenant` itself —
+ * `tenant.onCommit`, `tenant.log`, `tenant.snapshot()`, `registry.pin` — which lives on the thread
+ * that owns it, not on the router thread that holds the socket. Rather than serve a replica half
+ * a log, a node configured for both refuses to start and says which one to drop.
+ * `docs/c4-workers.md` §5; C4b is the milestone that lifts this.
+ */
+function assertWorkers(config: ServerConfig): void {
+  const n = config.server.workers
+  if (!Number.isFinite(n) || n < 0) {
+    throw BunQLError.badRequest(
+      `[server] workers must be 0 (one per core) or a positive count, got ${JSON.stringify(n)}`,
+    )
+  }
+  if (n === 1) return
+  const why =
+    config.cluster.enabled
+      ? "[cluster] enabled"
+      : config.replication.primary
+        ? "[replication] primary (this node follows an upstream)"
+        : config.replication.secret
+          ? "[replication] secret (this node serves /v1/replication)"
+          : null
+  if (!why) return
+  throw new BunQLError(
+    "WORKERS_UNSUPPORTED",
+    `[server] workers = ${n} cannot be combined with ${why}: a database's replication stream is ` +
+      "served from the thread that owns its writer, and with more than one worker that is not the " +
+      "thread holding the socket. Run this node with workers = 1, or without replication. " +
+      "See docs/c4-workers.md §5.",
+    400,
+  )
 }
 
 /** One path segment: no slash, no `:` (which is Bun's parameter marker), and not empty. */

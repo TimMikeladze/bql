@@ -30,6 +30,20 @@ import type { Handler, RouteContext } from "./routes.ts"
 import { ServerRuntime } from "./runtime.ts"
 import { Surfaces } from "./surfaces.ts"
 import {
+  createDbTarget,
+  isRelay,
+  isSharded,
+  relayDrain,
+  relayHranaUpgrade,
+  relayMessage,
+  relayUpgrade,
+  routerMetrics,
+  routingName,
+  type RelaySocketData,
+} from "./workers/router.ts"
+import { WorkerPool } from "./workers/pool.ts"
+import { resolveWorkers } from "./workers/shard.ts"
+import {
   busPublisher,
   closeSocket,
   drain,
@@ -172,7 +186,7 @@ export interface ReplicationSocketData {
   replication: true
 }
 
-type AppSocketData = SocketData | ReplicationSocketData | RaftSocketData
+type AppSocketData = SocketData | ReplicationSocketData | RaftSocketData | RelaySocketData
 
 function isReplication(data: AppSocketData): data is ReplicationSocketData {
   return (data as ReplicationSocketData).replication === true
@@ -214,7 +228,7 @@ export interface App {
  * Async because whether GraphQL is mounted at all depends on two optional peer packages
  * resolving, which is an `import()`. It is resolved once here, never per request.
  */
-export async function createApp(runtime: ServerRuntime): Promise<App> {
+export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Promise<App> {
   const options = (request: Request) => preflight(runtime.config, request)
   const surfaces = new Surfaces(runtime)
   const registry = serverRegistry(surfaces, {
@@ -230,27 +244,45 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
   }
   const routes: Record<string, unknown> = {}
   for (const operation of registry.operations()) {
-    mountOperation(routes, operation, wrap(runtime, asHandler(operation, http)))
+    // With workers, a route that names a database is not served here at all: it is forwarded to
+    // the worker that owns it, whose own app has already applied `wrap()`. `docs/c4-workers.md`.
+    const handler =
+      pool && isSharded(operation.path)
+        ? forwardByPath(runtime, pool)
+        : pool && operation.id === "createDatabase"
+          ? forwardByBody(runtime, pool)
+          : pool && operation.id === "metrics"
+            ? () => routerMetrics(runtime, pool)
+            : wrap(runtime, asHandler(operation, http))
+    mountOperation(routes, operation, handler)
   }
   // One preflight per path the registry claims, exactly as the hand-written table wrote by hand.
   for (const entry of Object.values(routes)) {
     ;(entry as Record<string, unknown>).OPTIONS = options
   }
 
-  Object.assign(routes, hranaRoutes(runtime))
+  Object.assign(routes, pool ? forwardHrana(runtime, pool, options) : hranaRoutes(runtime))
 
   return {
     routes,
     surfaces,
     fetch(request: Request, server: unknown) {
       const url = new URL(request.url)
-      if (url.pathname === "/v1/ws") return upgrade(runtime, request, server, url)
+      if (url.pathname === "/v1/ws") {
+        return pool
+          ? relayUpgrade(runtime, pool, request, server, url)
+          : upgrade(runtime, request, server, url)
+      }
       // Node-to-node, on its own path and with its own handshake: the cluster secret is proved
       // in-band over the socket (design §8), so nothing here looks at `Authorization`.
       if (url.pathname === "/v1/replication") return upgradeReplication(runtime, request, server)
       // The control plane's own socket, authenticated the same way with the same secret (C1).
       if (url.pathname === RAFT_PATH) return upgradeCluster(runtime, request, server)
-      if (isHranaUpgrade(request, url)) return hranaUpgrade(runtime, request, server, url)
+      if (isHranaUpgrade(request, url)) {
+        return pool
+          ? relayHranaUpgrade(runtime, pool, request, server, url)
+          : hranaUpgrade(runtime, request, server, url)
+      }
       if (request.method === "OPTIONS") return preflight(runtime.config, request)
       const headers = new Headers({ "content-type": "application/json; charset=utf-8" })
       applyCors(runtime.config, request, headers)
@@ -269,6 +301,18 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
       sendPings: true,
       maxPayloadLength: 16 * 1024 * 1024,
       open(ws: Socket) {
+        if (isRelay(ws.data) && pool) {
+          const data = ws.data
+          pool.attach(data.id, {
+            send: (text: string) => (ws as unknown as { send(t: string): number }).send(text),
+            subscribe: (topic: string) => ws.subscribe(topic),
+            unsubscribe: (topic: string) => ws.unsubscribe(topic),
+            close: (code?: number, reason?: string) => ws.close(code, reason),
+            pendingLive: data.pendingLive,
+          })
+          runtime.metrics.wsOpened()
+          return
+        }
         if (isCluster(ws.data as AppSocketData)) {
           runtime.cluster?.socket.onOpen(ws as unknown as RaftSocket)
           return
@@ -285,6 +329,11 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
         if (ws.data.principal) greet(ws, runtime.node)
       },
       message(ws: Socket, message: string | Buffer) {
+        if (isRelay(ws.data) && pool) {
+          runtime.metrics.wsMessage()
+          void relayMessage(pool, ws.data, ws as unknown as { send(text: string): number }, message)
+          return
+        }
         if (isCluster(ws.data as AppSocketData)) {
           runtime.cluster?.socket.onMessage(ws as unknown as RaftSocket, message as Uint8Array)
           return
@@ -300,6 +349,10 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
         void handleMessage(ws, message)
       },
       drain(ws: Socket) {
+        if (isRelay(ws.data) && pool) {
+          relayDrain(pool, ws.data, ws as unknown as { send(text: string): number })
+          return
+        }
         if (isCluster(ws.data as AppSocketData)) return
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.drain(ws as unknown as ReplicationSocket)
@@ -309,6 +362,12 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
         drain(ws)
       },
       close(ws: Socket) {
+        if (isRelay(ws.data) && pool) {
+          pool.closed(ws.data.routing, ws.data.id)
+          pool.untrack(ws.data.id)
+          runtime.metrics.wsClosed()
+          return
+        }
         if (isCluster(ws.data as AppSocketData)) {
           runtime.cluster?.socket.onClose(ws as unknown as RaftSocket)
           return
@@ -347,6 +406,59 @@ function asHandler(
     }
     return execute(ctx, ctx)
   }
+}
+
+/**
+ * A route that names a database, forwarded to the worker that owns it. The answer is the worker's
+ * finished `Response` — it ran `wrap()` inside its own app — so this returns it untouched.
+ */
+function forwardByPath(runtime: ServerRuntime, pool: WorkerPool) {
+  return async (request: Request): Promise<Response> => {
+    const url = new URL(request.url)
+    const db = routingName(runtime.config, request, url)
+    if (db === null) {
+      return errorResponse(new BunQLError("BAD_REQUEST", "no database in the request", 400))
+    }
+    return pool.fetch(pool.shardOf(db), request)
+  }
+}
+
+/** `POST /v1/db`, whose database is in the body: read it once here, route on it, pass the bytes. */
+function forwardByBody(runtime: ServerRuntime, pool: WorkerPool) {
+  return async (request: Request): Promise<Response> => {
+    const { name, body } = await createDbTarget(request)
+    return pool.fetch(pool.shardOf(name), request, body)
+  }
+}
+
+/**
+ * The libsql surface. Its database comes from the path, `x-namespace` or the `Host` label, which
+ * is what `routingName` already applies — so one forwarder covers every Hrana route, and the ones
+ * that name no database at all (`GET /v2`, `GET /v3`, the version probes) go to shard 0, where
+ * they touch nothing.
+ */
+function forwardHrana(
+  runtime: ServerRuntime,
+  pool: WorkerPool,
+  options: (request: Request) => Response,
+): Record<string, unknown> {
+  const forward = async (request: Request): Promise<Response> => {
+    const url = new URL(request.url)
+    const db = routingName(runtime.config, request, url)
+    return pool.fetch(db === null ? 0 : pool.shardOf(db), request)
+  }
+  const table: Record<string, unknown> = {}
+  for (const [path, entry] of Object.entries(hranaRoutes(runtime))) {
+    const methods: Record<string, unknown> = {}
+    for (const method of Object.keys(entry as Record<string, unknown>)) {
+      methods[method] = method === "OPTIONS" ? options : forward
+    }
+    table[path] = methods
+  }
+  // `/v1/db/:db/hrana` is a WebSocket upgrade, and an upgrade cannot be forwarded as a request:
+  // `fetch` below answers it through `relayHranaUpgrade` instead, so the route is dropped here.
+  delete table["/v1/db/:db/hrana"]
+  return table
 }
 
 /** Merges one method into the table, refusing a collision rather than letting one silently win. */
@@ -527,6 +639,8 @@ export async function createRuntime(
 export interface ServerHandle {
   server: Bun.Server<SocketData>
   runtime: ServerRuntime
+  /** Worker threads serving this node's databases; 1 when it is the ordinary single-thread node. */
+  workers: number
   registry: TenantRegistry
   config: ServerConfig
   url: string
@@ -550,7 +664,17 @@ export async function startServer(
       }
   const runtime = resolved.runtime
 
-  const app = await createApp(runtime)
+  // `docs/c4-workers.md`: more than one worker turns this process into a router — it keeps the
+  // listener, the sockets, the catalog and the authenticator, and owns no tenant. The pool is
+  // started before the listener so a worker that cannot build its runtime fails `startServer`
+  // rather than leaving a node that answers `DB_NOT_FOUND` for a shard of its databases.
+  const workers = owned ? resolveWorkers(config.server.workers) : 1
+  const pool =
+    workers > 1
+      ? await WorkerPool.start(config, options.onError ?? ((err) => console.error("bunql:", err)))
+      : null
+
+  const app = pool ? await createApp(runtime, pool) : await createApp(runtime)
   // The route table and the socket handler are built dynamically, so they are handed to
   // `Bun.serve` opaquely and the socket data type is reasserted here.
   const server = Bun.serve({
@@ -561,6 +685,12 @@ export async function startServer(
     websocket: app.websocket as never,
     development: false,
   }) as unknown as Bun.Server<SocketData>
+  if (pool) {
+    // A worker has no subscribers; everything it publishes arrives here and goes out over Bun's
+    // own pub/sub, which is the whole cross-worker change-feed story (`docs/c4-workers.md` §3).
+    const publisher = busPublisher(server)
+    pool.setHost({ publish: (topic, data) => publisher.publish(topic, data) })
+  }
   runtime.setPublisher(busPublisher(server))
   // Design §5.3's `moved`: a promotion or a fencing tells every socket that has named the database
   // where it went, instead of leaving it writing to a node that is no longer the primary for it.
@@ -586,6 +716,7 @@ export async function startServer(
   return {
     server,
     runtime,
+    workers: pool ? pool.size : 1,
     registry: runtime.registry,
     config,
     url,
@@ -594,6 +725,10 @@ export async function startServer(
       runtime.setPublisher(null)
       runtime.setMovedHandler(null)
       await server.stop(true)
+      if (pool) {
+        pool.setHost(null)
+        await pool.close()
+      }
       // Everything committed before the listener stopped belongs in the bucket, so the shippers
       // are drained before the runtime — and before the registry closes the logs they read from.
       app.surfaces.close()

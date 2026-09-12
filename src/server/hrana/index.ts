@@ -152,6 +152,23 @@ function dbFromPath(pathname: string): string | null {
 }
 
 /**
+ * What a Hrana upgrade is for: the database, fixed for the socket's life, and the subprotocol
+ * agreed. `null` when the client offered nothing this server speaks. A node with `workers: N`
+ * needs both before it upgrades, because the socket belongs to one shard from the handshake on
+ * (`docs/c4-workers.md` §4.2).
+ */
+export function hranaTarget(
+  request: Request,
+  url: URL,
+): { db: string; subprotocol: WsSubprotocol } | null {
+  const subprotocol = offeredSubprotocol(request)
+  if (!subprotocol) return null
+  const db =
+    dbFromPath(url.pathname) ?? namespaceOf(request, url, (request as RouteRequest).params ?? {})
+  return { db, subprotocol }
+}
+
+/**
  * The `hrana3`/`hrana2` handshake. Returns `undefined` once the socket has been upgraded (Bun's
  * contract for `fetch`) and a `Response` when it could not be. A token on the upgrade request is
  * accepted so a non-browser client need not repeat it, but `hello` is what normally carries it.
@@ -184,6 +201,7 @@ export {
   hranaWsOpen,
   isHranaSocket,
   namespaceOf,
+  newHranaSocketData,
 }
 export type { HranaSocketData }
 export * from "./proto.ts"

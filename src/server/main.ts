@@ -13,7 +13,10 @@ async function main(): Promise<void> {
   const config = loadConfig({ file: CONFIG_FILE, required: Boolean(process.env.BUNQL_CONFIG) })
   const handle = await startServer(config)
 
-  console.log(`bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}`)
+  console.log(
+    `bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}` +
+      (config.server.workers === 1 ? "" : `  workers=${handle.workers}`),
+  )
   console.log(
     `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
       `ack ${config.durability.defaultAck}`,

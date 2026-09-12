@@ -296,3 +296,68 @@ describe("the [cluster] section (C2)", () => {
     expect(splitPeer("not a url")).toEqual(["", ""])
   })
 })
+
+describe("[server] workers", () => {
+  test("defaults to one thread, which is the node this has always been", () => {
+    expect(DEFAULT_CONFIG.server.workers).toBe(1)
+    expect(loadConfig({ file: null, env: {} }).server.workers).toBe(1)
+  })
+
+  test("refuses to shard a node that serves /v1/replication", () => {
+    expect(() =>
+      loadConfig({
+        file: null,
+        env: {},
+        overrides: { server: { workers: 2 }, replication: { secret: "s" } },
+      }),
+    ).toThrow(/workers = 2 cannot be combined with \[replication\] secret/)
+  })
+
+  test("refuses to shard a node that follows an upstream", () => {
+    expect(() =>
+      loadConfig({
+        file: null,
+        env: {},
+        overrides: {
+          server: { workers: 4 },
+          replication: { primary: "wss://p/v1/replication", secret: "s" },
+        },
+      }),
+    ).toThrow(/\[replication\] primary/)
+  })
+
+  test("refuses to shard a node in a cluster", () => {
+    expect(() =>
+      loadConfig({
+        file: null,
+        env: {},
+        overrides: {
+          server: { workers: 2 },
+          cluster: { enabled: true },
+          replication: { secret: "s" },
+        },
+      }),
+    ).toThrow(/\[cluster\] enabled/)
+  })
+
+  test("a standalone node may shard, and one worker may do anything", () => {
+    expect(loadConfig({ file: null, env: {}, overrides: { server: { workers: 4 } } }).server.workers).toBe(4)
+    expect(
+      loadConfig({
+        file: null,
+        env: {},
+        overrides: { server: { workers: 1 }, replication: { secret: "s" } },
+      }).server.workers,
+    ).toBe(1)
+  })
+
+  test("the count comes from the environment like every other key", () => {
+    expect(loadConfig({ file: null, env: { BUNQL_SERVER_WORKERS: "3" } }).server.workers).toBe(3)
+  })
+
+  test("a negative count is refused rather than floored silently", () => {
+    expect(() =>
+      loadConfig({ file: null, env: {}, overrides: { server: { workers: -1 } } }),
+    ).toThrow(/\[server\] workers/)
+  })
+})
