@@ -142,6 +142,22 @@ export class BunQLError extends Error {
   }
 }
 
+/**
+ * Core's problem list, when a **refusal** carries one. `RequestInvalid` in `src/http/handler.ts`
+ * is the producer: a request core refused reports *every* mistake it found, because a client
+ * fixing three of them should be told about three. It lives here rather than there so both the
+ * compiled pipeline and `src/server/app.ts`'s wrapper build the same 400.
+ *
+ * Only a `BunQLError`, which is to say only something this server refused on purpose and whose
+ * message it already hands back. `ResponseInvalid` carries a problem list too and is a 500 the
+ * client learns nothing from — the invariant at the top of this file — so it is not one of these.
+ */
+function problemsOf(err: unknown): unknown[] | undefined {
+  if (!(err instanceof BunQLError)) return undefined
+  const problems = (err as unknown as { problems?: unknown }).problems
+  return Array.isArray(problems) && problems.length > 0 ? problems : undefined
+}
+
 /** True for the errors whose message is safe to hand back verbatim as a 400. */
 function isClientInputError(err: unknown): err is Error {
   return err instanceof TypeError || err instanceof RangeError || err instanceof SyntaxError
@@ -229,6 +245,8 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   const extra = error as unknown as Record<string, unknown>
   if (acks !== undefined) extra.acks = acks
   if (needed !== undefined) extra.needed = needed
+  const problems = problemsOf(err)
+  if (problems) extra.problems = problems
   return { status, body: { error } }
 }
 

@@ -74,6 +74,14 @@ export interface RouteContext {
   txid?: number
   /** Set on an SSE response so the wrapper leaves it unbuffered and uncompressed. */
   streaming?: boolean
+  /**
+   * Reads and validates the body against the schema this route publishes in
+   * `src/server/registry.ts`, once. Installed by `src/server/app.ts` when the route was mounted
+   * from the registry — which is every `/v1` route — and absent for a handler called directly by
+   * a test. `readJson` is the only caller, so the validation happens exactly where the ordering
+   * invariant at the top of this file puts it: after the principal and after the tenant.
+   */
+  body?: () => Promise<unknown>
 }
 
 export type Handler = (ctx: RouteContext) => Response | Promise<Response>
@@ -89,6 +97,10 @@ export function json(body: unknown, status = 200, headers?: Record<string, strin
 }
 
 async function readJson<T>(ctx: RouteContext, max: number): Promise<T> {
+  // The mounted path: core has the operation's published body schema and enforces it here, with
+  // the same `maxBodyBytes` the fallback below uses. An absent body an operation does not require
+  // reads as `{}`, exactly as it always has, so a handler that defaults its fields is unchanged.
+  if (ctx.body) return ((await ctx.body()) ?? {}) as T
   const declared = Number(ctx.request.headers.get("content-length") ?? "0")
   if (Number.isFinite(declared) && declared > max) {
     throw new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)

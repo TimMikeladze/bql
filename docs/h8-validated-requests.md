@@ -51,9 +51,9 @@ produce byte-identical 400s.
 validated eagerly by the pipeline, as they are for the data API. They cost nothing and leak nothing:
 every `/v1` path parameter is `s.string()` and so cannot fail, no operation declares headers, and the
 three that declare a query (`changes`, `live`, `databaseGraphiql`) publish exactly the keys their
-handlers read. The **body** is not read eagerly. Instead the pipeline hands the operation a thunk,
-and `readJson` in `src/server/routes.ts` — the single choke point all twelve body-reading handlers
-already go through — calls it:
+handlers read. The **body** is not read eagerly — `deferBody` in `HttpOptions` says so. Instead
+`app.ts` installs a thunk built by `bodyReader`, and `readJson` in `src/server/routes.ts` — the
+single choke point all twelve body-reading handlers already go through — calls it:
 
 ```ts
 export interface RouteContext {
@@ -61,6 +61,9 @@ export interface RouteContext {
   body?: () => Promise<unknown>
 }
 ```
+
+Memoised, because `txQuery` reads the body on two branches and a drained stream cannot be read
+twice.
 
 So the order stays exactly as the invariant states it, and the schema is genuinely enforced: a
 handler cannot see a body core rejected, because the only way to a body is through `readJson`.
@@ -91,11 +94,43 @@ three `/{pk}` operations answer `200` with `null` and publish `anyOf: [Row, null
   a `404` whose code is `NOT_FOUND` into a `200` with a `null` body. One place, and the generated
   field stays nullable because the document still declares the operation may answer nothing.
 
+### What this does not do — as built
+
+Two bodies are described and not checked, and both are right to be:
+
+- **`importDatabase`** carries a raw SQLite file. Its handler streams the request itself and never
+  reaches `readJson`, so nothing tries to `JSON.parse` a database. It now declares
+  `bodyType: "application/vnd.sqlite3"` so the document says what it really takes.
+- **`databaseGraphql`** has to answer a malformed query in GraphQL's own `{errors: [...]}` envelope
+  rather than BunQL's `{error: {...}}` — `src/graphql/handler.ts`'s header argues that out — so its
+  handler reads and refuses the body itself.
+
+And an ordering consequence worth stating, because a test pins it: `POST /v1/db/{db}/query` with an
+invalid body on a database this node no longer owns answers `400`, not the `307`. `query` cannot
+know whether the statement is a write, and so whether this node may take it, until it has read the
+SQL. A route that refuses up front — `DELETE /v1/db/{db}` — never reaches a body and redirects.
+
 ## Verification
 
-`bun test`, `bun run typecheck`, `bun run bytes`, `bun run routes:check`, plus:
+`bun test` (1318 pass, 2 skip, 0 fail), `bun run typecheck`, `bun run bytes`, `bun run routes:check`,
+all clean. Tests added in `test/server/registry.test.ts` and `test/server/promote.test.ts`:
 
-- a `/v1` request whose body violates the published schema answers `400` with `problems`;
+- a `/v1` request whose body violates the published schema answers `400` listing **every** problem;
+- an absent required body is `400 body is required`, and an absent optional one is a real request;
 - an unauthenticated request with a bad body still answers `401`, not `400`;
-- a write refused with `NOT_PRIMARY` still answers the same-origin `307` with `Location`;
-- `GET /v1/db/{db}/api/users/404` answers `404`, and the same row through GraphQL answers `null`.
+- a body over `maxBodyBytes` is still `413`;
+- a write on a same-origin promoted-away database answers `307` with `Location`;
+- `GET /v1/db/{db}/api/users/999` answers `404 NOT_FOUND`, and the same row through GraphQL is
+  `data.getUser: null` with no error.
+
+Exercised by hand against a real node on top of that: the statement, transaction, token, change
+feed, live query, dump/import and data API routes, the two generated documents, and the GraphQL
+surface with both peers resolved.
+
+One thing found along the way and fixed: `ResponseInvalid` also carries a `problems` list, and
+moving `problems` into `mapError` briefly leaked it into the `500` a client is supposed to learn
+nothing from. `problemsOf` is gated to `BunQLError`, which a response bug is not.
+
+Two code comments claimed an unsupported verb answers `405` from Bun's router. It answers `404`,
+through `createApp`'s `fetch` fallback — verified by hand. The comments say so now; the behaviour
+is unchanged and predates this work.

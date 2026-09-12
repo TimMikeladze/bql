@@ -158,6 +158,21 @@ forwarded, `acks` and `needed` for `ACK_TIMEOUT`. An error raised by the primary
 write arrives under the primary's own code and status — a constraint violation is still a
 `SQLITE_CONSTRAINT_*` with its 409, never a transport failure.
 
+`problems` is added when the request did not match the schema this route publishes. Every route's
+body, query and path parameters are validated against the document `GET /v1/openapi.json` serves,
+and a refusal lists **every** mistake it found rather than the first — a client fixing three of them
+should be told about three:
+
+```json
+{ "error": { "code": "BAD_REQUEST", "status": 400,
+             "message": "body.sql expected a string, got a number (and 1 more problem)",
+             "problems": [{ "path": "body.sql", "message": "expected a string, got a number" },
+                          { "path": "body.timeoutMs", "message": "expected an integer, got a string" }] } }
+```
+
+The body is judged **after** the token and the database, so a request that may not be here is still
+`401` or `404` rather than a `400` describing what the route would have taken.
+
 | code | status | when |
 |---|---|---|
 | `BAD_REQUEST` | 400 | malformed body, unknown option, bad SQL that SQLite reports as `SQLITE_ERROR` |

@@ -3,22 +3,22 @@
 // table and the published description cannot drift — which is the whole of `docs/plan-surfaces.md`
 // milestone H6 and what `docs/h6-mount.md` is the plan of record for.
 //
-// What an operation here supplies is **routing and description, not the request pipeline.** Each
-// `handler` is the `Handler` from `src/server/routes.ts`, unchanged, taking the `RouteContext`
-// `app.ts` builds; it parses its own body exactly as it did before this file existed. The reason
-// is stated in `docs/h6-mount.md` decision 1 and it is concrete: `app.ts`'s `wrap()` is the one
-// place the four `BunQL-*` headers, CORS, the metrics tick and C2's same-origin `307` are applied,
-// and the `307` has to know *which error code* a handler refused with — while `compileOperation`
-// in `src/http/handler.ts` deliberately turns that error into a `Response`. Mounting through
-// `mountRegistry` would therefore stop a promoted-away database redirecting. So `app.ts` mounts
-// these with its own wrapper, and the generated data API — which needs the coercion and gets no
-// `307` — goes through the real `src/http/` pipeline in `src/server/surfaces.ts`.
+// Each `handler` is the `Handler` from `src/server/routes.ts`, unchanged, taking the `RouteContext`
+// `app.ts` builds — but the schemas below are **enforced**, not only published
+// (`docs/h8-validated-requests.md`). `app.ts` mounts each operation as `executeOperation` inside
+// its own `wrap()`: the wrapper stays outermost because it is the one place the four `BunQL-*`
+// headers, CORS, the metrics tick and C2's same-origin `307` are applied, and the `307` has to
+// know *which error code* a handler refused with, which `compileOperation` would have turned into
+// a `Response` first. Core validates the path, the query and the headers before the handler; the
+// body is validated inside `readJson`, which is where `routes.ts`'s ordering invariant — principal,
+// then tenant, then body — puts it. The generated data API goes through the ordinary `src/http/`
+// pipeline in `src/server/surfaces.ts`, because it needs the coercion and gets no `307`.
 //
-// Consequence, said plainly: the request schemas below are published and are *not* enforced by
-// core's validator. They are written from the handler each describes and
-// `test/server/registry.test.ts` checks the live answers against the response schemas, so a lie
-// fails a test rather than living in the document. Migrating the handlers onto the validated
-// pipeline is follow-up work, named in `docs/next.md`.
+// Two bodies below are described and not checked, both deliberately: `importDatabase` carries a
+// raw SQLite file its handler streams itself, and `databaseGraphql` has to answer a malformed
+// query in GraphQL's own `{errors: [...]}` envelope rather than BunQL's. Neither reaches
+// `readJson`. `test/server/registry.test.ts` checks the live answers against the response schemas,
+// so a lie in either direction fails a test rather than living in the document.
 //
 // `src/server/hrana/` stays out: `/v2/pipeline` carries libsql's RPC envelope, not BunQL's API,
 // and an OpenAPI document of one opaque envelope helps nobody. `app.ts` mounts it separately.
@@ -155,10 +155,12 @@ interface Spec {
   body?: Schema
   /**
    * Whether the body may be left out. Default false: most of these read a required field out of
-   * it. The handlers accept an empty body and default it, so this is the document telling the
-   * truth about what a *useful* request carries, not a gate (see the module header).
+   * it. This is a gate as well as a description — core refuses an absent body an operation
+   * requires, and `readJson` hands back `{}` for an absent one it does not.
    */
   bodyOptional?: boolean
+  /** The request's media type. Default `application/json`; a raw file says so. */
+  bodyType?: string
   /** Default 200. */
   status?: number
   response: Schema
@@ -184,7 +186,15 @@ function define(spec: Spec): ServerOperation {
       ...(bound ? { path: pathSchemaFor(spec.path) } : {}),
       ...(spec.query ? { query: spec.query } : {}),
     },
-    ...(spec.body ? { body: { schema: spec.body, required: spec.bodyOptional !== true } } : {}),
+    ...(spec.body
+      ? {
+          body: {
+            schema: spec.body,
+            required: spec.bodyOptional !== true,
+            ...(spec.bodyType ? { contentType: spec.bodyType } : {}),
+          },
+        }
+      : {}),
     response: {
       ...(spec.status !== undefined ? { status: spec.status } : {}),
       schema: spec.response,
@@ -425,6 +435,7 @@ const SPECS: Spec[] = [
     tags: ["lifecycle"],
     security: "admin",
     body: s.string().describe("The raw SQLite file."),
+    bodyType: "application/vnd.sqlite3",
     status: 201,
     response: DbStats,
     errors: [...COMMON, "CONFLICT", "PAYLOAD_TOO_LARGE", "NOT_PRIMARY"],
@@ -707,8 +718,8 @@ export function serverRegistry(
   const prefix = surfaces.prefix
   if (switches.api) {
     // Exactly the methods `src/dataapi/` generates. `PUT` is not one of them, so it is not
-    // mounted: an unsupported verb then answers 405 from Bun's router rather than a 404 from a
-    // dispatcher that matched the wildcard and found nothing.
+    // mounted: it then falls through to `createApp`'s 404 without a dispatcher ever matching the
+    // wildcard and finding nothing behind it.
     for (const method of ["get", "post", "patch", "delete"] as const) {
       registry.add(
         define({

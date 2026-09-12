@@ -60,6 +60,38 @@ describe("the live role", () => {
     expect(other.headers.get("BunQL-Primary")).toBeNull()
   })
 
+  // The reason `src/server/app.ts` mounts the registry behind its own wrapper rather than behind
+  // `compileOperation`: the `307` is answered off the error *code*, which a `Response` has already
+  // swallowed (`docs/h8-validated-requests.md`).
+  test("a same-origin primary is a 307 the client can replay; a cross-origin one is not", async () => {
+    await createDb(server, "acme", "create table t (v text)")
+    // The database moved to this very origin, which is what one load balancer in front of a
+    // cluster looks like from inside — and the only case where following the redirect keeps
+    // `Authorization`.
+    server.handle.runtime.promoter.demote("acme", "moved", { node: "n2", url: server.url })
+
+    const refused = await server.fetch("/v1/db/acme/query?x=1", {
+      method: "POST",
+      body: JSON.stringify({ sql: "insert into t (v) values ('two')" }),
+      redirect: "manual",
+    })
+    expect(refused.status).toBe(307)
+    expect(refused.headers.get("location")).toBe(`${server.url}/v1/db/acme/query?x=1`)
+    expect(refused.headers.get("BunQL-Primary")).toBe(server.url)
+
+    // A body core refuses is refused first, and that is right: `query` cannot know whether the
+    // statement is a write — and so whether this node may take it — until it has read the SQL.
+    // A route that refuses up front, like `DELETE /v1/db/{db}`, never reaches a body at all.
+    const badBody = await server.fetch("/v1/db/acme/query", {
+      method: "POST",
+      body: JSON.stringify({ sql: 42 }),
+      redirect: "manual",
+    })
+    expect(badBody.status).toBe(400)
+    const admin = await server.fetch("/v1/db/acme", { method: "DELETE", redirect: "manual" })
+    expect(admin.status).toBe(307)
+  })
+
   test("the lifecycle gate follows the database, not the node", async () => {
     await createDb(server, "acme")
     server.handle.runtime.promoter.demote("acme", "moved", { node: "n2" })

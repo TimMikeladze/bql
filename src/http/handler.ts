@@ -16,7 +16,23 @@
 // A validation failure is the `400` of `src/server/errors.ts` and nothing new: the code is
 // `BAD_REQUEST`, the body is `{error: {code, message, status}}`, and the only addition is a
 // `problems` array, because core reports every mistake in a request and a client fixing three of
-// them should be told about three. There is no second error vocabulary here.
+// them should be told about three. There is no second error vocabulary here — `mapError` itself
+// carries `problems`, so this module builds no error response of its own.
+//
+// The pipeline is split at the error boundary. `executeOperation` runs an operation and **throws**;
+// `compileOperation` is that plus the `try/catch` that maps the throw onto a `Response`. The split
+// exists for `src/server/app.ts`: its `wrap()` is the one place the `BunQL-*` headers, CORS, the
+// metrics tick and C2's same-origin `307` are applied, and the `307` is answered only for a
+// refusal whose code is `NOT_PRIMARY` — which it cannot read off a `Response`. So the server mounts
+// `executeOperation` inside its own wrapper and every other caller keeps `compileOperation`.
+//
+// `deferBody` is the other thing the server needs. `src/server/routes.ts` resolves the principal
+// before it touches a tenant and the tenant before it reads the body, so a request that may not
+// see a database cannot learn whether it exists. Reading the body up front would answer `400`
+// where that ordering answers `401`. With `deferBody` the pipeline validates the path, the query
+// and the headers — none of which can leak anything: they are matched route segments and published
+// query keys — and leaves the body to `bodyReader`, which the caller calls at the point its own
+// ordering allows. Either way the body a handler sees is one core validated.
 //
 // **A handler may return a `Response`, and it is passed through untouched.** That is the contract,
 // not an accident: `dump` streams a database file out and `import` streams one in, and neither has
@@ -29,7 +45,7 @@
 // value, so development and production cannot put different bytes on the wire.
 
 import { keyword, type Operation, type Problem, type Schema, validate } from "../core/index.ts"
-import { BunQLError, errorResponse, mapError } from "../server/errors.ts"
+import { BunQLError, errorResponse } from "../server/errors.ts"
 import { encode } from "./encode.ts"
 
 /** What a compiled operation is given about the request it is serving. */
@@ -72,6 +88,11 @@ export interface HttpOptions {
    * reports (`src/server/app.ts` does) or in a test that provokes one on purpose.
    */
   onError?: (err: unknown, operation: Operation<any, any, any>) => void
+  /**
+   * Leaves the body unread, so the handler sees `body: undefined` and the caller reads it itself
+   * with `bodyReader` once its own ordering rules allow. See the module header.
+   */
+  deferBody?: boolean
 }
 
 /** A compiled operation. `params` are the route's matched values; `server` is Bun's, if any. */
@@ -80,6 +101,13 @@ export type Invoke = (
   params: Record<string, string>,
   server?: unknown,
 ) => Promise<Response>
+
+/**
+ * An operation run with the error mapping left off: it **throws** what the handler threw, so a
+ * caller that needs the refusal's code can see it. The context is the caller's, built before this
+ * is reached, because that is where a caller authenticates.
+ */
+export type Execute<Ctx> = (invocation: Invocation, ctx: Ctx) => Promise<Response>
 
 const DEFAULT_MAX_BODY = 8 * 1024 * 1024
 const JSON_TYPE = "application/json; charset=utf-8"
@@ -93,6 +121,15 @@ export class RequestInvalid extends BunQLError {
     this.name = "RequestInvalid"
     this.problems = problems
   }
+}
+
+/** Builds the `Invocation` both surfaces hand over, with the URL parsed only if it is read. */
+export function newInvocation(
+  request: Request,
+  params: Record<string, string>,
+  server?: unknown,
+): Invocation {
+  return new RequestInvocation(request, params, server)
 }
 
 /** A response that did not match the schema the document publishes for it. A server bug. */
@@ -202,30 +239,46 @@ function tooLarge(max: number): BunQLError {
   return new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
 }
 
-/** The `400` shape of `src/server/errors.ts`, with core's problem list alongside the message. */
-function invalidResponse(err: RequestInvalid): Response {
-  const { status, body } = mapError(err)
-  ;(body.error as unknown as Record<string, unknown>).problems = err.problems
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": JSON_TYPE },
-  })
+/**
+ * Reads and validates one request's body against the operation's published schema. Exported for
+ * `deferBody`: the caller decides *when* a body is read, never *whether* it is checked. Returns
+ * `undefined` for an absent body the operation does not require.
+ */
+export function bodyReader(
+  operation: Operation<any, any, any>,
+  options: HttpOptions = {},
+): (invocation: Invocation) => Promise<unknown> {
+  const maxBody = options.maxBodyBytes ?? DEFAULT_MAX_BODY
+  const schema = operation.body?.schema
+  const isJson = isJsonType(operation.body?.contentType ?? "application/json")
+  // A declared body is required unless the operation says otherwise: an operation that names a
+  // body schema and then reads `undefined` is the mistake, not the common case.
+  const required = operation.body ? operation.body.required !== false : false
+
+  return async function read(invocation: Invocation): Promise<unknown> {
+    if (!schema) return undefined
+    const text = await readBody(invocation.request, maxBody)
+    if (text.length === 0) {
+      if (required) throw new RequestInvalid([{ path: "body", message: "is required" }])
+      return undefined
+    }
+    const parsed = isJson ? parseJson(text) : text
+    const got = validate(schema, parsed, {})
+    if (!got.ok) throw new RequestInvalid(prefixed(got.problems, "body"))
+    return got.value
+  }
 }
 
 /**
- * Compiles one operation into the function both the routes table and the dispatcher call. Every
- * decision that can be made once — which headers to read, which query keys are arrays, whether the
- * body is JSON, whether responses are checked — is made here rather than per request.
+ * Compiles one operation into the function that runs it and **throws** on failure. Every decision
+ * that can be made once — which headers to read, which query keys are arrays, whether responses
+ * are checked — is made here rather than per request.
  */
-export function compileOperation<Ctx>(
+export function executeOperation<Ctx>(
   operation: Operation<any, any, Ctx>,
-  contextFor: ContextFactory<Ctx>,
   options: HttpOptions = {},
-): Invoke {
-  const maxBody = options.maxBodyBytes ?? DEFAULT_MAX_BODY
-  const checkResponse =
-    options.validateResponses ?? process.env.NODE_ENV !== "production"
-  const report = options.onError ?? ((err: unknown) => console.error(err))
+): Execute<Ctx> {
+  const checkResponse = options.validateResponses ?? process.env.NODE_ENV !== "production"
 
   const pathSchema = operation.params?.path
   const querySchema = operation.params?.query
@@ -233,73 +286,75 @@ export function compileOperation<Ctx>(
   const queryArrays = arrayKeys(querySchema)
   const headers = headerNames(headerSchema)
 
-  const bodySchema = operation.body?.schema
-  const bodyIsJson = isJsonType(operation.body?.contentType ?? "application/json")
-  // A declared body is required unless the operation says otherwise: an operation that names a
-  // body schema and then reads `undefined` is the mistake, not the common case.
-  const bodyRequired = operation.body ? operation.body.required !== false : false
+  const readBodyOf = options.deferBody ? undefined : bodyReader(operation, options)
 
   const status = operation.response.status ?? 200
   const responseType = operation.response.contentType ?? JSON_TYPE
   const responseIsJson = isJsonType(responseType)
   const responseSchema = operation.response.schema
 
+  return async function execute(invocation, ctx): Promise<Response> {
+    const problems: Problem[] = []
+    let path: unknown
+    let query: unknown
+    let head: unknown
+
+    if (pathSchema) {
+      const got = validate(pathSchema, invocation.params, { coerce: true })
+      if (got.ok) path = got.value
+      else problems.push(...prefixed(got.problems, "path"))
+    }
+    if (querySchema) {
+      const got = validate(querySchema, readQuery(invocation.url, queryArrays), { coerce: true })
+      if (got.ok) query = got.value
+      else problems.push(...prefixed(got.problems, "query"))
+    }
+    if (headerSchema) {
+      const got = validate(headerSchema, readHeaders(invocation.request, headers), { coerce: true })
+      if (got.ok) head = got.value
+      else problems.push(...prefixed(got.problems, "headers"))
+    }
+    // The body is read only once the cheap sections are known to be right, so a request that is
+    // wrong about its own URL never pays to have its body parsed.
+    if (problems.length > 0) throw new RequestInvalid(problems)
+
+    const body = readBodyOf ? await readBodyOf(invocation) : undefined
+
+    const result = await operation.handler({ path, query, headers: head, body }, ctx)
+    // The escape hatch, and the reason streaming works at all: a handler that built its own
+    // response knows something this module does not.
+    if (result instanceof Response) return result
+
+    if (checkResponse) {
+      const got = validate(responseSchema, result, {})
+      if (!got.ok) throw new ResponseInvalid(operation.id, got.problems)
+    }
+    return serialise(result, status, responseType, responseIsJson)
+  }
+}
+
+/**
+ * The same pipeline with the error mapping on: everything it throws leaves as the `{status, body}`
+ * of `src/server/errors.ts`. This is what a caller mounts when it has no reason to see the code a
+ * handler refused with.
+ */
+export function compileOperation<Ctx>(
+  operation: Operation<any, any, Ctx>,
+  contextFor: ContextFactory<Ctx>,
+  options: HttpOptions = {},
+): Invoke {
+  const execute = executeOperation<Ctx>(operation, options)
+  const report = options.onError ?? ((err: unknown) => console.error(err))
+
   return async function invoke(request, params, server): Promise<Response> {
     try {
       const invocation = new RequestInvocation(request, params, server)
+      // The context is built first, before any validation, because a context factory is where a
+      // caller authenticates and a request that will be refused should not first be charged for
+      // parsing its own body.
       const ctx = await contextFor(invocation)
-
-      const problems: Problem[] = []
-      let path: unknown
-      let query: unknown
-      let head: unknown
-
-      if (pathSchema) {
-        const got = validate(pathSchema, params, { coerce: true })
-        if (got.ok) path = got.value
-        else problems.push(...prefixed(got.problems, "path"))
-      }
-      if (querySchema) {
-        const got = validate(querySchema, readQuery(invocation.url, queryArrays), { coerce: true })
-        if (got.ok) query = got.value
-        else problems.push(...prefixed(got.problems, "query"))
-      }
-      if (headerSchema) {
-        const got = validate(headerSchema, readHeaders(request, headers), { coerce: true })
-        if (got.ok) head = got.value
-        else problems.push(...prefixed(got.problems, "headers"))
-      }
-      // The body is read only once the cheap sections are known to be right, so a request that is
-      // wrong about its own URL never pays to have its body parsed.
-      if (problems.length > 0) throw new RequestInvalid(problems)
-
-      let body: unknown
-      if (bodySchema) {
-        const text = await readBody(request, maxBody)
-        if (text.length === 0) {
-          if (bodyRequired) {
-            throw new RequestInvalid([{ path: "body", message: "is required" }])
-          }
-        } else {
-          const parsed = bodyIsJson ? parseJson(text) : text
-          const got = validate(bodySchema, parsed, {})
-          if (!got.ok) throw new RequestInvalid(prefixed(got.problems, "body"))
-          body = got.value
-        }
-      }
-
-      const result = await operation.handler({ path, query, headers: head, body }, ctx)
-      // The escape hatch, and the reason streaming works at all: a handler that built its own
-      // response knows something this module does not.
-      if (result instanceof Response) return result
-
-      if (checkResponse) {
-        const got = validate(responseSchema, result, {})
-        if (!got.ok) throw new ResponseInvalid(operation.id, got.problems)
-      }
-      return serialise(result, status, responseType, responseIsJson)
+      return await execute(invocation, ctx)
     } catch (err) {
-      if (err instanceof RequestInvalid) return invalidResponse(err)
       const response = errorResponse(err)
       // Mirrors `src/server/app.ts`: a `BunQLError` other than `INTERNAL` is a refusal this server
       // wrote on purpose, several of which are 5xx. Only the rest is a bug worth reporting.

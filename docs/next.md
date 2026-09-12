@@ -1,15 +1,16 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-12 at the end of the session that mounted the generated surfaces (H6). Read
-this, then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans
-of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL),
-`docs/h6-mount.md` (this session), `docs/p1-pragmas.md` and `docs/p2-group-commit.md`.
+Rewritten 2026-09-12 at the end of the session that closed what H6 left behind (H8). Read this,
+then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans of
+record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL),
+`docs/h6-mount.md`, `docs/h8-validated-requests.md` (this session), `docs/p1-pragmas.md` and
+`docs/p2-group-commit.md`.
 
 ## Where things stand
 
 Phases 0 and 1 are complete; phase 2 has its control plane, its failover and its packaging. On
 `main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree
-clean). `bun test` → **1312 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
+clean). `bun test` → **1318 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
 `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and Linux.** Zero runtime
 dependencies.
 
@@ -47,6 +48,8 @@ That is the case for `workers: N` below, measured rather than assumed.
 
 | landed in this session | what it is |
 |---|---|
+| H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
+| H8: `NOT_FOUND: 404` | the data API's `/{pk}` routes answer 404 rather than 200-with-null; GraphQL still answers `null`, through `nullOnNotFound` |
 | H6: the surfaces mounted | `src/server/registry.ts` (every `/v1` route as an `Operation`), `src/server/surfaces.ts` (the data API cache, the per-tenant dispatcher, the GraphQL handler), `[api]` and `[graphql]` config, `docs/h6-mount.md` |
 | `routes:check` reads the registry | it already read the live table; it now also fails when a served route is **not** in the registry, so a hand-added route in `createApp` cannot go undescribed |
 | `CLUSTER_DISABLED` joined `ERROR_STATUS` | `routes.ts` has thrown it since C1 with an explicit 503, but it was absent from the documented vocabulary, so the document build rejected it |
@@ -108,16 +111,14 @@ served route that is not in the registry. **H7** adds GraphQL subscriptions over
 Added by the performance session (2026-09-12):
 
 - ~~**The generated REST/OpenAPI/GraphQL surfaces are built and exported but not mounted.**~~
-  **Done (H6, `docs/h6-mount.md`).** What it left behind, on purpose: **the hand-written `/v1`
-  handlers are described by the registry but do not run through core's validator.** Each
-  operation's `handler` is the existing `Handler` and parses its own body as before; the operation
-  supplies the routing and the published schema. The obstruction is concrete — `app.ts`'s `wrap()`
-  needs the *error code* a handler refused with to answer C2's same-origin `307`, and
-  `compileOperation` turns that error into a `Response` first. So a published request schema is
-  not enforced; `test/server/registry.test.ts` checks the live answers against the **response**
-  schemas, which is the half that can be checked cheaply. Moving the handlers onto the validated
-  pipeline means giving `compileOperation` a way to hand the error back out — one option, and the
-  smallest — or moving the `307` inside it.
+  **Done (H6, `docs/h6-mount.md`).** What it left behind was closed by H8
+  (`docs/h8-validated-requests.md`): **the `/v1` request schemas are enforced.** `src/http/handler.ts`
+  is split at the error boundary — `executeOperation` runs an operation and throws,
+  `compileOperation` is that plus the mapping — so `app.ts` mounts the throwing form inside its own
+  `wrap()` and still sees the error *code* C2's `307` needs. The body is deferred (`deferBody`) and
+  validated inside `readJson`, which keeps `routes.ts`'s ordering invariant: principal, then tenant,
+  then body. Two bodies stay described and unchecked on purpose — `importDatabase` streams a raw
+  SQLite file, `databaseGraphql` must refuse in GraphQL's own envelope.
 - **Group commit is off by default** (`[limits] groupCommit`) because folded writes share a txid
   and the change feed emits one event per fold. Two e2e scenarios assert a txid per write and fail
   with it on — which is the honest signal that it is a contract change, not an optimisation. If
@@ -171,12 +172,12 @@ What the surfaces work (H1-H5) added to the list:
   pragma off for backwards compatibility and it is per-connection, so it belongs wherever the
   reader and writer connections are configured, probably behind a per-database setting since
   turning it on changes the meaning of existing schemas.
-- **There is no error code for "no such row".** `ERROR_STATUS` in `src/server/errors.ts` has
-  `DB_NOT_FOUND` and `TX_NOT_FOUND` and nothing meaning a row, and `statusForCode` throws on a code
-  it does not know — so inventing one locally yields either an undocumented status or a document
-  that will not build. The data API's `/{pk}` routes therefore answer `200` with `null`, published
-  honestly as `anyOf: [Row, null]`. Adding `NOT_FOUND: 404` is one line there and one line per
-  operation.
+- ~~**There is no error code for "no such row".**~~ **Fixed (H8, `docs/h8-validated-requests.md`).**
+  `NOT_FOUND: 404` is in `ERROR_STATUS`, the data API's three `/{pk}` operations declare it, and
+  their `200` schema is the row rather than `anyOf: [Row, null]`. GraphQL still answers `null`:
+  `nullOnNotFound` in `src/graphql/errors.ts` unmakes that one status on the in-process dispatch
+  the generated resolvers run through, so a missing row is a `404` in REST and a `null` in GraphQL
+  from one handler.
 - **`PRAGMA table_xinfo` and `PRAGMA index_info` are not on the token pragma allow-list**
   (`PRAGMA_SUBJECT`, `src/server/auth.ts`). Harmless today because introspection runs with server
   rights and its result is cached and shared — but it is the reason introspection must **not** be
@@ -283,12 +284,8 @@ rough order of value:
   ambient per-request token. A REST document cannot describe a subscription, so this is the one
   part of the surfaces work that is genuinely new code rather than wiring —
   `docs/plan-surfaces.md` H7. `graphql-ws` over the socket BunQL already runs.
-- **Put the hand-written handlers on the validated pipeline.** See the known gap above. The
-  blocker is one design question in `src/http/handler.ts`, not thirty handlers.
-- **`NOT_FOUND: 404`.** Still missing from `ERROR_STATUS`, which is why the data API's `/{pk}`
-  routes answer `200` with `null` and publish it honestly as `anyOf: [Row, null]`. Now that the
-  routes are live this is a visible contract rather than a latent one. One line in
-  `src/server/errors.ts`, one line per generated operation.
+- ~~**Put the hand-written handlers on the validated pipeline.**~~ **Done (H8).**
+- ~~**`NOT_FOUND: 404`.**~~ **Done (H8.)** Both are `docs/h8-validated-requests.md`.
 
 ### Smaller, if you want something bounded
 

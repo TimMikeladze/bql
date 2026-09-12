@@ -24,6 +24,7 @@ import { BunQLError, errorResponse } from "./errors.ts"
 import { failedIndexOf } from "./exec.ts"
 import { Metrics } from "./metrics.ts"
 import type { Operation } from "../core/index.ts"
+import { bodyReader, executeOperation, type HttpOptions } from "../http/index.ts"
 import { serverRegistry } from "./registry.ts"
 import type { Handler, RouteContext } from "./routes.ts"
 import { ServerRuntime } from "./runtime.ts"
@@ -197,14 +198,18 @@ export interface App {
  * that `GET /v1/openapi.json` is also emitted from, so the table and the document cannot drift
  * (`docs/h6-mount.md`).
  *
- * Each operation is mounted behind `wrap()`, not behind `src/http/`'s compiled pipeline, and the
- * reason is in `registry.ts`'s header: `wrap` has to see the error code a handler refused with,
- * to answer C2's same-origin `307`, and the compiled pipeline turns that error into a `Response`
- * before anything else can look at it. The generated data API *is* compiled — it needs the
- * coercion and it gets no `307` — and that happens inside `src/server/surfaces.ts`.
+ * Each operation runs through core's validator and then through `wrap()`. `wrap` is the outer
+ * layer because it has to see the error *code* a handler refused with, to answer C2's same-origin
+ * `307`; so the inner layer is `executeOperation`, which throws, rather than `compileOperation`,
+ * which would have turned the refusal into a `Response` first (`docs/h8-validated-requests.md`).
+ * The body is deferred: `src/server/routes.ts` reads it through `readJson` after it has resolved
+ * the principal and the tenant, which is that file's first invariant, and `ctx.body` is where core
+ * validates it. The generated data API is compiled the ordinary way inside
+ * `src/server/surfaces.ts` — it needs the coercion and it gets no `307`.
  *
- * Methods stay spelled out per path so an unsupported verb answers 405 from Bun rather than
- * falling through to the 404 handler.
+ * Methods stay spelled out per path rather than one catch-all per path, so a verb no operation
+ * declares reaches no handler at all. Bun answers it by falling through to the `fetch` below,
+ * which is a 404 — verified by hand, not a 405.
  *
  * Async because whether GraphQL is mounted at all depends on two optional peer packages
  * resolving, which is an `import()`. It is resolved once here, never per request.
@@ -217,9 +222,15 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
     graphql: await Surfaces.graphqlEnabled(runtime),
   })
 
+  // The same limits the hand-written path used, so a mounted route refuses exactly what it did.
+  const http: HttpOptions = {
+    maxBodyBytes: runtime.config.limits.maxBodyBytes,
+    // `wrap()` already reports a 500 it did not recognise; a second report would double every one.
+    onError: () => {},
+  }
   const routes: Record<string, unknown> = {}
   for (const operation of registry.operations()) {
-    mountOperation(routes, operation, wrap(runtime, asHandler(operation)))
+    mountOperation(routes, operation, wrap(runtime, asHandler(operation, http)))
   }
   // One preflight per path the registry claims, exactly as the hand-written table wrote by hand.
   for (const entry of Object.values(routes)) {
@@ -316,9 +327,26 @@ export async function createApp(runtime: ServerRuntime): Promise<App> {
   }
 }
 
-/** An operation's handler as the `Handler` `wrap()` takes. The input is unused: see `registry.ts`. */
-function asHandler(operation: Operation<unknown, unknown, RouteContext>): Handler {
-  return (ctx) => operation.handler(undefined, ctx) as Response | Promise<Response>
+/**
+ * One operation as the `Handler` `wrap()` takes: core's validator around the route handler, with
+ * the body left for `readJson` to ask for. `RouteContext` already carries everything `Invocation`
+ * needs — the request, the matched params, the parsed URL — so it is passed as both.
+ */
+function asHandler(
+  operation: Operation<unknown, unknown, RouteContext>,
+  options: HttpOptions,
+): Handler {
+  const execute = executeOperation<RouteContext>(operation, { ...options, deferBody: true })
+  const read = operation.body ? bodyReader(operation, options) : undefined
+  return (ctx) => {
+    if (read) {
+      // Memoised: a handler that reads the body twice — `txQuery` does, on two branches — must
+      // not find the stream already drained by the first read.
+      let once: Promise<unknown> | undefined
+      ctx.body = () => (once ??= read(ctx))
+    }
+    return execute(ctx, ctx)
+  }
 }
 
 /** Merges one method into the table, refusing a collision rather than letting one silently win. */

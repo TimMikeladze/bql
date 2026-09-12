@@ -14,11 +14,15 @@
 
 export { encode, encodeJson } from "./encode.ts"
 export {
+  bodyReader,
   compileOperation,
   type ContextFactory,
+  type Execute,
+  executeOperation,
   type HttpOptions,
   type Invocation,
   type Invoke,
+  newInvocation,
   type OperationInput,
   RequestInvalid,
   ResponseInvalid,
