@@ -275,6 +275,15 @@ export interface WsUnsubscribeRequest {
   sub: string
 }
 
+/**
+ * Application-level liveness, for clients that cannot see WebSocket control frames. The protocol
+ * ping of design §7 is the control frame; this is the same question asked in JSON.
+ */
+export interface WsPingRequest {
+  id?: number
+  op: "ping"
+}
+
 export type WsRequest =
   | WsHelloRequest
   | WsQueryRequest
@@ -284,6 +293,7 @@ export type WsRequest =
   | WsTxRollbackRequest
   | WsSubscribeRequest
   | WsUnsubscribeRequest
+  | WsPingRequest
 
 export type WsOp = WsRequest["op"]
 
@@ -356,18 +366,24 @@ export interface WsMovedEvent {
 
 export type WsPushEvent = "change" | "schema" | "rows" | "diff" | "reset"
 
+/** Answer to a `ping` that carried no `id`. */
+export interface WsPongEvent {
+  event: "pong"
+}
+
 export interface WsPush<D = ChangeEvent | SchemaEvent | LiveRowsEvent | LiveDiffEvent | ResetEvent> {
   sub: string
   event: WsPushEvent
   data: D
 }
 
-export type WsServerMessage = WsReply | WsPush | WsHelloEvent | WsMovedEvent
+export type WsServerMessage = WsReply | WsPush | WsHelloEvent | WsMovedEvent | WsPongEvent
 
 /** Response and request headers that carry the same information as the body fields above. */
 export const HEADERS = {
   txid: "BunQL-Txid",
   minTxid: "BunQL-Min-Txid",
+  ack: "BunQL-Ack",
   node: "BunQL-Node",
   role: "BunQL-Role",
   durationUs: "BunQL-Duration-Us",

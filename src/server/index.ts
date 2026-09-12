@@ -1,0 +1,91 @@
+// The public surface of the server: the app factory, the runtime it needs, the configuration and
+// the pieces the embedded API and the CLI reach for. Design §6, §7.
+
+export {
+  ADMIN,
+  applyPolicy,
+  AuthKeys,
+  Authenticator,
+  buildAuthorizer,
+  claimsFor,
+  constantTimeEqual,
+  globMatch,
+  KeyRing,
+  MemoryRevocationList,
+  mintToken,
+  pinQueryOnly,
+  requireScope,
+  tokenFromRequest,
+  tokenPrincipal,
+  verifyToken,
+  type AdminPrincipal,
+  type AuthenticatorOptions,
+  type AuthorizerRules,
+  type Ed25519Jwk,
+  type JwtHeader,
+  type NamespaceGrant,
+  type PolicyHandle,
+  type PolicyOptions,
+  type PolicySlot,
+  type Principal,
+  type RevocationList,
+  type Scope,
+  type TableScope,
+  type TokenClaims,
+  type TokenGrant,
+  type TokenPermissions,
+  type TokenPrincipal,
+  type VerifyOptions,
+} from "./auth.ts"
+export { createApp, startServer, type App, type ServerHandle, type StartOptions } from "./app.ts"
+export {
+  DEFAULT_CONFIG,
+  generateAdminKey,
+  loadConfig,
+  resolveAuth,
+  type AuthSection,
+  type DataSection,
+  type DefaultAck,
+  type DurabilitySection,
+  type LimitsSection,
+  type LoadConfigOptions,
+  type RealtimeSection,
+  type ResolvedAuth,
+  type ServerConfig,
+  type ServerConfigInput,
+  type ServerSection,
+} from "./config.ts"
+export {
+  BunQLError,
+  ERROR_STATUS,
+  errorResponse,
+  mapError,
+  type ErrorDetails,
+} from "./errors.ts"
+export {
+  awaitTxid,
+  executeBatch,
+  executeInTx,
+  executeStatement,
+  failedIndexOf,
+  resolveOptions,
+  type Executed,
+  type ResolvedOptions,
+} from "./exec.ts"
+export {
+  decodeArg,
+  decodeArgs,
+  encodeInteger,
+  encodeRows,
+  encodeValue,
+  fromBase64,
+  fromBase64Url,
+  toBase64,
+  toBase64Url,
+  type EncodedRows,
+  type RowSource,
+} from "./json.ts"
+export { Metrics, type MetricsSnapshot } from "./metrics.ts"
+export { mapTenantError, randomBaton, ServerRuntime, type TxSession } from "./runtime.ts"
+export { openSse, resumeFrom, SSE_HEADERS, SseStream, type SseOptions } from "./sse.ts"
+export { busPublisher, type SocketData } from "./ws.ts"

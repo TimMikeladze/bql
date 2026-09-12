@@ -13,9 +13,12 @@ import {
   applyPolicy,
   buildAuthorizer,
   claimsFor,
+  type PolicyHandle,
+  type PolicyOptions,
   tokenPrincipal,
   type Principal,
 } from "../../src/server/auth.ts"
+import { AuthorizerHub } from "../../src/realtime/authorizer.ts"
 import { BunQLError, mapError } from "../../src/server/errors.ts"
 import { cleanupTempDirs, tempDb } from "../sqlite/tmp.ts"
 
@@ -32,6 +35,26 @@ function fresh(): Database {
     insert into secrets(value) values ('hunter2');
   `)
   return db
+}
+
+/**
+ * The authorizer slot belongs to the hub (`src/realtime/authorizer.ts`), so the policy goes on
+ * through one hub per connection — exactly as the route layer does it.
+ */
+const hubs = new WeakMap<Database, AuthorizerHub>()
+
+function policyFor(
+  db: Database,
+  principal: Principal,
+  dbName: string,
+  options?: PolicyOptions,
+): PolicyHandle {
+  let hub = hubs.get(db)
+  if (!hub) {
+    hub = new AuthorizerHub(db)
+    hubs.set(db, hub)
+  }
+  return applyPolicy(db, hub, principal, dbName, options)
 }
 
 const rw = tokenPrincipal(claimsFor({ rw: ["acme"] }))
@@ -60,14 +83,14 @@ describe("scope", () => {
   test("a token with no claim on the database is refused before any SQL runs", () => {
     const db = fresh()
     const elsewhere = tokenPrincipal(claimsFor({ rw: ["other"] }))
-    expect(() => applyPolicy(db, elsewhere, "acme")).toThrow(BunQLError)
-    expect(statusOf(() => applyPolicy(db, elsewhere, "acme"))).toBe(403)
+    expect(() => policyFor(db, elsewhere, "acme")).toThrow(BunQLError)
+    expect(statusOf(() => policyFor(db, elsewhere, "acme"))).toBe(403)
     db.close()
   })
 
   test("a read-write token reads and writes", () => {
     const db = fresh()
-    const policy = applyPolicy(db, rw, "acme")
+    const policy = policyFor(db, rw, "acme")
     expect(policy.scope).toBe("rw")
     expect(db.prepare("select count(*) from todos").values()).toEqual([[2]])
     db.run("insert into todos(title) values ('third')")
@@ -78,7 +101,7 @@ describe("scope", () => {
 
   test("a read-only token reads but cannot write, in any shape", () => {
     const db = fresh()
-    const policy = applyPolicy(db, ro, "acme")
+    const policy = policyFor(db, ro, "acme")
     expect(policy.scope).toBe("ro")
     expect(db.prepare("select title from todos where id = 1").values()).toEqual([["write it"]])
     for (const sql of [
@@ -98,7 +121,7 @@ describe("scope", () => {
 
   test("a read-only token cannot lift its own query_only flag", () => {
     const db = fresh()
-    applyPolicy(db, ro, "acme")
+    policyFor(db, ro, "acme")
     expect(codeOf(() => db.run("pragma query_only = 0"))).toBe("SQLITE_AUTH")
     expect(statusOf(() => db.run("insert into todos(title) values ('nope')"))).toBe(403)
     db.close()
@@ -106,7 +129,7 @@ describe("scope", () => {
 
   test("query_only is still the second line of defence when the authorizer allows a write", () => {
     const db = fresh()
-    applyPolicy(db, ro, "acme")
+    policyFor(db, ro, "acme")
     // Reach past the authorizer by installing one that allows everything, as a route bug would.
     db.authorizer(() => 0)
     expect(codeOf(() => db.run("insert into todos(title) values ('nope')"))).toBe("SQLITE_READONLY")
@@ -115,7 +138,7 @@ describe("scope", () => {
 
   test("releasing hands the connection back unrestricted", () => {
     const db = fresh()
-    const policy = applyPolicy(db, ro, "acme")
+    const policy = policyFor(db, ro, "acme")
     expect(statusOf(() => db.run("insert into todos(title) values ('nope')"))).toBe(403)
     policy.release()
     db.run("insert into todos(title) values ('now fine')")
@@ -125,10 +148,10 @@ describe("scope", () => {
 
   test("re-scoping a pooled connection re-authorizes its cached statements", () => {
     const db = fresh()
-    applyPolicy(db, rw, "acme")
+    policyFor(db, rw, "acme")
     const stmt = db.prepare("select value from secrets")
     expect(stmt.values()).toEqual([["hunter2"]])
-    applyPolicy(db, tokenPrincipal(claimsFor({ rw: ["acme"], tables: { todos: "rw" } })), "acme")
+    policyFor(db, tokenPrincipal(claimsFor({ rw: ["acme"], tables: { todos: "rw" } })), "acme")
     expect(codeOf(() => stmt.values())).toBe("SQLITE_AUTH")
     db.close()
   })
@@ -138,7 +161,7 @@ describe("cross-database access", () => {
   test("ATTACH and DETACH are denied for every token", () => {
     const db = fresh()
     for (const principal of [rw, ro]) {
-      applyPolicy(db, principal, "acme")
+      policyFor(db, principal, "acme")
       expect(codeOf(() => db.exec("attach database ':memory:' as m"))).toBe("SQLITE_AUTH")
       expect(codeOf(() => db.exec("detach database m"))).toBe("SQLITE_AUTH")
     }
@@ -147,7 +170,7 @@ describe("cross-database access", () => {
 
   test("load_extension is denied but ordinary functions are not", () => {
     const db = fresh()
-    applyPolicy(db, rw, "acme")
+    policyFor(db, rw, "acme")
     expect(db.prepare("select upper(title) from todos where id = 1").values()).toEqual([
       ["WRITE IT"],
     ])
@@ -166,7 +189,7 @@ describe("cross-database access", () => {
 describe("pragmas", () => {
   test("the allow-list lets a client describe the schema", () => {
     const db = fresh()
-    applyPolicy(db, ro, "acme")
+    policyFor(db, ro, "acme")
     expect(db.prepare("pragma table_info(todos)").all()).toHaveLength(3)
     expect(db.prepare("pragma table_list").all().length).toBeGreaterThan(0)
     expect(db.prepare("pragma index_list(todos)").all()).toBeDefined()
@@ -184,7 +207,7 @@ describe("pragmas", () => {
   test("everything off the allow-list is denied, in both scopes", () => {
     const db = fresh()
     for (const principal of [rw, ro]) {
-      applyPolicy(db, principal, "acme")
+      policyFor(db, principal, "acme")
       for (const sql of [
         "pragma journal_mode = delete",
         "pragma query_only = 0",
@@ -211,7 +234,7 @@ describe("table ACL", () => {
 
   test("reads are allowed on listed tables and denied on the rest", () => {
     const db = fresh()
-    applyPolicy(db, scoped, "acme")
+    policyFor(db, scoped, "acme")
     expect(db.prepare("select title from todos").values()).toEqual([["write it"], ["ship it"]])
     expect(db.prepare("select email from users").values()).toEqual([["ann@example.com"]])
     expect(codeOf(() => db.prepare("select value from secrets"))).toBe("SQLITE_AUTH")
@@ -221,7 +244,7 @@ describe("table ACL", () => {
 
   test("every column of a listed table is readable", () => {
     const db = fresh()
-    applyPolicy(db, scoped, "acme")
+    policyFor(db, scoped, "acme")
     expect(db.prepare("select id, title, done from todos").all()).toHaveLength(2)
     expect(db.prepare("select * from todos").all()).toHaveLength(2)
     db.close()
@@ -229,7 +252,7 @@ describe("table ACL", () => {
 
   test("writes need rw on that table", () => {
     const db = fresh()
-    applyPolicy(db, scoped, "acme")
+    policyFor(db, scoped, "acme")
     db.run("insert into todos(title) values ('third')")
     db.run("update todos set done = 1 where id = 1")
     db.run("delete from todos where id = 2")
@@ -242,7 +265,7 @@ describe("table ACL", () => {
 
   test("the schema stays readable, so clients can still introspect", () => {
     const db = fresh()
-    applyPolicy(db, scoped, "acme")
+    policyFor(db, scoped, "acme")
     expect(db.prepare("select name from sqlite_master where type = 'table'").all().length).toBe(3)
     expect(db.prepare("pragma table_info(todos)").all()).toHaveLength(3)
     db.close()
@@ -251,7 +274,7 @@ describe("table ACL", () => {
   test("AUTOINCREMENT keeps working, which means sqlite_sequence is reachable", () => {
     const db = Database.open(tempDb())
     db.exec("create table notes(id integer primary key autoincrement, body text)")
-    applyPolicy(db, tokenPrincipal(claimsFor({ rw: ["acme"], tables: { notes: "rw" } })), "acme")
+    policyFor(db, tokenPrincipal(claimsFor({ rw: ["acme"], tables: { notes: "rw" } })), "acme")
     db.run("insert into notes(body) values ('one')")
     db.run("insert into notes(body) values ('two')")
     expect(db.prepare("select id from notes order by id").values()).toEqual([[1], [2]])
@@ -260,7 +283,7 @@ describe("table ACL", () => {
 
   test("a table-scoped token may not change the schema at all", () => {
     const db = fresh()
-    applyPolicy(db, scoped, "acme")
+    policyFor(db, scoped, "acme")
     for (const sql of [
       "create table more(id integer)",
       "drop table todos",
@@ -275,7 +298,7 @@ describe("table ACL", () => {
 
   test("table names are matched the way SQLite matches identifiers", () => {
     const db = fresh()
-    applyPolicy(db, tokenPrincipal(claimsFor({ rw: ["acme"], tables: { TODOS: "rw" } })), "acme")
+    policyFor(db, tokenPrincipal(claimsFor({ rw: ["acme"], tables: { TODOS: "rw" } })), "acme")
     expect(db.prepare("select title from ToDoS").all()).toHaveLength(2)
     db.close()
   })
@@ -284,7 +307,7 @@ describe("table ACL", () => {
 describe("admin", () => {
   test("runs with no authorizer at all", () => {
     const db = fresh()
-    const policy = applyPolicy(db, ADMIN, "acme")
+    const policy = policyFor(db, ADMIN, "acme")
     expect(policy.scope).toBe("rw")
     db.exec("attach database ':memory:' as m")
     db.exec("detach database m")
@@ -298,9 +321,9 @@ describe("admin", () => {
 
   test("takes a connection back from a read-only token", () => {
     const db = fresh()
-    applyPolicy(db, ro, "acme")
+    policyFor(db, ro, "acme")
     expect(statusOf(() => db.run("insert into todos(title) values ('nope')"))).toBe(403)
-    applyPolicy(db, ADMIN, "acme")
+    policyFor(db, ADMIN, "acme")
     db.run("insert into todos(title) values ('fine')")
     expect(db.prepare("select count(*) from todos").values()).toEqual([[3]])
     db.close()
@@ -310,7 +333,7 @@ describe("admin", () => {
 describe("reportEveryDelete", () => {
   test("makes a whole-table delete report each row without changing the outcome", () => {
     const db = fresh()
-    applyPolicy(db, rw, "acme", { reportEveryDelete: true })
+    policyFor(db, rw, "acme", { reportEveryDelete: true })
     const deleted: bigint[] = []
     db.onUpdate((op, _dbName, table, rowid) => {
       if (op === 9 && table === "todos") deleted.push(rowid)
@@ -324,7 +347,7 @@ describe("reportEveryDelete", () => {
 
   test("is off by default, and the truncate optimisation then hides the rows", () => {
     const db = fresh()
-    applyPolicy(db, rw, "acme")
+    policyFor(db, rw, "acme")
     let seen = 0
     db.onUpdate(() => seen++)
     db.run("delete from todos")

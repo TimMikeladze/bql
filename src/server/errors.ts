@@ -15,6 +15,10 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   QUERY_TIMEOUT: 408,
   CONFLICT: 409,
   RESET_REQUIRED: 409,
+  TX_BUSY: 409,
+  TX_NOT_FOUND: 404,
+  TOO_MANY_ROWS: 400,
+  PAYLOAD_TOO_LARGE: 413,
   TXID_NOT_AVAILABLE: 425,
   TOO_MANY_REQUESTS: 429,
   BUSY: 503,
@@ -92,6 +96,15 @@ export class BunQLError extends Error {
 
   static busy(message = "database is busy"): BunQLError {
     return new BunQLError("BUSY", message, 503)
+  }
+
+  /** More rows than the request's `maxRows` allowed (design §6, "common request options"). */
+  static tooManyRows(maxRows: number): BunQLError {
+    return new BunQLError(
+      "TOO_MANY_ROWS",
+      `the result has more than the ${maxRows} rows this request allowed`,
+      400,
+    )
   }
 }
 

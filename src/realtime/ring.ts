@@ -80,6 +80,17 @@ export class ChangeRing {
     this.#bytes = 0
   }
 
+  /**
+   * Declares that everything up to `txid` happened before this ring existed. A ring created for a
+   * database that already has a history must answer `"reset"` for those positions rather than an
+   * empty backlog — an empty backlog reads as "you are up to date", which would silently lose
+   * every event between the client's position and now.
+   */
+  seal(txid: number): void {
+    if (txid > this.#evictedUpTo) this.#evictedUpTo = txid
+    if (txid > this.#latestTxid) this.#latestTxid = txid
+  }
+
   #prune(): void {
     const deadline = this.#now() - this.maxAgeMs
     while (this.#entries.length > 0) {

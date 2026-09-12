@@ -23,6 +23,7 @@ import {
   type CheckpointResult,
   Database,
   type LimitName,
+  type TransactionMode,
 } from "../sqlite/index.ts"
 import {
   computeFull,
@@ -137,6 +138,15 @@ export interface WriteOptions {
   ack?: AckLevel
 }
 
+export interface TxBeginOptions extends WriteOptions {
+  /** `BEGIN <mode>`. Default `"immediate"`: a baton transaction is a write that arrives in parts. */
+  mode?: TransactionMode
+  /** Roll the transaction back after this long with no statement. 0 (default) never expires. */
+  idleTimeoutMs?: number
+  /** Called after the idle timer rolled the transaction back, so the route layer can drop its baton. */
+  onExpire?: () => void
+}
+
 export interface ReadOptions {
   /** Refuse (or wait) until the tenant has reached this txid — design §5.4, read-your-writes. */
   minTxid?: bigint
@@ -223,6 +233,11 @@ export class Tenant {
   #waiters: Waiter[] = []
   #walFd: number | null = null
   #writing = false
+  #txOpen = false
+  #txAck: AckLevel = "local"
+  #txIdleTimeoutMs = 0
+  #txOnExpire: (() => void) | null = null
+  #txTimer: ReturnType<typeof setTimeout> | null = null
   #exclusive = false
   #closed = false
   #lastActivityMs = Date.now()
@@ -325,7 +340,13 @@ export class Tenant {
 
   /** True while a write, a read lease or a snapshot is in flight; the registry never evicts then. */
   get busy(): boolean {
-    return this.#writing || this.#exclusive || this.#leased > 0 || this.#waiters.length > 0
+    return (
+      this.#writing ||
+      this.#txOpen ||
+      this.#exclusive ||
+      this.#leased > 0 ||
+      this.#waiters.length > 0
+    )
   }
 
   get walBytes(): number {
@@ -376,6 +397,7 @@ export class Tenant {
    */
   write<T>(fn: (db: Database) => T, options: WriteOptions = {}): WriteResult<T> {
     this.#assertOpen()
+    if (this.#txOpen) throw txBusy(this.name)
     if (this.#writing) {
       throw new TenantError("WRITE_IN_PROGRESS", `a write is already running on ${this.name}`)
     }
@@ -400,6 +422,119 @@ export class Tenant {
       this.#writing = false
       this.#lastActivityMs = Date.now()
     }
+  }
+
+  // ── interactive transactions (design §6.3, §7) ───────────────────────────────────────────────
+  //
+  // A baton transaction is `write()` taken apart: the same BEGIN IMMEDIATE, the same post-commit
+  // path, but with the statements arriving over several requests. It holds the tenant's only
+  // writer for as long as it is open, which is why there is at most one and why it is leashed by
+  // an idle timer rather than by the client's goodwill.
+
+  /** True while an interactive transaction holds the writer. */
+  get txOpen(): boolean {
+    return this.#txOpen
+  }
+
+  /**
+   * Takes the writer with `BEGIN <mode>`. Throws `TX_BUSY` when anything else already holds it.
+   * The idle timer rolls the transaction back and calls `onExpire` if no statement arrives for
+   * `idleTimeoutMs`; every `txExec` restarts it.
+   */
+  txBegin(options: TxBeginOptions = {}): void {
+    this.#assertOpen()
+    if (this.#txOpen || this.#writing) throw txBusy(this.name)
+    if (this.#exclusive) throw BunQLError.busy(`${this.name} is taking a snapshot`)
+    const mode = options.mode ?? "immediate"
+    try {
+      this.writer.exec(
+        mode === "deferred" ? "begin" : mode === "exclusive" ? "begin exclusive" : "begin immediate",
+      )
+    } catch (err) {
+      throw translateWriteError(err, this.name)
+    }
+    this.#txOpen = true
+    this.#txAck = options.ack ?? this.defaultAck
+    this.#txIdleTimeoutMs = options.idleTimeoutMs ?? 0
+    this.#txOnExpire = options.onExpire ?? null
+    this.#lastActivityMs = Date.now()
+    this.#armTxTimer()
+  }
+
+  /** Runs one statement inside the open transaction and restarts its idle timer. */
+  txExec<T>(fn: (db: Database) => T): T {
+    this.#assertOpen()
+    if (!this.#txOpen) throw noTx(this.name)
+    this.#lastActivityMs = Date.now()
+    this.#armTxTimer()
+    try {
+      return fn(this.writer)
+    } catch (err) {
+      throw translateWriteError(err, this.name)
+    }
+  }
+
+  /**
+   * `COMMIT`, then the same steps `write()` runs afterwards: tail, append, save, publish,
+   * checkpoint. Returns the txid the transaction was assigned, or the current one when it wrote
+   * nothing. A failed COMMIT rolls back, so the writer is free either way.
+   */
+  txCommit(options: WriteOptions = {}): bigint {
+    this.#assertOpen()
+    if (!this.#txOpen) throw noTx(this.name)
+    const ack = options.ack ?? this.#txAck
+    this.#clearTxTimer()
+    try {
+      try {
+        this.writer.exec("commit")
+      } catch (err) {
+        if (this.writer.inTransaction) this.writer.exec("rollback")
+        throw translateWriteError(err, this.name)
+      }
+      const txid = this.#capture()
+      if (ack === "fsync") this.#syncDurable()
+      this.#maybeCheckpoint()
+      return txid
+    } finally {
+      this.#endTx()
+    }
+  }
+
+  /** `ROLLBACK`. Safe to call on a transaction SQLite has already rolled back itself. */
+  txRollback(): void {
+    if (!this.#txOpen) return
+    this.#clearTxTimer()
+    try {
+      if (!this.#closed && this.writer.inTransaction) this.writer.exec("rollback")
+    } catch (err) {
+      this.#options.onError?.(err)
+    } finally {
+      this.#endTx()
+    }
+  }
+
+  #armTxTimer(): void {
+    this.#clearTxTimer()
+    if (this.#txIdleTimeoutMs <= 0) return
+    this.#txTimer = setTimeout(() => {
+      this.#txTimer = null
+      const onExpire = this.#txOnExpire
+      this.txRollback()
+      onExpire?.()
+    }, this.#txIdleTimeoutMs)
+    this.#txTimer.unref?.()
+  }
+
+  #clearTxTimer(): void {
+    if (this.#txTimer === null) return
+    clearTimeout(this.#txTimer)
+    this.#txTimer = null
+  }
+
+  #endTx(): void {
+    this.#txOpen = false
+    this.#txOnExpire = null
+    this.#lastActivityMs = Date.now()
   }
 
   /**
@@ -663,6 +798,16 @@ export class Tenant {
       waiter.reject(new TenantError("CLOSED", `${this.name} was closed while waiting for a txid`))
     }
     this.#waiters = []
+    if (this.#txOpen) {
+      this.#clearTxTimer()
+      try {
+        if (this.writer.inTransaction) this.writer.exec("rollback")
+      } catch {
+        // Closing must not throw; an uncommitted transaction leaves nothing behind anyway.
+      }
+      this.#txOpen = false
+      this.#txOnExpire = null
+    }
     try {
       this.#capture()
       // Fold the WAL into the database file. Resuming a tailer costs two verification passes
@@ -710,6 +855,9 @@ export class Tenant {
       waiter.reject(new TenantError("CLOSED", `${this.name} was abandoned while waiting`))
     }
     this.#waiters = []
+    this.#clearTxTimer()
+    this.#txOpen = false
+    this.#txOnExpire = null
     this.log.close()
     this.recorder.close()
     for (const reader of this.#free) reader.close()
@@ -1000,6 +1148,15 @@ async function copyFile(from: string, to: string): Promise<void> {
   } catch {
     fs.copyFileSync(from, to)
   }
+}
+
+/** Design §6.3: the tenant has one writer, so a second interactive transaction has to wait. */
+function txBusy(name: string): BunQLError {
+  return new BunQLError("TX_BUSY", `${name} already has an open transaction`, 409)
+}
+
+function noTx(name: string): BunQLError {
+  return new BunQLError("TX_NOT_FOUND", `${name} has no open transaction`, 404)
 }
 
 /** SQLite's out-of-space code is the tenant's quota (design §4.7, §6.6). */

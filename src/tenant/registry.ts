@@ -9,7 +9,8 @@
 import fs from "node:fs"
 import path from "node:path"
 import { BunQLError } from "../server/errors.ts"
-import type { Database } from "../sqlite/index.ts"
+import { Database } from "../sqlite/index.ts"
+import { computeFull } from "../wal/index.ts"
 import { Catalog, positionOf, type TenantRow } from "./catalog.ts"
 import {
   type AckLevel,
@@ -89,6 +90,8 @@ export class TenantRegistry {
   #options: RegistryOptions
   /** Insertion order is recency: the oldest entry is the first eviction candidate. */
   #open = new Map<string, Tenant>()
+  /** Names the LRU may not close: a tenant with a live subscription still has to see commits. */
+  #pinned = new Set<string>()
   #sweeper: ReturnType<typeof setInterval> | null = null
   #evictions = 0
   #closed = false
@@ -171,6 +174,53 @@ export class TenantRegistry {
   }
 
   /**
+   * Files a raw SQLite file as a new database (design §6.5, `POST /v1/db/{db}/import`). The file
+   * is written into the tenant directory, switched to WAL mode and folded flat, and the catalog
+   * row starts at txid 1 carrying the file's own rolling checksum — so the imported state is a
+   * position that needs no log record behind it, and a replica bootstraps from a snapshot.
+   */
+  async importDatabase(name: string, bytes: Uint8Array): Promise<Tenant> {
+    this.#assertOpen()
+    assertValidName(name)
+    if (this.catalog.getTenant(name)) {
+      throw new TenantError("DB_EXISTS", `database ${name} already exists`)
+    }
+    const dir = tenantDir(this.dir, name)
+    const dbPath = path.join(dir, "main.db")
+    fs.mkdirSync(dir, { recursive: true })
+    for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(`${dbPath}${suffix}`, { force: true })
+    try {
+      await Bun.write(dbPath, bytes)
+      // Opening it is the real verification: a file that is not a database, or is a corrupt one,
+      // fails here with SQLite's own result code rather than on the first query later.
+      const db = Database.open(dbPath, { wal: false })
+      try {
+        db.exec("pragma journal_mode = wal")
+        db.prepare("select count(*) from sqlite_schema").get()
+        db.walCheckpoint("TRUNCATE")
+      } finally {
+        db.close()
+      }
+      const full = computeFull(dbPath, { includeWal: false })
+      const row = this.catalog.createTenant({
+        name,
+        pageSize: full.pageSize || this.#options.pageSize || 4096,
+        quotaBytes: this.#options.quotaBytes ?? 0,
+        position: {
+          txid: 1n,
+          checksum: full.checksum,
+          dbSizePages: full.pages,
+          wal: { salt1: 0, salt2: 0, frame: 0 },
+        },
+      })
+      return this.#openRow(row)
+    } catch (err) {
+      fs.rmSync(dir, { recursive: true, force: true })
+      throw err
+    }
+  }
+
+  /**
    * Closes the tenant and moves its directory to `<dataDir>/trash/<name>-<ms>`. The catalog row
    * is tombstoned, so the name is free again and the deletion is still on the record.
    */
@@ -180,12 +230,31 @@ export class TenantRegistry {
     if (!row) throw BunQLError.dbNotFound(name)
     const tenant = this.open(name)
     this.#open.delete(name)
+    this.#pinned.delete(name)
     return tenant.delete()
+  }
+
+  /**
+   * Keeps a tenant out of the eviction sweep. The realtime engine's hooks live on the writer
+   * connection, so closing a tenant that somebody is subscribed to would silently stop the feed.
+   * Pins nest; `unpin` removes one.
+   */
+  pin(name: string): void {
+    this.#pinned.add(name)
+  }
+
+  unpin(name: string): void {
+    this.#pinned.delete(name)
+  }
+
+  get pinned(): ReadonlySet<string> {
+    return this.#pinned
   }
 
   /** Closes a tenant without deleting anything. It reopens on the next `open`. */
   release(name: string): void {
     const tenant = this.#open.get(name)
+    this.#pinned.delete(name)
     if (!tenant) return
     this.#open.delete(name)
     if (!tenant.closed) tenant.close()
@@ -297,7 +366,7 @@ export class TenantRegistry {
     if (this.#open.size <= this.maxOpen) return
     for (const [name, tenant] of this.#open) {
       if (this.#open.size <= this.maxOpen) break
-      if (tenant.busy) continue
+      if (tenant.busy || this.#pinned.has(name)) continue
       this.#open.delete(name)
       try {
         tenant.close()

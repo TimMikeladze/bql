@@ -30,6 +30,7 @@ export {
   TenantError,
   type TenantOptions,
   type TenantStats,
+  type TxBeginOptions,
   type WriteOptions,
   type WriteResult,
 } from "./tenant.ts"

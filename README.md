@@ -12,8 +12,45 @@ The full design, including the replication and realtime protocols, is in
 
 ## Status
 
-Phase 0, milestone 3. The SQLite driver (`src/sqlite`) and WAL shipping (`src/wal`) are
-implemented; tenants, the server and the client layers are not yet.
+Phase 0, milestone 6. The SQLite driver (`src/sqlite`), WAL shipping (`src/wal`), tenancy
+(`src/tenant`), realtime (`src/realtime`) and the HTTP/WebSocket/SSE server (`src/server`) are
+implemented and usable end to end. The client SDK, the embedded API, the CLI and the Hrana
+compatibility layer are not written yet.
+
+## Quickstart
+
+```sh
+bun start                 # or: bun run src/server/main.ts
+```
+
+The first start generates an admin key and an Ed25519 signing key, writes both to
+`<dataDir>/keys.json`, and prints the admin key once. Configuration is `bunql.toml` in the working
+directory plus `BUNQL_*` overrides; every key is listed in [docs/design.md](docs/design.md) §9.4
+and resolved by `src/server/config.ts`.
+
+```sh
+KEY=<the admin key it printed>
+curl -sX POST localhost:4321/v1/db -H "authorization: Bearer $KEY" \
+     -H 'content-type: application/json' -d '{"name":"acme"}'
+
+curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
+     -H 'content-type: application/json' \
+     -d '{"sql":"create table todos(id integer primary key, title text)"}'
+
+curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
+     -H 'content-type: application/json' \
+     -d '{"sql":"insert into todos(title) values (?)","args":["write it"]}'
+# {"columns":[],"types":[],"rows":[],"rowsAffected":1,"lastInsertRowid":1,"txid":2,...}
+
+# A scoped token safe to hand to a browser, and the change feed it can subscribe to.
+TOKEN=$(curl -sX POST localhost:4321/v1/tokens -H "authorization: Bearer $KEY" \
+        -H 'content-type: application/json' \
+        -d '{"dbs":["acme"],"scope":"ro","ttl":86400}' | jq -r .token)
+curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
+```
+
+The route table, the WebSocket protocol and every deviation from the design are in
+[docs/m5-server.md](docs/m5-server.md).
 
 ## The driver
 
@@ -116,6 +153,8 @@ names as the reason to move to mechanism A in phase 1.
 ```sh
 bun test
 bun run typecheck
-bun run bench        # driver against bun:sqlite
-bun run bench:wal    # primary -> replica shipping latency
+bun run bench         # driver against bun:sqlite
+bun run bench:wal     # primary -> replica shipping latency
+bun run bench:tenant  # the write path through the tenant owner
+bun run bench:http    # point reads and writes over HTTP and WebSocket
 ```

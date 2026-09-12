@@ -214,6 +214,18 @@ export class Database implements StatementHost {
       : this.lib.symbols.sqlite3_changes64(this.#handle)
   }
 
+  /**
+   * Rowid of the most recent successful insert on this connection. `Statement.run` reports the
+   * same number; this getter is for the paths that step with `values()` because the statement had
+   * a `RETURNING` clause and still have to answer `lastInsertRowid`.
+   */
+  get lastInsertRowid(): number | bigint {
+    this.#assertOpen()
+    return this.safeIntegers
+      ? this.lib.wide.sqlite3_last_insert_rowid(this.#handle)
+      : this.lib.symbols.sqlite3_last_insert_rowid(this.#handle)
+  }
+
   /** Rows changed since the connection was opened. */
   get totalChanges(): number | bigint {
     this.#assertOpen()

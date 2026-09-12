@@ -764,6 +764,12 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
 
 export interface PolicyOptions {
   reportEveryDelete?: boolean
+  /**
+   * Force `PRAGMA query_only`. Readers are borrowed with it on whatever the token's scope is, so
+   * a bug in statement classification still cannot write through the pool; the writer runs with
+   * it off. Defaults to "on for a read-only token".
+   */
+  queryOnly?: boolean
 }
 
 export interface PolicyHandle {
@@ -774,43 +780,100 @@ export interface PolicyHandle {
 }
 
 /**
- * Sets a pooled connection up for one principal: `query_only` for a read-only token, plus the
- * authorizer above. The admin principal runs with neither, as the lifecycle routes need `ATTACH`
- * and arbitrary pragmas.
+ * The one authorizer slot on a connection, as `src/realtime/authorizer.ts` owns it. The policy is
+ * the hub's *base* layer: change capture and read-set recording register their own layers on the
+ * same connection, and the hub is what keeps them from overwriting each other.
+ */
+export interface PolicySlot {
+  setBase(authorizer: Authorizer | null): void
+  bypass<T>(fn: () => T): T
+}
+
+/**
+ * `query_only` as this module last set it, per connection. The pragma is a prepare-and-step, and
+ * the overwhelming case is a pooled reader borrowed again for the same kind of principal, so
+ * remembering the flag is what keeps re-scoping down to one FFI call.
+ */
+const queryOnlyState = new WeakMap<Database, boolean>()
+
+/** The policy identity a connection is currently scoped to, or absent when it is unscoped. */
+const appliedPolicy = new WeakMap<Database, string>()
+
+/**
+ * Sets `query_only` once and remembers it, so later `applyPolicy` calls that want the same value
+ * are free. The server pins its readers on and its writer off when a connection is opened, which
+ * is what keeps the request path down to the authorizer alone.
+ */
+export function pinQueryOnly(db: Database, on: boolean): void {
+  db.run(on ? "pragma query_only = 1" : "pragma query_only = 0")
+  queryOnlyState.set(db, on)
+}
+
+/**
+ * Everything about a policy that changes what SQLite will allow. Two requests with the same
+ * identity on the same connection need no second `sqlite3_set_authorizer`, and — this is the
+ * point — no expiry of the statements already prepared under it.
+ */
+function policyKey(principal: Principal, dbName: string, options: PolicyOptions): string {
+  if (principal.kind === "admin") return "admin"
+  const scope = principal.scopeFor(dbName)
+  const tables = principal.tables
+    ? Object.entries(principal.tables)
+        .map(([name, access]) => `${name.toLowerCase()}:${access}`)
+        .sort()
+        .join(",")
+    : "*"
+  return `${scope}|${dbName}|${tables}|${options.reportEveryDelete ? 1 : 0}|${options.queryOnly ?? ""}`
+}
+
+/**
+ * Sets a pooled connection up for one principal: `query_only` for a reader or a read-only token,
+ * plus the authorizer above as the hub's base layer. The admin principal runs with neither, as
+ * the lifecycle routes need `ATTACH` and arbitrary pragmas.
  *
- * The authorizer is removed before the pragma is touched, because `query_only` is not on the
- * pragma allow-list — a token must not be able to turn its own read-only flag off.
+ * The pragma is set through `hub.bypass`, because `query_only` is not on the pragma allow-list —
+ * a token must not be able to turn its own read-only flag off, and the policy that says so must
+ * not stop the server from setting it either.
  */
 export function applyPolicy(
   db: Database,
+  hub: PolicySlot,
   principal: Principal,
   dbName: string,
   options: PolicyOptions = {},
 ): PolicyHandle {
-  db.authorizer(null)
+  const before = queryOnlyState.get(db) ?? false
+  const restore = (): void => {
+    appliedPolicy.delete(db)
+    hub.setBase(null)
+    if (queryOnlyState.get(db) !== before) hub.bypass(() => setQueryOnly(db, before))
+  }
+  const key = policyKey(principal, dbName, options)
+  if (appliedPolicy.get(db) === key) {
+    return { scope: principal.kind === "admin" ? "rw" : (principal.scopeFor(dbName) as Scope), release: restore }
+  }
   if (principal.kind === "admin") {
-    setQueryOnly(db, false)
-    return { scope: "rw", release: () => db.authorizer(null) }
+    hub.bypass(() => setQueryOnly(db, options.queryOnly === true))
+    hub.setBase(null)
+    appliedPolicy.set(db, key)
+    return { scope: "rw", release: restore }
   }
   const scope = principal.scopeFor(dbName)
   if (scope === null) throw BunQLError.notAuthorized(`token has no access to database ${dbName}`)
-  setQueryOnly(db, scope === "ro")
-  db.authorizer(
+  hub.bypass(() => setQueryOnly(db, options.queryOnly ?? scope === "ro"))
+  hub.setBase(
     buildAuthorizer({
       scope,
       ...(principal.tables ? { tables: principal.tables } : {}),
       ...(options.reportEveryDelete ? { reportEveryDelete: true } : {}),
     }),
   )
-  return {
-    scope,
-    release(): void {
-      db.authorizer(null)
-      setQueryOnly(db, false)
-    },
-  }
+  appliedPolicy.set(db, key)
+  return { scope, release: restore }
 }
 
 function setQueryOnly(db: Database, on: boolean): void {
+  if (queryOnlyState.get(db) === on) return
   db.run(on ? "pragma query_only = 1" : "pragma query_only = 0")
+  queryOnlyState.set(db, on)
 }
