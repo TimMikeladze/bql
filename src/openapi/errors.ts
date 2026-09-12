@@ -79,7 +79,8 @@ export function reasonPhrase(status: number): string {
  *
  * `acks` and `needed` are here because `mapError` really does attach them for `ACK_TIMEOUT` —
  * "how close did it get" is the one thing an operator wants from that body — even though
- * `ErrorInfo` does not name them.
+ * `ErrorInfo` does not name them. `problems` is here because every route's request is validated
+ * against the schemas this document publishes, and a refusal lists all of them.
  *
  * Not `.strict()`: a client must tolerate a field a later version adds.
  */
@@ -105,6 +106,15 @@ export function errorBodySchema(name: string): Schema {
             .optional()
             .describe("Distinct replicas that acked in time, for ACK_TIMEOUT."),
           needed: s.int().optional().describe("How many were needed, for ACK_TIMEOUT."),
+          problems: s
+            .array(
+              s.object({
+                path: s.string().describe('Where it is, as "body.sql"; empty for the whole value.'),
+                message: s.string(),
+              }),
+            )
+            .optional()
+            .describe("Every way the request failed this operation's schema, not only the first."),
         })
         .describe("What went wrong."),
     })

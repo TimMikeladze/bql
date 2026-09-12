@@ -453,6 +453,7 @@ describe("errors", () => {
       "primary",
       "acks",
       "needed",
+      "problems",
     ])
   })
 

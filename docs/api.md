@@ -257,8 +257,9 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `POST /v1/db/:db/v3/cursor` | the same cursor | as above |
 | `GET /v1/db/:db/hrana` | Hrana WebSocket, sub-protocol `hrana3` or `hrana2` | in-band `hello` |
 
-An unknown path is a `404` in the error shape above. An unsupported method on a known path is a
-`405` from Bun's router.
+An unknown path is a `404` in the error shape above, and so is an unsupported method on a known
+path: only the methods an operation declares are mounted, and anything else falls through to the
+same handler.
 
 ### `POST /v1/db/:db/query`
 

@@ -22,7 +22,6 @@ export {
   type HttpOptions,
   type Invocation,
   type Invoke,
-  newInvocation,
   type OperationInput,
   RequestInvalid,
   ResponseInvalid,

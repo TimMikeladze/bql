@@ -184,6 +184,13 @@ export type BunQLErrorCode =
   // Any `SQLITE_*` extended result code name also travels in this field.
   | (string & {})
 
+/** One thing wrong with a request, as core's validator reports it. */
+export interface ErrorProblem {
+  /** Where it is, as `body.sql` or `query.limit`. Empty for the value as a whole. */
+  path: string
+  message: string
+}
+
 export interface ErrorInfo {
   code: BunQLErrorCode
   message: string
@@ -194,6 +201,11 @@ export interface ErrorInfo {
   failedIndex?: number
   /** Where to go instead, for `NOT_PRIMARY`. */
   primary?: string
+  /**
+   * Every way the request failed the schema this route publishes, not only the first — a client
+   * fixing three of them should be told about three. Present on a `BAD_REQUEST` core refused.
+   */
+  problems?: ErrorProblem[]
 }
 
 export interface ErrorBody {

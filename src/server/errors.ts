@@ -246,7 +246,7 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   if (acks !== undefined) extra.acks = acks
   if (needed !== undefined) extra.needed = needed
   const problems = problemsOf(err)
-  if (problems) extra.problems = problems
+  if (problems) error.problems = problems as ErrorInfo["problems"]
   return { status, body: { error } }
 }
 

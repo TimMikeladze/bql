@@ -107,6 +107,32 @@ describe("execute", () => {
     expect(error.message).toContain("nope")
   })
 
+  // The server validates every request against the schema it publishes and reports *every* problem
+  // it found (`docs/h8-validated-requests.md`). Dropping them here would leave a caller re-guessing
+  // which field was wrong out of a summary message.
+  test("a schema refusal keeps every problem the server listed", () => {
+    const error = BunQLClientError.fromBody(
+      {
+        error: {
+          code: "BAD_REQUEST",
+          message: "body.sql expected a string, got a number (and 1 more problem)",
+          status: 400,
+          problems: [
+            { path: "body.sql", message: "expected a string, got a number" },
+            { path: "body.timeoutMs", message: "expected an integer, got a string" },
+          ],
+        },
+      },
+      400,
+      "bad request",
+    )
+    expect(error.code).toBe("BAD_REQUEST")
+    expect((error.problems ?? []).map((problem) => problem.path)).toEqual([
+      "body.sql",
+      "body.timeoutMs",
+    ])
+  })
+
   test("an unknown database is a 404, not a hang", async () => {
     const error = await failure(fixture.client.db("missing").sql`select 1`)
     expect(error.code).toBe("DB_NOT_FOUND")

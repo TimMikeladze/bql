@@ -224,14 +224,14 @@ Tim's constraint: OpenAPI before GraphQL. Each is one Opus subagent with its own
 H3 and H4's *emitter* half are independent enough to run beside each other; H4 cannot finish
 without H3.
 
-**H6 as built differs from this plan in one way, deliberately.** The registry supplies the routing
-and the description for the `/v1` routes, but not the request pipeline: each operation's handler is
-the existing `Handler`, which parses its own body as it always did. `src/server/app.ts`'s `wrap()`
-has to see the *error code* a handler refused with, to answer C2's same-origin `307`, and
-`compileOperation` turns that error into a `Response` before anything else can look at it. The
-generated data API does go through the compiled pipeline, because it needs the coercion and gets no
-`307`. `docs/h6-mount.md` decision 1 argues it out; moving the hand-written handlers onto the
-validated pipeline is the follow-up.
+**H6 as built split this plan in two, and H8 finished it.** H6 gave the registry the routing and
+the description but not the request pipeline, because `src/server/app.ts`'s `wrap()` has to see the
+*error code* a handler refused with to answer C2's same-origin `307`, and `compileOperation` turned
+that error into a `Response` first (`docs/h6-mount.md` decision 1). H8 answered that by splitting
+`src/http/handler.ts` at the error boundary — `executeOperation` throws, `compileOperation` is that
+plus the mapping — so the `/v1` request schemas are now enforced with the `307` intact, and the
+body is validated inside `readJson` to keep `routes.ts`'s principal-then-tenant-then-body ordering.
+`docs/h8-validated-requests.md`.
 
 H6 is the one that touches existing files, so it is scheduled after phase 2's C1–C3 have had their
 turn in `src/server/routes.ts` — two agents editing that file is the one thing phase 1 proved not

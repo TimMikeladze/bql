@@ -21,6 +21,11 @@ builds the `Bun.serve` route table *and* the document, so the two cannot drift.
 
 ## Decision 1 — the server registry builds the route table, but not the request pipeline
 
+> **Superseded by H8** (`docs/h8-validated-requests.md`). The obstruction below is real and is
+> what H8 removed, by splitting `src/http/handler.ts` into a form that throws and a form that maps.
+> The `/v1` request schemas *are* enforced now. What follows is left as written, because it is the
+> reasoning H8 was built on.
+
 `docs/plan-surfaces.md` H6 says "port the hand-written routes onto `Operation`/`Registry`". There
 are two halves to that and they carry very different risk:
 
@@ -47,7 +52,7 @@ from the handler it describes and pinned by `test/server/registry.test.ts`, and 
 their own checking exactly as they did before this milestone — `assertStatement`, `readJson`,
 `requireScope`, `resolveOptions`. The generated data API *is* validated by core, because it goes
 through the real `src/http/` pipeline. Migrating the hand-written handlers onto that pipeline is
-left as follow-up work and named in `docs/next.md`.
+left as follow-up work and named in `docs/next.md`. **That follow-up is H8, and it is done.**
 
 ## Decision 2 — the data API is one wildcard route and a per-tenant dispatcher
 

@@ -3,7 +3,7 @@
 // (design §6.6) — `SQLITE_CONSTRAINT_UNIQUE`, `DB_NOT_FOUND`, `TXID_NOT_AVAILABLE` — plus the two
 // this side can raise on its own: `NETWORK` and `CLIENT`.
 
-import type { BunQLErrorCode, ErrorBody, ErrorInfo } from "./protocol.ts"
+import type { BunQLErrorCode, ErrorBody, ErrorInfo, ErrorProblem } from "./protocol.ts"
 
 export interface ClientErrorInit {
   code: BunQLErrorCode
@@ -13,6 +13,8 @@ export interface ClientErrorInit {
   txid?: number
   failedIndex?: number
   primary?: string
+  /** Every schema problem the server found, for a `BAD_REQUEST` core refused. */
+  problems?: ErrorProblem[]
   cause?: unknown
 }
 
@@ -24,6 +26,11 @@ export class BunQLClientError extends Error {
   readonly failedIndex?: number
   /** Where to go instead, for `NOT_PRIMARY`. */
   readonly primary?: string
+  /**
+   * Every way the request failed the schema the route publishes, not only the first. Present when
+   * the server's validator refused it; a caller can point at each field rather than re-guess.
+   */
+  readonly problems?: readonly ErrorProblem[]
 
   constructor(init: ClientErrorInit) {
     super(init.message, init.cause === undefined ? undefined : { cause: init.cause })
@@ -33,6 +40,7 @@ export class BunQLClientError extends Error {
     if (init.txid !== undefined) this.txid = init.txid
     if (init.failedIndex !== undefined) this.failedIndex = init.failedIndex
     if (init.primary !== undefined) this.primary = init.primary
+    if (init.problems !== undefined) this.problems = init.problems
   }
 
   /** The error shape of design §6.6, from a response body or a WebSocket reply. */
@@ -44,6 +52,7 @@ export class BunQLClientError extends Error {
       ...(info.txid !== undefined ? { txid: info.txid } : {}),
       ...(info.failedIndex !== undefined ? { failedIndex: info.failedIndex } : {}),
       ...(info.primary !== undefined ? { primary: info.primary } : {}),
+      ...(info.problems !== undefined ? { problems: info.problems } : {}),
     })
   }
 

@@ -363,10 +363,12 @@ GET    /v1/openapi.json               this server's own API
 
 `/v1/openapi.json` is emitted from the very list of operations the `Bun.serve` route table is
 built from (`src/server/registry.ts`), so the document and the router cannot drift — `bun run
-routes:check` fails if a route is added outside it. `[api]` and `[graphql]` configure the
-generated surfaces; a surface that is off has no route at all rather than one that refuses.
-`docs/h6-mount.md` is the as-built note. GraphQL subscriptions over the existing change feed are
-H7 in [docs/plan-surfaces.md](docs/plan-surfaces.md).
+routes:check` fails if a route is added outside it. Those schemas are **enforced**, not only
+published: every request is validated against the document, and a refusal is a `400` listing every
+problem it found rather than the first. `[api]` and `[graphql]` configure the generated surfaces; a
+surface that is off has no route at all rather than one that refuses. `docs/h6-mount.md` and
+`docs/h8-validated-requests.md` are the as-built notes. GraphQL subscriptions over the existing
+change feed are H7 in [docs/plan-surfaces.md](docs/plan-surfaces.md).
 
 ## The driver
 

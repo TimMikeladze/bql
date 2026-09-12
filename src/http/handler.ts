@@ -123,15 +123,6 @@ export class RequestInvalid extends BunQLError {
   }
 }
 
-/** Builds the `Invocation` both surfaces hand over, with the URL parsed only if it is read. */
-export function newInvocation(
-  request: Request,
-  params: Record<string, string>,
-  server?: unknown,
-): Invocation {
-  return new RequestInvocation(request, params, server)
-}
-
 /** A response that did not match the schema the document publishes for it. A server bug. */
 export class ResponseInvalid extends Error {
   readonly problems: Problem[]
