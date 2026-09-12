@@ -8,12 +8,21 @@ adds, in build order, with the wire protocol decided up front so every milestone
 | id | scope | owns | depends on |
 |---|---|---|---|
 | R1 | replication transport: frame codec, primary endpoint, replica client, replica-mode tenants, bootstrap by snapshot, resume, epoch fencing | `src/replication/`, replica mode in `src/tenant/`, `/v1/replication` in `src/server/`, CLI flags | — |
-| R2 | durability and routing: `ack: replica\|quorum`, write forwarding from replica to primary, read-your-writes across nodes, `BunQL-Role`/`BunQL-Primary` | `src/replication/ack.ts`, `src/server/exec.ts`, `routes.ts`, `ws.ts` | R1 |
+| R2 | durability and routing: `ack: replica\|quorum`, write forwarding from replica to primary, read-your-writes across nodes, `BunQL-Role`/`BunQL-Primary`, a server-side transaction queue | `src/replication/ack.ts`, `src/server/exec.ts`, `routes.ts`, `ws.ts` | R1 |
 | R3 | S3 shipper and restore over `Bun.S3Client`, retention and compaction, `bunql restore --from s3://…` | `src/storage/`, CLI | R1 (shares the log iterator, not the transport) |
 | R4 | Hrana compat: `GET /v2` + `POST /v2/pipeline`, then `/v3/pipeline`, `/v3/cursor`, WS subprotocols | `src/server/hrana/` | — |
 | R5 | ORM adapters `bunql/kysely` and `bunql/drizzle` | `src/kysely.ts`, `src/drizzle.ts` | — |
 
 R5 and R4 do not touch replication and can run beside R1. R2 must follow R1.
+
+### A finding from R5 that belongs to R2
+
+A tenant has one writer, so `limits.maxOpenTx` is 1 and a second interactive transaction is
+refused `409 TX_BUSY` at once. R5 found that this breaks any client with two concurrent request
+handlers and worked around it with a client-side queue in the Drizzle shim. The fix belongs on
+the server: queue a transaction that finds the writer busy for up to `limits.txWaitMs` (default
+5000) and answer `TX_BUSY` only when that expires, so every client gets the behaviour without
+shipping its own queue. R2 owns it.
 
 ## Wire protocol (design §8, made exact)
 
