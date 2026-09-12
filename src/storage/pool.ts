@@ -142,6 +142,17 @@ export class ShipperPool {
     return { shippedTxid, pendingRecords, errors, bytes }
   }
 
+  /**
+   * `totals()` plus the databases whose bucket is behind — what `/metrics` renders, in one call so
+   * that a worker can post it across the channel without importing the route table (C4e).
+   */
+  metrics(): { shippedTxid: number; pendingRecords: number; errors: number; bytes: number; behind: number } {
+    const totals = this.totals()
+    let behind = 0
+    for (const shipper of this.#shippers.values()) if (shipper.behind) behind++
+    return { ...totals, behind }
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true

@@ -787,6 +787,9 @@ export async function startServer(
       // worker's promotion rewrote a row in it without passing through this thread's `onChange`.
       roleChanged: () => runtime.promoter.refresh(),
     })
+    // C4e: `GET /v1/db` is answered here, and the tenants are not here. One gather on an admin
+    // listing route, never on a data path.
+    runtime.setOpenStates(() => pool.openDatabases())
   }
   runtime.setPublisher(busPublisher(server))
   // Design §5.3's `moved`: a promotion or a fencing tells every socket that has named the database
@@ -834,6 +837,7 @@ export async function startServer(
     async close(): Promise<void> {
       runtime.setPublisher(null)
       runtime.setMovedHandler(null)
+      runtime.setOpenStates(null)
       // Every replica socket is closed before the workers go, so a stream is ended by a `1001` the
       // replica reconnects from rather than by a channel that stops answering under it.
       app.replication?.stop()

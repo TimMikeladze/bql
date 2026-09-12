@@ -22,7 +22,7 @@ import type {
   PromotionOutcome,
   PromotionRequest,
 } from "../../cluster/index.ts"
-import type { MetricsState, ReplicationMetrics } from "../metrics.ts"
+import type { MetricsState, ReplicationMetrics, StorageMetrics } from "../metrics.ts"
 
 /** One HTTP request, on its way to the worker that owns the database its path names. */
 export interface HttpHop {
@@ -532,6 +532,32 @@ export interface MetricsReply {
    * stream: the records this worker emitted and the worst lag across its own streams.
    */
   replication?: Pick<ReplicationMetrics, "lagTxid" | "records"> | null
+  /**
+   * This worker's share of the S3 shipper. A shipper is per database and a database belongs to
+   * exactly one worker, so the shards are disjoint and the node's figures are the same merge the
+   * single-threaded node already does across its own databases: `shippedTxid` maxes,
+   * `pendingRecords`, `errors` and `bytes` sum, `behind` counts.
+   */
+  storage?: StorageMetrics | null
+}
+
+/**
+ * C4e: which databases a worker holds open, and how far each has got. `GET /v1/db` is answered on
+ * the router, which owns the catalog and no tenant, so without this it reported every database as
+ * `"open": false` with the catalog's throttled txid — true of the router and false of the node.
+ *
+ * One gather on an admin listing route, never on a data path.
+ */
+export interface DbsAsk {
+  kind: "dbs"
+  id: number
+}
+
+export interface DbsReply {
+  kind: "dbs.reply"
+  id: number
+  /** Decimal, because a txid is a u64 and structured clone of a bigint is not worth the asymmetry. */
+  open: { name: string; txid: string }[]
 }
 
 export interface Shutdown {
@@ -575,6 +601,7 @@ export type ToWorker =
   | ClusterProposed
   | ClusterPromoted
   | MetricsAsk
+  | DbsAsk
   | Shutdown
 
 /** Everything a worker sends. */
@@ -608,6 +635,7 @@ export type FromWorker =
   | RoleEvent
   | ErrorEvent
   | MetricsReply
+  | DbsReply
   | ShutdownReply
 
 /** Headers as a list of pairs, which is what structured clone takes. */

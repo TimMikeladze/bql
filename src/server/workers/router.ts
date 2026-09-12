@@ -292,7 +292,7 @@ export async function routerMetrics(
   pool: WorkerPool,
   replication: ReplicationRouter | null,
 ): Promise<Response> {
-  const { metrics, registry, replication: shards } = await pool.gather()
+  const { metrics, registry, replication: shards, storage } = await pool.gather()
   // The router answers no database request, but it does answer the node-level ones, so its own
   // counters belong in the total.
   metrics.absorb(runtime.metrics.state())
@@ -318,7 +318,11 @@ export async function routerMetrics(
           records: shards?.records ?? 0,
         }
       : null
-  const body = metrics.render(registry, runtime.node, replicationMetrics, null)
+  // C4e: the `bunql_s3_*` gauges, which C4 omitted because a shipper lives on a worker. The merge
+  // is the one `ShipperPool.totals` already performs across a node's databases, applied across the
+  // shards — which is exact rather than a convention, because a database belongs to one worker and
+  // the shards are therefore disjoint.
+  const body = metrics.render(registry, runtime.node, replicationMetrics, storage)
   return new Response(body, {
     headers: {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",

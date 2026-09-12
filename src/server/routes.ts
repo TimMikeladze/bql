@@ -682,13 +682,21 @@ export const createDb: Handler = async (ctx) => {
 export const listDbs: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const rows = ctx.runtime.registry.list()
-  const openNames = new Set(ctx.runtime.registry.openNames)
+  // C4e: on a router the tenants are on the workers, so "is it open, and where has it got to" is
+  // one gather rather than a local lookup. `openStates()` is null on every thread that holds its
+  // own tenants, which is every node but a sharded one's router — so this costs nothing there.
+  const live = await ctx.runtime.openStates()
+  const openNames = live ?? new Set(ctx.runtime.registry.openNames)
   return json({
     databases: rows.map((row) => {
       // The catalog position is throttled (docs/m4-tenant.md), so an open tenant is asked
       // directly rather than reported as of the last save.
-      const isOpen = openNames.has(row.name)
-      const txid = isOpen ? ctx.runtime.tenant(row.name).txid : row.txid
+      const isOpen = live ? live.has(row.name) : (openNames as Set<string>).has(row.name)
+      const txid = live
+        ? (live.get(row.name) ?? row.txid)
+        : isOpen
+          ? ctx.runtime.tenant(row.name).txid
+          : row.txid
       return {
         name: row.name,
         createdAtMs: row.createdAtMs,

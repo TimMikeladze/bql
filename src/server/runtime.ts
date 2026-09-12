@@ -173,6 +173,8 @@ export class ServerRuntime {
   #shard: { index: number; workers: number } | null = null
   /** C4d: where a worker reports a role flip, since the router's catalog read cannot see it. */
   #onRoleChanged: ((db: string, role: NodeRole) => void) | null = null
+  /** C4e: how the router asks the workers which databases are open. Null on every other thread. */
+  #openStates: (() => Promise<Map<string, bigint>>) | null = null
   /** R2: the waiter behind `ack: "replica" | "quorum"`. */
   readonly acks: AckTracker
   /** R2: the path a write takes off a replica. `enabled` is false everywhere else. */
@@ -661,6 +663,20 @@ export class ServerRuntime {
   /** Called by `Promoter.#flip`, the one place a database's role changes. */
   roleChanged(db: string, role: NodeRole): void {
     this.#onRoleChanged?.(db, role)
+  }
+
+  /** C4e: where the router learns which databases its workers hold open. */
+  setOpenStates(source: (() => Promise<Map<string, bigint>>) | null): void {
+    this.#openStates = source
+  }
+
+  /**
+   * Which databases are open on this node and how far each has got, or **null** when this thread
+   * is the one that holds them — in which case the caller reads `registry.openNames` directly and
+   * pays nothing. Only a router has to ask, and only `GET /v1/db` asks.
+   */
+  openStates(): Promise<Map<string, bigint>> | null {
+    return this.#openStates?.() ?? null
   }
 
   /**

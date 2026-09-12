@@ -17,7 +17,7 @@
 
 import type { Command, PromotionOutcome, PromotionRequest } from "../../cluster/index.ts"
 import type { ServerConfig } from "../config.ts"
-import { Metrics, type MetricsState } from "../metrics.ts"
+import { Metrics, type MetricsState, type StorageMetrics } from "../metrics.ts"
 import type { ClusterViewPush, FollowResult, FromWorker, ToWorker } from "./protocol.ts"
 import { resolveWorkers, shardOf } from "./shard.ts"
 
@@ -106,6 +106,12 @@ export class SocketRouting {
   hrana: { db: string; version: number } | null = null
 }
 
+/**
+ * Above this, a hopped request body is transferred instead of copied. One megabyte: small enough
+ * that an import never pays the copy, large enough that nothing on a data path is ever detached.
+ */
+const TRANSFER_ABOVE_BYTES = 1 << 20
+
 export class WorkerPool {
   readonly size: number
 
@@ -118,6 +124,7 @@ export class WorkerPool {
     number,
     (streams: { stream: number; db: string; applied: string; bootstrapping: boolean }[]) => void
   >()
+  #dbs = new Map<number, (open: { name: string; txid: string }[]) => void>()
   #shutdowns = new Map<number, () => void>()
   #seq = 0
   #host: RouterHost | null = null
@@ -221,14 +228,21 @@ export class WorkerPool {
       () => this.#post(index, { kind: "http.abort", id }),
       { once: true },
     )
-    this.#post(index, {
-      kind: "http",
-      id,
-      method: request.method,
-      url: request.url,
-      headers,
-      body,
-    })
+    // A body big enough to be worth it is **transferred** rather than cloned: structured clone
+    // copies, and `POST /v1/db/{db}/import` is a whole SQLite file. Transferring detaches the
+    // router's `ArrayBuffer`, which is exactly right here — the buffer came from
+    // `request.arrayBuffer()`, nothing else views it, and the router never reads it again.
+    //
+    // Small bodies stay cloned. The general rule `protocol.ts` states — clone, because a body is
+    // almost always a few hundred bytes and a detached buffer is a sharp edge — is still the rule;
+    // this is the one case where the body is megabytes and the sharp edge has no reach.
+    const transfer =
+      body !== null && body.byteLength >= TRANSFER_ABOVE_BYTES ? [body.buffer as ArrayBuffer] : undefined
+    this.#post(
+      index,
+      { kind: "http", id, method: request.method, url: request.url, headers, body },
+      transfer,
+    )
     return answer
   }
 
@@ -446,10 +460,12 @@ export class WorkerPool {
     metrics: Metrics
     registry: RegistryShare
     replication: { lagTxid: number; records: number } | null
+    storage: StorageMetrics | null
   }> {
     const merged = new Metrics()
     const registry: RegistryShare = { open: 0, tenants: 0, evictions: 0 }
     let replication: { lagTxid: number; records: number } | null = null
+    let storage: StorageMetrics | null = null
     await Promise.all(
       this.#workers.map(
         (_, index) =>
@@ -465,13 +481,51 @@ export class WorkerPool {
                 replication.records += reply.replication.records
                 replication.lagTxid = Math.max(replication.lagTxid, reply.replication.lagTxid)
               }
+              // The shards hold disjoint databases, so this is the same merge a single-threaded
+              // node already does over its own: the highest position, and the rest added up.
+              if (reply.storage) {
+                storage ??= { shippedTxid: 0, pendingRecords: 0, errors: 0, bytes: 0, behind: 0 }
+                storage.shippedTxid = Math.max(storage.shippedTxid, reply.storage.shippedTxid)
+                storage.pendingRecords += reply.storage.pendingRecords
+                storage.errors += reply.storage.errors
+                storage.bytes += reply.storage.bytes
+                storage.behind += reply.storage.behind
+              }
               resolve()
             })
             this.#post(index, { kind: "metrics", id })
           }),
       ),
     )
-    return { metrics: merged, registry, replication }
+    return { metrics: merged, registry, replication, storage }
+  }
+
+  /**
+   * Every database the workers hold open, with the txid each has actually reached. The router owns
+   * no tenant, so this is the only way `GET /v1/db` can report either honestly (C4e).
+   */
+  async openDatabases(): Promise<Map<string, bigint>> {
+    const out = new Map<string, bigint>()
+    await Promise.all(
+      this.#workers.map(
+        (_, index) =>
+          new Promise<void>((resolve) => {
+            const id = this.#seq++
+            const timer = setTimeout(() => {
+              this.#dbs.delete(id)
+              resolve()
+            }, 2000)
+            timer.unref?.()
+            this.#dbs.set(id, (open) => {
+              clearTimeout(timer)
+              for (const one of open) out.set(one.name, BigInt(one.txid))
+              resolve()
+            })
+            this.#post(index, { kind: "dbs", id })
+          }),
+      ),
+    )
+    return out
   }
 
   async close(): Promise<void> {
@@ -507,10 +561,11 @@ export class WorkerPool {
 
   // ── the receiving end ────────────────────────────────────────────────────────────────────────
 
-  #post(index: number, message: ToWorker): void {
+  #post(index: number, message: ToWorker, transfer?: ArrayBuffer[]): void {
     const worker = this.#workers[index]
     if (!worker) throw new Error(`no worker ${index}`)
-    worker.postMessage(message)
+    if (transfer && transfer.length > 0) worker.postMessage(message, transfer as unknown as never)
+    else worker.postMessage(message)
   }
 
   #receive(index: number, message: FromWorker): void {
@@ -658,7 +713,14 @@ export class WorkerPool {
           metrics: message.metrics,
           registry: message.registry,
           replication: message.replication ?? null,
+          storage: message.storage ?? null,
         })
+        return
+      }
+      case "dbs.reply": {
+        const waiting = this.#dbs.get(message.id)
+        this.#dbs.delete(message.id)
+        waiting?.(message.open)
         return
       }
       case "shutdown.reply": {
@@ -729,6 +791,7 @@ interface WorkerMetrics {
   metrics: MetricsState
   registry: RegistryShare
   replication: { lagTxid: number; records: number } | null
+  storage: StorageMetrics | null
 }
 
 /**

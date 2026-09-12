@@ -406,9 +406,13 @@ a 500 ms guard). The write path then costs **no message at all** — `assertWrit
 one `Map.get` and one `performance.now()`, and **86 573 writes/s at six workers clustered against
 86 754 plain** is what that is worth.
 
-Nothing of C4 is refused any more. Two smaller things it left are still open, both in reporting
-rather than in data, listed under "Known gaps". The third, the missing replication gauges, **C4b
-closed**.
+Nothing of C4 is refused any more, and **its reporting gaps are closed too** (C4e, in
+`docs/c4-workers.md` §9). `GET /v1/db` reports which databases are open and where they have got to,
+by gathering from the workers — an admin listing route, and a thread that holds its own tenants
+pays nothing. The `bunql_s3_*` gauges are back, merged across the shards by exactly the rule one
+node already applies across its own databases, which is exact rather than a convention because the
+shards hold disjoint databases. And a hopped body of a megabyte or more is transferred rather than
+copied, so an import no longer pays an extra copy.
 
 ### B. ~~Replica apply mechanism A~~ **Done (C5).** What it measured, and what it left
 

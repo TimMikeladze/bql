@@ -356,9 +356,27 @@ where it did 28 809, and more than the 39 734 four separate processes did in §5
   own. It omitted the replication and storage gauges; **C4b closed the replication half** with a
   summing rule per gauge (C4b §7) now that replication is no longer refused. The S3 shipper's
   gauges are still omitted: they are per worker with no summing rule that is not a lie.
-- A hopped request body crosses as one `Uint8Array`, so `POST /v1/db/{db}/import` of a very large
-  SQLite file is copied once more than it would be on a single-threaded node. `[limits]
-  maxImportBytes` still bounds it.
+- ~~A hopped request body crosses as one `Uint8Array`, so `POST /v1/db/{db}/import` of a very large
+  SQLite file is copied once more than it would be on a single-threaded node.~~ **Closed (C4e).** A
+  body of a megabyte or more is **transferred** rather than cloned, which detaches the router's
+  `ArrayBuffer` — exactly right here, since it came straight from `request.arrayBuffer()`, nothing
+  else views it, and the router never reads it again. Small bodies stay cloned: `protocol.ts`'s
+  rule is still the rule, and this is the one case where the body is megabytes and the sharp edge
+  of a detached buffer has nothing to cut. `[limits] maxImportBytes` still bounds it.
+
+### The reporting gaps, closed (C4e)
+
+Two facts a router does not itself hold, and used to answer from what it *did* hold:
+
+- **`GET /v1/db` said `"open": false` for everything**, with the catalog's throttled txid — true of
+  the router, which owns no tenant, and false of the node. It is now one gather of the workers'
+  open sets and live positions. A round trip on an admin listing route, and `openStates()` is null
+  on every thread that holds its own tenants, so a single-threaded node pays nothing for it.
+- **The `bunql_s3_*` gauges were omitted**, because a shipper is per database and a database lives
+  on a worker. They are back, and the merge is exact rather than a convention: the shards hold
+  **disjoint** databases, so it is the same rule `ShipperPool.totals` already applies across one
+  node's databases — `shippedTxid` takes the max, `pendingRecords`, `errors` and `bytes` sum, and
+  `behind` counts. Max-of-max is a max; sum-of-sum is a sum.
 
 ## 10. C4b — what is left after this
 

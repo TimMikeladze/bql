@@ -695,7 +695,25 @@ self.onmessage = (event: MessageEvent): void => {
           : server
             ? { lagTxid: server.maxLagTxid, records: server.recordsSent }
             : null,
+        // A shipper is per database and a database is one worker's, so these merge across the
+        // shards by exactly the rule one node already merges them across its own databases.
+        storage: current.runtime.storage?.metrics() ?? null,
       })
+      return
+    }
+    case "dbs": {
+      // Only the ones this thread actually holds open; a database nobody has touched is the
+      // router's catalog row and needs nothing from here.
+      const open: { name: string; txid: string }[] = []
+      for (const name of current.runtime.registry.openNames) {
+        try {
+          open.push({ name, txid: current.runtime.tenant(name).txid.toString() })
+        } catch {
+          // Closing, or evicted between the listing and the open. The catalog row is then as good
+          // an answer as there is, which is what the router falls back to.
+        }
+      }
+      post({ kind: "dbs.reply", id: message.id, open })
       return
     }
     case "shutdown": {
