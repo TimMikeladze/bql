@@ -15,6 +15,7 @@ import {
   startReplica,
   stopAll,
   tempDir,
+  untilPrimaryLost,
   untilSynced,
   type Node,
 } from "./harness.ts"
@@ -72,8 +73,11 @@ describe("promotion, static topology", () => {
     const epochBefore = replica.handle.runtime.registry.open("acme").epoch
 
     await primary.close()
+    await untilPrimaryLost(replica)
 
     const promoted = await post(replica, "/v1/db/acme/promote", {})
+    // The body first: a refusal prints its code here, where `.status` alone would not.
+    expect(promoted.body).toMatchObject({ promoted: true })
     expect(promoted.status).toBe(200)
     expect(promoted.body.promoted).toBe(true)
     expect(promoted.body.role).toBe("primary")
@@ -114,8 +118,16 @@ describe("promotion, static topology", () => {
     const replica = await startReplica(primary)
     await untilSynced(primary, replica, "acme")
     await primary.close()
+    await untilPrimaryLost(replica)
 
-    expect((await post(replica, "/v1/db/acme/promote", {})).status).toBe(200)
+    // Losing a primary promotes nobody. There is no control plane here, so there is no lease path
+    // and nothing that re-reads a role: `docs/c2-promotion.md` says the operator is the authority
+    // in a static topology, and this is that claim as an assertion.
+    expect(replica.handle.runtime.roleFor("acme")).toBe("replica")
+
+    const first = await post(replica, "/v1/db/acme/promote", {})
+    expect(first.body).toMatchObject({ promoted: true })
+    expect(first.status).toBe(200)
     const epoch = replica.handle.runtime.registry.open("acme").epoch
     const again = await post(replica, "/v1/db/acme/promote", {})
     expect(again.status).toBe(409)
@@ -159,8 +171,11 @@ describe("promotion, static topology", () => {
     const next = await startReplica(old, { node: "next" })
     await untilSynced(old, next, "acme")
     await old.close()
+    await untilPrimaryLost(next)
 
-    expect((await post(next, "/v1/db/acme/promote", {})).status).toBe(200)
+    const promoted = await post(next, "/v1/db/acme/promote", {})
+    expect(promoted.body).toMatchObject({ promoted: true })
+    expect(promoted.status).toBe(200)
     await query(next, "acme", "insert into t (v) values ('two')")
     const newEpoch = next.handle.runtime.registry.open("acme").epoch
 

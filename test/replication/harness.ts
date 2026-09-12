@@ -303,6 +303,27 @@ export async function until(
   }
 }
 
+/**
+ * Waits until `node`'s replication client has noticed that its primary is gone.
+ *
+ * `await primary.close()` resolves once the *primary* has stopped listening, which says nothing
+ * about when the *replica's* socket sees the close: that event is delivered to the client
+ * asynchronously, and measured on Linux the replica still reports `connected` in every single
+ * round at the instant `close()` returns. Normally one HTTP round trip is enough of a yield for it
+ * to land; on a loaded machine it is not.
+ *
+ * A promotion asked for inside that window is correctly refused `STREAM_LIVE` — the replica can
+ * still see its primary, and promoting against a live primary is the two-writers case. So a test
+ * that promotes has to establish the precondition rather than assume it.
+ */
+export async function untilPrimaryLost(node: Node, timeoutMs = 10_000): Promise<void> {
+  await until(
+    () => !(node.handle.runtime.replica?.connected ?? false),
+    `${node.handle.config.server.node} to notice its primary is gone`,
+    timeoutMs,
+  )
+}
+
 /** Waits until `node` reports `db` at or past `txid`. */
 export async function untilTxid(
   node: Node,

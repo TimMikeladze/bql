@@ -215,6 +215,26 @@ placement and a failover had no candidate to pick. Claims are now a convergence 
 one-second timer that reports positions, with conditions that all read "the cluster does not yet
 agree with what this node is".
 
+## A note for anyone writing a test that promotes
+
+`await primary.close()` resolves when the **primary** has stopped listening. It says nothing about
+when the **replica** has noticed: the socket's `close` event reaches the client asynchronously, and
+measured on Linux the replica still reports `connected` in *every* round at the instant `close()`
+returns. One HTTP round trip is usually enough of a yield for it to land, which is why a test that
+promotes over HTTP normally passes — and why it fails on a loaded CI runner, where it sometimes is
+not.
+
+A promotion asked for inside that window is refused `STREAM_LIVE`, correctly: the replica can still
+see its primary, and promoting against a live primary is the two-writers case this milestone
+exists to prevent. So a test must establish the precondition — `untilPrimaryLost(replica)` in
+`test/replication/harness.ts` — rather than assume `close()` implies it.
+
+Nothing promotes a node on its own without `[cluster]`. `#flip(db, "primary", …)` has three callers
+and two of them return early when `runtime.cluster` is null; the third is the route.
+`Promoter.start()` installs no timer without a cluster, and `src/tenant/registry.ts` only ever
+writes the role `"replica"`. `test/replication/promote.test.ts` asserts the role is still `replica`
+after the primary has gone and before the operator promotes.
+
 ## Deviations from the brief
 
 - **`307` is same-origin only.** The brief and design §5.3 ask for `307` + `BunQL-Primary`.

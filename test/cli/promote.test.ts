@@ -11,6 +11,7 @@ import {
   startPrimary,
   startReplica,
   stopAll,
+  untilPrimaryLost,
   untilSynced,
   type Node,
 } from "../replication/harness.ts"
@@ -59,8 +60,10 @@ describe("bunql promote", () => {
     expect(refused.stderr).toContain("STREAM_LIVE")
 
     await primary.close()
+    await untilPrimaryLost(replica)
 
     const promoted = await on(replica, "promote", "acme")
+    expect(promoted.stderr).toBe("")
     expect(promoted.code).toBe(0)
     expect(promoted.stdout).toContain("acme promoted")
     expect(promoted.stdout).toContain("epoch 1")
@@ -79,6 +82,7 @@ describe("bunql promote", () => {
     const replica = await startReplica(primary)
     await untilSynced(primary, replica, "beta")
     await primary.close()
+    await untilPrimaryLost(replica)
 
     const missing = await on(replica, "promote", "nothing")
     expect(missing.code).toBe(1)
