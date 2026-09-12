@@ -457,6 +457,11 @@ pipeline is within a microsecond of both. Everything, read against the design §
 [docs/benchmarks.md](docs/benchmarks.md) — including the one missed target, 130k msg/s against a
 150k WebSocket budget, which is writes serialising on the single writer.
 
+Throughput, per process: ~220k reads/s on a socket, ~50k/s over HTTP, and 25–30k writes/s no
+matter how many databases they are spread over. [docs/performance.md](docs/performance.md) takes
+both hot paths apart stage by stage — SQLite is 29% of a write and 0.79 µs of a read — and says
+what to do about each ceiling and how the thing scales.
+
 ## Tests
 
 ```sh
