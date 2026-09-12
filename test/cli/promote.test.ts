@@ -1,0 +1,136 @@
+// `bunql promote` and `bunql cluster`, spawned as an operator runs them, against real nodes.
+//
+// The CLI addresses the node that should become the primary, not the cluster: promotion is that
+// node's own copy being accepted, so `--url` names the candidate.
+
+import { afterAll, describe, expect, test } from "bun:test"
+import path from "node:path"
+import {
+  createDb,
+  query,
+  startPrimary,
+  startReplica,
+  stopAll,
+  untilSynced,
+  type Node,
+} from "../replication/harness.ts"
+import { startCluster, stopAll as stopCluster, waitFor } from "../cluster/servers.ts"
+
+const CLI = path.join(import.meta.dir, "..", "..", "src", "cli.ts")
+
+afterAll(async () => {
+  await stopAll()
+  await stopCluster()
+})
+
+interface Ran {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+async function bunql(url: string, adminKey: string, ...args: string[]): Promise<Ran> {
+  const child = Bun.spawn(["bun", CLI, ...args], {
+    env: { ...process.env, BUNQL_URL: url, BUNQL_ADMIN_KEY: adminKey, BUNQL_TOKEN: "" },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  return { code, stdout, stderr }
+}
+
+const on = (node: Node, ...args: string[]): Promise<Ran> => bunql(node.url, node.adminKey, ...args)
+
+describe("bunql promote", () => {
+  test("promotes a replica whose primary is gone, end to end", async () => {
+    const primary = await startPrimary()
+    await createDb(primary, "acme", "create table t (v text)")
+    await query(primary, "acme", "insert into t (v) values ('one')")
+    const replica = await startReplica(primary)
+    await untilSynced(primary, replica, "acme")
+
+    // With the primary up it refuses, and says why in a sentence an operator can act on.
+    const refused = await on(replica, "promote", "acme")
+    expect(refused.code).toBe(1)
+    expect(refused.stderr).toContain("STREAM_LIVE")
+
+    await primary.close()
+
+    const promoted = await on(replica, "promote", "acme")
+    expect(promoted.code).toBe(0)
+    expect(promoted.stdout).toContain("acme promoted")
+    expect(promoted.stdout).toContain("epoch 1")
+
+    // It is a primary now, and `bunql exec` against it writes.
+    const wrote = await on(replica, "exec", "acme", "--sql", "insert into t (v) values ('two')")
+    expect(wrote.code).toBe(0)
+    const read = await on(replica, "exec", "acme", "--sql", "select count(*) as n from t", "--json")
+    expect(read.code).toBe(0)
+    expect(JSON.parse(read.stdout)).toEqual([{ n: 2 }])
+  }, 30_000)
+
+  test("--json prints the server's own body, and a missing database is an error", async () => {
+    const primary = await startPrimary()
+    await createDb(primary, "beta")
+    const replica = await startReplica(primary)
+    await untilSynced(primary, replica, "beta")
+    await primary.close()
+
+    const missing = await on(replica, "promote", "nothing")
+    expect(missing.code).toBe(1)
+    expect(missing.stderr).toContain("NO_COPY")
+
+    const promoted = await on(replica, "promote", "beta", "--json")
+    expect(promoted.code).toBe(0)
+    expect(JSON.parse(promoted.stdout)).toMatchObject({ db: "beta", promoted: true, role: "primary" })
+  }, 30_000)
+
+  test("promote needs a database", async () => {
+    const primary = await startPrimary()
+    const ran = await on(primary, "promote")
+    expect(ran.code).toBe(1)
+    expect(ran.stderr).toContain("promote needs a database")
+  })
+})
+
+describe("bunql cluster", () => {
+  test("reports membership, the term and where each database lives", async () => {
+    const servers = await startCluster(3)
+    await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
+    const owner = servers[0] as (typeof servers)[number]
+    const created = await bunql(owner.url, owner.adminKey, "db", "create", "acme")
+    expect(created.code).toBe(0)
+
+    const json = await bunql(owner.url, owner.adminKey, "cluster", "--json")
+    expect(json.code).toBe(0)
+    const view = JSON.parse(json.stdout) as {
+      id: string
+      term: number
+      nodes: { id: string }[]
+      dbs: { db: string; primary: string | null; leaseHeldHere: boolean }[]
+    }
+    expect(view.id).toBe(owner.id)
+    expect(view.term).toBeGreaterThan(0)
+    expect(view.nodes.map((node) => node.id).sort()).toEqual(["n1", "n2", "n3"])
+    expect(view.dbs.find((db) => db.db === "acme")).toMatchObject({
+      primary: owner.id,
+      leaseHeldHere: true,
+    })
+
+    const table = await bunql(owner.url, owner.adminKey, "cluster")
+    expect(table.code).toBe(0)
+    expect(table.stdout).toContain("acme")
+    expect(table.stdout).toContain("term")
+  }, 30_000)
+
+  test("a node with no [cluster] section says so rather than pretending", async () => {
+    const standalone = await startPrimary()
+    const ran = await on(standalone, "cluster")
+    expect(ran.code).toBe(1)
+    expect(ran.stderr).toContain("CLUSTER_DISABLED")
+  })
+})

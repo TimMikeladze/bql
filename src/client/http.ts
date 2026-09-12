@@ -2,6 +2,14 @@
 // `BunQL-Min-Txid` header of design §5.4 and the error mapping of §6.6 happen in exactly one
 // place. A caller that forgets one cannot exist.
 //
+// Second invariant (C2): a request is replayed against another node **only** on `NOT_PRIMARY`,
+// **only** once, and **only** when the caller asked for it. `NOT_PRIMARY` is the one failure this
+// server produces strictly *before* a statement runs — `requirePrimary` before the body is read,
+// `assertWritable` before the writer is taken, the forwarder before a frame goes out — so
+// replaying it cannot double-apply a write. `FORWARD_TIMEOUT` and a dropped socket mean "may or
+// may not have committed" (`docs/next.md`) and are never retried; nor is anything inside an
+// interactive transaction, whose baton belongs to one node. See `docs/c2-promotion.md`.
+//
 // Only `fetch` is used, with a caller-supplied implementation when the runtime has none on the
 // global object.
 
@@ -28,6 +36,11 @@ export interface RequestInitLike {
   signal?: AbortSignal
   /** Overrides the client's token for this one request. */
   token?: string | null
+  /**
+   * Replay this request once against the node a `NOT_PRIMARY` names. Set by the one-shot statement
+   * paths and by nothing else — see the invariant at the top of this file.
+   */
+  retryOnMoved?: boolean
 }
 
 /** Trailing slashes make `${base}/v1/...` ambiguous, so they are removed once, here. */
@@ -75,7 +88,11 @@ export class HttpClient {
   }
 
   /** One request, with the body serialised and the response left untouched. */
-  async send(path: string, init: RequestInitLike = {}): Promise<Response> {
+  send(path: string, init: RequestInitLike = {}): Promise<Response> {
+    return this.#sendTo(this.base, path, init)
+  }
+
+  async #sendTo(base: string, path: string, init: RequestInitLike): Promise<Response> {
     const headers = this.headersFor(init)
     let body: string | undefined
     if (init.body !== undefined) {
@@ -83,7 +100,7 @@ export class HttpClient {
       if (!headers.has("content-type")) headers.set("content-type", "application/json")
     }
     try {
-      return await this.#config.fetchImpl(this.url(path), {
+      return await this.#config.fetchImpl(`${base}${path}`, {
         method: init.method ?? (body === undefined ? "GET" : "POST"),
         headers,
         ...(body === undefined ? {} : { body }),
@@ -94,16 +111,71 @@ export class HttpClient {
     }
   }
 
-  /** One request whose body is JSON, with design §6.6's error shape turned into a throw. */
+  /**
+   * One request whose body is JSON, with design §6.6's error shape turned into a throw — and, when
+   * the caller opted in, one replay against the node a `NOT_PRIMARY` names.
+   *
+   * The replay carries this client's own headers and token rather than following the redirect: a
+   * cross-origin redirect strips `Authorization` per the Fetch standard, which is exactly why the
+   * server answers `503` rather than `307` when the new primary is on another origin.
+   */
   async json<T>(path: string, init: RequestInitLike = {}): Promise<T> {
     const response = await this.send(path, init)
-    return readJson<T>(response, path)
+    const text = await response.text().catch(() => "")
+    if (init.retryOnMoved) {
+      const elsewhere = movedTo(response, text, this.base)
+      if (elsewhere) {
+        const retried = await this.#sendTo(elsewhere, path, init)
+        return parseBody<T>(await retried.text().catch(() => ""), retried.status, retried.ok, path)
+      }
+    }
+    return parseBody<T>(text, response.status, response.ok, path)
+  }
+}
+
+/**
+ * The base URL a `NOT_PRIMARY` points at, or null when this response is not one, names nowhere, or
+ * names the node that just answered.
+ *
+ * The status is checked *and* the body's code, because every response from a replica carries
+ * `BunQL-Primary` — including a `503 BUSY`, which is a different failure and is not replayed here.
+ */
+function movedTo(response: Response, text: string, from: string): string | null {
+  if (response.ok) return null
+  let code: string | undefined
+  try {
+    code = (JSON.parse(text) as ErrorBody | null)?.error?.code
+  } catch {
+    return null
+  }
+  if (code !== "NOT_PRIMARY") return null
+  const named = response.headers.get(HEADERS.primary)
+  if (!named) return null
+  const base = httpBaseOf(named)
+  return base && base !== from ? base : null
+}
+
+/**
+ * `BunQL-Primary` is a `ws://host/v1/replication` in a static topology and an HTTP base in a
+ * cluster. Either way what a client needs is the origin, so both collapse to the same thing.
+ */
+export function httpBaseOf(value: string): string | null {
+  try {
+    const url = new URL(value)
+    const scheme = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol
+    return `${scheme}//${url.host}`
+  } catch {
+    return null
   }
 }
 
 /** A response body as JSON, or the error it describes. */
 export async function readJson<T>(response: Response, what: string): Promise<T> {
   const text = await response.text().catch(() => "")
+  return parseBody<T>(text, response.status, response.ok, what)
+}
+
+function parseBody<T>(text: string, status: number, ok: boolean, what: string): T {
   let parsed: unknown = null
   if (text.length > 0) {
     try {
@@ -112,11 +184,11 @@ export async function readJson<T>(response: Response, what: string): Promise<T> 
       parsed = null
     }
   }
-  if (!response.ok) {
+  if (!ok) {
     throw BunQLClientError.fromBody(
       parsed as ErrorBody | null,
-      response.status,
-      `${what} failed with ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+      status,
+      `${what} failed with ${status}${text ? `: ${text.slice(0, 200)}` : ""}`,
     )
   }
   return parsed as T

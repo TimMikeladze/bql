@@ -247,6 +247,9 @@ class RemoteDb implements Db {
     const result = await this.#core.http.json<BatchResult>(`/v1/db/${this.name}/batch`, {
       method: "POST",
       body,
+      // A batch is one shot: the server refuses `NOT_PRIMARY` before running any of it, so a
+      // replay against the node it names cannot apply anything twice (C2).
+      retryOnMoved: true,
       ...(this.#minTxid(options) !== undefined ? { minTxid: this.#minTxid(options) } : {}),
     })
     this.#core.observe(this.name, result.txid)
@@ -346,6 +349,9 @@ class RemoteDb implements Db {
       const wire = await this.#core.http.json<QueryResult>(`/v1/db/${this.name}/query`, {
         method: "POST",
         body: statementBody(request, rows, statement),
+        // One shot, so one transparent replay against the node a `NOT_PRIMARY` names (C2). The
+        // interactive-transaction paths below deliberately do not set it: a baton is node-local.
+        retryOnMoved: true,
         ...(minTxid !== undefined ? { minTxid } : {}),
       })
       this.#core.observe(this.name, wire.txid)

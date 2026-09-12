@@ -65,13 +65,20 @@ Every response carries these four:
 |---|---|
 | `BunQL-Txid` | the database's last txid as this request saw it |
 | `BunQL-Node` | node identity; a hash of the hostname unless `[server] node` sets one |
-| `BunQL-Role` | `primary`, or `replica` when `[replication] role = "replica"` |
+| `BunQL-Role` | `primary` or `replica` — **for the database this request names**, live |
 | `BunQL-Duration-Us` | microseconds spent in the handler |
 
+`BunQL-Role` is per database and it moves at runtime. A node promoted for `acme` answers
+`primary` for `acme` and `replica` for everything it still follows, in the same process and
+without a restart; a request that names no database (`POST /v1/db`, `/healthz`) gets the node's
+own role instead. See [Promotion and failover](#promotion-and-failover).
+
 `BunQL-Primary` is on **every** response from a replica, not only on a `NOT_PRIMARY` error: it
-carries `[replication] primary`, so a client that wants the write path never has to provoke an
-error to find it. While `[server] cors` is on (the default) all five are listed in
-`Access-Control-Expose-Headers`, and `OPTIONS` on any route is a preflight.
+carries where that database's writes go — `[replication] primary` in a static topology, and the
+node the control plane names in a cluster — so a client that wants the write path never has to
+provoke an error to find it. While `[server] cors` is on (the default) all five are listed in
+`Access-Control-Expose-Headers`, along with `Location`, and `OPTIONS` on any route is a
+preflight.
 
 ### Request options
 
@@ -109,6 +116,17 @@ Two failures belong to the replica levels, and **neither rolls anything back**:
 - `503 ACK_TIMEOUT` — the transaction committed and is durable on this node, but the acks did not
   arrive within `[replication] ackTimeoutMs`. The body carries the `txid` that committed, plus
   `acks` and `needed`. Retrying the statement would write it twice; read the txid back instead.
+
+**`ack: "local"` and failover lose the tail.** This is the default, and it is worth stating as
+plainly as it deserves: a write answered `local` is durable on **one** node. Failover picks the
+replica with the highest txid the control plane has been told about, which is the best any replica
+has — but a primary that dies may have committed and *answered* transactions past that point which
+no replica ever received. Those are gone, and nothing reports a gap: the new primary simply starts
+at its own txid.
+
+The loss is bounded by replica lag, typically under a millisecond on a LAN, and it is not zero.
+`ack: "replica"` or `"quorum"` makes it impossible, at the cost of a round trip per write, because
+promotion then cannot pick a node that is missing an acknowledged transaction.
 
 ### Value encoding
 
@@ -161,6 +179,10 @@ write arrives under the primary's own code and status — a constraint violation
 | `ACK_TIMEOUT` | 503 | committed and locally durable, but not enough replica acks in time |
 | `FORWARD_TIMEOUT` | 504 | the primary never answered a write a replica forwarded to it |
 | `REPLICATION_DISABLED` | 403 | `GET /v1/replication` on a node with no `[replication] secret` |
+| `CLUSTER_DISABLED` | 503 | `GET /v1/cluster` on a node with no `[cluster]` section enabled; 403 on the raft socket |
+| `NO_COPY` | 404 | `promote` for a database this node holds no copy of |
+| `GENERATION_MISMATCH`, `STREAM_LIVE`, `ALREADY_PRIMARY`, `BEHIND` | 409 | `promote` refused; see [Promotion and failover](#promotion-and-failover) |
+| `LEASE_HELD`, `NO_LEADER`, `NOT_COMMITTED` | 503 | `promote` refused by the control plane |
 | `QUOTA_EXCEEDED` | 507 | `max_page_count` reached, or `SQLITE_FULL` |
 | `INTERNAL` | 500 | a bug; the client is told nothing more, the server logs the rest |
 
@@ -190,6 +212,7 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `GET /v1/db/:db/live` | live query, SSE | `ro` |
 | `GET /v1/replication` | node-to-node stream (WebSocket) | cluster secret, in-band |
 | `POST /v1/db/:db/query` | one statement | `ro`, `rw` when it writes |
+| `POST /v1/db/:db/promote` | make this node the primary for it | admin |
 | `GET /v1/db/:db/replication` | txid, epoch, checksum, snapshot, replicas | `ro` |
 | `POST /v1/db/:db/restore` | point-in-time restore | admin |
 | `POST /v1/db/:db/snapshot` | force a snapshot | admin |
@@ -197,6 +220,8 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `POST /v1/db/:db/tx/:tx` | one statement in it | `rw` |
 | `POST /v1/db/:db/tx/:tx/commit` | commit | `rw` |
 | `POST /v1/db/:db/tx/:tx/rollback` | roll back | `rw` |
+| `GET /v1/cluster` | control-plane membership, term and placement | admin |
+| `GET /v1/cluster/raft` | node-to-node raft socket (WebSocket) | cluster secret, in-band |
 | `POST /v1/tokens` | mint a scoped token | admin |
 | `DELETE /v1/tokens/:jti` | revoke one | admin |
 | `GET /v1/ws` | WebSocket upgrade, sub-protocol `bunql.v1` | any |
@@ -620,15 +645,182 @@ Everything a replica cannot do in phase 1, in one place.
 | interactive transactions | forwarded whole; the baton is the primary's |
 | the change feed | txid-only events, `changes: []` |
 | live queries | full, re-run on every applied transaction |
-| `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore`, `POST /v1/db/:db/import` | `503 NOT_PRIMARY` with `BunQL-Primary`. They are refused rather than forwarded: a create would have to come back over the replication stream to exist here anyway, and a delete has no safe forwarding story while promotion does not exist. Address the primary |
+| `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore`, `POST /v1/db/:db/import` | `503 NOT_PRIMARY` with `BunQL-Primary`, or `307` when the new primary is on the same origin. They are refused rather than forwarded: a create would have to come back over the replication stream to exist here anyway, and a delete on a copy the primary still owns removes the applier's own file. The gate is per database, so a promoted node serves them for what it was promoted for. Address the primary, or promote |
 | `POST /v1/db/:db/checkpoint` with `TRUNCATE` | `503 NOT_PRIMARY`. Every other mode runs locally |
 | `POST /v1/db/:db/snapshot` | works: a replica has the file and a snapshot of it is a valid restore source |
 | S3 shipping | off. A replica authors nothing, so it ships nothing; `restore` from a bucket still works |
 | `ack: "replica"` / `"quorum"` on a forwarded write | honoured — the level travels with the forwarded body and the primary waits for it |
-| promotion to primary | not built. `POST /v1/db/:db/promote` and `bunql promote` are phase 2 |
+| promotion to primary | `POST /v1/db/:db/promote` and `bunql promote` (C2). A promoted node stops following that database, keeps the copy, and serves its own lifecycle routes for it |
 
 A replica's `GET /readyz` is `503` while its stream is down, so a load balancer takes it out of
 rotation rather than serving data that only gets staler.
+
+## Promotion and failover
+
+A replica becomes the primary for one database. `docs/c2-promotion.md` is the as-built note and
+carries the safety argument; this is the surface.
+
+### `POST /v1/db/{db}/promote`
+
+Admin only. Body `{"force": false}`.
+
+```json
+{ "db": "acme", "promoted": true, "role": "primary", "epoch": 4, "txid": 918,
+  "why": "n2 takes acme at epoch 4, fencing n1" }
+```
+
+It addresses **the node that should become the primary** — promotion is that node's own copy being
+accepted — so `--url` names the candidate, not the cluster. A refusal changes nothing at all: the
+decision is taken first, and in a cluster it is taken on the Raft leader against the leader's own
+clock.
+
+| refusal | status | meaning |
+|---|---|---|
+| `NO_COPY` | 404 | this node holds no copy of that database |
+| `GENERATION_MISMATCH` | 409 | the copy is of a *different* database that wore this name. See `docs/r7-unfollow.md` |
+| `STREAM_LIVE` | 409 | static topology only: this node is still streaming the database from its primary, which is therefore up |
+| `ALREADY_PRIMARY` | 409 | this node already authors its transactions |
+| `BEHIND` | 409 | another node has acknowledged a higher txid; promoting here would discard those transactions |
+| `LEASE_HELD` | 503 | another node's lease is still live and it may still be writing |
+| `NO_LEADER` | 503 | clustered, and no Raft leader could be reached |
+| `NOT_COMMITTED` | 503 | the grant did not commit inside the control plane's propose timeout |
+
+`"force": true` overrides exactly three of them — `STREAM_LIVE`, `LEASE_HELD` and `BEHIND` — and
+nothing else. It is how an operator says "the old primary is gone, I have checked", and with
+`ack: "local"` it is also how an operator accepts the lost tail above.
+
+Promotion is per database. Promoting a whole node is a loop over `GET /v1/db`.
+
+### What a promoted node does
+
+It stops following that database (keeping the copy — this is not the R7 unfollow, which deletes
+one), folds its WAL into the file, takes the new epoch, and reopens as a primary. From that
+instant it serves its own lifecycle routes for it, `BunQL-Role` says `primary` for it, and every
+`TxnRecord` it authors carries the new epoch.
+
+Everything else it follows is untouched: a node is a primary for what it was promoted for and a
+replica for the rest.
+
+### What the old primary does
+
+A node that learns another holds a newer epoch for a database it thought it owned **demotes
+itself** for that database — at once, before any further write — rather than dying. Two things
+teach it: a `SUBSCRIBE` arriving at epoch higher than its own (the existing `EPOCH_AHEAD` check in
+`/v1/replication`), and, in a cluster, a committed lease naming somebody else.
+
+A demoted node keeps serving reads from its copy and says where the database went. If it knows an
+HTTP base for the new primary it follows it, and the existing divergence check does the rest: a
+copy that diverged over the lost tail is handed a snapshot.
+
+In a **static topology with no cluster** there is nothing to teach it automatically. A node brought
+back with `--replica-of <new primary>` demotes through the ordinary replica path; one brought back
+unchanged keeps serving its stale copy until an operator points it somewhere. That is the honest
+limit of a topology with no control plane, and it is why promotion there is an explicit operator
+action.
+
+### What a client is told
+
+| transport | answer |
+|---|---|
+| HTTP, new primary on the same origin | `307` with `Location` and `BunQL-Primary` |
+| HTTP, new primary on another origin | `503 NOT_PRIMARY` with `BunQL-Primary` and `Location` |
+| WebSocket | `{"event":"moved","db":"acme","primary":"http://…"}` to every socket that has named that database |
+
+The split is not arbitrary. Following a cross-origin redirect strips `Authorization` (Fetch
+standard, "HTTP-redirect fetch"), so a `307` across nodes would turn a retryable refusal into a
+`401` the caller cannot explain; same-origin — one load balancer in front of the cluster, which is
+how design §5.3's redirect is meant to be deployed — keeps the header and genuinely helps.
+
+**The SDK replays the request once**, against the node the answer names, carrying its own token.
+It does that for `307` and for `503 NOT_PRIMARY`, and for nothing else — in particular never for
+`504 FORWARD_TIMEOUT` or a socket that dropped mid-forward, which mean *may or may not have
+committed*, never for `ACK_TIMEOUT`, which means committed, and never inside an interactive
+transaction, whose baton belongs to one node.
+
+The reason the two are different: every producer of `NOT_PRIMARY` refuses **before** a statement
+runs — the admin gate before the body is read, the lease check before the writer is taken, the
+forwarder before a frame goes out — so replaying one cannot double-apply a write. `FORWARD_TIMEOUT`
+is raised precisely because the node does not know what happened.
+
+## The cluster control plane
+
+`[cluster] enabled` puts this node in a small built-in Raft group that holds membership,
+per-database placement and per-database leases. It is control plane only: **the write path never
+waits on it**, and never awaits anything. A write consults the lease its own node already holds, in
+memory, against a monotonic clock.
+
+```http
+GET /v1/cluster        → membership, term, leader, and where each database lives (admin)
+GET /v1/cluster/raft   → the node-to-node raft socket; the cluster secret is proved in-band
+```
+
+```json
+{ "id": "n2", "role": "leader", "term": 4, "leader": "n2",
+  "commitIndex": 91, "appliedIndex": 91, "voters": ["n1","n2","n3"], "learners": [],
+  "nowMs": 1789211888147,
+  "nodes": [{ "id": "n1", "advertise": "ws://10.0.0.1:4321", "zone": "", "status": "voter",
+              "reachable": true, "joinedTerm": 1 }],
+  "dbs": [{ "db": "acme", "primary": "n1", "replicas": ["n2","n3"], "epoch": 2,
+            "lease": { "node": "n1", "until": 1789211889347 }, "acked": { "n1": "918" },
+            "generation": "cccd5653576f50ff", "leaseHeldHere": false }] }
+```
+
+`lease.until` is the **Raft leader's** wall clock and is meaningless against any other, which is
+why `nowMs` travels beside it. `leaseHeldHere` is the only thing in the body derived from the
+answering node's own monotonic clock, and it is what the write path actually asks.
+
+A node with no `[cluster]` section answers `503 CLUSTER_DISABLED` rather than pretending.
+
+### The lease, and why two primaries are impossible
+
+The leader grants a database's primary a lease for `leaseTtlMs`. The holder renews it every
+`leaseRenewMs` — **the holder, never the leader on its behalf**, because a leader renewing for a
+node that has died would keep a dead primary's database for ever and nothing would ever fail over.
+
+The holder treats the lease as valid until `leaseTtlMs - leaseGuardMs` from the moment it **asked**
+for the grant, on its own monotonic clock. The leader stamps `until` after that moment, so the
+holder's deadline is earlier than the leader's by at least the guard, whatever the offset between
+the two wall clocks — no node ever reads another node's. The leader will not grant the lease
+elsewhere before `until`. The window in which two nodes could both write is therefore negative by
+`leaseGuardMs`, and that is the whole of it.
+
+A node whose lease has lapsed refuses writes with `503 NOT_PRIMARY` and keeps serving reads, which
+carry `BunQL-Role: replica`.
+
+### Failover
+
+When a lease lapses on the leader's own clock, the leader grants it to the reachable node in that
+database's placement with the highest acknowledged txid, ties broken by node id. The database's
+epoch moves, the old primary is fenced by it, and the winner promotes itself locally. With
+`ack: "local"` this can lose the tail — see [Durability levels](#durability-levels).
+
+### `[cluster]`
+
+```toml
+[cluster]
+enabled = false        # BUNQL_CLUSTER_ENABLED; setting `peers` turns it on
+id = ""                # this node's id; defaults to [server] node
+advertise = ""         # ws://host:port other nodes reach this one at, and the HTTP base clients are sent to
+zone = ""              # rack/AZ label; C3's placement reads it
+peers = []             # ["n2=ws://b:4321", "ws://c:4321"] — an id is derived from host:port when absent
+bootstrap = false      # form a new group from `peers` instead of waiting to join one
+rf = 2                 # replica factor; recorded, not yet used
+leaseTtlMs = 3000
+leaseRenewMs = 1000
+leaseGuardMs = 500     # the margin that makes two primaries impossible; do not tune down casually
+electionTimeoutMs = 1500
+heartbeatMs = 300
+```
+
+Every key takes a `BUNQL_CLUSTER_*` override, and `BUNQL_CLUSTER_PEERS` is comma-separated. The
+cluster shares `[replication] secret` — the two sockets run between the same nodes and a second
+secret would be a second thing to rotate — so `[cluster] enabled` with no secret is a configuration
+error. So is a `leaseGuardMs` at or above `leaseTtlMs`, or a `leaseRenewMs` that leaves no room
+inside `leaseTtlMs - leaseGuardMs`.
+
+**What C2 does not do:** placement. A database enters the control plane when the node that holds it
+claims it, not because a hash says it belongs somewhere, and a database the control plane has never
+heard of is not lease-gated at all. Consistent hashing, `rf` and zones are C3.
 
 ---
 
@@ -1042,6 +1234,7 @@ in-process code with the data directory already open. Tokens start applying agai
 ```
 bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
             [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
+            [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
             [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
 bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
 bunql db list
@@ -1055,6 +1248,8 @@ bunql backup status <db>
 bunql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
 bunql backup generations <db>
 bunql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
+bunql promote <db> [--force]
+bunql cluster
 bunql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
 bunql exec <db> --sql "select 1"
 bunql shell <db>
@@ -1082,6 +1277,23 @@ the primary announces. A pair is two commands:
 bunql serve --dir ./p --port 4501 --cluster-secret $SECRET
 bunql serve --dir ./r --port 4502 --cluster-secret $SECRET \
             --replica-of ws://127.0.0.1:4501/v1/replication
+```
+
+When the primary is gone, `bunql promote` is addressed at the replica that should take over —
+promotion is that node's own copy being accepted, so `--url` names the candidate:
+
+```sh
+bunql --url http://127.0.0.1:4502 promote acme          # refused while the primary is up
+bunql --url http://127.0.0.1:4502 promote acme --force  # "it is gone, I have checked"
+```
+
+`serve --cluster-peers` puts the node in a Raft control plane, which is what makes failover
+automatic. Every node needs its own `--advertise`, and they all share `--cluster-secret`:
+
+```sh
+bunql serve --dir ./a --port 4501 --cluster-secret $SECRET \
+            --advertise ws://127.0.0.1:4501 --cluster-peers b=ws://127.0.0.1:4502,c=ws://127.0.0.1:4503
+bunql cluster   # membership, term, and where each database lives
 ```
 
 `serve --s3 s3://bucket/prefix` turns on continuous backup. Credentials deliberately have **no
@@ -1158,6 +1370,18 @@ the canonical one wins when both are set.
 | `[replication] forwardWrites` | `true` | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
 | `[replication] forwardTimeoutMs` | `10000` | `BUNQL_REPLICATION_FORWARD_TIMEOUT_MS` | — |
 | `[replication] maxForwards` | `256` | `BUNQL_REPLICATION_MAX_FORWARDS` | — |
+| `[cluster] enabled` | `false`; `true` once `peers` is set | `BUNQL_CLUSTER_ENABLED` | — |
+| `[cluster] id` | `""` → `[server] node` | `BUNQL_CLUSTER_ID` | — |
+| `[cluster] advertise` | `""` | `BUNQL_CLUSTER_ADVERTISE` | — |
+| `[cluster] zone` | `""` | `BUNQL_CLUSTER_ZONE` | — |
+| `[cluster] peers` | `[]`; `id=ws://host:port` or a bare URL | `BUNQL_CLUSTER_PEERS` (comma-separated) | — |
+| `[cluster] bootstrap` | `false` | `BUNQL_CLUSTER_BOOTSTRAP` | — |
+| `[cluster] rf` | `2` (recorded; placement is C3) | `BUNQL_CLUSTER_RF` | — |
+| `[cluster] leaseTtlMs` | `3000` | `BUNQL_CLUSTER_LEASE_TTL_MS` | — |
+| `[cluster] leaseRenewMs` | `1000` | `BUNQL_CLUSTER_LEASE_RENEW_MS` | — |
+| `[cluster] leaseGuardMs` | `500` | `BUNQL_CLUSTER_LEASE_GUARD_MS` | — |
+| `[cluster] electionTimeoutMs` | `1500` | `BUNQL_CLUSTER_ELECTION_TIMEOUT_MS` | — |
+| `[cluster] heartbeatMs` | `300` | `BUNQL_CLUSTER_HEARTBEAT_MS` | — |
 | `[s3] enabled` | `false`; `true` once `bucket` is set | `BUNQL_S3_ENABLED` | — |
 | `[s3] bucket` | `""` (no shipping); also accepts `s3://bucket/prefix` | `BUNQL_S3_BUCKET` | `BUNQL_S3_URL` |
 | `[s3] region` | `""` (Bun's own resolution) | `BUNQL_S3_REGION` | — |
@@ -1222,13 +1446,23 @@ The as-built notes are `docs/r1-replication.md` (transport), `docs/r2-durability
 contract, the shipper and restore), `docs/r4-hrana.md` (the libsql surface and what the clients
 really send) and `docs/r5-orm.md` (the two adapters).
 
+### Landed in phase 2
+
+| design | status |
+|---|---|
+| §5.3 built-in Raft control plane (membership, placement, per-database leases) | C1/C2. Control plane only; the write path consults a cached lease against a monotonic clock and never awaits |
+| §6.5 `POST /v1/db/{db}/promote` | C2, with the epoch fencing the old primary and `force` overriding exactly three refusals |
+| §5.3 failover on a lapsed lease | C2. The holder renews its own lease; the leader grants a lapsed one to the reachable replica with the highest acked txid |
+| §5.3 `307` + `BunQL-Primary`, WS `moved` | C2. `307` same-origin only, because a cross-origin redirect strips `Authorization`; the SDK replays once instead |
+| §9.3 `bunql promote`, `bunql cluster` | C2 |
+| §9.4 `[cluster]` | C2, without `rf` — placement is C3 |
+
+`docs/c2-promotion.md` is the as-built note.
+
 ### Still not implemented
 
 | design | status |
 |---|---|
-| §6.5 `POST /v1/db/{db}/promote` | phase 2. Promotion needs a control plane that can fence the old primary, not just a route |
-| §9.3 `bunql promote`, `bunql cluster` | phase 2, with the control plane |
-| §9.4 `[cluster]` | phase 2 |
 | §4.5 replica apply mechanism A (pages into the file, shm header rewritten under the WAL locks) | mechanism B works and is what the numbers above are; A is the way to stop rescanning the WAL per apply |
 | §4.6 row-level CDC on a replica | phase 3. A replica receives pages, so logical decoding of the WAL is what it would take |
 | §9.2 `BunQL.open({ s3 })` | phase 2; the embedded engine has no shipper of its own |

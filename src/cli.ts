@@ -23,6 +23,7 @@ const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
 
   bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
               [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
+              [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
               [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
   bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
   bunql db list
@@ -36,6 +37,8 @@ const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
   bunql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
   bunql backup generations <db>
   bunql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
+  bunql promote <db> [--force]
+  bunql cluster [--watch]
   bunql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
   bunql exec <db> --sql "select 1"
   bunql shell <db>
@@ -224,6 +227,9 @@ async function serve(args: ParsedArgs): Promise<void> {
   const replicaOf = str(args, "replica-of")
   const clusterSecret = str(args, "cluster-secret")
   const follow = str(args, "follow")
+  const peers = str(args, "cluster-peers")
+  const advertise = str(args, "advertise")
+  const zone = str(args, "zone")
   if (dir !== undefined) overrides.data = { dir }
   if (port !== undefined || host !== undefined || node !== undefined) {
     overrides.server = {
@@ -261,6 +267,24 @@ async function serve(args: ParsedArgs): Promise<void> {
     }
   }
 
+  if (peers !== undefined || advertise !== undefined || zone !== undefined) {
+    // `--cluster-peers` is the whole decision, as `--replica-of` is for replication: a node told
+    // who its peers are is in a cluster.
+    overrides.cluster = {
+      ...(peers !== undefined
+        ? {
+            enabled: true,
+            peers: peers
+              .split(",")
+              .map((one) => one.trim())
+              .filter((one) => one.length > 0),
+          }
+        : {}),
+      ...(advertise !== undefined ? { advertise } : {}),
+      ...(zone !== undefined ? { zone } : {}),
+    }
+  }
+
   const config = loadConfig({
     file,
     required: Boolean(str(args, "config")),
@@ -274,6 +298,10 @@ async function serve(args: ParsedArgs): Promise<void> {
     ? `\nbunql: shipping to s3://${config.s3.bucket}/${config.s3.prefix}, retention ` +
       `${config.s3.retention}`
     : ""
+  const cluster = config.cluster.enabled
+    ? `\nbunql: cluster ${config.cluster.id}, peers ${config.cluster.peers.join(", ") || "(none)"}` +
+      `, lease ${config.cluster.leaseTtlMs}ms guard ${config.cluster.leaseGuardMs}ms`
+    : ""
   const replication =
     config.replication.role === "replica"
       ? `\nbunql: replica of ${config.replication.primary}, following ` +
@@ -284,7 +312,7 @@ async function serve(args: ParsedArgs): Promise<void> {
   console.log(
     `bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
       `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
-      `ack ${config.durability.defaultAck}${replication}${storage}`,
+      `ack ${config.durability.defaultAck}${replication}${cluster}${storage}`,
   )
   let stopping = false
   const stop = (signal: string): void => {
@@ -340,6 +368,12 @@ function envSuppressions(overrides: ServerConfigInput): Record<string, string | 
     cleared.BUNQL_S3_BUCKET = undefined
     cleared.BUNQL_S3_PREFIX = undefined
   }
+  if (overrides.cluster?.peers !== undefined) {
+    cleared.BUNQL_CLUSTER_PEERS = undefined
+    cleared.BUNQL_CLUSTER_ENABLED = undefined
+  }
+  if (overrides.cluster?.advertise !== undefined) cleared.BUNQL_CLUSTER_ADVERTISE = undefined
+  if (overrides.cluster?.zone !== undefined) cleared.BUNQL_CLUSTER_ZONE = undefined
   if (overrides.s3?.endpoint !== undefined) cleared.BUNQL_S3_ENDPOINT = undefined
   if (overrides.s3?.region !== undefined) cleared.BUNQL_S3_REGION = undefined
   return cleared
@@ -712,6 +746,106 @@ async function exec(args: ParsedArgs, remote: Remote): Promise<void> {
   }
 }
 
+interface PromoteBody {
+  db: string
+  promoted: boolean
+  role: string
+  epoch: number
+  txid: number
+  why: string
+}
+
+/**
+ * `bunql promote <db>` — design §9.3 and `docs/c2-promotion.md`. It addresses the node that should
+ * become the primary, because the promotion is that node's local copy being accepted: `--url` is
+ * the candidate, not the cluster.
+ */
+async function promote(args: ParsedArgs, remote: Remote): Promise<void> {
+  const name = args.positional[1]
+  if (!name) throw new CliError("promote needs a database")
+  const force = args.flags.force === true
+  const body = await api<PromoteBody>(remote, "POST", `/v1/db/${name}/promote`, { force })
+  out(
+    remote,
+    body,
+    `${body.db} promoted on ${remote.url}: epoch ${body.epoch}, txid ${body.txid}\n${body.why}`,
+  )
+}
+
+interface ClusterBody {
+  id: string
+  role: string
+  term: number
+  leader: string | null
+  commitIndex: number
+  appliedIndex: number
+  voters: string[]
+  learners: string[]
+  nowMs: number
+  nodes: {
+    id: string
+    advertise: string
+    zone: string
+    status: string
+    reachable: boolean
+  }[]
+  dbs: {
+    db: string
+    primary: string | null
+    replicas: string[]
+    epoch: number
+    lease: { node: string; until: number } | null
+    acked: Record<string, string>
+    generation: string | null
+    leaseHeldHere: boolean
+  }[]
+}
+
+/** `bunql cluster` — the observable surface of the control plane (`docs/plan-phase2.md` C1). */
+async function cluster(args: ParsedArgs, remote: Remote): Promise<void> {
+  const body = await api<ClusterBody>(remote, "GET", "/v1/cluster")
+  if (remote.json) {
+    console.log(JSON.stringify(body, null, 2))
+    return
+  }
+  console.log(
+    `${body.id}  ${body.role}  term ${body.term}  leader ${body.leader ?? "(none)"}  ` +
+      `commit ${body.commitIndex}/${body.appliedIndex}`,
+  )
+  console.log(
+    Bun.inspect.table(
+      body.nodes.map((node) => ({
+        node: node.id,
+        advertise: node.advertise,
+        zone: node.zone,
+        status: node.status,
+        reachable: node.reachable,
+        voter: body.voters.includes(node.id),
+      })),
+    ),
+  )
+  if (body.dbs.length === 0) {
+    console.log("no databases placed")
+    return
+  }
+  console.log(
+    Bun.inspect.table(
+      body.dbs.map((db) => ({
+        db: db.db,
+        primary: db.primary ?? "(none)",
+        replicas: db.replicas.join(",") || "-",
+        epoch: db.epoch,
+        // The lease's `until` is the leader's wall clock, so it is only meaningful against the
+        // node's own `nowMs`, which the route sends beside it.
+        leaseMs: db.lease ? db.lease.until - body.nowMs : null,
+        holder: db.lease?.node ?? "(none)",
+        here: db.leaseHeldHere,
+        generation: db.generation ?? "-",
+      })),
+    ),
+  )
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv)
   const command = args.positional[0]
@@ -743,6 +877,12 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 0
       case "checkpoint":
         await checkpoint(args, remote)
+        return 0
+      case "promote":
+        await promote(args, remote)
+        return 0
+      case "cluster":
+        await cluster(args, remote)
         return 0
       case "token":
         await token(args, remote)
