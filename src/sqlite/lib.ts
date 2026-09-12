@@ -171,6 +171,8 @@ const WALSUM = {
     args: [T.ptr, T.u32, T.u32, T.u32, T.u32, T.u32, T.i32, T.ptr],
     returns: T.void,
   },
+  /** The non-variadic shim over `sqlite3_db_config`; see `scripts/native/walsum.c`. */
+  bunql_db_config_int: { args: [T.ptr, T.i32, T.i32, T.ptr], returns: T.i32 },
 } as const
 
 /**
@@ -328,6 +330,12 @@ export interface WalsumSymbols {
     native: number,
     out: PtrArg,
   ): void
+  /**
+   * `sqlite3_db_config(db, op, v, &out)` with an arity bun:ffi can express. `v` is 1, 0, or -1 to
+   * read without changing; `out` is one `i32` receiving the setting as it stands afterwards.
+   * Returns an SQLite result code.
+   */
+  bunql_db_config_int(db: Ptr, op: number, v: number, out: PtrArg): number
 }
 
 export interface SqliteFeatures {

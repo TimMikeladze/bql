@@ -82,6 +82,18 @@ export interface SqliteSection {
   trustedSchema: boolean
   /** `PRAGMA cell_size_check`. Catches a corrupt page at read time, for a cost on every write. */
   cellSizeCheck: boolean
+  /**
+   * `SQLITE_DBCONFIG_DEFENSIVE`. Blocks the things a database *file* should never be able to do to
+   * the process that opens it: writing to `sqlite_schema` directly, `PRAGMA writable_schema`, the
+   * shadow tables of a virtual table, and `PRAGMA journal_mode = off`. SQLite's own advice for any
+   * file you did not write, which is exactly what `POST /v1/db/{db}/import` accepts.
+   *
+   * Off by default, like every other switch here that changes what a statement means. It has **no
+   * pragma** and is reachable only through the vendored build's `bunql_db_config_int` shim
+   * (`docs/p1-pragmas.md`), so a node on a system libsqlite3 that asks for it is refused at
+   * startup rather than left believing it is hardened.
+   */
+  defensive: boolean
 }
 
 export interface DurabilitySection {
@@ -382,6 +394,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     foreignKeys: false,
     trustedSchema: true,
     cellSizeCheck: false,
+    defensive: false,
   },
   durability: {
     defaultAck: "local",

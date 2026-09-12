@@ -58,6 +58,19 @@ unfair cache:
 Collapsing the two `fstat`s and the header read into one `pread` saves 0.75 µs. Worth having, but
 it is not the item.
 
+**Done, and it measured better than this predicted.** `#readHeader` had to `fstat` to find out
+whether a TRUNCATE checkpoint had emptied the file, and `poll` then `fstat`ed the same fd again
+microseconds later for the loop bound; it now returns the size it already had, and the 32-byte
+header buffer is allocated once rather than per poll. **`poll()` p50 2.83 µs → 2.43**, three runs
+each, ±0.04 — more than the 0.29 predicted for one `fstat`, because the allocation went with it.
+
+The remaining `fstat` was left alone deliberately. It can be removed by bounding the loop on a
+short read instead of on the size, but that costs one extra `readSync` per poll (the terminating
+short read) against the 0.29 µs it saves, which is a wash at best. And **the size must not be
+cached across polls**: `wal_checkpoint(RESTART)` rewrites the header and restarts frames at the
+same offsets without changing the file's size, so an unchanged size is not evidence that nothing
+changed.
+
 ### 2.1 Four ways of writing that loop, all identical
 
 Every one of these was tried against the real tailer, alternating with the shipped version:
@@ -223,5 +236,6 @@ does not touch.
   in both modes and CI runs the vendored build, so the JavaScript path is exercised by the
   `BUNQL_WAL_NATIVE=0` tests rather than only by machines that happen to lack the helper.
 - `encodeFrame` and `computeFull` still checksum in JavaScript, deliberately (§3.3).
-- The rest of `poll()` is 1.98 µs, of which 0.75 is two `fstat`s and a header read that could be
-  one `pread`. That is the next thing in this file, and it is small.
+- ~~The rest of `poll()` is 1.98 µs, of which 0.75 is two `fstat`s and a header read that could be
+  one `pread`.~~ **Done** — the duplicate `fstat` and the per-poll header allocation are gone and
+  `poll()` p50 went **2.83 µs → 2.43**. §2 says why the last `fstat` stays.

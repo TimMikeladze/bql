@@ -285,6 +285,33 @@ export const FILE_CONTROLS = {
 export type FileControlName = keyof typeof FILE_CONTROLS
 
 /**
+ * `sqlite3_db_config` ops that take an int and write an int back — every one except
+ * `SQLITE_DBCONFIG_LOOKASIDE` and `SQLITE_DBCONFIG_MAINDBNAME`, whose shapes differ.
+ *
+ * These have **no pragma**: `sqlite3_db_config` is the only way to reach them, it is variadic, and
+ * bun:ffi cannot call a variadic function — so they go through `bunql_db_config_int` in the
+ * vendored artefact and are simply unreachable on a system libsqlite3 (`docs/p1-pragmas.md`).
+ */
+export const DB_CONFIGS = {
+  /**
+   * Blocks the things a database file should never be able to do to its process: writing to
+   * `sqlite_schema` directly, `PRAGMA writable_schema`, the `shadow` tables of a virtual table,
+   * and `PRAGMA journal_mode = off`. SQLite's own advice for any file you did not write, which is
+   * exactly what `POST /v1/db/{db}/import` accepts.
+   */
+  SQLITE_DBCONFIG_DEFENSIVE: 1010,
+  SQLITE_DBCONFIG_ENABLE_FKEY: 1002,
+  SQLITE_DBCONFIG_ENABLE_TRIGGER: 1003,
+  SQLITE_DBCONFIG_ENABLE_VIEW: 1015,
+  SQLITE_DBCONFIG_TRUSTED_SCHEMA: 1017,
+  SQLITE_DBCONFIG_DQS_DML: 1013,
+  SQLITE_DBCONFIG_DQS_DDL: 1014,
+  SQLITE_DBCONFIG_WRITABLE_SCHEMA: 1011,
+} as const
+
+export type DbConfigName = keyof typeof DB_CONFIGS
+
+/**
  * `xShmLock` flags. The wal-index's eight lock slots are write (0), checkpoint (1), recover (2)
  * and five read marks (3..7); taking them all exclusively is what design §4.5's page apply needs
  * to keep a reader out of a database file it is rewriting. `src/wal/shmlock.ts`.

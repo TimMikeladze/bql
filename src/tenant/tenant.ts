@@ -184,6 +184,8 @@ export interface SqlitePragmas {
   foreignKeys?: boolean
   trustedSchema?: boolean
   cellSizeCheck?: boolean
+  /** `SQLITE_DBCONFIG_DEFENSIVE`; needs the vendored build's shim, and says so if it is absent. */
+  defensive?: boolean
 }
 
 /** Design §4.7: SQL bombs are bounded by the library, not by parsing. */
@@ -1545,6 +1547,20 @@ function applyPragmas(db: Database, pragmas: SqlitePragmas | undefined, writer: 
   }
   if (pragmas.cellSizeCheck !== undefined) {
     db.exec(`pragma cell_size_check = ${pragmas.cellSizeCheck ? "on" : "off"}`)
+  }
+  if (pragmas.defensive !== undefined) {
+    // No pragma exists for this one; it is `sqlite3_db_config`, which is variadic, which bun:ffi
+    // cannot call — so it goes through the vendored artefact's non-variadic shim and is absent on
+    // a system libsqlite3 (`docs/p1-pragmas.md`).
+    const settled = db.dbConfig("SQLITE_DBCONFIG_DEFENSIVE", pragmas.defensive ? 1 : 0)
+    if (settled === null && pragmas.defensive) {
+      // Refuse rather than harden silently-not: a node told to be defensive that quietly is not is
+      // worse than one that will not start.
+      throw new Error(
+        "[sqlite] defensive needs the vendored libsqlite3 (bun run sqlite:build): " +
+          "SQLITE_DBCONFIG_DEFENSIVE has no pragma and this build has no bunql_db_config_int",
+      )
+    }
   }
 }
 

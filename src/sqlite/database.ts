@@ -12,6 +12,8 @@
 import { JSCallback, FFIType as T, toArrayBuffer } from "bun:ffi"
 import {
   CHECKPOINT_MODES,
+  DB_CONFIGS,
+  type DbConfigName,
   FILE_CONTROLS,
   LIMITS,
   SQLITE_BUSY,
@@ -650,6 +652,31 @@ export class Database implements StatementHost {
    * Sends a VFS file-control opcode. Returns the raw result code; `SQLITE_NOTFOUND` (12) simply
    * means this VFS does not implement the opcode.
    */
+  /**
+   * `sqlite3_db_config` for the (int, int*) ops, through the non-variadic shim in the vendored
+   * artefact. Returns the setting as it stands afterwards, or **null on a build that has no shim**
+   * — a system libsqlite3, where it is not reachable at all.
+   *
+   * Why it needs a shim: `sqlite3_db_config` is variadic and bun:ffi cannot express that. Calling
+   * it as fixed-arity was tried and fails three ways, because on arm64 a variadic argument is
+   * passed on the stack where a fixed one goes in a register, so SQLite reads whatever was there —
+   * the value ignored, the out-parameter never written, and a SIGKILL on the second call
+   * (`docs/p1-pragmas.md`).
+   *
+   * `value` is 1 to enable, 0 to disable, -1 to read without changing.
+   */
+  dbConfig(op: DbConfigName | number, value: number): number | null {
+    this.#assertOpen()
+    const shim = this.lib.walsum
+    if (!shim) return null
+    const opcode = typeof op === "number" ? op : DB_CONFIGS[op]
+    if (opcode === undefined) throw new RangeError(`unknown db config ${String(op)}`)
+    const out = new Int32Array(1)
+    const rc = shim.bunql_db_config_int(this.#handle, opcode, value, out)
+    if (rc !== SQLITE_OK) this.fail(rc)
+    return out[0] as number
+  }
+
   fileControl(op: FileControlName | number, arg: ArrayBufferView | null = null): number {
     this.#assertOpen()
     const opcode = typeof op === "number" ? op : FILE_CONTROLS[op]

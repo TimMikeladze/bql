@@ -61,7 +61,27 @@ It belongs per database rather than per node, which needs a catalog column and a
 that is deliberately not in this milestone. A node that wants enforcement turns it on for every
 database it serves.
 
-## What cannot be reached, and why
+## What could not be reached, and now can
+
+**`SQLITE_DBCONFIG_DEFENSIVE` is built and is `[sqlite] defensive`**, off by default like every
+other switch here that changes what a statement means. The remedy this section predicted is what
+was built: `scripts/native/walsum.c` — which P3 had by then made a real file with the
+optional-symbol machinery around it — gained a three-line non-variadic shim,
+`int bunql_db_config_int(sqlite3*, int op, int v, int *out)`, and `src/sqlite/lib.ts` declares it
+optionally beside `bunql_wal_*`. So it is a **capability of the vendored build**: present in the
+artefact `bun run sqlite:build` produces, absent on a system libsqlite3, and a node configured
+`defensive = true` on such a build **refuses to start** rather than quietly not hardening.
+
+`Database.dbConfig(op, value)` serves the whole (int, int\*) family — `value` 1, 0, or -1 to read
+without changing — and `DB_CONFIGS` in `src/sqlite/constants.ts` names the ops. Verified rather than
+assumed, against each of the three ways the fixed-arity attempt failed: the value is honoured
+(read-back follows what was set), the out-parameter is written (-1 reports the live setting), and a
+hundred consecutive calls survive (the mis-declaration died on the *second*). And it does what it
+is for: with it on, `pragma writable_schema` followed by an `update sqlite_schema` is refused with
+*"table sqlite_master may not be modified"*, and with it off the same two statements succeed.
+`test/sqlite/dbconfig.test.ts`.
+
+The original analysis, kept because it is the reason the shim exists:
 
 `SQLITE_DBCONFIG_DEFENSIVE` has **no pragma**. It is reachable only through `sqlite3_db_config`,
 which is variadic (`int sqlite3_db_config(sqlite3*, int op, ...)`), and bun:ffi cannot express a
@@ -82,8 +102,8 @@ compile a three-line non-variadic shim beside it —
 `int bunql_db_config_int(sqlite3*, int op, int v, int *out)` — and `src/sqlite/lib.ts` can declare
 it optional exactly as it declares `sqlite3_snapshot_*`. That makes `defensive` a *capability* of
 the vendored build, reported by `features` and absent on a system library, which is the pattern the
-driver already uses. Not built here; `trusted_schema` and `cell_size_check` cover the same ground
-through pragmas that exist.
+driver already uses. **This is what was built**, once P3 had made `walsum.c` exist; see the top of
+this section.
 
 ## Token verification cache
 

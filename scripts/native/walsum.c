@@ -3,9 +3,17 @@
 **
 ** Why this file exists: the same loop in JavaScript costs 4.79 µs for a 4 KiB page and is 71% of
 ** a `WalTailer.poll()`; here it is a few dozen vector loads. Four ways of writing it in JS were
-** measured and none of them moved it — `docs/p3-wal-checksum.md` §2.1. Nothing else is in here,
-** and nothing here touches SQLite: it is compiled into the same artefact as the amalgamation only
-** so that there is one library, one dlopen and one capability check.
+** measured and none of them moved it — `docs/p3-wal-checksum.md` §2.1. It is compiled into the
+** same artefact as the amalgamation so that there is one library, one dlopen and one capability
+** check.
+**
+** The second thing here is `bunql_db_config_int`, a three-line non-variadic shim over
+** `sqlite3_db_config`. `SQLITE_DBCONFIG_DEFENSIVE` has no pragma and is reachable only through
+** that variadic function, which bun:ffi cannot express — declaring it fixed-arity was *tried* and
+** fails three ways, because on arm64 a variadic argument goes on the stack where a fixed one goes
+** in a register, so SQLite reads whatever was there (`docs/p1-pragmas.md`). A shim compiled here
+** makes it a capability of the vendored build, reported by `features` and absent on a system
+** library, which is the pattern the driver already uses for `sqlite3_snapshot_*`.
 **
 ** Invariant: this is a faithful replacement for `src/wal/codec.ts`, not a fast path with a
 ** narrower domain. Both checksum word orders are implemented, the frame header is decoded
@@ -21,6 +29,26 @@
 
 #include <stdint.h>
 #include <string.h>
+
+/* Declared rather than included: this file is compiled beside the amalgamation, which defines
+** both, and forward-declaring keeps it free of a 9 MB header it needs two lines of. */
+struct sqlite3;
+extern int sqlite3_db_config(struct sqlite3 *, int op, ...);
+
+/*
+** `sqlite3_db_config(db, op, v, &out)` with a fixed arity bun:ffi can call.
+**
+** Only the (int, int*) shape of the op is served, which is every op except
+** SQLITE_DBCONFIG_LOOKASIDE and SQLITE_DBCONFIG_MAINDBNAME. `v` is 1 to enable, 0 to disable and
+** -1 to leave unchanged and only read back; `*out` receives the setting as it stands afterwards,
+** which is how the caller learns whether the build honoured it at all.
+*/
+int bunql_db_config_int(struct sqlite3 *db, int op, int v, int *out) {
+  int settled = 0;
+  int rc = sqlite3_db_config(db, op, v, &settled);
+  if (out) *out = settled;
+  return rc;
+}
 
 /* `native` is 1 when the WAL's checksum words are in the host's own byte order. `n` is a multiple
 ** of 8: SQLite only ever checksums the 8-byte frame prefix, the 24-byte header prefix, and whole

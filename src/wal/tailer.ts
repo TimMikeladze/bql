@@ -73,6 +73,8 @@ export class WalTailer {
   #running: Checksum = [0, 0]
   #sawReset = false
   #scratch: Uint8Array = new Uint8Array(0)
+  /** Reused across polls: the header is 32 bytes and is re-read on every one of them. */
+  #headerScratch: Uint8Array = new Uint8Array(WAL_HEADER_SIZE)
 
   /** The page size and salts come from the WAL header on the first read; nothing to configure. */
   constructor(walPath: string) {
@@ -105,10 +107,10 @@ export class WalTailer {
     const fd = this.#open()
     if (fd === null) return []
 
-    const header = this.#readHeader(fd)
-    if (!header) return []
+    const state = this.#read(fd)
+    if (!state) return []
+    const { header, size } = state
 
-    const size = fs.fstatSync(fd).size
     const frameSize = walFrameSize(header.pageSize)
     if (this.#scratch.byteLength !== frameSize) this.#scratch = new Uint8Array(frameSize)
     const frame = this.#scratch
@@ -169,8 +171,9 @@ export class WalTailer {
   restore(position: WalPosition): RestoreOutcome {
     const fd = this.#open()
     if (fd === null) return "absent"
-    const header = this.#readHeader(fd)
-    if (!header) return "absent"
+    const state = this.#read(fd)
+    if (!state) return "absent"
+    const { header, size } = state
 
     if (header.salt1 !== position.salt1 || header.salt2 !== position.salt2) {
       this.#adopt(header, true)
@@ -181,7 +184,6 @@ export class WalTailer {
       return "resumed"
     }
 
-    const size = fs.fstatSync(fd).size
     const frameSize = walFrameSize(header.pageSize)
     const frame = new Uint8Array(frameSize)
     let running = headerChecksum(header)
@@ -239,18 +241,26 @@ export class WalTailer {
   }
 
   /**
-   * Re-reads the header on every poll. A generation change has to be noticed before frames are
-   * read, and the salts stamped into each frame make the reverse race (new header, stale frames
-   * or the other way round) fail validation rather than corrupt the stream.
+   * Re-reads the header on every poll, and returns the file size it had to `fstat` for anyway.
+   *
+   * A generation change has to be noticed before frames are read, and the salts stamped into each
+   * frame make the reverse race (new header, stale frames or the other way round) fail validation
+   * rather than corrupt the stream.
+   *
+   * The size rides back with the header because every caller wants both and `fstat`ing twice
+   * microseconds apart on the same fd is a syscall for an answer already in hand
+   * (`docs/p3-wal-checksum.md` §2). It must not be cached across polls: a `wal_checkpoint(RESTART)`
+   * rewrites the header and restarts frames at the same offsets **without changing the file size**,
+   * so an unchanged size is not evidence that nothing changed.
    */
-  #readHeader(fd: number): WalHeader | null {
+  #read(fd: number): { header: WalHeader; size: number } | null {
     const size = fs.fstatSync(fd).size
     if (size < WAL_HEADER_SIZE) {
       // A TRUNCATE checkpoint empties the file; the next writer rewrites the header.
       if (this.#header !== null) this.#markReset()
       return null
     }
-    const buf = new Uint8Array(WAL_HEADER_SIZE)
+    const buf = this.#headerScratch
     fs.readSync(fd, buf, 0, WAL_HEADER_SIZE, 0)
     const header = parseWalHeader(buf)
     if (!header) {
@@ -263,7 +273,7 @@ export class WalTailer {
     } else if (current.salt1 !== header.salt1 || current.salt2 !== header.salt2) {
       this.#adopt(header, true)
     }
-    return header
+    return { header, size }
   }
 
   #markReset(): void {
