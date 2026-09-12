@@ -174,10 +174,14 @@ that owns a database owns that database's stream, so `tenant.onCommit`, `tenant.
 Serving a replica costs 15% of write throughput on a single-threaded node and 19% on a sharded one;
 six workers with a replica attached do **65 845 writes/s against one worker's 28 236**.
 
-Still refused, each for its own reason: `[replication] primary` (**C4c**, C4b mirrored —
-`ReplicaClient`'s socket, reconnect and generation ledger are node-level while its apply is per
-shard) and `[cluster] enabled` (the Raft lease is consulted on the write path, which is now a
-worker, and a worker must not block on the control plane).
+Both of the combinations this left refused have since been built. `[replication] primary` is
+**C4c** (`docs/c4c-replication-follow.md`), C4b mirrored: the router owns the one upstream
+connection and the worker owns each database's stream, as one class in three modes. `[cluster]
+enabled` is **C4d** (`docs/c4d-cluster-workers.md`), the last of them: the `ClusterNode` stays whole
+on the router and only the lease *deadline* is pushed down, converted onto the worker's own
+monotonic clock because each Bun worker has its own `performance.timeOrigin`. The write path costs
+no message — **86 573 writes/s at six workers clustered against 86 754 plain** — and
+`WORKERS_UNSUPPORTED` is gone from the error vocabulary with the last refusal it named.
 
 ### C5 — replica apply mechanism A — **done (`docs/c5-apply-pages.md`)**
 
