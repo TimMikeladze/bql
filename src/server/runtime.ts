@@ -24,6 +24,7 @@ import {
   AckTracker,
   NoReplicas,
   ReplicaClient,
+  ReplicaOffline,
   ReplicationServer,
 } from "../replication/index.ts"
 import {
@@ -145,7 +146,13 @@ export class ServerRuntime {
     this.node = options.config.server.node
     this.role = options.config.replication.role
     this.#onError =
-      options.onError ?? ((err: unknown) => console.error("bunql: server runtime", err))
+      options.onError ??
+      ((err: unknown) =>
+        // A replica reporting that it cannot reach its primary is operational news, not a fault
+        // in this process; printing its stack would bury the faults that do have one.
+        err instanceof ReplicaOffline
+          ? console.error(`bunql: ${err.message}`)
+          : console.error("bunql: server runtime", err))
     this.registry =
       options.registry ??
       TenantRegistry.open({

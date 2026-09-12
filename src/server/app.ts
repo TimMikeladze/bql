@@ -97,8 +97,12 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
         ...(failedIndexOf(err) !== undefined ? { failedIndex: failedIndexOf(err) } : {}),
       })
       // A 500 is a bug in this server, and the client is told nothing about it, so it has to be
-      // reported here or it is lost.
-      if (response.status >= 500) runtime.report(err)
+      // reported here or it is lost. A `BunQLError` is never that: every code in `ERROR_STATUS`
+      // is a refusal this server wrote on purpose, and several of them are 5xx — `NOT_PRIMARY`,
+      // `NO_REPLICAS`, `ACK_TIMEOUT`, `BUSY`, `QUOTA_EXCEEDED`. Logging those with a stack trace
+      // buries the real bugs in the noise of a replica answering the question it is supposed to.
+      const deliberate = err instanceof BunQLError && err.code !== "INTERNAL"
+      if (response.status >= 500 && !deliberate) runtime.report(err)
     }
     const durationUs = Math.round((Bun.nanoseconds() - startedNs) / 1000)
     const headers = response.headers

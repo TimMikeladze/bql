@@ -37,6 +37,18 @@ import {
   type SubscribedBody,
 } from "./protocol.ts"
 
+/**
+ * "This replica is not connected, and here is why." An operational notice, not a fault in this
+ * process, so the handlers that print it leave the stack out — a stack trace on a primary that is
+ * simply down is the same noise a deliberate `503` would be.
+ */
+export class ReplicaOffline extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ReplicaOffline"
+  }
+}
+
 /** Who this module pins tenants as, so it never releases the realtime engine's pin. */
 const PIN_OWNER = "replication"
 
@@ -175,6 +187,9 @@ export class ReplicaClient {
   #nextStream = 1
   #connected = false
   #handshook = false
+  /** Has this client ever completed a handshake with this primary? Distinguishes a dropped link
+   * from a primary that will never accept us — only the second is worth explaining over HTTP. */
+  #everHandshook = false
   #primaryNode: string | null = null
   #lastError: string | null = null
   #attempt = 0
@@ -196,7 +211,11 @@ export class ReplicaClient {
     this.bootstrapDir = options.bootstrapDir ?? path.join(options.registry.dir, "bootstrap")
     this.#follow = options.follow?.length ? [...options.follow] : ["*"]
     this.#onError =
-      options.onError ?? ((err: unknown) => console.error("bunql: replica", err))
+      options.onError ??
+      ((err: unknown) =>
+        err instanceof ReplicaOffline
+          ? console.error(`bunql: ${err.message}`)
+          : console.error("bunql: replica", err))
     this.#factory =
       options.factory ??
       ((url: string) => new WebSocket(url) as unknown as ClientSocket)
@@ -392,9 +411,54 @@ export class ReplicaClient {
       // is the only thing this handler is for. A browser-style `error` event carries no detail.
       this.#lastError = `could not reach ${this.primary}`
     }) as (event: never) => void)
-    socket.addEventListener("close", (() => {
+    socket.addEventListener("close", ((event: { code?: number; reason?: string }) => {
+      // A close that carries a reason is the primary telling us why; keep it over the generic
+      // message the `error` handler wrote, since it is the only detail we will ever get.
+      if (event?.reason) this.#lastError = `${this.primary} closed the socket: ${event.reason}`
       this.#onClose()
-    }) as (event: never) => void)
+    }) as unknown as (event: never) => void)
+  }
+
+  /**
+   * Says out loud that this replica is not connected.
+   *
+   * A failed upgrade reaches a WebSocket client as a bare `close`, with the HTTP status that
+   * caused it nowhere in sight — so a node pointed at a primary whose `[replication] secret` is
+   * empty retries forever against a `403 REPLICATION_DISABLED` it cannot see, logs nothing, and
+   * simply answers `GET /v1/db` with an empty list. That is a configuration mistake that looks
+   * exactly like an empty cluster, and finding it by hand takes far longer than it should.
+   *
+   * So: report the first failure immediately, and afterwards only on attempts that are powers of
+   * two, which gives an operator prompt notice and then a slow drumbeat instead of a log filled
+   * at the reconnect interval. On the first failure, and only for a primary this client has never
+   * once handshaken with, ask the same URL over plain HTTP what it would have said — one request,
+   * never repeated, never allowed to throw, and never made for a link that merely dropped.
+   */
+  #reportDisconnected(): void {
+    const attempt = this.#attempt
+    if (attempt > 1 && (attempt & (attempt - 1)) !== 0) return
+    const detail = this.#lastError ?? `could not reach ${this.primary}`
+    this.#onError(
+      new ReplicaOffline(
+        `replica of ${this.primary} is not connected (attempt ${attempt}): ${detail}`,
+      ),
+    )
+    if (attempt === 1 && !this.#everHandshook) void this.#explainOnce()
+  }
+
+  /** Asks the replication URL over HTTP why the upgrade failed, so the reason reaches the log. */
+  async #explainOnce(): Promise<void> {
+    try {
+      const url = this.primary.replace(/^ws/, "http")
+      const response = await fetch(url, { headers: { accept: "application/json" } })
+      if (response.ok) return
+      const body = (await response.text()).slice(0, 200)
+      const reason = `${this.primary} answered ${response.status} to the upgrade: ${body}`
+      this.#lastError = reason
+      this.#onError(new ReplicaOffline(reason))
+    } catch {
+      // The primary is simply unreachable, which the message already said.
+    }
   }
 
   #onClose(): void {
@@ -417,6 +481,7 @@ export class ReplicaClient {
     const base = Math.min(this.reconnectMs * 2 ** this.#attempt, MAX_RECONNECT_MS)
     this.#attempt += 1
     const delay = base / 2 + Math.random() * (base / 2)
+    this.#reportDisconnected()
     this.#retry = setTimeout(() => {
       this.#retry = null
       this.#connect()
@@ -541,6 +606,7 @@ export class ReplicaClient {
     // The handshake is done and the primary has named its databases, which is what `follow: ["*"]`
     // resolves against (docs/r1-replication.md deviation 1).
     this.#handshook = true
+    this.#everHandshook = true
     this.#lastError = null
     this.#startHeartbeat()
     this.#resolveFollow(hello.databases ?? [])

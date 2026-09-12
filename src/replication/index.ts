@@ -60,6 +60,7 @@ export {
   type ForwardRequest,
   ReplicaClient,
   type ReplicaClientOptions,
+  ReplicaOffline,
   type ReplicaStatus,
   type SocketFactory,
   type StreamStatus,
