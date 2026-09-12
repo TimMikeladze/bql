@@ -229,7 +229,7 @@ export class Surfaces {
 
   // ── the handlers `src/server/registry.ts` mounts ─────────────────────────────────────────────
 
-  /** `GET|POST|PUT|PATCH|DELETE /v1/db/:db/api/*` — the generated REST surface. */
+  /** `GET|POST|PATCH|DELETE /v1/db/:db/api/*` — the generated REST surface. */
   readonly dataApi: Handler = async (ctx) => {
     const runtime = ctx.runtime
     const principal = await runtime.auth.authenticate(ctx.request)
@@ -257,6 +257,8 @@ export class Surfaces {
     const principal = await runtime.auth.authenticate(ctx.request)
     const db = dbName(ctx)
     requireScope(principal, db, "ro")
+    // Opened before it is introspected, so a database that does not exist is `DB_NOT_FOUND` and
+    // not an empty document that looks like a database with no tables.
     runtime.tenant(db)
     const entry = await this.entryFor(db)
     return json(
