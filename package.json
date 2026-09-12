@@ -17,7 +17,12 @@
     "./tenant": "./src/tenant/index.ts",
     "./realtime": "./src/realtime/index.ts",
     "./sqlite": "./src/sqlite/index.ts",
-    "./wal": "./src/wal/index.ts"
+    "./wal": "./src/wal/index.ts",
+    "./core": "./src/core/index.ts",
+    "./http": "./src/http/index.ts",
+    "./openapi": "./src/openapi/index.ts",
+    "./dataapi": "./src/dataapi/index.ts",
+    "./graphql": "./src/graphql/index.ts"
   },
   "files": [
     "src",
