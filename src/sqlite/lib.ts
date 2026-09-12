@@ -440,8 +440,10 @@ export function remedy(): string {
     (vendored ? `and it will be found at ${vendored}.\n` : "") +
     "Or point BUNQL_SQLITE_LIB at a libsqlite3 of your own — it must be built with " +
     "SQLITE_ENABLE_PREUPDATE_HOOK and SQLITE_ENABLE_SESSION. On macOS, Homebrew's " +
-    "(brew install sqlite, /opt/homebrew/opt/sqlite/lib/libsqlite3.dylib) qualifies; Apple's " +
-    "system build does not."
+    "(brew install sqlite, /opt/homebrew/opt/sqlite/lib/libsqlite3.dylib) qualifies. Apple's " +
+    "/usr/lib/libsqlite3.dylib declares both on macOS 26 and still is not the one to use: it " +
+    "defaults cache_size to 2000 pages rather than -2000 KiB, which changes when dirty pages " +
+    "reach the -wal."
   )
 }
 

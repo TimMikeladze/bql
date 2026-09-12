@@ -378,9 +378,15 @@ bun run sqlite:build          # needs a C compiler; writes vendor/sqlite/libsqli
 
 That fetches a hash-pinned SQLite 3.53.4 amalgamation, compiles it with the flags the driver
 resolves symbols against, verifies the result, and is then found automatically. Failing that, the
-library comes from `BUNQL_SQLITE_LIB`, else the usual Homebrew and Linux paths: Homebrew's build
-qualifies and Debian's and Ubuntu's do, Apple's system library does not. Only the vendored build
-has `sqlite3_snapshot_*`. `bun run scripts/sqlite.ts --explain` prints every flag and why.
+library comes from `BUNQL_SQLITE_LIB`, else the usual Homebrew and Linux paths. Homebrew's build
+qualifies and Debian's and Ubuntu's do; no distro build carries `sqlite3_snapshot_*`.
+
+Apple's `/usr/lib/libsqlite3.dylib` is the one to avoid, and not for the reason it looks like:
+on macOS 26 it is 3.51.0 *with* `ENABLE_PREUPDATE_HOOK`, `ENABLE_SESSION` and `ENABLE_SNAPSHOT`,
+so the driver loads it and every capability reports present. What it changes is a default —
+`cache_size` is 2000 **pages** rather than upstream's -2000 KiB, four times the page cache — so
+dirty pages reach the `-wal` at different moments and six WAL and snapshot tests fail on it.
+`bun run scripts/sqlite.ts --explain` prints every flag and why.
 
 ## WAL shipping
 

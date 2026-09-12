@@ -64,10 +64,40 @@ Three further measurements that do change decisions:
   patch releases; Ubuntu 20.04's 3.31 does not.
 
 The honest summary: relying on the system library mostly works and silently varies. It varies by
-distribution, by image, and by release; it never has `SQLITE_ENABLE_SNAPSHOT`, which
+distribution, by image, and by release; no distribution build has `SQLITE_ENABLE_SNAPSHOT`, which
 `src/sqlite/lib.ts` declares a symbol table for; and it gives the project no say in any of the
 other flags. Vendoring is still the right answer — it was just never the emergency the brief
 described.
+
+### 1.1 macOS, measured the same way (added 2026-09-12)
+
+The same premise was wrong about Apple's library, in the same direction, and §7 below overstated
+it too ("snapshot: true, which no system library on either platform can report"). On macOS 26.6.2,
+`/usr/lib/libsqlite3.dylib` is **SQLite 3.51.0 with `ENABLE_PREUPDATE_HOOK`, `ENABLE_SESSION` and
+`ENABLE_SNAPSHOT`**, plus `OMIT_AUTORESET`, `OMIT_LOAD_EXTENSION` and `THREADSAFE=2`. The driver
+loads it and `features` reports preupdate, session and snapshot all present, so the capability
+story that rules out a distro build does not rule this one out.
+
+It is still not a library to run on, for a reason capability probing cannot see: **Apple compiles
+a different default page cache.** `PRAGMA cache_size` is `2000` — positive, so 2000 *pages*, 8 MiB
+at the 4 KiB page size — against upstream's `-2000`, which is 2 MiB. Four times the cache means
+dirty pages spill into the `-wal` at different moments, and six tests fail on it:
+
+```
+BUNQL_SQLITE_LIB=/usr/lib/libsqlite3.dylib bun test   → 1243 pass, 2 skip, 6 fail
+  polling > a page written twice in one transaction appears once, at its last version
+  polling > a rolled-back transaction never reaches the stream
+  snapshots > records the database at the txid the caller names
+  snapshot and fork > a fork at a txid is the database as it was at that txid
+  restore > restoring to the snapshot itself replays nothing
+  bunql end to end > a fork at a txid dumps identically to the primary taken at that txid
+```
+
+The first one is the tell: a page written twice in one transaction yields two WAL frames upstream
+and one on Apple's build, because the second write finds the page still in cache. Nothing is
+broken and nothing reports a problem — the WAL simply has a different shape, which is exactly the
+"silently varies" above, on the platform where it was least expected. The skip count is unchanged
+at 2, because both capability blocks that could flip are satisfied here as well.
 
 ## 2. `scripts/sqlite.ts`
 
@@ -275,8 +305,9 @@ Locally on macOS (arm64, Bun 1.4.0): `bun run sqlite:build` builds SQLite 3.53.4
 preupdate, session and snapshot; `bun run typecheck` clean; `bun test` → **934 pass, 2 skip, 0
 fail** across 72 files; `bun run scripts/routes.ts --check` clean. The two skips are the
 `describe.if(!features.…)` blocks that only run on a library *lacking* the capability. The loaded
-library is confirmed to be the vendored one, with `snapshot: true` — which no system library on
-either platform can report.
+library is confirmed to be the vendored one, with `snapshot: true` — which no *distribution*
+library reports (§1.1 corrects this line: Apple's macOS 26 build does report it, and is still the
+wrong library to run on, for a different reason).
 
 On Linux, the whole CI leg was run end to end in `docker run --rm oven/bun:1.4` (Debian 13,
 aarch64) — installing a compiler, building the library from the pinned amalgamation, and running
