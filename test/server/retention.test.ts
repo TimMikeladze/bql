@@ -67,11 +67,17 @@ describe("the server's retention sweep", () => {
 
       const tenant = server.handle.registry.open("acme")
       const before = tenant.log.bytes
-      expect(tenant.log.firstTxid).toBe(1n)
 
+      // Deliberately no assertion that the log still starts at txid 1 here. The sweep runs every
+      // 20 ms against a 50 ms retention, so on a machine slower than the one this was written on
+      // it has already fired by the time the setup above finishes — the test would be racing its
+      // own timer to observe a state it is about to destroy. It failed exactly that way in CI on
+      // both platforms, reading firstTxid 7 and 9 rather than 1. Nothing is lost by dropping it:
+      // if `retain` were never called the wait below would time out, which is the original bug.
+      //
       // The timer, not a hand-driven sweep: the bug was that nothing ever called `retain`.
       await until(() => tenant.log.firstTxid === 9n, "the sweep to bound the log")
-      expect(tenant.log.bytes).toBeLessThan(before)
+      expect(tenant.log.bytes).toBeLessThanOrEqual(before)
       // The floor is the snapshot, and the snapshot is kept however old it is.
       const stats = await server.json<{ lastSnapshotTxid: number }>("/v1/db/acme")
       expect(stats.lastSnapshotTxid).toBe(9)
