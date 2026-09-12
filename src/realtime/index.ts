@@ -8,6 +8,7 @@
 
 import type {
   ChangeEvent,
+  IncludeLevel,
   IntValue,
   ObjectRow,
   RowChange,
@@ -72,7 +73,7 @@ export { readSetOf, readSetTouched, type ReadSet } from "./readset.ts"
 export { ChangeRing, type ChangeRingOptions } from "./ring.ts"
 
 /** How much of each row a change subscriber wants; the tenant runs at the highest one asked for. */
-export type IncludeLevel = "none" | "pk" | "row" | "row+old"
+export type { IncludeLevel }
 
 const LEVEL_RANK: Readonly<Record<CaptureLevel, number>> = {
   off: 0,

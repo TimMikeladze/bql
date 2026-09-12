@@ -446,9 +446,60 @@ export const live: Handler = async (ctx) => {
 
 interface CreateBody {
   name?: string
-  from?: { db: string; at?: number }
+  from?: { db: string; at?: number | string }
   pageSize?: number
   quotaBytes?: number
+}
+
+/** Anything at or after this as a number is a wall clock in milliseconds, not a txid (2001-09-09). */
+const TIMESTAMP_FLOOR = 1_000_000_000_000
+
+/**
+ * `at` as a txid. Design §6.5 and §9.3 both write it as `txid|timestamp`, so an ISO-8601 string or
+ * an epoch-millisecond number is resolved against the tenant's log, whose records each carry a
+ * microsecond timestamp. The search is a binary one over dense txids, so it costs a handful of
+ * record reads rather than a scan.
+ */
+function resolveAt(tenant: Tenant, at: number | string): bigint {
+  if (typeof at === "number" && Number.isFinite(at) && at < TIMESTAMP_FLOOR) {
+    return BigInt(Math.floor(at))
+  }
+  if (typeof at === "string" && /^\d+$/.test(at.trim())) {
+    const value = BigInt(at.trim())
+    if (value < BigInt(TIMESTAMP_FLOOR)) return value
+    return txidAtTime(tenant, Number(value))
+  }
+  const ms = typeof at === "number" ? at : Date.parse(at)
+  if (!Number.isFinite(ms)) {
+    throw BunQLError.badRequest(`at must be a txid or a timestamp, got ${JSON.stringify(at)}`)
+  }
+  return txidAtTime(tenant, ms)
+}
+
+/** The newest txid committed at or before `ms`, or a 400 naming what the log still holds. */
+function txidAtTime(tenant: Tenant, ms: number): bigint {
+  const targetUs = BigInt(Math.floor(ms)) * 1000n
+  let low = tenant.log.firstTxid ?? 1n
+  let high = tenant.log.lastTxid
+  let best: bigint | null = null
+  while (low <= high) {
+    const mid = low + (high - low) / 2n
+    const record = tenant.log.read(mid)
+    if (!record) break
+    if (record.timestampUs <= targetUs) {
+      best = mid
+      low = mid + 1n
+    } else {
+      high = mid - 1n
+    }
+  }
+  if (best === null) {
+    throw BunQLError.badRequest(
+      `no transaction at or before ${new Date(ms).toISOString()} is still in the log for ` +
+        `${tenant.name}; the oldest it holds is txid ${tenant.log.firstTxid ?? 0n}`,
+    )
+  }
+  return best
 }
 
 export const createDb: Handler = async (ctx) => {
@@ -464,7 +515,9 @@ export const createDb: Handler = async (ctx) => {
         ? {
             from: {
               db: body.from.db,
-              ...(body.from.at !== undefined ? { at: BigInt(Math.floor(body.from.at)) } : {}),
+              ...(body.from.at !== undefined
+                ? { at: resolveAt(ctx.runtime.tenant(body.from.db), body.from.at) }
+                : {}),
             },
           }
         : {}),
@@ -499,7 +552,8 @@ export const listDbs: Handler = async (ctx) => {
   })
 }
 
-function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, unknown> {
+/** The stats body of design §6.5, also what the embedded API's `stat` returns. */
+export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, unknown> {
   const stats = tenant.stats()
   const realtime = runtime.realtimeOf(tenant.name)
   return {
@@ -555,7 +609,7 @@ export const snapshotDb: Handler = async (ctx) => {
 }
 
 interface RestoreBody {
-  at?: number
+  at?: number | string
   into?: string
 }
 
@@ -570,7 +624,7 @@ export const restoreDb: Handler = async (ctx) => {
   const name = dbName(ctx)
   const body = await readJson<RestoreBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   const tenant = ctx.runtime.tenant(name)
-  const at = body.at === undefined ? tenant.txid : BigInt(Math.floor(body.at))
+  const at = body.at === undefined ? tenant.txid : resolveAt(tenant, body.at)
   if (at <= 0n) throw BunQLError.badRequest("restore needs a positive txid in `at`")
   const into = body.into ?? `${name}-restore-${at}`.slice(0, 64)
   assertValidName(into)

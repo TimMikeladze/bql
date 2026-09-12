@@ -18,8 +18,10 @@ async function main(): Promise<void> {
     `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
       `ack ${config.durability.defaultAck}`,
   )
-  if (!process.env.BUNQL_ADMIN_KEY) {
-    console.log(`bunql: the admin key is in ${config.auth.keysFile}; set BUNQL_ADMIN_KEY to override`)
+  if (!process.env.BUNQL_ADMIN_KEY && !process.env.BUNQL_AUTH_ADMIN_KEY) {
+    console.log(
+      `bunql: the admin key is in ${config.auth.keysFile}; set BUNQL_AUTH_ADMIN_KEY to override`,
+    )
   }
 
   let stopping = false

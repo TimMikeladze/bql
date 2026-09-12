@@ -77,6 +77,39 @@ describe("loadConfig", () => {
     expect(config.limits.maxRows).toBe(7)
   })
 
+  test("every key has a BUNQL_<SECTION>_<KEY> override, and the short aliases still work", () => {
+    const config = loadConfig({
+      env: {
+        BUNQL_DATA_DIR: "/tmp/bunql-canonical",
+        BUNQL_SERVER_PORT: "4444",
+        BUNQL_LIMITS_QUERY_TIMEOUT_MS: "1234",
+        BUNQL_REALTIME_RING_BYTES: "5000",
+        BUNQL_AUTH_ADMIN_KEY: "canonical-key",
+      },
+    })
+    expect(config.data.dir).toBe("/tmp/bunql-canonical")
+    expect(config.server.port).toBe(4444)
+    expect(config.limits.queryTimeoutMs).toBe(1234)
+    expect(config.realtime.ringBytes).toBe(5000)
+    expect(config.auth.adminKey).toBe("canonical-key")
+
+    const legacy = loadConfig({ env: { BUNQL_DIR: "/tmp/bunql-legacy", BUNQL_PORT: "4445" } })
+    expect(legacy.data.dir).toBe("/tmp/bunql-legacy")
+    expect(legacy.server.port).toBe(4445)
+  })
+
+  test("the canonical name wins over the alias for the same key", () => {
+    const config = loadConfig({
+      env: { BUNQL_DIR: "/tmp/bunql-alias", BUNQL_DATA_DIR: "/tmp/bunql-canonical" },
+    })
+    expect(config.data.dir).toBe("/tmp/bunql-canonical")
+  })
+
+  test("a list-valued key is comma-separated in the environment", () => {
+    const config = loadConfig({ env: { BUNQL_AUTH_JWT_PUBLIC_KEYS: "aGk=, dGhlcmU=" } })
+    expect(config.auth.jwtPublicKeys).toEqual(["aGk=", "dGhlcmU="])
+  })
+
   test("a missing file is fine unless it was required", () => {
     expect(() => loadConfig({ file: "/nowhere/bunql.toml", env: {} })).not.toThrow()
     expect(() => loadConfig({ file: "/nowhere/bunql.toml", required: true, env: {} })).toThrow()

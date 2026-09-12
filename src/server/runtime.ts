@@ -57,6 +57,8 @@ export interface RuntimeOptions {
   registry?: TenantRegistry
   metrics?: Metrics
   onError?: (err: unknown) => void
+  /** Called for every tenant the registry opens; the embedded API's `on("commit")` needs it. */
+  onTenantOpen?: (tenant: Tenant) => void
 }
 
 export class ServerRuntime {
@@ -97,6 +99,7 @@ export class ServerRuntime {
         defaultAck: options.config.durability.defaultAck,
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
+        ...(options.onTenantOpen ? { onOpen: options.onTenantOpen } : {}),
       })
   }
 

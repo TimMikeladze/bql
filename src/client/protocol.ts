@@ -103,6 +103,12 @@ export interface TxResult {
 
 export type ChangeOp = "insert" | "update" | "delete"
 
+/**
+ * How much of each row a change subscriber wants. The capture level is per database and the engine
+ * runs at the highest level any subscriber asked for, so this is a floor rather than a filter.
+ */
+export type IncludeLevel = "none" | "pk" | "row" | "row+old"
+
 export interface RowChange {
   table: string
   op: ChangeOp

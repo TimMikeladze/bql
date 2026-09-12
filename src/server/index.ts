@@ -37,9 +37,19 @@ export {
   type TokenPrincipal,
   type VerifyOptions,
 } from "./auth.ts"
-export { createApp, startServer, type App, type ServerHandle, type StartOptions } from "./app.ts"
+export {
+  createApp,
+  createRuntime,
+  startServer,
+  type App,
+  type RuntimeBundle,
+  type ServerHandle,
+  type StartOptions,
+} from "./app.ts"
 export {
   DEFAULT_CONFIG,
+  ENV_KEYS,
+  envNameFor,
   generateAdminKey,
   loadConfig,
   resolveAuth,

@@ -209,6 +209,71 @@ transport with no SQLite at all — costs 37 µs, which caps this harness at rou
 sequentially regardless of what the database does. A number worth quoting needs a client on
 another core, which belongs to the end-to-end pass in M8.
 
+## Environment overrides (updated in M7)
+
+Design §9.4 says every key has an environment override. The canonical name of one is its section
+and its key, upper-cased and underscore-separated, under `BUNQL_`; the short names that predate
+M7 are still accepted, and the canonical one wins when both are set. An empty value counts as
+unset, so `BUNQL_ADMIN_KEY=` leaves the key to be generated rather than setting it to "".
+
+| key | canonical | alias |
+|---|---|---|
+| `[server] port` | `BUNQL_SERVER_PORT` | `BUNQL_PORT` |
+| `[server] host` | `BUNQL_SERVER_HOST` | `BUNQL_HOST` |
+| `[server] node` | `BUNQL_SERVER_NODE` | `BUNQL_NODE` |
+| `[server] tenantFromHost` | `BUNQL_SERVER_TENANT_FROM_HOST` | `BUNQL_TENANT_FROM_HOST` |
+| `[server] cors` | `BUNQL_SERVER_CORS` | `BUNQL_CORS` |
+| `[data] dir` | `BUNQL_DATA_DIR` | `BUNQL_DIR` |
+| `[data] maxOpen` | `BUNQL_DATA_MAX_OPEN` | `BUNQL_MAX_OPEN` |
+| `[data] readers` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |
+| `[data] pageSize` | `BUNQL_DATA_PAGE_SIZE` | `BUNQL_PAGE_SIZE` |
+| `[data] quotaBytes` | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
+| `[durability] defaultAck` | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
+| `[durability] checkpointWalBytes` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
+| `[durability] retention` | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
+| `[realtime] ringBytes` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
+| `[realtime] ringMaxAgeMs` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
+| `[realtime] maxLiveQueries` | `BUNQL_REALTIME_MAX_LIVE_QUERIES` | `BUNQL_MAX_LIVE_QUERIES` |
+| `[realtime] maxRowsPerLive` | `BUNQL_REALTIME_MAX_ROWS_PER_LIVE` | `BUNQL_MAX_ROWS_PER_LIVE` |
+| `[realtime] idleRetainMs` | `BUNQL_REALTIME_IDLE_RETAIN_MS` | `BUNQL_IDLE_RETAIN_MS` |
+| `[limits] queryTimeoutMs` | `BUNQL_LIMITS_QUERY_TIMEOUT_MS` | `BUNQL_QUERY_TIMEOUT_MS` |
+| `[limits] writeTimeoutMs` | `BUNQL_LIMITS_WRITE_TIMEOUT_MS` | `BUNQL_WRITE_TIMEOUT_MS` |
+| `[limits] txIdleTimeoutMs` | `BUNQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BUNQL_TX_IDLE_TIMEOUT_MS` |
+| `[limits] maxRows` | `BUNQL_LIMITS_MAX_ROWS` | `BUNQL_MAX_ROWS` |
+| `[limits] maxOpenTx` | `BUNQL_LIMITS_MAX_OPEN_TX` | `BUNQL_MAX_OPEN_TX` |
+| `[limits] maxBodyBytes` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
+| `[limits] maxImportBytes` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
+| `[auth] adminKey` | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
+| `[auth] jwtKey` | `BUNQL_AUTH_JWT_KEY` | `BUNQL_JWT_ED25519` |
+| `[auth] jwtPublicKeys` | `BUNQL_AUTH_JWT_PUBLIC_KEYS` (comma-separated) | — |
+| `[auth] keysFile` | `BUNQL_AUTH_KEYS_FILE` | `BUNQL_KEYS_FILE` |
+| `[auth] clockToleranceSec` | `BUNQL_AUTH_CLOCK_TOLERANCE_SEC` | `BUNQL_CLOCK_TOLERANCE_SEC` |
+| `[auth] defaultTokenTtlMs` | `BUNQL_AUTH_DEFAULT_TOKEN_TTL_MS` | `BUNQL_TOKEN_TTL_MS` |
+
+`BUNQL_CONFIG` names the TOML file and makes it required. It is read by `main.ts` and by
+`bunql serve`, not by `loadConfig` itself.
+
+Before M7 the table held only the short names, so `BUNQL_DATA_DIR` — the name the section-plus-key
+rule produces, and the one an operator writes first — was silently ignored while `BUNQL_PORT` and
+`BUNQL_ADMIN_KEY` worked. Both spellings are generated from the defaults now, so a key added to
+`ServerConfig` gets its override for free.
+
+## What M7 changed here
+
+- **`createRuntime(config, options)`** (`app.ts`) builds the registry, the authenticator and the
+  metrics without listening, and `startServer` takes a `runtime` instead of building one. That is
+  how `src/embedded.ts` serves over the engine it already has rather than opening a second
+  `ServerRuntime` on the same registry — which would put two `AuthorizerHub`s on one connection.
+  A runtime passed in is not closed by `handle.close()`.
+- **`TenantRegistry.onOpen`** and `RuntimeOptions.onTenantOpen`: a callback for every tenant the
+  registry opens, whatever route reached it. The embedded `bq.on("commit")` needs to see every
+  database without holding them all open.
+- **`at` may be a timestamp** on `POST /v1/db/{db}/restore` and in `from.at` on `POST /v1/db`.
+  An ISO-8601 string, or a number at or above 1e12, is resolved to the newest txid committed at or
+  before it by binary-searching the tenant's log, whose records each carry a microsecond timestamp.
+  A number below 1e12 is still a txid, and a time older than the log is a 400 naming what the log
+  still holds.
+
 ## Testing
 
 `test/server/` — 116 new tests over a real listener on port 0 (218 in `test/server/` in total, with M5a's unit tests for the codec, the errors and the policy):
@@ -224,4 +289,4 @@ another core, which belongs to the end-to-end pass in M8.
 | `ops.test.ts` | `healthz`, `readyz`, the Prometheus exposition and its counters, metrics auth, CORS preflight and exposure, `cors: false`, 404 |
 | `config.test.ts` | defaults, TOML, `${VAR}` expansion, environment precedence and coercion, missing files, key generation and persistence, a token surviving a restart, limits and `tenantFromHost` end to end |
 
-`bun test` runs 420 tests in 9.5 s; `bun run typecheck` is clean.
+`bun test` runs 486 tests in 12 s across the whole repository; `bun run typecheck` is clean.

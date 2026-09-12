@@ -50,6 +50,12 @@ export interface RegistryOptions {
   onError?: (err: unknown) => void
   /** Passed to every tenant: called for each connection opened, writer or reader. */
   onConnection?: (db: Database, role: "writer" | "reader") => void
+  /**
+   * Called once for every tenant this registry opens, however it was reached — `open`, `create`,
+   * a fork or an import. It is the only place a caller can see every live tenant without holding
+   * them all open itself, which is what a process-wide commit listener needs.
+   */
+  onOpen?: (tenant: Tenant) => void
 }
 
 export interface CreateOptions {
@@ -356,6 +362,13 @@ export class TenantRegistry {
     }
     const tenant = Tenant.open(options)
     this.#open.set(row.name, tenant)
+    if (this.#options.onOpen) {
+      try {
+        this.#options.onOpen(tenant)
+      } catch (err) {
+        this.#report(err)
+      }
+    }
     this.#evict()
     this.#startSweeper()
     return tenant

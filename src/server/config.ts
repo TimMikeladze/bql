@@ -131,8 +131,12 @@ export const DEFAULT_CONFIG: ServerConfig = {
   },
 }
 
-/** `BUNQL_*` name → the config path it sets. Design §9.4: "every key has an env override". */
-const ENV_KEYS: Readonly<Record<string, string>> = {
+/**
+ * The short `BUNQL_*` names, kept because they are what earlier milestones documented. The
+ * canonical name of a key is `BUNQL_<SECTION>_<KEY>`, generated below from the defaults, and it
+ * wins when both are set.
+ */
+const ENV_ALIASES: Readonly<Record<string, string>> = {
   BUNQL_PORT: "server.port",
   BUNQL_HOST: "server.host",
   BUNQL_NODE: "server.node",
@@ -165,6 +169,29 @@ const ENV_KEYS: Readonly<Record<string, string>> = {
   BUNQL_TOKEN_TTL_MS: "auth.defaultTokenTtlMs",
 }
 
+/** `data` + `dir` → `BUNQL_DATA_DIR`; `limits` + `queryTimeoutMs` → `BUNQL_LIMITS_QUERY_TIMEOUT_MS`. */
+export function envNameFor(section: string, key: string): string {
+  const snake = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
+  return `BUNQL_${section.toUpperCase()}_${snake}`
+}
+
+/** One override per key of the resolved config, named by its section and its key. */
+function canonicalEnvKeys(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const section of Object.keys(DEFAULT_CONFIG) as (keyof ServerConfig)[]) {
+    for (const key of Object.keys(DEFAULT_CONFIG[section])) {
+      out[envNameFor(section, key)] = `${section}.${key}`
+    }
+  }
+  return out
+}
+
+/** Every environment override this node understands, canonical names last so they win. */
+export const ENV_KEYS: Readonly<Record<string, string>> = {
+  ...ENV_ALIASES,
+  ...canonicalEnvKeys(),
+}
+
 type Env = Record<string, string | undefined>
 
 /** Expands `${NAME}` against the environment, which is how design §9.4 writes secrets in TOML. */
@@ -173,6 +200,13 @@ function expand(value: string, env: Env): string {
 }
 
 function coerce(target: unknown, raw: string): unknown {
+  // A list-valued key (the verify-only public keys) is comma-separated in the environment.
+  if (Array.isArray(target)) {
+    return raw
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+  }
   if (typeof target === "number") {
     const n = Number(raw.replaceAll("_", ""))
     if (!Number.isFinite(n)) throw BunQLError.badRequest(`${JSON.stringify(raw)} is not a number`)

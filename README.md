@@ -12,21 +12,22 @@ The full design, including the replication and realtime protocols, is in
 
 ## Status
 
-Phase 0, milestone 6. The SQLite driver (`src/sqlite`), WAL shipping (`src/wal`), tenancy
-(`src/tenant`), realtime (`src/realtime`) and the HTTP/WebSocket/SSE server (`src/server`) are
-implemented and usable end to end. The client SDK, the embedded API, the CLI and the Hrana
-compatibility layer are not written yet.
+Phase 0, milestone 7. The SQLite driver (`src/sqlite`), WAL shipping (`src/wal`), tenancy
+(`src/tenant`), realtime (`src/realtime`), the HTTP/WebSocket/SSE server (`src/server`), the client
+SDK (`src/client`), the embedded API (`src/embedded.ts`) and the `bunql` CLI (`src/cli.ts`) are
+implemented and usable end to end. Replication to a second node and the Hrana compatibility layer
+are phase 1.
 
 ## Quickstart
 
+### A server, and curl
+
 ```sh
-bun start                 # or: bun run src/server/main.ts
+bun start                                      # or: bun run src/cli.ts serve --dir ./data
 ```
 
 The first start generates an admin key and an Ed25519 signing key, writes both to
-`<dataDir>/keys.json`, and prints the admin key once. Configuration is `bunql.toml` in the working
-directory plus `BUNQL_*` overrides; every key is listed in [docs/design.md](docs/design.md) §9.4
-and resolved by `src/server/config.ts`.
+`<dataDir>/keys.json`, and prints the admin key once.
 
 ```sh
 KEY=<the admin key it printed>
@@ -51,6 +52,88 @@ curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
 
 The route table, the WebSocket protocol and every deviation from the design are in
 [docs/m5-server.md](docs/m5-server.md).
+
+### The client (browsers, Bun, Node, Workers)
+
+Modelled on `Bun.SQL`: a tagged template that binds its values, a result array carrying the
+statement's metadata, and subscriptions that are both emitters and async iterables.
+
+```ts
+import { createClient } from "bunql/client"
+
+const client = createClient({ url: "http://localhost:4321", token })
+const db = client.db("acme")
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
+written.lastInsertRowid // 1          · also .affectedRows, .txid, .command, .count
+
+const todos = await db.sql`select * from todos where done = ${0}`   // [{ id: 1, title: "write it", done: 0 }]
+const one = await db.sql`select title from todos where id = ${1}`.first()
+const rows = await db.sql`select id, title from todos`.values()     // [[1, "write it"]]
+
+await db.batch([db.stmt`insert into todos(title) values ('a')`, db.stmt`update todos set done = 1`])
+await db.transaction(async (tx) => {                                // over the socket, else a baton
+  await tx.sql`insert into todos(title) values (${"in a transaction"})`
+})
+
+const live = db.live`select * from todos where done = 0`.key("id")
+live.on("rows", (event) => render(event.rows))                      // full result, then diffs
+live.on("diff", (event) => patch(event.added, event.removed, event.updated))
+
+for await (const event of db.changes({ tables: ["todos"] })) {
+  console.log(event.txid, event.changes)                            // reconnects and resumes on its own
+}
+```
+
+`consistency: "ryw"` (the default) remembers the highest txid it has seen per database and sends it
+as `BunQL-Min-Txid`, so a read never goes backwards. `intMode: "bigint" | "string"` decides what an
+integer beyond 2^53 becomes; the default refuses to round it.
+
+### Embedded, in one process
+
+```ts
+import { BunQL } from "bunql"
+
+const bq = await BunQL.open({ dir: "./data" })
+const db = await bq.create("acme")                     // or bq.db("acme") for one that exists
+
+await db.sql`create table todos(id integer primary key, title text)`.run()
+db.sync.sql`insert into todos(title) values (${"fast path"})`.run()   // no promise at all
+const rows = db.sync.sql`select * from todos`.all()
+
+bq.on("commit", ({ db, txid }) => console.log(db, txid))
+for await (const event of db.changes()) console.log(event)            // the bus, not HTTP
+
+await bq.serve({ port: 4321 })                         // the same engine, now over HTTP/WS/SSE
+```
+
+`db` is the interface above, so code written against the client runs against the embedded engine
+unchanged; `db.sync` is the escape hatch for hot loops.
+
+### The CLI
+
+```sh
+bunql serve --dir ./data --port 4321          # or: bun run src/cli.ts serve
+bunql db create acme
+bunql db list
+bunql db fork acme-copy --from acme@4812      # a txid, or @2026-09-11T10:00:00Z
+bunql restore acme --at 2026-09-11T10:00:00Z --into acme-recovered
+bunql token --db acme --scope ro --ttl 30d --tables 'todos:r'
+bunql shell acme                              # a REPL over the WebSocket protocol
+```
+
+Every command but `serve` talks to a running server: `--url` (or `$BUNQL_URL`) and `--token` (or
+`$BUNQL_TOKEN`, else `$BUNQL_ADMIN_KEY`). `--json` prints the server's own body instead of a
+summary line.
+
+### Configuration
+
+`bunql.toml` in the working directory, then `BUNQL_*` in the environment. Every key of
+[design.md](docs/design.md) §9.4 has an override named after its section and its key —
+`BUNQL_DATA_DIR`, `BUNQL_SERVER_PORT`, `BUNQL_LIMITS_QUERY_TIMEOUT_MS`, `BUNQL_AUTH_ADMIN_KEY` —
+and the short forms `BUNQL_DIR`, `BUNQL_PORT`, `BUNQL_ADMIN_KEY`, `BUNQL_NODE` and the rest still
+work. The full list is in [docs/m5-server.md](docs/m5-server.md) and in `src/server/config.ts`.
 
 ## The driver
 

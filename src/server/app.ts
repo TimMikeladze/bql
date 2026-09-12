@@ -6,7 +6,7 @@
 // before the `fetch` fallback runs, which is what keeps the query path free of URL parsing.
 
 import { HEADERS, WS_PROTOCOL } from "../client/protocol.ts"
-import { Catalog, TenantRegistry } from "../tenant/index.ts"
+import { Catalog, type Tenant, TenantRegistry } from "../tenant/index.ts"
 import { Authenticator, type RevocationList } from "./auth.ts"
 import { loadConfig, resolveAuth, type ServerConfig, type ServerConfigInput } from "./config.ts"
 import { errorResponse } from "./errors.ts"
@@ -236,26 +236,40 @@ export interface StartOptions {
   overrides?: ServerConfigInput
   /** A registry to use instead of opening one; the tests share one across restarts. */
   registry?: TenantRegistry
+  /**
+   * A runtime to serve over instead of building one — this is how the embedded API mounts the
+   * HTTP surface on the engine it already has. Two runtimes over one registry would each install
+   * an `AuthorizerHub` on the same connection, which `runtime.ts` forbids. A runtime passed in is
+   * the caller's to close; `handle.close()` leaves it open.
+   */
+  runtime?: ServerRuntime
+  /** The admin key for a runtime passed in, so the handle can report it. */
+  adminKey?: string | null
   onError?: (err: unknown) => void
   /** Where the first-start admin key notice goes. Defaults to `console.log`. */
   log?: (message: string) => void
+  /** Called for every tenant the registry opens, when this call builds the runtime. */
+  onTenantOpen?: (tenant: Tenant) => void
 }
 
-export interface ServerHandle {
-  server: Bun.Server<SocketData>
+export interface RuntimeBundle {
   runtime: ServerRuntime
-  registry: TenantRegistry
-  config: ServerConfig
-  url: string
   adminKey: string | null
-  close(): Promise<void>
+  /** True when this call had to generate the admin key, which is the only time it is printed. */
+  adminKeyGenerated: boolean
+  /** Where generated key material was written, or null when nothing was. */
+  keysFile: string | null
 }
 
-/** Opens the data directory, resolves key material and starts listening. */
-export async function startServer(
+/**
+ * Resolves key material and builds the runtime — the registry, the authenticator and the metrics
+ * — without listening on anything. `startServer` calls it; the embedded API calls it directly and
+ * serves over the result later, or never.
+ */
+export async function createRuntime(
   config: ServerConfig,
-  options: StartOptions = {},
-): Promise<ServerHandle> {
+  options: Pick<StartOptions, "registry" | "onError" | "onTenantOpen"> = {},
+): Promise<RuntimeBundle> {
   const resolved = await resolveAuth(config)
   // The runtime opens the registry, and the catalog inside it is the revocation list, so the
   // authenticator reaches it through this indirection rather than through a second open.
@@ -273,8 +287,42 @@ export async function startServer(
     metrics: new Metrics(),
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
+    ...(options.onTenantOpen ? { onTenantOpen: options.onTenantOpen } : {}),
   })
   catalog = runtime.registry.catalog
+  return {
+    runtime,
+    adminKey: resolved.adminKey,
+    adminKeyGenerated: resolved.adminKeyGenerated,
+    keysFile: resolved.adminKeyGenerated || resolved.jwtKeyGenerated ? resolved.keysFile : null,
+  }
+}
+
+export interface ServerHandle {
+  server: Bun.Server<SocketData>
+  runtime: ServerRuntime
+  registry: TenantRegistry
+  config: ServerConfig
+  url: string
+  adminKey: string | null
+  close(): Promise<void>
+}
+
+/** Opens the data directory, resolves key material and starts listening. */
+export async function startServer(
+  config: ServerConfig,
+  options: StartOptions = {},
+): Promise<ServerHandle> {
+  const owned = options.runtime === undefined
+  const resolved: RuntimeBundle = owned
+    ? await createRuntime(config, options)
+    : {
+        runtime: options.runtime as ServerRuntime,
+        adminKey: options.adminKey ?? null,
+        adminKeyGenerated: false,
+        keysFile: null,
+      }
+  const runtime = resolved.runtime
 
   const app = createApp(runtime)
   // The route table and the socket handler are built dynamically, so they are handed to
@@ -308,7 +356,9 @@ export async function startServer(
     async close(): Promise<void> {
       runtime.setPublisher(null)
       await server.stop(true)
-      runtime.close()
+      // A runtime that was passed in belongs to its owner — the embedded API keeps serving from it
+      // after `serve()` is stopped, and closing it here would take the engine with the listener.
+      if (owned) runtime.close()
     },
   }
 }

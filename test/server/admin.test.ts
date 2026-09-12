@@ -109,6 +109,33 @@ describe("fork and restore", () => {
     expect(await rows("alpha", "select count(*) from t")).toEqual([[3]])
   })
 
+  test("`at` also takes a timestamp, resolved against the log", async () => {
+    // Everything `alpha` holds was written just now, so "now" is its latest txid and a time
+    // before the log starts has nothing to restore to.
+    const restored = await server.json<{ name: string; txid: number; at: number }>(
+      "/v1/db/alpha/restore",
+      {
+        method: "POST",
+        body: JSON.stringify({ at: new Date().toISOString(), into: "alpha-by-time" }),
+      },
+    )
+    expect(restored.at).toBeGreaterThan(0)
+    expect(await rows("alpha-by-time", "select count(*) from t")).toEqual([[3]])
+
+    const tooEarly = await server.fetch("/v1/db/alpha/restore", {
+      method: "POST",
+      body: JSON.stringify({ at: "2001-01-01T00:00:00Z", into: "alpha-too-early" }),
+    })
+    expect(tooEarly.status).toBe(400)
+    expect(((await tooEarly.json()) as ErrorBody).error.message).toContain("no transaction at or")
+
+    const nonsense = await server.fetch("/v1/db/alpha/restore", {
+      method: "POST",
+      body: JSON.stringify({ at: "soon", into: "alpha-soon" }),
+    })
+    expect(nonsense.status).toBe(400)
+  })
+
   test("restore without `into` picks a name of its own", async () => {
     const restored = await server.json<{ name: string }>("/v1/db/alpha/restore", {
       method: "POST",
