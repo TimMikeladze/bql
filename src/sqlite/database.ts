@@ -2,6 +2,12 @@
 // for as long as SQLite might call it, and is detached from the connection before it is freed.
 // A JSCallback that SQLite still holds a pointer to but JS has collected is a segfault, so
 // installing a hook always stores it and closing always unwires it first.
+//
+// The authorizer is the one callback that is always installed: SQLite calls it while compiling a
+// statement, and that is the only place the connection can learn what a program will do before it
+// does it. `authorizer()` therefore swaps the JS function behind a permanent trampoline rather
+// than wiring and unwiring the C callback — and still calls `sqlite3_set_authorizer` on every
+// change, because that is what expires statements already in the cache under the old verdicts.
 
 import { JSCallback, FFIType as T, toArrayBuffer } from "bun:ffi"
 import {
@@ -17,6 +23,8 @@ import {
   SQLITE_OPEN_READWRITE,
   SQLITE_OPEN_URI,
   SQLITE_PREPARE_PERSISTENT,
+  SQLITE_FUNCTION,
+  SQLITE_INSERT,
   SQLITE_ROW,
   type CheckpointMode,
   type FileControlName,
@@ -27,6 +35,7 @@ import { cbuf, cstr, sqlite, type SqliteLibrary } from "./lib.ts"
 import {
   prepareStatement,
   Statement,
+  type ProgramFacts,
   type RunResult,
   type StatementHost,
 } from "./statement.ts"
@@ -152,6 +161,11 @@ export class Database implements StatementHost {
   #deadlineAt = Infinity
   #sessions = new Set<number>()
 
+  // Set while `prepare()` is compiling; the authorizer trampoline writes what it sees into them.
+  #probing = false
+  #probeInserts = false
+  #probeReadsRowid = false
+
   private constructor(handle: number, filename: string, safeIntegers: boolean) {
     this.lib = sqlite()
     this.#handle = handle
@@ -181,6 +195,7 @@ export class Database implements StatementHost {
 
     const db = new Database(handle, path, options.safeIntegers === true)
     try {
+      db.#installAuthorizer()
       db.busyTimeout(options.busyTimeoutMs ?? 5000)
       if (options.wal !== false && !readonly) db.exec("pragma journal_mode = wal")
     } catch (err) {
@@ -226,6 +241,16 @@ export class Database implements StatementHost {
       : this.lib.symbols.sqlite3_last_insert_rowid(this.#handle)
   }
 
+  /**
+   * Overwrites the connection's insert counter (`sqlite3_set_last_insert_rowid`). SQL running on
+   * the connection sees the new value through `last_insert_rowid()`, so a caller that borrows the
+   * counter as a marker owns putting the old value back.
+   */
+  setLastInsertRowid(rowid: number | bigint): void {
+    this.#assertOpen()
+    this.lib.symbols.sqlite3_set_last_insert_rowid(this.#handle, BigInt(rowid))
+  }
+
   /** Rows changed since the connection was opened. */
   get totalChanges(): number | bigint {
     this.#assertOpen()
@@ -256,7 +281,15 @@ export class Database implements StatementHost {
       this.#cache.set(sql, hit)
       return hit
     }
-    const stmt = prepareStatement(this, sql, SQLITE_PREPARE_PERSISTENT)
+    this.#probing = true
+    this.#probeInserts = false
+    this.#probeReadsRowid = false
+    let stmt: Statement
+    try {
+      stmt = prepareStatement(this, sql, SQLITE_PREPARE_PERSISTENT)
+    } finally {
+      this.#probing = false
+    }
     this.#cache.set(sql, stmt)
     if (this.#cache.size > CACHE_LIMIT) {
       const oldest = this.#cache.keys().next()
@@ -379,20 +412,40 @@ export class Database implements StatementHost {
     this.lib.symbols.sqlite3_interrupt(this.#handle)
   }
 
-  /** Installs the statement authorizer, or removes it with null. */
+  /**
+   * Sets the statement authorizer, or clears it with null. The trampoline underneath stays
+   * installed either way — it is also how the connection learns what a statement's program does
+   * — so this swaps the JS function and then re-arms `sqlite3_set_authorizer`, which is what
+   * expires statements the cache prepared under the previous verdicts.
+   */
   authorizer(cb: Authorizer | null): void {
     this.#assertOpen()
-    const s = this.lib.symbols
     this.#onAuth = cb
-    if (!cb) {
-      s.sqlite3_set_authorizer(this.#handle, null, null)
-      this.#authCb?.close()
-      this.#authCb = null
-      return
-    }
-    if (this.#authCb) return
-    this.#authCb = new JSCallback(
+    this.#installAuthorizer()
+  }
+
+  /**
+   * Installs (or re-arms) the permanent trampoline. Re-arming matters: `sqlite3_set_authorizer`
+   * expires every prepared statement on the connection, which is the only way a statement
+   * compiled under an old authorizer gets re-authorised.
+   */
+  #installAuthorizer(): void {
+    const s = this.lib.symbols
+    this.#authCb ??= new JSCallback(
       (_ctx: number, action: number, a1: number, a2: number, a3: number, a4: number) => {
+        if (this.#probing) {
+          // The compile-time facts of design §6.1's `lastInsertRowid`. `cstr` is skipped unless
+          // the action can carry one of them, so a connection with no authorizer of its own
+          // allocates nothing here.
+          if (action === SQLITE_INSERT) this.#probeInserts = true
+          else if (
+            action === SQLITE_FUNCTION &&
+            !this.#probeReadsRowid &&
+            cstr(a2) === "last_insert_rowid"
+          ) {
+            this.#probeReadsRowid = true
+          }
+        }
         const fn = this.#onAuth
         if (!fn) return SQLITE_OK
         try {
@@ -405,6 +458,15 @@ export class Database implements StatementHost {
     )
     const rc = s.sqlite3_set_authorizer(this.#handle, this.#authCb.ptr, null)
     if (rc !== SQLITE_OK) this.fail(rc)
+  }
+
+  /**
+   * What the authorizer saw while compiling the statement just prepared, and the end of the
+   * probe window. Called by `prepareStatement` as it builds the Statement.
+   */
+  takeProgramFacts(): ProgramFacts {
+    this.#probing = false
+    return { inserts: this.#probeInserts, readsLastInsertRowid: this.#probeReadsRowid }
   }
 
   /** Fires once per inserted, updated or deleted row, after the change, in rowid tables. */

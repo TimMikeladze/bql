@@ -383,16 +383,18 @@ describe("value encoding worth knowing about", () => {
     expect((await c.execute("select r from vals where id = 1")).rows[0]?.r).toBe(1)
   })
 
-  test("lastInsertRowid is null when the new rowid repeats the connection's last one", async () => {
-    // A known gap, not a client quirk: `src/server/exec.ts` tells an INSERT that inserted from an
-    // UPDATE that did not by comparing `sqlite3_last_insert_rowid` either side of the step, so an
-    // insert into a second table that happens to get the same rowid reports nothing. Its own
-    // database, because the gap is a property of the connection's history.
+  test("lastInsertRowid is right when the new rowid repeats the connection's last one", async () => {
+    // Row 1 of table `a` and then row 1 of table `b`, on the same pooled writer: the counter
+    // never moves, and the second insert used to report nothing. `src/server/exec.ts` now asks
+    // the statement whether it inserts and zeroes the counter under it, so the repeat is visible.
+    // Its own database, because the case is a property of the connection's history.
     await server.createDb("rowid", "create table a (id integer primary key); create table b (id integer primary key)")
     const own = client({ url: `http://${hostPort()}/v1/db/rowid/`, intMode: "bigint" })
     expect((await own.execute("insert into a default values")).lastInsertRowid).toBe(1n)
-    expect((await own.execute("insert into b default values")).lastInsertRowid).toBeUndefined()
+    expect((await own.execute("insert into b default values")).lastInsertRowid).toBe(1n)
     expect((await own.execute("insert into a default values")).lastInsertRowid).toBe(2n)
+    // An UPDATE on the same connection reports nothing rather than the insert before it.
+    expect((await own.execute("update a set id = id where id = 1")).lastInsertRowid).toBeUndefined()
   })
 })
 

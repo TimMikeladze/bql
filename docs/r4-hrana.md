@@ -289,10 +289,10 @@ Two of these were fixed, in `src/server/hrana/`; two are gaps.
    `client.transaction()` calls on one socket fails `TX_BUSY` at once. A client that wants
    concurrent transactions should use the HTTP transport. Fixing it properly means chaining per
    stream instead of per socket, which is a change to that module's ordering invariant.
-4. **`last_insert_rowid` is null when the new rowid repeats the connection's last one (gap, not
-   ours to fix).** `src/server/exec.ts` tells an INSERT that inserted from an UPDATE that did not
-   by reading `sqlite3_last_insert_rowid` either side of the step, so an insert whose new rowid
-   equals the previous one on the same pooled connection reports nothing. It affects the native
+4. **`last_insert_rowid` was null when the new rowid repeated the connection's last one (fixed
+   after R4b).** `src/server/exec.ts` used to tell an INSERT that inserted from an UPDATE that did
+   not by reading `sqlite3_last_insert_rowid` either side of the step, so an insert whose new rowid
+   equalled the previous one on the same pooled connection reported nothing. It affected the native
    API identically. Two tables, one row each:
 
    ```http
@@ -306,10 +306,11 @@ Two of these were fixed, in `src/server/hrana/`; two are gaps.
      {"type":"ok","response":{"type":"close"}}]}
    ```
 
-   `last_insert_rowid` should be `"1"`. `@libsql/client` reports it as
-   `ResultSet.lastInsertRowid === undefined`. The fix belongs in `exec.ts:156`, which R4 does not
-   own; `test/hrana/libsql-client.test.ts` pins the current behaviour so the change is visible when
-   someone makes it.
+   That body now reads `"last_insert_rowid":"1"`. `exec.ts` asks the prepared statement whether its
+   program inserts (`Statement.inserts`, captured from SQLite's authorizer at prepare time) and
+   zeroes the connection's counter under a statement that does, so a non-zero value afterwards is
+   proof this statement set it. `test/hrana/wire.test.ts` and `test/hrana/libsql-client.test.ts`
+   pin the fixed behaviour; `test/server/rowid.test.ts` pins the rest of the shapes.
 
 Everything else the hand-rolled client predicted held: the relative pipeline URL, the
 `execute` + `close` pipelining, the batch shape with its conditioned `ROLLBACK`, `BEGIN IMMEDIATE`

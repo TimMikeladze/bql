@@ -1,6 +1,11 @@
 // Invariant: a statement is always left reset. Every verb resets before it binds and resets
 // again when it stops stepping, including on the error and early-return paths, so no statement
 // ever holds a read transaction open between calls.
+//
+// A statement also carries what the connection's authorizer saw while compiling it (`inserts`,
+// `readsLastInsertRowid`). Those facts are captured once, at prepare time, and are immutable for
+// the life of the statement, which is what lets them ride along in the connection's
+// prepared-statement cache instead of being recomputed per step.
 
 import {
   SQLITE_DONE,
@@ -21,6 +26,24 @@ import {
   type SqliteValue,
 } from "./values.ts"
 
+/**
+ * What SQLite's authorizer reported about the program while it was being compiled. These are
+ * facts about the compiled statement, not about the SQL text, so a trigger body counts and a
+ * regular expression over the SQL never would.
+ */
+export interface ProgramFacts {
+  /**
+   * The program contains an insert — into the target table, into a trigger's table, or into
+   * `sqlite_master` for DDL. A superset of "this statement sets `last_insert_rowid`", which is
+   * why it is a gate and not an answer.
+   */
+  readonly inserts: boolean
+  /** The program calls `last_insert_rowid()`, so the connection's counter is an input to it. */
+  readonly readsLastInsertRowid: boolean
+}
+
+export const NO_PROGRAM_FACTS: ProgramFacts = { inserts: false, readsLastInsertRowid: false }
+
 /** The part of Database a Statement needs; keeps the two modules free of a runtime cycle. */
 export interface StatementHost {
   readonly lib: SqliteLibrary
@@ -30,6 +53,8 @@ export interface StatementHost {
   fail(rc: number): never
   /** Drops a finalized statement from the connection's prepared-statement cache. */
   uncache(stmt: Statement): void
+  /** Facts the connection's authorizer recorded while compiling the statement being prepared. */
+  takeProgramFacts(): ProgramFacts
 }
 
 export interface RunResult {
@@ -63,11 +88,18 @@ export class Statement {
   #finalized = false
   /** True while a generator from `.iterate()` is mid-flight. */
   #iterating = false
+  readonly #facts: ProgramFacts
 
-  constructor(host: StatementHost, sql: string, handle: number) {
+  constructor(
+    host: StatementHost,
+    sql: string,
+    handle: number,
+    facts: ProgramFacts = NO_PROGRAM_FACTS,
+  ) {
     this.#host = host
     this.#sql = sql
     this.#handle = handle
+    this.#facts = facts
     this.#columnCount = host.lib.symbols.sqlite3_column_count(handle)
   }
 
@@ -121,6 +153,22 @@ export class Statement {
   get readonly(): boolean {
     this.#assertLive()
     return this.#host.lib.symbols.sqlite3_stmt_readonly(this.#handle) !== 0
+  }
+
+  /**
+   * True when SQLite authorized an insert while compiling this statement — including one a
+   * trigger performs and the `sqlite_master` row a DDL statement writes. It is captured once, at
+   * prepare time, and travels with the statement through the connection's cache, so asking is
+   * free. A statement whose answer is false cannot move `last_insert_rowid`; a statement whose
+   * answer is true might.
+   */
+  get inserts(): boolean {
+    return this.#facts.inserts
+  }
+
+  /** True when the program calls `last_insert_rowid()` and so reads the connection's counter. */
+  get readsLastInsertRowid(): boolean {
+    return this.#facts.readsLastInsertRowid
   }
 
   /**
@@ -406,5 +454,7 @@ export function prepareStatement(
       21,
     )
   }
-  return new Statement(host, sql, handle)
+  // Taken here, while the compile that produced `handle` is still the last one the connection
+  // authorized: the facts belong to this statement and to no other.
+  return new Statement(host, sql, handle, host.takeProgramFacts())
 }

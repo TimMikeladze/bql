@@ -74,6 +74,27 @@ describe("execute", () => {
     expect(Number(result.last_insert_rowid)).toBeGreaterThan(0)
   })
 
+  test("last_insert_rowid is right when the rowid repeats across tables", async () => {
+    // `docs/r4-hrana.md` pinned this response with `last_insert_rowid: null`: row 1 of one table
+    // and then row 1 of another, on the pooled writer, left the counter reading 1 either side of
+    // the second insert. Both are `"1"`, and an UPDATE after them is still null.
+    await server.createDb(
+      "repeat",
+      "create table a (id integer primary key); create table b (id integer primary key)",
+    )
+    const run = async (sql: string) => {
+      const { body } = await server.pipeline(
+        { baton: null, requests: [exec(sql), { type: "close" }] },
+        { route: "/v1/db/repeat/v2/pipeline" },
+      )
+      return okResult(body, 0)
+    }
+    expect((await run("insert into a default values")).last_insert_rowid).toBe("1")
+    expect((await run("insert into b default values")).last_insert_rowid).toBe("1")
+    expect((await run("insert into a default values")).last_insert_rowid).toBe("2")
+    expect((await run("update a set id = id where id = 1")).last_insert_rowid).toBeNull()
+  })
+
   test("named args bind by name, with or without the sigil", async () => {
     const { body } = await server.pipeline(
       {

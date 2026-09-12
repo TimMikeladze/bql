@@ -6,6 +6,8 @@
 // Statement classification is `sqlite3_stmt_readonly`, not a regular expression over the SQL. A
 // read-only statement runs on a pooled reader; anything else goes to the tenant's single writer
 // through `tenant.write`, which is what turns it into a txid, a log record and a change event.
+// `lastInsertRowid` comes from the same place: SQLite's own account of the statement, never a
+// guess from the SQL text or from a number that happened to move.
 
 import {
   HEADERS,
@@ -122,38 +124,68 @@ interface Stepped {
   lastInsertRowid: number | bigint | null
 }
 
+const isZero = (v: number | bigint): boolean => v === 0 || v === 0n
+
 /**
  * Binds, arms the deadline and steps. `values()` materialises the result, so `maxRows` is checked
  * once it is known; the deadline and the per-connection `sqlite3_limit` set are what bound the
  * work before that point.
+ *
+ * `lastInsertRowid` is the connection's counter, not the statement's, so the counter alone cannot
+ * say whether *this* statement set it. The statement says whether it could: `stmt.inserts` is
+ * what SQLite's authorizer reported at prepare time, cached on the prepared statement. For a
+ * statement that could insert, the counter is zeroed before the step and read after it, so a
+ * non-zero value is proof SQLite set it during this step — true even when the new rowid repeats
+ * the connection's previous one, and false for the statements that merely look like inserts (a
+ * `WITHOUT ROWID` table, an upsert that took the UPDATE branch, DDL writing `sqlite_master`, an
+ * insert a trigger performed, all of which SQLite deliberately leaves the counter alone for).
+ * The old value goes back when nothing set it, so the next statement in the same transaction
+ * still reads it. A statement that calls `last_insert_rowid()` itself takes the counter as an
+ * input and is never zeroed under it; there the older "did the number move" test is all there is.
  */
 function step(db: Database, request: StatementRequest, timeoutMs: number, maxRows: number): Stepped {
   const stmt = db.prepare(request.sql)
   const params = decodeArgs(request.args as Args | undefined)
   const writes = !stmt.readonly
-  // `sqlite3_last_insert_rowid` is a property of the connection, not of the statement: it keeps
-  // reporting the last insert long after it. Reading it either side of the step is what tells an
-  // UPDATE that inserted nothing from an INSERT that did, so `lastInsertRowid` describes this
-  // statement rather than some earlier one on the same pooled connection. (An insert that reuses
-  // the rowid it just deleted reports null, which is a value the client supplied anyway.)
-  const rowidBefore = writes ? db.lastInsertRowid : 0
+  const mayInsert = writes && stmt.inserts
+  const marking = mayInsert && !stmt.readsLastInsertRowid
+  const rowidBefore = mayInsert ? db.lastInsertRowid : 0
+  if (marking && !isZero(rowidBefore)) db.setLastInsertRowid(0)
   stmt.vmSteps(true)
   db.deadline(timeoutMs)
   let rows: SqliteValue[][]
   try {
     rows = stmt.values(...params)
+  } catch (err) {
+    if (marking && !isZero(rowidBefore) && isZero(db.lastInsertRowid)) {
+      db.setLastInsertRowid(rowidBefore)
+    }
+    throw err
   } finally {
     db.deadline(null)
   }
   if (rows.length > maxRows) throw BunQLError.tooManyRows(maxRows)
-  const rowidAfter = writes ? db.lastInsertRowid : 0
+  const rowsAffected = writes ? Number(db.changes) : 0
+  let lastInsertRowid: number | bigint | null = null
+  if (mayInsert) {
+    const rowidAfter = db.lastInsertRowid
+    if (marking) {
+      if (isZero(rowidAfter)) {
+        if (!isZero(rowidBefore)) db.setLastInsertRowid(rowidBefore)
+      } else {
+        lastInsertRowid = rowidAfter
+      }
+    } else if (rowsAffected > 0 && !isZero(rowidAfter)) {
+      lastInsertRowid = rowidAfter
+    }
+  }
   return {
     rows,
     stmt,
     writes,
     vmSteps: stmt.vmSteps(),
-    rowsAffected: writes ? Number(db.changes) : 0,
-    lastInsertRowid: writes && rowidAfter !== rowidBefore ? rowidAfter : null,
+    rowsAffected,
+    lastInsertRowid,
   }
 }
 

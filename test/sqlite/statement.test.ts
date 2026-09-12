@@ -266,3 +266,68 @@ describe("connection state", () => {
     expect(() => Database.open(tempDb("missing.db"), { create: false })).toThrow(SqliteError)
   })
 })
+
+describe("what the authorizer saw while compiling", () => {
+  const db = fresh()
+  db.exec("create table wr(k text primary key, v text) without rowid")
+  db.exec("create trigger t_ins after insert on t begin insert into wr(k,v) values (new.v, 'x'); end")
+
+  test("inserts is true for every program that writes a row, including a trigger's", () => {
+    expect(db.prepare("insert into t(v) values (?)").inserts).toBe(true)
+    expect(db.prepare("insert or replace into t(id,v) values (1,'a')").inserts).toBe(true)
+    expect(db.prepare("insert into t(v) values ('r') returning id").inserts).toBe(true)
+    expect(db.prepare("insert into wr(k,v) values ('a','b')").inserts).toBe(true)
+    // The statement itself only updates; the trigger it fires is what inserts.
+    db.exec("create table u(id integer primary key, v text)")
+    db.exec("create trigger u_upd after update on u begin insert into t(v) values ('hit'); end")
+    expect(db.prepare("update u set v = 'z'").inserts).toBe(true)
+    // DDL writes a sqlite_master row, which SQLite authorizes as an insert.
+    expect(db.prepare("create table if not exists made(x int)").inserts).toBe(true)
+  })
+
+  test("inserts is false for a statement that cannot write a row", () => {
+    expect(db.prepare("select * from t").inserts).toBe(false)
+    expect(db.prepare("update t set v = 'q' where id = 1").inserts).toBe(false)
+    expect(db.prepare("delete from t where id = 1").inserts).toBe(false)
+    expect(db.prepare("pragma user_version = 4").inserts).toBe(false)
+  })
+
+  test("readsLastInsertRowid names the statements the counter is an input to", () => {
+    expect(db.prepare("insert into t(v) values (last_insert_rowid())").readsLastInsertRowid).toBe(
+      true,
+    )
+    expect(db.prepare("select last_insert_rowid()").readsLastInsertRowid).toBe(true)
+    expect(db.prepare("insert into t(v) values ('plain')").readsLastInsertRowid).toBe(false)
+  })
+
+  test("the facts survive the prepared-statement cache", () => {
+    const sql = "insert into t(v) values ('cached')"
+    expect(db.prepare(sql).inserts).toBe(true)
+    expect(db.prepare(sql)).toBe(db.prepare(sql))
+    expect(db.prepare(sql).inserts).toBe(true)
+  })
+
+  test("the probe does not disturb an authorizer of the caller's own", () => {
+    const seen: number[] = []
+    db.authorizer((action) => {
+      seen.push(action)
+      return 0
+    })
+    expect(db.prepare("select v from t where id = 2").inserts).toBe(false)
+    expect(seen.length).toBeGreaterThan(0)
+    db.authorizer(() => 1)
+    expect(() => db.prepare("select v from t where id = 3").all()).toThrow(SqliteError)
+    db.authorizer(null)
+    expect(db.prepare("select v from t where id = 2").inserts).toBe(false)
+  })
+
+  test("setLastInsertRowid moves the counter SQL reads", () => {
+    db.prepare("insert into t(v) values ('rowid')").run()
+    const set = db.lastInsertRowid
+    db.setLastInsertRowid(0)
+    expect(db.lastInsertRowid).toBe(0)
+    expect(db.prepare("select last_insert_rowid() as r").get()?.r).toBe(0)
+    db.setLastInsertRowid(set)
+    expect(db.lastInsertRowid).toBe(set)
+  })
+})

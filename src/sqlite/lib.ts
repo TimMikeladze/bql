@@ -69,6 +69,7 @@ const CORE = {
   sqlite3_changes64: { args: [T.ptr], returns: T.i64_fast },
   sqlite3_total_changes64: { args: [T.ptr], returns: T.i64_fast },
   sqlite3_last_insert_rowid: { args: [T.ptr], returns: T.i64_fast },
+  sqlite3_set_last_insert_rowid: { args: [T.ptr, T.i64], returns: T.void },
   sqlite3_get_autocommit: { args: [T.ptr], returns: T.i32 },
   sqlite3_busy_timeout: { args: [T.ptr, T.i32], returns: T.i32 },
   sqlite3_limit: { args: [T.ptr, T.i32, T.i32], returns: T.i32 },
@@ -200,6 +201,7 @@ export interface CoreSymbols {
   sqlite3_changes64(db: Ptr): I64Fast
   sqlite3_total_changes64(db: Ptr): I64Fast
   sqlite3_last_insert_rowid(db: Ptr): I64Fast
+  sqlite3_set_last_insert_rowid(db: Ptr, rowid: bigint): void
   sqlite3_get_autocommit(db: Ptr): number
   sqlite3_busy_timeout(db: Ptr, ms: number): number
   sqlite3_limit(db: Ptr, id: number, value: number): number
