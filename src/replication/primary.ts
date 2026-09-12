@@ -105,6 +105,22 @@ export interface ReplicationServerOptions {
    * writer held until the idle timer notices.
    */
   onDisconnect?: (node: string) => void
+  /**
+   * C2: a replica subscribed claiming an epoch **higher** than this node holds for the database.
+   * That is proof the control plane granted the database to somebody else after it granted it
+   * here, so this node has been fenced and must stop being its primary. The caller demotes;
+   * this module only reports, because a tenant's role is the server's to change.
+   */
+  onEpochAhead?: (event: { db: string; node: string; epoch: number; held: number }) => void
+  /**
+   * The generation id to announce for a database whose identity this node did not mint: a copy it
+   * received as a replica, including one it has since been promoted for. `generationId` derives an
+   * id from the catalog row's `created_at`, and a replica's row was created *here*, so deriving
+   * one for such a copy would announce a new identity for the same database and make every
+   * downstream replica trash its copy. Returning null falls back to the derived id, which is right
+   * for a database this node authored.
+   */
+  generationOf?: (db: string) => string | null
   onError?: (err: unknown) => void
 }
 
@@ -170,6 +186,8 @@ export class ReplicationServer {
   #ackListeners = new Set<(event: AckEvent) => void>()
   #onForward: ((request: ForwardBody, node: string) => Promise<unknown>) | null
   #onDisconnect: ((node: string) => void) | null
+  #onEpochAhead: (event: { db: string; node: string; epoch: number; held: number }) => void
+  #generationOf: (db: string) => string | null
   #onError: (err: unknown) => void
   #closed = false
 
@@ -181,6 +199,8 @@ export class ReplicationServer {
     this.slowReplicaMs = options.slowReplicaMs ?? 30_000
     this.#onForward = options.onForward ?? null
     this.#onDisconnect = options.onDisconnect ?? null
+    this.#onEpochAhead = options.onEpochAhead ?? (() => {})
+    this.#generationOf = options.generationOf ?? (() => null)
     this.#onError =
       options.onError ?? ((err: unknown) => console.error("bunql: replication", err))
   }
@@ -449,16 +469,29 @@ export class ReplicationServer {
    * reporting a replica of something that no longer exists, and `#tick` reads `txid` off a tenant
    * that has been torn down. The replica learns from the announcement this runs just before.
    */
+  #isOpen(db: string): boolean {
+    try {
+      return this.registry.openNames.includes(db)
+    } catch {
+      return false
+    }
+  }
+
   #sweepStreams(announcement: Map<string, string>): void {
     for (const conn of [...this.#conns]) {
       for (const stream of [...conn.streams.values()]) {
         const current = announcement.get(stream.db)
         const replaced = current !== stream.generation
         if (!replaced && !stream.tenant.closed) continue
+        // A tenant that was closed and *reopened* under the same name was swapped on purpose —
+        // C2's promotion and demotion both close a tenant and open it in the other role — so the
+        // stream is ended (the replica re-subscribes and picks up the new one) without being
+        // reported. Only a tenant that is closed and gone is news.
+        const swapped = !replaced && this.#isOpen(stream.db)
         // A delete or a re-create is somebody's deliberate act and is not this node's news to
         // report — the replica logs what it lets go of, which is where the surprise lives. A
         // tenant closed under a stream whose database is otherwise unchanged is not deliberate.
-        if (!replaced) {
+        if (!replaced && !swapped) {
           this.#onError(
             new Error(
               `${stream.db} was closed under stream ${stream.id} to replica ${conn.node}; ` +
@@ -510,14 +543,20 @@ export class ReplicationServer {
    */
   #announcement(): Map<string, string> {
     try {
-      return new Map(this.registry.list().map((row) => [row.name, generationId(row)]))
+      return new Map(
+        // A copy this node received as a replica keeps the id it was bootstrapped under; only a
+        // database this node minted gets one derived from its own row. See `generationOf`.
+        this.registry.list().map((row) => [row.name, this.#generationOf(row.name) ?? generationId(row)]),
+      )
     } catch {
       return new Map()
     }
   }
 
   /** This node's generation id for one database, or `null` when it holds no such database. */
-  #generationOf(db: string): string | null {
+  #generationFor(db: string): string | null {
+    const held = this.#generationOf(db)
+    if (held) return held
     try {
       const row = this.registry.list().find((one) => one.name === db)
       return row ? generationId(row) : null
@@ -549,13 +588,20 @@ export class ReplicationServer {
         "EPOCH_AHEAD",
         `${request.db}: the replica claims epoch ${epoch}, this node holds ${tenant.epoch}`,
       )
+      // The fencing signal. Reporting it is the whole point: without this the stream simply went
+      // quiet and a fenced primary kept accepting writes (C2, `docs/c2-promotion.md`).
+      try {
+        this.#onEpochAhead({ db: request.db, node: conn.node, epoch, held: tenant.epoch })
+      } catch (err) {
+        this.#onError(err)
+      }
       return
     }
 
     // A replica that names a generation this node does not hold is holding a *different*
     // database under this name, however well its txid and checksum line up with ours. Treat it
     // exactly as `reset` — a snapshot, whatever `#decide` would otherwise have said.
-    const generation = this.#generationOf(request.db) ?? ""
+    const generation = this.#generationFor(request.db) ?? ""
     const stale =
       typeof request.generation === "string" &&
       request.generation.length > 0 &&

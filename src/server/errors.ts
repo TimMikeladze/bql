@@ -41,6 +41,8 @@ export interface ErrorDetails {
   failedIndex?: number
   /** Where the client should go instead, for `NOT_PRIMARY`. */
   primary?: string
+  /** An absolute URL the request can be replayed against, for `307` (design §5.3). */
+  location?: string
   /** Distinct replica nodes that acked in time, for `ACK_TIMEOUT`. */
   acks?: number
   /** How many were needed. */
@@ -206,11 +208,13 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   const txid = details?.txid ?? own?.txid
   const failedIndex = details?.failedIndex ?? own?.failedIndex
   const primary = details?.primary ?? own?.primary
+  const location = details?.location ?? own?.location
   const acks = details?.acks ?? own?.acks
   const needed = details?.needed ?? own?.needed
   if (txid !== undefined) error.txid = txid
   if (failedIndex !== undefined) error.failedIndex = failedIndex
   if (primary !== undefined) error.primary = primary
+  if (location !== undefined) (error as unknown as Record<string, unknown>).location = location
   // `ErrorInfo` is the client's shape and does not name these; they ride along for `ACK_TIMEOUT`,
   // where "how close did it get" is the one thing an operator wants from the body.
   const extra = error as unknown as Record<string, unknown>
@@ -226,5 +230,7 @@ export function errorResponse(err: unknown, details?: ErrorDetails, extra?: Bun.
   headers.set("content-type", "application/json; charset=utf-8")
   if (body.error.txid !== undefined) headers.set(HEADERS.txid, String(body.error.txid))
   if (body.error.primary !== undefined) headers.set(HEADERS.primary, body.error.primary)
+  const location = (body.error as unknown as { location?: string }).location
+  if (location !== undefined) headers.set("location", location)
   return new Response(JSON.stringify(body), { status, headers })
 }

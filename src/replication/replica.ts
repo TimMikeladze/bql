@@ -15,6 +15,11 @@
 // recorded against the primary's generation id for it; a database that leaves the announcement is
 // dropped through the registry's delete path, and one whose id has changed is dropped and
 // bootstrapped again from zero. See `docs/r7-unfollow.md`.
+//
+// Fourth invariant (C2): `detach` is not `#unfollow`. A database this node has been promoted for
+// stops being streamed and keeps its copy and its generation — that copy is the thing being
+// promoted. Only an announcement that says the database is gone, or is a different database, may
+// delete anything. `docs/c2-promotion.md`.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -219,7 +224,6 @@ interface Stream {
 
 export class ReplicaClient {
   readonly registry: TenantRegistry
-  readonly primary: string
   readonly secret: string
   readonly node: string
   readonly reconnectMs: number
@@ -250,6 +254,12 @@ export class ReplicaClient {
    */
   #generations = new Map<string, string>()
   #unfollowed: UnfollowedDatabase[] = []
+  /**
+   * Databases this node has been promoted for. They are skipped by `#resolveFollow`, so a primary
+   * that is still up and still announcing them cannot pull this node back into following a
+   * database it now owns — which would be the two-writers case arriving through the back door.
+   */
+  #detached = new Set<string>()
   /** So an empty announcement is reported once, not at every heartbeat while it persists. */
   #emptyAnnouncementReported = false
   /** Has this connection carried a non-empty announcement yet? See `#resolveFollow`. */
@@ -271,9 +281,16 @@ export class ReplicaClient {
   #forwards = new Map<number, Forward>()
   #nextForward = 1
 
+  /** Where this node follows from. C2's `retarget` moves it when a failover names a new primary. */
+  #primary: string
+
+  get primary(): string {
+    return this.#primary
+  }
+
   constructor(options: ReplicaClientOptions) {
     this.registry = options.registry
-    this.primary = options.primary
+    this.#primary = options.primary
     this.secret = options.secret
     this.node = options.node
     this.reconnectMs = options.reconnectMs ?? 250
@@ -338,6 +355,19 @@ export class ReplicaClient {
     if (!generation || this.#generations.get(db) === generation) return
     this.#generations.set(db, generation)
     this.#saveGenerations()
+  }
+
+  /**
+   * The generation id this node's copy of `db` was bootstrapped under, or null.
+   *
+   * This is the database's *identity*, and it survives promotion: a promoted node still holds the
+   * same database, so it must keep announcing the same id. Deriving one from its own catalog row
+   * would mint a new identity out of nothing — `generationId` hashes `created_at`, and a replica's
+   * row was created here rather than on the primary — and every downstream replica would then
+   * trash its copy and bootstrap again for no reason at all.
+   */
+  generationOf(db: string): string | null {
+    return this.#generations.get(db) ?? null
   }
 
   #forgetGeneration(db: string): void {
@@ -489,6 +519,73 @@ export class ReplicaClient {
         // Already closed.
       }
     }
+  }
+
+  /**
+   * C2: stops following one database without touching its files. This is the promotion path —
+   * `UNSUBSCRIBE`, drop the stream, release the pin, and **keep** the copy and its recorded
+   * generation, because that copy is what is about to become the primary's.
+   *
+   * The name is remembered, so a primary that is still up and still announcing the database does
+   * not re-subscribe this node to a database it now owns.
+   */
+  detach(db: string): void {
+    this.#detached.add(db)
+    const stream = this.#byDb.get(db)
+    if (!stream) return
+    this.#abortBootstrap(stream)
+    this.#streams.delete(stream.id)
+    this.#byDb.delete(db)
+    this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id } satisfies UnsubscribeBody))
+    this.registry.unpin(db, PIN_OWNER)
+  }
+
+  /** The mirror of `detach`: this node has been demoted, so follow the database again. */
+  attach(db: string): void {
+    if (!this.#detached.delete(db)) return
+    if (!this.#handshook || this.#byDb.has(db)) return
+    try {
+      this.#subscribe(db)
+    } catch (err) {
+      this.#onError(err)
+    }
+  }
+
+  /** Databases this node has been promoted for and no longer follows. */
+  get detached(): string[] {
+    return [...this.#detached]
+  }
+
+  /**
+   * Points this client at a different primary and reconnects. C2's failover uses it so a demoted
+   * node converges on the new primary without an operator; a URL it is already following is a
+   * no-op, because reconnecting would only cost a re-handshake.
+   */
+  retarget(url: string): void {
+    if (!url || url === this.#primary) return
+    this.#primary = url
+    const socket = this.#socket
+    this.#socket = null
+    this.#connected = false
+    this.#handshook = false
+    this.#attempt = 0
+    if (this.#retry !== null) {
+      clearTimeout(this.#retry)
+      this.#retry = null
+    }
+    for (const stream of this.#streams.values()) this.#abortBootstrap(stream)
+    this.#streams.clear()
+    this.#byDb.clear()
+    this.#sawDatabases = false
+    this.#emptyAnnouncementReported = false
+    if (socket) {
+      try {
+        socket.close(1000, "following a new primary")
+      } catch {
+        // Already closed; `#connect` below is what matters.
+      }
+    }
+    if (!this.#stopped) this.#connect()
   }
 
   /** Resolves once every followed database has applied at least `txid`. For tests and `readyz`. */
@@ -750,6 +847,10 @@ export class ReplicaClient {
    */
   #resolveFollow(announced: string[], generations?: Record<string, string>): void {
     const held = new Set([...this.#byDb.keys(), ...this.#generations.keys()])
+    // A database this node has been promoted for is not held *as a follower* any more. It must be
+    // neither dropped (the copy is now this node's own primary copy) nor re-subscribed (that is
+    // the two-writers case arriving through an announcement).
+    for (const db of this.#detached) held.delete(db)
 
     // An empty announcement is the one this client will not take at face value. A primary that is
     // the wrong node, or has restarted against an empty data directory, announces nothing from its
@@ -797,7 +898,7 @@ export class ReplicaClient {
     const wildcard = this.#follow.includes("*")
     const wanted = wildcard ? announced : this.#follow.filter((db) => live.has(db))
     for (const db of wanted) {
-      if (this.#byDb.has(db)) continue
+      if (this.#byDb.has(db) || this.#detached.has(db)) continue
       try {
         this.#subscribe(db)
       } catch (err) {
@@ -1138,6 +1239,23 @@ export class ReplicaClient {
 
   #errorIn(body: ErrorBody): void {
     this.#lastError = `${body.code}: ${body.message}`
+    // This node holds a *higher* epoch than the node it is following, which means the peer is a
+    // stale primary: it was fenced and has not noticed. Retrying would loop for ever, so the
+    // stream is dropped and said out loud. The peer fences itself when it sees this same
+    // subscribe (`ReplicationServer.onEpochAhead`), so both halves converge.
+    if (body.code === "EPOCH_AHEAD" && body.stream !== undefined) {
+      const stream = this.#streams.get(body.stream)
+      if (stream) {
+        this.detach(stream.db)
+        this.#onError(
+          new ReplicaUnfollowed(
+            `${stream.db}: ${this.#primary} is behind this node's epoch and was fenced; ` +
+              "this node stopped following it for that database",
+          ),
+        )
+      }
+      return
+    }
     if (FATAL_CODES.has(body.code)) {
       this.#onError(new Error(this.#lastError))
       try {

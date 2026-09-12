@@ -62,6 +62,8 @@ export interface SocketData {
   queues: Map<string, Promise<unknown>>
   /** Latest undelivered live result per subscription, kept while the socket is backpressured. */
   pendingLive: Map<string, string>
+  /** Databases this socket has been told about, so `moved` reaches it exactly once per name. */
+  watching: Set<string>
 }
 
 /** What this module needs from `Bun.serve`'s socket. */
@@ -103,7 +105,17 @@ export function newSocketData(runtime: ServerRuntime, principal: Principal | nul
     subs: new Map(),
     queues: new Map(),
     pendingLive: new Map(),
+    watching: new Set(),
   }
+}
+
+/**
+ * The topic design §5.3's `moved` is published to. A socket joins it the first time it names a
+ * database, because that is exactly the set of sockets that would otherwise keep writing to a node
+ * that has stopped being the primary for it.
+ */
+export function movedTopic(db: string): string {
+  return `moved:${db}`
 }
 
 function send(ws: Socket, value: unknown): number {
@@ -159,6 +171,22 @@ export function greet(ws: Socket, node: string): void {
     role: runtime.role,
     ...(runtime.primaryUrl ? { primary: runtime.primaryUrl } : {}),
   })
+}
+
+/**
+ * Design §5.3's `moved`: every socket that has touched `db` is told where it went. C2 sends it
+ * from a promotion or a fencing, which is the one moment a client holding an open socket would
+ * otherwise keep writing to a node that has stopped being the primary.
+ *
+ * The set of sockets is the ones subscribed to the database plus the ones holding a transaction on
+ * it, which is exactly the set that has state tied to this node for that database.
+ */
+export function movedPublisher(
+  server: { publish(topic: string, data: string): unknown },
+): (db: string, primary: string) => void {
+  return (db, primary) => {
+    server.publish(movedTopic(db), JSON.stringify({ event: "moved", db, primary }))
+  }
 }
 
 /** Entry point for one client frame. */
@@ -264,10 +292,23 @@ function databaseOf(ws: Socket, message: WsRequest): string {
   const any = message as WsAny
   if (any.tx) {
     const remote = remoteOf(ws, any)
-    return remote ? remote.db : sessionOf(ws, any).db
+    return watch(ws, remote ? remote.db : sessionOf(ws, any).db)
   }
-  if (any.db) return any.db
+  if (any.db) return watch(ws, any.db)
   throw BunQLError.badRequest(`${any.op} needs a db or a tx`)
+}
+
+/** Joins the `moved` topic for a database, once per socket per name. */
+function watch(ws: Socket, db: string): string {
+  if (!ws.data.watching.has(db)) {
+    ws.data.watching.add(db)
+    try {
+      ws.subscribe(movedTopic(db))
+    } catch {
+      // A socket that is already closing cannot be subscribed; it has nothing to be told either.
+    }
+  }
+  return db
 }
 
 function sessionOf(ws: Socket, message: WsAny): TxSession {
@@ -350,7 +391,7 @@ async function statement(ws: Socket, message: WsAny, db: string): Promise<void> 
   try {
     if (message.op === "batch") {
       const body = message as BatchRequest
-      if (runtime.forwarder.enabled && wsBatchNeedsPrimary(runtime, tenant, principal, body)) {
+      if (runtime.forwarder.enabledFor(tenant.name) && wsBatchNeedsPrimary(runtime, tenant, principal, body)) {
         send(ws, { id, ok: true, result: await runtime.forwarder.batch(tenant, principal, body, options) })
         return
       }
@@ -361,7 +402,7 @@ async function statement(ws: Socket, message: WsAny, db: string): Promise<void> 
     }
     assertStatement(message, "query")
     const body = message as StatementRequest
-    if (runtime.forwarder.enabled && runtime.forwarder.needsPrimary(tenant, principal, [body.sql])) {
+    if (runtime.forwarder.needsPrimary(tenant, principal, [body.sql])) {
       send(ws, { id, ok: true, result: await runtime.forwarder.query(tenant, principal, body, options) })
       return
     }
@@ -369,7 +410,7 @@ async function statement(ws: Socket, message: WsAny, db: string): Promise<void> 
     if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     send(ws, { id, ok: true, result })
   } catch (err) {
-    throw mapTenantError(err, runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrlFor(tenant.name))
   }
 }
 
@@ -421,7 +462,7 @@ async function txBegin(ws: Socket, message: WsAny, db: string): Promise<void> {
   requireScope(principal, db, "rw")
   const tenant = runtime.tenant(db)
   try {
-    if (runtime.forwarder.enabled) {
+    if (runtime.forwarder.enabledFor(tenant.name)) {
       const remote = await runtime.forwarder.txBegin(tenant, principal, message, ws.data.owner)
       send(ws, { id: message.id, ok: true, tx: remote.tx, expiresInMs: remote.expiresInMs })
       return
@@ -438,7 +479,7 @@ async function txBegin(ws: Socket, message: WsAny, db: string): Promise<void> {
       expiresInMs: runtime.config.limits.txIdleTimeoutMs,
     })
   } catch (err) {
-    throw mapTenantError(err, runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrlFor(tenant.name))
   }
 }
 
@@ -458,7 +499,7 @@ async function txEnd(
     }
     send(ws, { id: message.id, ok: true, txid: Number(txid) })
   } catch (err) {
-    throw mapTenantError(err, runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrlFor(session.db))
   }
 }
 

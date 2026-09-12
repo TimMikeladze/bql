@@ -6,6 +6,7 @@
 // before the `fetch` fallback runs, which is what keeps the query path free of URL parsing.
 
 import { HEADERS, WS_PROTOCOL } from "../client/protocol.ts"
+import { RAFT_PATH, type RaftSocket, type RaftSocketData } from "../cluster/index.ts"
 import type { ReplicationSocket } from "../replication/index.ts"
 import {
   hranaRoutes,
@@ -31,6 +32,7 @@ import {
   drain,
   greet,
   handleMessage,
+  movedPublisher,
   newSocketData,
   type Socket,
   type SocketData,
@@ -43,6 +45,9 @@ const EXPOSED = [
   HEADERS.role,
   HEADERS.durationUs,
   HEADERS.primary,
+  // `Location` is not on the CORS safelist, and a browser client that cannot read it cannot
+  // follow C2's `307` to the node that took the database over.
+  "Location",
 ].join(", ")
 
 const ALLOWED_HEADERS = [
@@ -89,9 +94,11 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
       params: request.params ?? {},
     }
     let response: Response
+    let refused: string | null = null
     try {
       response = await handler(ctx)
     } catch (err) {
+      refused = err instanceof BunQLError ? err.code : null
       response = errorResponse(err, {
         ...(ctx.txid !== undefined ? { txid: ctx.txid } : {}),
         ...(failedIndexOf(err) !== undefined ? { failedIndex: failedIndexOf(err) } : {}),
@@ -105,21 +112,55 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
       if (response.status >= 500 && !deliberate) runtime.report(err)
     }
     const durationUs = Math.round((Bun.nanoseconds() - startedNs) / 1000)
+    const db = ctx.params.db
+    // The role is the live role *for this database* — a node promoted at runtime is a primary for
+    // what it was promoted for and a replica for everything else, and one header cannot be both.
+    // A request that names no database gets the node's own role (C2).
+    const role = db ? runtime.roleFor(db) : runtime.role
+    let response2 = response
     const headers = response.headers
     headers.set(HEADERS.node, runtime.node)
-    headers.set(HEADERS.role, runtime.role)
+    headers.set(HEADERS.role, role)
     // Every response from a replica says where the primary is, not just the refusals: a client
     // that wants `consistency: "primary"` should not have to provoke an error to find out.
-    if (runtime.primaryUrl && !headers.has(HEADERS.primary)) {
-      headers.set(HEADERS.primary, runtime.primaryUrl)
+    const primary = db ? runtime.primaryUrlFor(db) : runtime.primaryUrl
+    if (primary && !headers.has(HEADERS.primary)) headers.set(HEADERS.primary, primary)
+    // Design §5.3's redirect, with the one constraint the standard puts on it: a `307` is answered
+    // only when the new primary is on the **same origin** as the request.
+    //
+    // Following a cross-origin redirect strips `Authorization` (Fetch standard, "HTTP-redirect
+    // fetch"), so a `307` across nodes turns a refusal a client can retry into a `401` it cannot
+    // explain. Same-origin — one load balancer in front of the cluster, which is how §5.3's
+    // redirect is meant to be deployed — keeps the header and the client is genuinely helped.
+    // Otherwise the answer stays `503 NOT_PRIMARY` with `BunQL-Primary`, and the SDK retries
+    // against that node itself, carrying its own token. `docs/c2-promotion.md` argues it out.
+    //
+    // Either shape is only ever produced for a refusal taken *before* the statement ran — every
+    // producer of `NOT_PRIMARY` refuses up front — so replaying it cannot double-apply a write.
+    if (refused === "NOT_PRIMARY" && db) {
+      const http = runtime.primaryHttpFor(db)
+      if (http) {
+        const location = `${http}${ctx.url.pathname}${ctx.url.search}`
+        headers.set("location", location)
+        if (sameOrigin(http, ctx.url)) response2 = new Response(response.body, { status: 307, headers })
+      }
     }
     headers.set(HEADERS.durationUs, String(durationUs))
     if (!headers.has(HEADERS.txid) && ctx.txid !== undefined) {
       headers.set(HEADERS.txid, String(ctx.txid))
     }
     applyCors(runtime.config, request, headers)
-    runtime.metrics.request(response.status, durationUs)
-    return response
+    runtime.metrics.request(response2.status, durationUs)
+    return response2
+  }
+}
+
+/** Whether a redirect to `target` would keep the request's `Authorization` header. */
+function sameOrigin(target: string, from: URL): boolean {
+  try {
+    return new URL(target).origin === from.origin
+  } catch {
+    return false
   }
 }
 
@@ -128,10 +169,14 @@ export interface ReplicationSocketData {
   replication: true
 }
 
-type AppSocketData = SocketData | ReplicationSocketData
+type AppSocketData = SocketData | ReplicationSocketData | RaftSocketData
 
 function isReplication(data: AppSocketData): data is ReplicationSocketData {
   return (data as ReplicationSocketData).replication === true
+}
+
+function isCluster(data: AppSocketData): data is RaftSocketData {
+  return (data as RaftSocketData).cluster === true
 }
 
 export interface App {
@@ -166,6 +211,7 @@ export function createApp(runtime: ServerRuntime): App {
     "/v1/db/:db/import": { POST: on(handlers.importDb), OPTIONS: options },
     "/v1/db/:db/checkpoint": { POST: on(handlers.checkpointDb), OPTIONS: options },
     "/v1/db/:db/replication": { GET: on(handlers.replication), OPTIONS: options },
+    "/v1/db/:db/promote": { POST: on(handlers.promoteDb), OPTIONS: options },
     "/v1/db/:db/backup": { GET: on(handlers.backupStatus), OPTIONS: options },
     "/v1/db/:db/backup/verify": { POST: on(handlers.backupVerify), OPTIONS: options },
     "/v1/db/:db/backup/generations": {
@@ -178,6 +224,7 @@ export function createApp(runtime: ServerRuntime): App {
       OPTIONS: options,
     },
     "/v1/db": { GET: on(handlers.listDbs), POST: on(handlers.createDb), OPTIONS: options },
+    "/v1/cluster": { GET: on(handlers.cluster), OPTIONS: options },
     "/v1/tokens": { POST: on(handlers.mintToken), OPTIONS: options },
     "/v1/tokens/:jti": { DELETE: on(handlers.revokeToken), OPTIONS: options },
     "/healthz": { GET: on(handlers.healthz), OPTIONS: options },
@@ -195,6 +242,8 @@ export function createApp(runtime: ServerRuntime): App {
       // Node-to-node, on its own path and with its own handshake: the cluster secret is proved
       // in-band over the socket (design §8), so nothing here looks at `Authorization`.
       if (url.pathname === "/v1/replication") return upgradeReplication(runtime, request, server)
+      // The control plane's own socket, authenticated the same way with the same secret (C1).
+      if (url.pathname === RAFT_PATH) return upgradeCluster(runtime, request, server)
       if (isHranaUpgrade(request, url)) return hranaUpgrade(runtime, request, server, url)
       if (request.method === "OPTIONS") return preflight(runtime.config, request)
       const headers = new Headers({ "content-type": "application/json; charset=utf-8" })
@@ -214,6 +263,10 @@ export function createApp(runtime: ServerRuntime): App {
       sendPings: true,
       maxPayloadLength: 16 * 1024 * 1024,
       open(ws: Socket) {
+        if (isCluster(ws.data as AppSocketData)) {
+          runtime.cluster?.socket.onOpen(ws as unknown as RaftSocket)
+          return
+        }
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.open(ws as unknown as ReplicationSocket)
           return
@@ -226,6 +279,10 @@ export function createApp(runtime: ServerRuntime): App {
         if (ws.data.principal) greet(ws, runtime.node)
       },
       message(ws: Socket, message: string | Buffer) {
+        if (isCluster(ws.data as AppSocketData)) {
+          runtime.cluster?.socket.onMessage(ws as unknown as RaftSocket, message as Uint8Array)
+          return
+        }
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.message(ws as unknown as ReplicationSocket, message as Uint8Array)
           return
@@ -237,6 +294,7 @@ export function createApp(runtime: ServerRuntime): App {
         void handleMessage(ws, message)
       },
       drain(ws: Socket) {
+        if (isCluster(ws.data as AppSocketData)) return
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.drain(ws as unknown as ReplicationSocket)
           return
@@ -245,6 +303,10 @@ export function createApp(runtime: ServerRuntime): App {
         drain(ws)
       },
       close(ws: Socket) {
+        if (isCluster(ws.data as AppSocketData)) {
+          runtime.cluster?.socket.onClose(ws as unknown as RaftSocket)
+          return
+        }
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.close(ws as unknown as ReplicationSocket)
           return
@@ -285,6 +347,33 @@ function upgradeReplication(
     )
   }
   const ok = (server as UpgradeHost).upgrade(request, { data: { replication: true } })
+  if (ok) return undefined
+  return new Response("expected a WebSocket upgrade", { status: 426 })
+}
+
+/**
+ * The raft socket of `docs/plan-phase2.md` C1, mounted here so the control plane shares this
+ * node's listener rather than binding a second port. The secret is proved in-band, exactly as
+ * `/v1/replication`'s is, so `Authorization` is not consulted here either.
+ */
+function upgradeCluster(
+  runtime: ServerRuntime,
+  request: Request,
+  server: unknown,
+): Response | undefined {
+  const cluster = runtime.cluster
+  if (!cluster) {
+    return errorResponse(
+      new BunQLError(
+        "CLUSTER_DISABLED",
+        "this node has no [cluster] section enabled, so it is not in a raft group",
+        403,
+      ),
+    )
+  }
+  const outcome = cluster.socket.onUpgrade(request)
+  if (outcome instanceof Response) return outcome
+  const ok = (server as UpgradeHost).upgrade(request, { data: outcome.data })
   if (ok) return undefined
   return new Response("expected a WebSocket upgrade", { status: 426 })
 }
@@ -430,8 +519,12 @@ export async function startServer(
     development: false,
   }) as unknown as Bun.Server<SocketData>
   runtime.setPublisher(busPublisher(server))
+  // Design §5.3's `moved`: a promotion or a fencing tells every socket that has named the database
+  // where it went, instead of leaving it writing to a node that is no longer the primary for it.
+  runtime.setMovedHandler(movedPublisher(server as unknown as { publish(topic: string, data: string): unknown }))
   // A replica starts following only once it is listening: its own `/v1/replication` may be the
   // upstream of a third node, and a chain that opens sockets before it can answer them is racy.
+  if (owned) await runtime.startCluster()
   if (owned) runtime.startReplication()
   // Shipping starts with the listener for the same reason replication does: a snapshot taken from
   // a drain can be served over `/v1/db/:db/dump`, and a node that ships before it can answer is
@@ -456,6 +549,7 @@ export async function startServer(
     adminKey: resolved.adminKey,
     async close(): Promise<void> {
       runtime.setPublisher(null)
+      runtime.setMovedHandler(null)
       await server.stop(true)
       // Everything committed before the listener stopped belongs in the bucket, so the shippers
       // are drained before the runtime — and before the registry closes the logs they read from.

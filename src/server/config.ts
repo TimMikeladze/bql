@@ -129,6 +129,41 @@ export interface ReplicationSection {
 }
 
 /**
+ * The built-in Raft control plane (design §5.3, `docs/plan-phase2.md` C1/C2). Off by default:
+ * standalone and the static topology of §5.2 have no Raft in them at all, and a node that does not
+ * enable it pays one null check on the write path.
+ *
+ * The cluster shares `[replication] secret` rather than having a secret of its own — the two
+ * sockets are between the same nodes and a second secret would be a second thing to rotate.
+ */
+export interface ClusterSection {
+  enabled: boolean
+  /** This node's id in the Raft group. Defaults to `[server] node`. */
+  id: string
+  /** `ws://host:port` other nodes reach this one at; also the HTTP base clients are sent to. */
+  advertise: string
+  /** Rack or AZ label. C3's placement reads it; C2 only records it. */
+  zone: string
+  /** `id=ws://host:port`, or a bare `ws://host:port` whose host:port is then the id. */
+  peers: string[]
+  /** Form a new cluster from `peers` instead of waiting to be added to one. */
+  bootstrap: boolean
+  /** Replica factor. C3; recorded here so a config written today does not have to move. */
+  rf: number
+  leaseTtlMs: number
+  leaseRenewMs: number
+  /**
+   * How long before a lease expires its holder stops accepting writes. It is the margin that makes
+   * two primaries impossible, so it is the one key here that must not be tuned down casually —
+   * `docs/c2-promotion.md` sets out what it covers.
+   */
+  leaseGuardMs: number
+  /** Randomised 1x–2x per Raft. */
+  electionTimeoutMs: number
+  heartbeatMs: number
+}
+
+/**
  * Continuous backup to an S3-compatible bucket (design §4.4, `docs/r3-storage.md`). Everything a
  * credential falls back to Bun's own `S3_*` / `AWS_*` resolution when it is left empty, so a node
  * running with an instance role configures nothing but the bucket.
@@ -185,6 +220,7 @@ export interface ServerConfig {
   limits: LimitsSection
   auth: AuthSection
   replication: ReplicationSection
+  cluster: ClusterSection
   s3: S3Section
 }
 
@@ -249,6 +285,20 @@ export const DEFAULT_CONFIG: ServerConfig = {
     forwardTimeoutMs: 10_000,
     maxForwards: 256,
   },
+  cluster: {
+    enabled: false,
+    id: "",
+    advertise: "",
+    zone: "",
+    peers: [],
+    bootstrap: false,
+    rf: 2,
+    leaseTtlMs: 3000,
+    leaseRenewMs: 1000,
+    leaseGuardMs: 500,
+    electionTimeoutMs: 1500,
+    heartbeatMs: 300,
+  },
   s3: {
     enabled: false,
     bucket: "",
@@ -308,6 +358,7 @@ const ENV_ALIASES: Readonly<Record<string, string>> = {
   BUNQL_TOKEN_TTL_MS: "auth.defaultTokenTtlMs",
   // The three an operator types by hand often enough to want a short name.
   BUNQL_REPLICA_OF: "replication.primary",
+  BUNQL_CLUSTER_PEERS: "cluster.peers",
   BUNQL_CLUSTER_SECRET: "replication.secret",
   BUNQL_FOLLOW: "replication.follow",
   // The bucket is typed by hand often enough, and `AWS_*` / `S3_*` are Bun's own fallbacks rather
@@ -417,6 +468,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       ...DEFAULT_CONFIG.replication,
       follow: [...DEFAULT_CONFIG.replication.follow],
     },
+    cluster: { ...DEFAULT_CONFIG.cluster, peers: [...DEFAULT_CONFIG.cluster.peers] },
     s3: { ...DEFAULT_CONFIG.s3 },
   }
 
@@ -430,6 +482,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       limits: mergeSection(config.limits, patch.limits, env),
       auth: mergeSection(config.auth, patch.auth, env),
       replication: mergeSection(config.replication, patch.replication, env),
+      cluster: mergeSection(config.cluster, patch.cluster, env),
       s3: mergeSection(config.s3, patch.s3, env),
     }
   }
@@ -477,6 +530,33 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   }
   if (config.replication.follow.length === 0) config.replication.follow = ["*"]
 
+  // `[cluster] peers` is the whole decision, as `--replica-of` is: a node told who its peers are
+  // is in a cluster. `enabled = false` in the file is still honoured, so a config can keep the
+  // peer list while a node runs standalone.
+  if (config.cluster.peers.length > 0 && clusterEnabledIn(fromFile, options.overrides, env) !== false) {
+    config.cluster.enabled = true
+  }
+  if (!config.cluster.id) config.cluster.id = config.server.node
+  if (config.cluster.enabled && !config.replication.secret) {
+    throw BunQLError.badRequest(
+      "[cluster] enabled needs [replication] secret: the raft socket proves the same cluster " +
+        "secret the replication socket does",
+    )
+  }
+  if (config.cluster.enabled && config.cluster.leaseGuardMs >= config.cluster.leaseTtlMs) {
+    throw BunQLError.badRequest(
+      `[cluster] leaseGuardMs (${config.cluster.leaseGuardMs}) must be below leaseTtlMs ` +
+        `(${config.cluster.leaseTtlMs}): the guard is the part of the lease a holder does not use`,
+    )
+  }
+  if (config.cluster.enabled && config.cluster.leaseRenewMs >= config.cluster.leaseTtlMs - config.cluster.leaseGuardMs) {
+    throw BunQLError.badRequest(
+      `[cluster] leaseRenewMs (${config.cluster.leaseRenewMs}) must leave room inside ` +
+        `leaseTtlMs - leaseGuardMs (${config.cluster.leaseTtlMs - config.cluster.leaseGuardMs}), ` +
+        "or a lease expires before its holder has asked to keep it",
+    )
+  }
+
   // `s3://bucket/prefix` in one variable, because that is how an operator writes a bucket.
   if (config.s3.bucket.startsWith("s3://")) {
     const rest = config.s3.bucket.slice("s3://".length)
@@ -500,6 +580,19 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   // deleted database for ever — the failure this key exists to prevent.
   parseRetentionOrThrow(config.durability.retention, "durability")
   return config
+}
+
+/** True/false when something actually set `[cluster] enabled`, null when nothing did. */
+function clusterEnabledIn(
+  fromFile: ServerConfigInput,
+  overrides: ServerConfigInput | undefined,
+  env: Env,
+): boolean | null {
+  const raw = env.BUNQL_CLUSTER_ENABLED
+  if (raw !== undefined && raw !== "") return raw === "1" || raw.toLowerCase() === "true"
+  if (overrides?.cluster?.enabled !== undefined) return overrides.cluster.enabled
+  if (fromFile.cluster?.enabled !== undefined) return fromFile.cluster.enabled
+  return null
 }
 
 /** True/false when something actually set `[s3] enabled`, null when nothing did. */

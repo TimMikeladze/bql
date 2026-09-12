@@ -21,9 +21,12 @@
 // `close`, so maintenance is never why a process is still alive.
 
 import type { Args } from "../client/protocol.ts"
+import path from "node:path"
+import { ClusterNode, raftUrl } from "../cluster/index.ts"
 import {
   AckTimeout,
   AckTracker,
+  generationId,
   NoReplicas,
   ReplicaClient,
   ReplicaNotice,
@@ -55,6 +58,7 @@ import {
 import type { ServerConfig } from "./config.ts"
 import { BunQLError } from "./errors.ts"
 import { Forwarder, runForward } from "./forward.ts"
+import { FencedNotice, httpBase, type NodeRole, Promoter } from "./promote.ts"
 import { decodeArgs, encodeRows, type EncodedRows } from "./json.ts"
 import { Metrics } from "./metrics.ts"
 
@@ -105,8 +109,18 @@ export class ServerRuntime {
   readonly registry: TenantRegistry
   readonly metrics: Metrics
   readonly node: string
-  /** What this node reports in `BunQL-Role` and answers writes with. */
-  readonly role: "primary" | "replica"
+  /**
+   * What `[replication]` was configured as. It is **not** the live role: a node promoted at
+   * runtime keeps this value and changes `role`, which is what `docs/next.md` said C2 had to fix.
+   */
+  readonly configuredRole: "primary" | "replica"
+  /**
+   * The control plane, or null when `[cluster] enabled` is false. The data path touches it in
+   * exactly one place — `assertWritable` — and never awaits it.
+   */
+  readonly cluster: ClusterNode | null
+  /** Which databases this node is the primary for, and the only thing that changes that. */
+  readonly promoter: Promoter
   /**
    * The primary's `/v1/replication` endpoint, or null when `[replication] secret` is empty —
    * which is what `403 REPLICATION_DISABLED` is answered from.
@@ -136,6 +150,7 @@ export class ServerRuntime {
   /** Transactions waiting for the writer, per database, in arrival order (R5's finding). */
   #txQueue = new Map<string, TxWaiter[]>()
   #publisher: Publisher | null = null
+  #onMoved: ((db: string, primary: string) => void) | null = null
   #onTenantOpen: ((tenant: Tenant) => void) | null = null
   #onError: (err: unknown) => void
   #closed = false
@@ -150,14 +165,14 @@ export class ServerRuntime {
     this.auth = options.auth
     this.metrics = options.metrics ?? new Metrics()
     this.node = options.config.server.node
-    this.role = options.config.replication.role
+    this.configuredRole = options.config.replication.role
     this.#onError =
       options.onError ??
       ((err: unknown) =>
         // A replica reporting that it cannot reach its primary, or that it has let a database go,
         // is operational news, not a fault in this process; printing its stack would bury the
         // faults that do have one. `ReplicaNotice` is the base of every such notice.
-        err instanceof ReplicaNotice
+        err instanceof ReplicaNotice || err instanceof FencedNotice
           ? console.error(`bunql: ${err.message}`)
           : console.error("bunql: server runtime", err))
     this.registry =
@@ -187,6 +202,20 @@ export class ServerRuntime {
           slowReplicaMs: options.config.replication.slowReplicaMs,
           onForward: (request, node) => runForward(this, request, node),
           onDisconnect: (node) => this.rollbackOrigin(node),
+          // C2's fencing signal: a peer subscribed claiming an epoch this node does not hold, so
+          // the control plane granted the database elsewhere after granting it here.
+          onEpochAhead: (event) =>
+            this.promoter.demote(
+              event.db,
+              `${event.node} subscribed at epoch ${event.epoch} while this node holds ` +
+                `${event.held}; this node has been fenced and is now a replica of it`,
+              { node: event.node },
+            ),
+          // A database this node holds as a replica copy — or was promoted for — keeps the
+          // identity it was bootstrapped under rather than one derived from a catalog row this
+          // node wrote itself. Without this, promoting a node re-mints the database's identity and
+          // every other replica trashes its copy and bootstraps again.
+          generationOf: (db) => this.replica?.generationOf(db) ?? null,
           onError: this.#onError,
         })
       : null
@@ -196,7 +225,83 @@ export class ServerRuntime {
       withoutReplicas: options.config.replication.ackWithoutReplicas,
     })
     this.forwarder = new Forwarder(this)
+    this.cluster = buildClusterNode(options.config, this.#onError)
+    this.promoter = new Promoter(this)
+    this.cluster?.onChange(() => this.promoter.onClusterChange())
     this.#startSweep()
+  }
+
+  // ── role (C2) ────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * What this node reports in `BunQL-Role` when the request names no database, and what the
+   * `POST /v1/db` gate reads. Live: a promotion changes it without a restart.
+   */
+  get role(): NodeRole {
+    return this.promoter.nodeRole
+  }
+
+  /** The live role for one database. Every per-database gate reads this rather than `role`. */
+  roleFor(db: string): NodeRole {
+    return this.promoter.roleFor(db)
+  }
+
+  /**
+   * A database's identity as this node should state it: the id its copy was bootstrapped under
+   * when it received one, and only otherwise one derived from its own catalog row.
+   *
+   * The order matters and is the same everywhere it is asked. `generationId` hashes the row's
+   * `created_at`, and a replica's row was created *here* — so a node that has been promoted would
+   * otherwise mint a fresh identity for a database that has not changed, and every other replica
+   * of it would see a generation change, run R7's unfollow, and trash a perfectly good copy.
+   */
+  generationOf(db: string): string | null {
+    const held = this.replica?.generationOf(db)
+    if (held) return held
+    const row = this.registry.list().find((one) => one.name === db)
+    return row ? generationId(row) : null
+  }
+
+  /**
+   * The lease check, on the write path. One `Map.get` and one `performance.now()` on a clustered
+   * node; one null check on every other node.
+   */
+  assertWritable(db: string): void {
+    if (this.cluster === null) return
+    this.promoter.assertWritable(db)
+  }
+
+  /** Starts the control plane. Called by `startServer` beside `startReplication`. */
+  async startCluster(): Promise<void> {
+    if (!this.cluster) return
+    await this.cluster.start()
+    this.promoter.start()
+  }
+
+  /**
+   * Points this node's replication client at `url`, starting one if it had none. This is how a
+   * demoted primary converges on the node that took its database over without an operator.
+   */
+  followPrimary(url: string): void {
+    if (!url) return
+    if (this.replica) {
+      this.replica.retarget(url)
+      return
+    }
+    if (!this.config.replication.secret) return
+    this.config.replication.primary = url
+    this.startReplicationClient()
+  }
+
+  /** Tells every socket subscribed to `db` that it has moved (design §5.3's `moved` frame). */
+  movedFrom(db: string): void {
+    const where = this.promoter.primaryFor(db)
+    this.#onMoved?.(db, where.url ?? where.node ?? "")
+  }
+
+  /** Where `ws.ts` plugs the `moved` fan-out in, so this module never imports the socket layer. */
+  setMovedHandler(handler: ((db: string, primary: string) => void) | null): void {
+    this.#onMoved = handler
   }
 
   /**
@@ -270,6 +375,12 @@ export class ServerRuntime {
    * attached replica.
    */
   #databasesChanged(event: { kind: "create" | "delete"; name: string }): void {
+    // The per-database role cache is derived from the catalog, so it is refreshed wherever the
+    // catalog's database set moves — including a bootstrap, which creates replica-role rows.
+    this.promoter?.refresh()
+    if (event.kind === "create") {
+      void this.promoter?.claim(event.name).catch((err) => this.#onError(err))
+    }
     if (event.kind === "delete") {
       this.acks.forget(event.name)
       // A deleted database keeps whatever is already in the bucket — design §6.5 says the log and
@@ -376,8 +487,15 @@ export class ServerRuntime {
    * constructor so the embedded API can build a runtime without opening a socket.
    */
   startReplication(): void {
-    if (this.replica || this.role !== "replica") return
+    if (this.replica || this.configuredRole !== "replica") return
+    this.startReplicationClient()
+  }
+
+  /** The client itself, separated so `followPrimary` can start one on a node that had none. */
+  startReplicationClient(): void {
+    if (this.replica) return
     const section = this.config.replication
+    if (!section.primary) return
     this.replica = new ReplicaClient({
       registry: this.registry,
       primary: section.primary,
@@ -393,11 +511,24 @@ export class ServerRuntime {
     this.replica.start()
   }
 
-  /** Where a client should send a write this node cannot take. */
+  /**
+   * Where a client should send a write this node cannot take, when the request names no database.
+   * `primaryUrlFor` is the per-database answer and is what every gate that knows a database uses.
+   */
   get primaryUrl(): string | null {
     return this.role === "replica" && this.config.replication.primary
       ? this.config.replication.primary
       : null
+  }
+
+  /** Where a write for one database should go: the control plane's answer, then the config's. */
+  primaryUrlFor(db: string): string | null {
+    return this.promoter.primaryFor(db).url
+  }
+
+  /** An HTTP base the request can be replayed against, when one is knowable. `307` uses it. */
+  primaryHttpFor(db: string): string | null {
+    return this.promoter.primaryFor(db).http
   }
 
   /**
@@ -583,6 +714,7 @@ export class ServerRuntime {
     if (this.#txByDb.has(tenant.name) || tenant.txOpen) {
       throw new BunQLError("TX_BUSY", `${tenant.name} already has an open transaction`, 409)
     }
+    this.assertWritable(tenant.name)
     const baton = randomBaton()
     const session: TxSession = {
       baton,
@@ -700,7 +832,19 @@ export class ServerRuntime {
 
   endTx(session: TxSession, how: "commit" | "rollback"): bigint {
     try {
-      if (how === "commit") return session.tenant.txCommit()
+      if (how === "commit") {
+        // An interactive transaction can be held longer than a lease lives — `txIdleTimeoutMs` is
+        // 5 s and a lease is 3 s — so the lease is checked again here, at the moment the writer
+        // actually commits. A lease that lapsed under an open transaction rolls it back rather
+        // than committing on a node the cluster has already moved on from.
+        try {
+          this.assertWritable(session.db)
+        } catch (err) {
+          session.tenant.txRollback()
+          throw err
+        }
+        return session.tenant.txCommit()
+      }
       session.tenant.txRollback()
       return session.tenant.txid
     } finally {
@@ -791,6 +935,8 @@ export class ServerRuntime {
     void this.storage?.close().catch(() => {})
     for (const name of [...this.#realtime.keys()]) this.closeRealtime(name)
     this.#subscribers.clear()
+    this.promoter.close()
+    void this.cluster?.close().catch(() => {})
     this.replica?.stop()
     this.replica = null
     this.replication?.stop()
@@ -884,6 +1030,51 @@ function buildShipperPool(
     retentionMs: parseRetentionMs(s3.retention),
     onError,
   })
+}
+
+/**
+ * The control plane for a node with `[cluster] enabled`, or null. It is built but not started: a
+ * `ClusterNode` opens its own log and dials its peers, and `startServer` does that beside the
+ * replication client so nothing opens a socket before this node can answer one.
+ */
+function buildClusterNode(config: ServerConfig, onError: (err: unknown) => void): ClusterNode | null {
+  const section = config.cluster
+  if (!section.enabled) return null
+  const peers: Record<string, string> = {}
+  for (const entry of section.peers) {
+    const [id, url] = splitPeer(entry)
+    if (id && url) peers[id] = url
+  }
+  return new ClusterNode({
+    id: section.id || config.server.node,
+    dir: path.join(config.data.dir, "cluster"),
+    advertise: section.advertise,
+    zone: section.zone,
+    peers,
+    bootstrap: section.bootstrap,
+    secret: config.replication.secret,
+    leaseTtlMs: section.leaseTtlMs,
+    leaseRenewMs: section.leaseRenewMs,
+    leaseGuardMs: section.leaseGuardMs,
+    electionTimeoutMs: section.electionTimeoutMs,
+    heartbeatMs: section.heartbeatMs,
+    onError,
+  })
+}
+
+/**
+ * `[cluster] peers` entries are `id=ws://host:port` or a bare `ws://host:port`, whose host:port is
+ * then the id. The explicit form is what a node whose `[cluster] id` is not its host needs.
+ */
+export function splitPeer(entry: string): [string, string] {
+  const at = entry.indexOf("=")
+  if (at > 0) return [entry.slice(0, at).trim(), raftUrl(entry.slice(at + 1).trim())]
+  const url = raftUrl(entry.trim())
+  try {
+    return [new URL(url).host, url]
+  } catch {
+    return ["", ""]
+  }
 }
 
 /** 128 random bits as hex: a baton nobody can guess and nothing else in the process reuses. */

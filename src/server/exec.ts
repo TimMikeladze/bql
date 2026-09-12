@@ -245,6 +245,11 @@ export function executeStatement(
   requireScope(principal, tenant.name, "rw")
   // A durability level this node cannot answer is refused before anything is written, so the
   // common misconfiguration leaves no committed transaction behind to explain (design §5.4).
+  // C2: the lease. One `Map.get` and one `performance.now()` on a clustered node, one null check
+  // everywhere else — and the only thing the write path asks the control plane, ever. A node whose
+  // lease has lapsed stops writing `leaseGuardMs` before the leader could grant it elsewhere,
+  // which is what makes two primaries impossible (`docs/c2-promotion.md`).
+  runtime.assertWritable(tenant.name)
   runtime.assertAckAvailable(tenant.name, options.ack)
   const written = tenant.write(
     (db) => {
@@ -304,6 +309,11 @@ export function executeBatch(
   // pure reads pays a `BEGIN IMMEDIATE` it did not need, which is the price of `atomic` meaning
   // exactly one thing.
   requireScope(principal, tenant.name, "rw")
+  // C2: the lease. One `Map.get` and one `performance.now()` on a clustered node, one null check
+  // everywhere else — and the only thing the write path asks the control plane, ever. A node whose
+  // lease has lapsed stops writing `leaseGuardMs` before the leader could grant it elsewhere,
+  // which is what makes two primaries impossible (`docs/c2-promotion.md`).
+  runtime.assertWritable(tenant.name)
   runtime.assertAckAvailable(tenant.name, options.ack)
   const startedNs = Bun.nanoseconds()
   const written = tenant.write(

@@ -96,11 +96,17 @@ async function start(dir: string, overrides: ServerConfigInput): Promise<Node> {
   }
 }
 
-/** A primary on its own. `secret` defaults to the shared cluster secret; pass "" to disable. */
-export function startPrimary(overrides: ServerConfigInput = {}): Promise<Node> {
-  return start(tempDir("bunql-primary-"), {
+/**
+ * A primary on its own. `secret` defaults to the shared cluster secret; pass "" to disable.
+ * `dir` reuses a data directory, which is how a test restarts a node that has state.
+ */
+export function startPrimary(
+  overrides: ServerConfigInput = {},
+  options: { dir?: string; node?: string } = {},
+): Promise<Node> {
+  return start(options.dir ?? tempDir("bunql-primary-"), {
     ...overrides,
-    server: { node: "primary", ...overrides.server },
+    server: { node: options.node ?? "primary", ...overrides.server },
     replication: { secret: CLUSTER_SECRET, ...overrides.replication },
   })
 }

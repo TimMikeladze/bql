@@ -7,6 +7,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { DEFAULT_CONFIG, loadConfig, resolveAuth } from "../../src/server/config.ts"
 import { verifyToken } from "../../src/server/auth.ts"
+import { splitPeer } from "../../src/server/runtime.ts"
 import { startTestServer, stopAll, tempDataDir } from "./harness.ts"
 
 afterAll(stopAll)
@@ -210,5 +211,88 @@ describe("a server built from that configuration", () => {
     })
     expect(response.status).toBe(200)
     await server.close()
+  })
+})
+
+describe("the [cluster] section (C2)", () => {
+  test("is off unless something turns it on, and peers are the whole decision", () => {
+    expect(loadConfig({ env: {} }).cluster.enabled).toBe(false)
+    const withPeers = loadConfig({
+      env: {},
+      overrides: { cluster: { peers: ["n2=ws://b:4321"] }, replication: { secret: "s" } },
+    })
+    expect(withPeers.cluster.enabled).toBe(true)
+    // …and an explicit `enabled = false` still wins, so a config can keep the peer list while the
+    // node runs standalone.
+    expect(
+      loadConfig({
+        env: {},
+        overrides: { cluster: { enabled: false, peers: ["n2=ws://b:4321"] } },
+      }).cluster.enabled,
+    ).toBe(false)
+  })
+
+  test("the id defaults to [server] node", () => {
+    const config = loadConfig({ env: {}, overrides: { server: { node: "alpha" } } })
+    expect(config.cluster.id).toBe("alpha")
+    expect(
+      loadConfig({ env: {}, overrides: { server: { node: "alpha" }, cluster: { id: "beta" } } })
+        .cluster.id,
+    ).toBe("beta")
+  })
+
+  test("every key has a BUNQL_CLUSTER_* override", () => {
+    const config = loadConfig({
+      env: {
+        BUNQL_CLUSTER_ENABLED: "true",
+        BUNQL_CLUSTER_PEERS: "n2=ws://b:4321,n3=ws://c:4321",
+        BUNQL_CLUSTER_ZONE: "rack-1",
+        BUNQL_CLUSTER_LEASE_TTL_MS: "5000",
+        BUNQL_CLUSTER_LEASE_GUARD_MS: "800",
+        BUNQL_REPLICATION_SECRET: "s",
+      },
+    })
+    expect(config.cluster.enabled).toBe(true)
+    expect(config.cluster.peers).toEqual(["n2=ws://b:4321", "n3=ws://c:4321"])
+    expect(config.cluster.zone).toBe("rack-1")
+    expect(config.cluster.leaseTtlMs).toBe(5000)
+    expect(config.cluster.leaseGuardMs).toBe(800)
+  })
+
+  test("a cluster with no secret is refused: the raft socket proves the same one", () => {
+    expect(() => loadConfig({ env: {}, overrides: { cluster: { enabled: true } } })).toThrow(
+      /needs \[replication\] secret/,
+    )
+  })
+
+  test("a guard that does not fit inside the lease is refused", () => {
+    // The guard is the part of the lease its holder deliberately does not use; a guard at or above
+    // the TTL means the holder never holds it, and one at zero means there is no margin at all.
+    expect(() =>
+      loadConfig({
+        env: {},
+        overrides: { replication: { secret: "s" }, cluster: { enabled: true, leaseGuardMs: 3000 } },
+      }),
+    ).toThrow(/leaseGuardMs/)
+    expect(() =>
+      loadConfig({
+        env: {},
+        overrides: {
+          replication: { secret: "s" },
+          cluster: { enabled: true, leaseTtlMs: 1000, leaseGuardMs: 500, leaseRenewMs: 600 },
+        },
+      }),
+    ).toThrow(/leaseRenewMs/)
+  })
+
+  test("a peer entry is read in either form", () => {
+    expect(splitPeer("n2=ws://b:4321")).toEqual(["n2", "ws://b:4321/v1/cluster/raft"])
+    expect(splitPeer("ws://b:4321")).toEqual(["b:4321", "ws://b:4321/v1/cluster/raft"])
+    // An entry that already names the socket is left alone.
+    expect(splitPeer("n2=ws://b:4321/v1/cluster/raft")).toEqual([
+      "n2",
+      "ws://b:4321/v1/cluster/raft",
+    ])
+    expect(splitPeer("not a url")).toEqual(["", ""])
   })
 })

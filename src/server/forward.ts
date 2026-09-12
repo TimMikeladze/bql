@@ -91,12 +91,17 @@ export class Forwarder {
     this.runtime = runtime
   }
 
+  /**
+   * Whether *any* database on this node forwards. Kept for the callers that ask before they know
+   * which database is involved; `enabledFor` is the per-database answer, and C2 made that
+   * distinction matter — a node promoted for `acme` still forwards writes for `beta`.
+   */
   get enabled(): boolean {
-    return (
-      this.runtime.role === "replica" &&
-      this.runtime.config.replication.forwardWrites &&
-      this.runtime.replica !== null
-    )
+    return this.runtime.config.replication.forwardWrites && this.runtime.replica !== null
+  }
+
+  enabledFor(db: string): boolean {
+    return this.enabled && this.runtime.roleFor(db) === "replica"
   }
 
   /**
@@ -105,7 +110,7 @@ export class Forwarder {
    * read on a replica is served locally and nothing else is guessed at.
    */
   needsPrimary(tenant: Tenant, principal: Principal, sql: string[]): boolean {
-    if (!this.enabled) return false
+    if (!this.enabledFor(tenant.name)) return false
     return this.runtime.withReader(tenant, principal, (db) => {
       for (const one of sql) {
         if (!db.prepare(one).readonly) return true
@@ -269,25 +274,27 @@ export class Forwarder {
 
   async #send(db: string, op: string, payload: ForwardPayload): Promise<unknown> {
     const replica = this.runtime.replica
-    if (!replica) throw BunQLError.notPrimary(this.runtime.primaryUrl ?? undefined)
+    if (!replica) throw BunQLError.notPrimary(this.runtime.primaryUrlFor(db) ?? undefined)
     this.runtime.metrics.forwarded()
     try {
       return await replica.forward({ db, op, body: payload })
     } catch (err) {
-      throw this.#raise(err)
+      throw this.#raise(err, db)
     }
   }
 
   /** The primary's failure, re-raised here as if this node had produced it. */
-  #raise(err: unknown): unknown {
+  #raise(err: unknown, db: string): unknown {
     if (!(err instanceof ForwardError)) return err
     const details = err.details ?? {}
-    if (err.code === "NOT_PRIMARY") {
-      return BunQLError.notPrimary(this.runtime.primaryUrl ?? undefined)
-    }
+    const primary = this.runtime.primaryUrlFor(db)
+    // A `NOT_PRIMARY` from the primary is itself a pre-execution refusal — it was fenced, or it
+    // never owned this database — so it stays a `NOT_PRIMARY` and stays safe to retry. A
+    // `FORWARD_TIMEOUT` never becomes one, because that one means "may or may not have committed".
+    if (err.code === "NOT_PRIMARY") return BunQLError.notPrimary(primary ?? undefined)
     const mapped = new BunQLError(err.code, err.message, err.status, {
       ...(details.txid !== undefined ? { txid: details.txid } : {}),
-      ...(this.runtime.primaryUrl ? { primary: this.runtime.primaryUrl } : {}),
+      ...(primary ? { primary } : {}),
     })
     if (details.failedIndex !== undefined) markFailedIndex(mapped, details.failedIndex)
     return mapped

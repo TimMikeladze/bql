@@ -10,6 +10,12 @@
 // primary only. `requirePrimary` is that gate, and it sits after the admin check so a request
 // without the key learns nothing about the node's role. Reads, token minting and the node-local
 // maintenance routes (`snapshot`, `checkpoint`) deliberately stay open on a replica.
+//
+// Third invariant (C2): the gate reads the **live** role for the database in the request, not a
+// field copied out of the config at startup. A node promoted at runtime serves its own lifecycle
+// routes; a node fenced at runtime stops serving them, in the same request. `runtime.roleFor(db)`
+// is the only answer, and `POST /v1/db` — which names no database — is the one case that asks the
+// node-level `runtime.role` instead.
 
 import path from "node:path"
 import {
@@ -131,6 +137,26 @@ function requirePrimary(ctx: RouteContext): void {
   throw BunQLError.notPrimary(ctx.runtime.primaryUrl ?? undefined)
 }
 
+/** The same gate for a route that names a database, against that database's live role. */
+function requirePrimaryFor(ctx: RouteContext, db: string): void {
+  if (ctx.runtime.roleFor(db) !== "replica") return
+  throw BunQLError.notPrimary(ctx.runtime.primaryUrlFor(db) ?? undefined)
+}
+
+/**
+ * Where a write this node will not take should go, for whichever database the request names. A
+ * request that names none — `POST /v1/db` — gets the node's own answer.
+ */
+function primaryOf(ctx: RouteContext): string | null {
+  let db: string
+  try {
+    db = dbName(ctx)
+  } catch {
+    return ctx.runtime.primaryUrl
+  }
+  return ctx.runtime.primaryUrlFor(db)
+}
+
 /** Database name from the path, or from the first `Host` label when `tenantFromHost` is on. */
 export function dbName(ctx: RouteContext): string {
   const fromPath = ctx.params.db
@@ -170,7 +196,7 @@ export const query: Handler = async (ctx) => {
   try {
     // On a replica, a statement SQLite calls a write goes to the primary and comes back with its
     // result; a read never leaves this node (R2, design §5.2).
-    if (runtime.forwarder.enabled && runtime.forwarder.needsPrimary(tenant, principal, [body.sql])) {
+    if (runtime.forwarder.needsPrimary(tenant, principal, [body.sql])) {
       const forwarded = await runtime.forwarder.query(tenant, principal, body, options)
       ctx.txid = forwarded.txid
       return json(forwarded)
@@ -180,7 +206,7 @@ export const query: Handler = async (ctx) => {
     if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     return json(result)
   } catch (err) {
-    throw mapTenantError(err, runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrlFor(tenant.name))
   }
 }
 
@@ -191,7 +217,7 @@ export const batch: Handler = async (ctx) => {
   await awaitTxid(tenant, options)
   const runtime = ctx.runtime
   try {
-    if (runtime.forwarder.enabled && batchNeedsPrimary(runtime, tenant, principal, body)) {
+    if (runtime.forwarder.enabledFor(tenant.name) && batchNeedsPrimary(runtime, tenant, principal, body)) {
       const forwarded = await runtime.forwarder.batch(tenant, principal, body, options)
       ctx.txid = forwarded.txid
       return json(forwarded)
@@ -201,7 +227,7 @@ export const batch: Handler = async (ctx) => {
     await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     return json(result)
   } catch (err) {
-    throw mapTenantError(err, runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrlFor(tenant.name))
   }
 }
 
@@ -232,7 +258,7 @@ export const txBegin: Handler = async (ctx) => {
   try {
     // An interactive transaction is a write that arrives in parts, so on a replica the whole
     // baton lifecycle lives on the primary and this node only holds the mapping.
-    if (ctx.runtime.forwarder.enabled) {
+    if (ctx.runtime.forwarder.enabledFor(tenant.name)) {
       const remote = await ctx.runtime.forwarder.txBegin(tenant, principal, body, null)
       return json(remote)
     }
@@ -242,7 +268,7 @@ export const txBegin: Handler = async (ctx) => {
     })
     return json({ tx: session.baton, expiresInMs: ctx.runtime.config.limits.txIdleTimeoutMs })
   } catch (err) {
-    const mapped = mapTenantError(err, ctx.runtime.primaryUrl)
+    const mapped = mapTenantError(err, ctx.runtime.primaryUrlFor(tenant.name))
     if (mapped instanceof BunQLError && mapped.code === "TX_BUSY") {
       return json(
         {
@@ -288,7 +314,7 @@ export const txQuery: Handler = async (ctx) => {
     ctx.txid = result.txid
     return json(result)
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -312,7 +338,7 @@ function endTx(how: "commit" | "rollback"): Handler {
       }
       return json({ txid: Number(txid) })
     } catch (err) {
-      throw mapTenantError(err, ctx.runtime.primaryUrl)
+      throw mapTenantError(err, primaryOf(ctx))
     }
   }
 }
@@ -623,10 +649,15 @@ export const createDb: Handler = async (ctx) => {
           }
         : {}),
     })
+    // In a cluster the database is not writable until this node holds its lease, and the claim is
+    // what makes the cluster *know* the database at all — so a create that returned before the
+    // grant committed would be followed by a `503 NOT_PRIMARY` on the caller's very next
+    // statement. Bounded by the control plane's own propose timeout.
+    await ctx.runtime.promoter.ensureLease(tenant.name)
     ctx.txid = Number(tenant.txid)
     return json(statsOf(ctx.runtime, tenant), 201)
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -687,15 +718,15 @@ export const statDb: Handler = async (ctx) => {
 
 export const deleteDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
-  requirePrimary(ctx)
   const name = dbName(ctx)
+  requirePrimaryFor(ctx, name)
   if (!ctx.runtime.registry.has(name)) throw BunQLError.dbNotFound(name)
   ctx.runtime.evict(name)
   try {
     const trash = ctx.runtime.registry.delete(name)
     return json({ name, deleted: true, trash })
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -713,7 +744,7 @@ export const snapshotDb: Handler = async (ctx) => {
       createdAtMs: ref.createdAtMs,
     })
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -736,8 +767,8 @@ interface RestoreBody {
  */
 export const restoreDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
-  requirePrimary(ctx)
   const name = dbName(ctx)
+  requirePrimaryFor(ctx, name)
   const body = await readJson<RestoreBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   if (body.from === "s3") return await restoreFromS3(ctx, name, body)
 
@@ -748,10 +779,11 @@ export const restoreDb: Handler = async (ctx) => {
   assertValidName(into)
   try {
     const created = await ctx.runtime.registry.create(into, { from: { db: name, at } })
+    await ctx.runtime.promoter.ensureLease(created.name)
     ctx.txid = Number(created.txid)
     return json({ name: into, txid: Number(created.txid), from: name, at: Number(at) }, 201)
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -972,15 +1004,15 @@ export const dumpDb: Handler = async (ctx) => {
       },
     })
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
 /** Takes a raw SQLite file as the body and files it as a new database (design §6.5). */
 export const importDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
-  requirePrimary(ctx)
   const name = dbName(ctx)
+  requirePrimaryFor(ctx, name)
   assertValidName(name)
   const runtime = ctx.runtime
   if (runtime.registry.has(name)) {
@@ -1000,10 +1032,11 @@ export const importDb: Handler = async (ctx) => {
   }
   try {
     const tenant = await runtime.registry.importDatabase(name, bytes)
+    await runtime.promoter.ensureLease(tenant.name)
     ctx.txid = Number(tenant.txid)
     return json(statsOf(runtime, tenant), 201)
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -1027,7 +1060,7 @@ export const checkpointDb: Handler = async (ctx) => {
     ctx.txid = Number(tenant.txid)
     return json({ mode, ...result, walBytes: tenant.walBytes, txid: Number(tenant.txid) })
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, primaryOf(ctx))
   }
 }
 
@@ -1145,6 +1178,70 @@ export const revokeToken: Handler = async (ctx) => {
   if (!jti) throw BunQLError.badRequest("no token id in the path")
   ctx.runtime.registry.catalog.revokeToken(jti)
   return json({ jti, revoked: true })
+}
+
+// ── promotion and the control plane (C2, design §5.3) ──────────────────────────────────────────
+
+/** The HTTP status each refusal deserves. A refusal is never a 500: it is a considered answer. */
+const PROMOTION_STATUS: Readonly<Record<string, number>> = {
+  NO_COPY: 404,
+  GENERATION_MISMATCH: 409,
+  STREAM_LIVE: 409,
+  ALREADY_PRIMARY: 409,
+  BEHIND: 409,
+  LEASE_HELD: 503,
+  NO_LEADER: 503,
+  NOT_COMMITTED: 503,
+}
+
+/**
+ * Makes this node the primary for one database (design §5.3, `docs/c2-promotion.md`).
+ *
+ * Admin only, and a refusal changes nothing: the decision is taken by the control plane — on the
+ * Raft leader, against the leader's own clock — before anything local is touched. `force` overrides
+ * exactly three refusals and is how an operator says "the old primary is gone, I have checked".
+ */
+export const promoteDb: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const name = dbName(ctx)
+  const body = await readJson<{ force?: boolean }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+  const outcome = await ctx.runtime.promoter.promote(name, { force: body.force === true })
+  if (!outcome.ok) {
+    throw new BunQLError(outcome.code, outcome.why, PROMOTION_STATUS[outcome.code] ?? 409, {
+      ...(ctx.runtime.primaryUrlFor(name) ? { primary: ctx.runtime.primaryUrlFor(name) as string } : {}),
+    })
+  }
+  const tenant = ctx.runtime.tenant(name)
+  ctx.txid = Number(tenant.txid)
+  return json({
+    db: name,
+    promoted: true,
+    role: ctx.runtime.roleFor(name),
+    epoch: tenant.epoch,
+    txid: Number(tenant.txid),
+    why: outcome.why,
+  })
+}
+
+/** The control plane's observable surface (`docs/plan-phase2.md` C1). */
+export const cluster: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const node = ctx.runtime.cluster
+  if (!node) {
+    throw new BunQLError(
+      "CLUSTER_DISABLED",
+      "this node has no [cluster] section enabled, so it is not in a raft group",
+      503,
+    )
+  }
+  const view = node.observe()
+  return json({
+    ...view,
+    // The lease is the one thing in the view a reader cannot interpret without knowing whose clock
+    // `until` is in, so the node's own wall clock goes beside it.
+    nowMs: Date.now(),
+    dbs: view.dbs.map((db) => ({ ...db, leaseHeldHere: node.holdsLease(db.db) })),
+  })
 }
 
 // ── operations ─────────────────────────────────────────────────────────────────────────────────
