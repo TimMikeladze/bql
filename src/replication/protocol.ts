@@ -9,6 +9,14 @@
 //
 // Second invariant: this module does no I/O and holds no sockets. Everything here is a pure
 // function of bytes, which is what makes the codec testable without a server on either end.
+//
+// One note on `generationId` at the foot of the file: it joins its three inputs with NUL, and NUL
+// specifically because `assertValidName` cannot admit one. A separator a name *could* contain
+// would let two different databases hash to the same id — join with "-" and `("a", "b-1", 4096)`
+// collides with `("a-b", "1", 4096)` — so the separator has to be a byte the inputs cannot carry,
+// which is exactly what NUL is here. Write it as the escape `"\0"` and never as the byte: the
+// repo's CI scans every source file for a raw NUL, and one here would fail that scan while still
+// diffing as ordinary text.
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 
