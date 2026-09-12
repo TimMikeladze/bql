@@ -1,0 +1,101 @@
+// The public surface of WAL shipping: read committed transactions off a primary's WAL, turn them
+// into records, keep them in a segment log, and apply them to a replica. Design §4.3–§4.5.
+
+export {
+  type MetaFsyncPolicy,
+  type ReplicaPosition,
+  WalApplier,
+  type WalApplierOptions,
+} from "./applier.ts"
+export {
+  type Checksum,
+  checkFrame,
+  checksum,
+  databasePageCount,
+  databasePageSize,
+  encodeFrame,
+  encodeWalHeader,
+  type FrameCheck,
+  type FrameHeader,
+  frameChecksum,
+  headerChecksum,
+  MAX_PAGE_SIZE,
+  MIN_PAGE_SIZE,
+  parseFrameHeader,
+  parseWalHeader,
+  randomSalt,
+  readWalHeader,
+  SHM_HEADER_SIZE,
+  WAL_FRAME_HEADER_SIZE,
+  WAL_HEADER_SIZE,
+  WAL_MAGIC_BE,
+  WAL_MAGIC_LE,
+  WAL_VERSION,
+  type WalHeader,
+  walFrameCapacity,
+  walFrameOffset,
+  walFrameSize,
+  walHeaderChecksumValid,
+  ZERO_CHECKSUM,
+} from "./codec.ts"
+export {
+  ChecksumMismatch,
+  EpochRegression,
+  LogGap,
+  PositionMismatch,
+  WalError,
+  WalFormatError,
+} from "./errors.ts"
+export {
+  DEFAULT_SEGMENT_BYTES,
+  type FsyncPolicy,
+  type RetentionPolicy,
+  type RetentionResult,
+  TxnLog,
+  type TxnLogOptions,
+} from "./log.ts"
+export {
+  type RecorderPosition,
+  TxnRecorder,
+  type TxnRecorderOptions,
+} from "./primary.ts"
+export {
+  computeFull,
+  decode,
+  decodeHeader,
+  type DecodedHeader,
+  type DecodedRecord,
+  encode,
+  FLAG_SNAPSHOT_BOUNDARY,
+  FLAG_ZSTD,
+  foldTransaction,
+  type FullChecksum,
+  LivePageSource,
+  type PageSource,
+  pageHash,
+  RECORD_HEADER_SIZE,
+  RECORD_VERSION,
+  RollingChecksum,
+  type TransactionFold,
+  type TxnRecord,
+  type TxnRecordHeader,
+  type TxnRecordInput,
+} from "./record.ts"
+export {
+  listSnapshots,
+  removeSnapshot,
+  restore,
+  type RestoreOptions,
+  type RestoreResult,
+  snapshot,
+  type SnapshotOptions,
+  type SnapshotRef,
+  type SnapshotTarget,
+} from "./snapshot.ts"
+export {
+  type RestoreOutcome,
+  scanWalPages,
+  type TxnFrames,
+  WalTailer,
+  type WalPosition,
+} from "./tailer.ts"

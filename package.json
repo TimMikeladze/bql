@@ -5,13 +5,15 @@
   "private": true,
   "description": "SQLite as a multi-tenant database server for Bun, with WAL shipping and hook-driven realtime.",
   "exports": {
-    "./sqlite": "./src/sqlite/index.ts"
+    "./sqlite": "./src/sqlite/index.ts",
+    "./wal": "./src/wal/index.ts"
   },
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "bench": "bun run bench/driver.ts",
-    "dev": "bun run src/cli.ts serve --dir ./data"
+    "dev": "bun run src/cli.ts serve --dir ./data",
+    "bench:wal": "bun run bench/wal.ts"
   },
   "engines": {
     "bun": ">=1.4.0"
