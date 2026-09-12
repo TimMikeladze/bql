@@ -1333,6 +1333,12 @@ the canonical one wins when both are set.
 | `[data] readers` | `2` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |
 | `[data] pageSize` | `4096` | `BUNQL_DATA_PAGE_SIZE` | `BUNQL_PAGE_SIZE` |
 | `[data] quotaBytes` | `0` (unlimited) | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
+| `[sqlite] writerCacheBytes` | `8388608` | `BUNQL_SQLITE_WRITER_CACHE_BYTES` | — |
+| `[sqlite] readerCacheBytes` | `2097152` | `BUNQL_SQLITE_READER_CACHE_BYTES` | — |
+| `[sqlite] readerMmapBytes` | `0` (off) | `BUNQL_SQLITE_READER_MMAP_BYTES` | — |
+| `[sqlite] foreignKeys` | `false` | `BUNQL_SQLITE_FOREIGN_KEYS` | — |
+| `[sqlite] trustedSchema` | `true` | `BUNQL_SQLITE_TRUSTED_SCHEMA` | — |
+| `[sqlite] cellSizeCheck` | `false` | `BUNQL_SQLITE_CELL_SIZE_CHECK` | — |
 | `[durability] defaultAck` | `"local"` (also `fsync`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
 | `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
 | `[durability] retention` | `"7d"` (`"0"` keeps everything) | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
@@ -1352,6 +1358,7 @@ the canonical one wins when both are set.
 | `[limits] txWaitMs` | `5000` | `BUNQL_LIMITS_TX_WAIT_MS` | `BUNQL_TX_WAIT_MS` |
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
+| `[auth] verifyCacheSize` | `1024` (`0` disables) | `BUNQL_AUTH_VERIFY_CACHE_SIZE` | — |
 | `[auth] adminKey` | generated on first start | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
 | `[auth] jwtKey` | generated on first start | `BUNQL_AUTH_JWT_KEY` | `BUNQL_JWT_ED25519` |
 | `[auth] jwtPublicKeys` | `[]` | `BUNQL_AUTH_JWT_PUBLIC_KEYS` (comma-separated) | — |

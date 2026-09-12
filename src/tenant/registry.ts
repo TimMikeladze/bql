@@ -20,6 +20,7 @@ import { Catalog, positionOf, type TenantRole, type TenantRow } from "./catalog.
 import {
   type AckLevel,
   assertValidName,
+  type SqlitePragmas,
   Tenant,
   tenantDir,
   TenantError,
@@ -48,6 +49,8 @@ export interface RegistryOptions {
   waitMs?: number
   segmentBytes?: number
   logFsync?: "never" | "each" | "interval"
+  /** Per-connection pragmas for every tenant this registry opens (`docs/p1-pragmas.md`). */
+  sqlite?: SqlitePragmas
   /** How often idle tenants are checked for a TRUNCATE checkpoint. Default 250 ms. */
   sweepIntervalMs?: number
   /** Where the fd-budget warning goes. Defaults to `console.warn`. */
@@ -507,6 +510,7 @@ export class TenantRegistry {
         ? { segmentBytes: this.#options.segmentBytes }
         : {}),
       ...(this.#options.logFsync !== undefined ? { logFsync: this.#options.logFsync } : {}),
+      ...(this.#options.sqlite !== undefined ? { sqlite: this.#options.sqlite } : {}),
       ...(this.#options.onError !== undefined ? { onError: this.#options.onError } : {}),
       ...(this.#options.onConnection !== undefined
         ? { onConnection: this.#options.onConnection }

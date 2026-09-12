@@ -258,6 +258,7 @@ async function deriveKid(rawPublicKey: Uint8Array): Promise<string> {
 export class KeyRing {
   #keys = new Map<string, AuthKeys>()
   #signingKid: string | null = null
+  #version = 0
 
   constructor(keys: readonly AuthKeys[] = []) {
     for (const key of keys) this.add(key)
@@ -267,7 +268,16 @@ export class KeyRing {
   add(key: AuthKeys): this {
     this.#keys.set(key.kid, key)
     if (key.canSign && this.#signingKid === null) this.#signingKid = key.kid
+    this.#version += 1
     return this
+  }
+
+  /**
+   * Bumped by every change to the ring. `SignatureCache` records it beside each entry, so a key
+   * added or rotated out invalidates every signature that ring had vouched for.
+   */
+  get version(): number {
+    return this.#version
   }
 
   get(kid: string): AuthKeys | undefined {
@@ -293,6 +303,7 @@ export class KeyRing {
     const key = this.#keys.get(kid)
     if (!key?.canSign) throw BunQLError.badRequest(`no signing key with kid ${kid}`)
     this.#signingKid = kid
+    this.#version += 1
     return this
   }
 
@@ -387,6 +398,68 @@ export interface VerifyOptions {
   /** Slack on `exp` and `nbf`, in seconds. Default 30. */
   clockToleranceSec?: number
   revocations?: RevocationList
+  /**
+   * Skips the **signature check** for a token whose signature this ring has already checked, and
+   * nothing else: expiry, not-before and revocation are re-evaluated on a hit exactly as on a
+   * miss, because those are the inputs that change between two requests carrying one token.
+   */
+  cache?: SignatureCache
+}
+
+/**
+ * Verified signatures, by token. A signature is a pure function of the token and the key ring, so
+ * caching it removes arithmetic and no decision: `verifyToken` still re-checks `exp`, `nbf` and
+ * the revocation list on every hit, and an entry is bound to the ring version that vouched for it,
+ * so rotating a key out invalidates every signature it had signed.
+ *
+ * An EdDSA verification measures 28.3 µs, which is most of an HTTP request that does a point read
+ * (`docs/performance.md` §2). Bounded, because the keys are attacker-supplied: past `max` the
+ * least recently used entry goes.
+ */
+export class SignatureCache {
+  /** Insertion order is the LRU order; a hit re-inserts. */
+  #entries = new Map<string, { claims: TokenClaims; ringVersion: number }>()
+  readonly max: number
+
+  constructor(max = 1024) {
+    this.max = Math.max(0, Math.floor(max))
+  }
+
+  get size(): number {
+    return this.#entries.size
+  }
+
+  get(token: string, ringVersion: number): TokenClaims | undefined {
+    const hit = this.#entries.get(token)
+    if (!hit) return undefined
+    if (hit.ringVersion !== ringVersion) {
+      this.#entries.delete(token)
+      return undefined
+    }
+    this.#entries.delete(token)
+    this.#entries.set(token, hit)
+    return hit.claims
+  }
+
+  set(token: string, claims: TokenClaims, ringVersion: number): void {
+    if (this.max === 0) return
+    this.#entries.delete(token)
+    this.#entries.set(token, { claims, ringVersion })
+    while (this.#entries.size > this.max) {
+      const oldest = this.#entries.keys().next().value
+      if (oldest === undefined) break
+      this.#entries.delete(oldest)
+    }
+  }
+
+  /** Drops one token, which is what a revocation does. */
+  delete(token: string): void {
+    this.#entries.delete(token)
+  }
+
+  clear(): void {
+    this.#entries.clear()
+  }
 }
 
 /**
@@ -398,6 +471,9 @@ export async function verifyToken(
   token: string,
   options: VerifyOptions = {},
 ): Promise<TokenClaims> {
+  const cached = options.cache?.get(token, ring.version)
+  if (cached) return checkClaims(cached, token, options)
+
   const parts = token.split(".")
   if (parts.length !== 3) throw BunQLError.unauthenticated("token is not a JWT")
   const [headerText, claimsText, signatureText] = parts as [string, string, string]
@@ -432,15 +508,31 @@ export async function verifyToken(
     throw BunQLError.unauthenticated("token header and claims disagree about the key")
   }
 
+  options.cache?.set(token, claims, ring.version)
+  return checkClaims(claims, token, options)
+}
+
+/**
+ * Everything about a token that is not its signature. Called on a cache hit and on a miss, so the
+ * two answer identically — a cached token that has since expired or been revoked is refused, and
+ * evicted on the way out.
+ */
+async function checkClaims(
+  claims: TokenClaims,
+  token: string,
+  options: VerifyOptions,
+): Promise<TokenClaims> {
   const nowSec = Math.floor((options.now ?? Date.now()) / 1000)
   const slack = options.clockToleranceSec ?? 30
   if (typeof claims.exp === "number" && claims.exp + slack < nowSec) {
+    options.cache?.delete(token)
     throw BunQLError.unauthenticated("token has expired")
   }
   if (typeof claims.nbf === "number" && claims.nbf - slack > nowSec) {
     throw BunQLError.unauthenticated("token is not valid yet")
   }
   if (options.revocations && (await options.revocations.isRevoked(claims.jti))) {
+    options.cache?.delete(token)
     throw BunQLError.unauthenticated("token has been revoked")
   }
   return claims
@@ -534,6 +626,12 @@ export interface AuthenticatorOptions {
   adminKey?: string | null
   revocations?: RevocationList
   clockToleranceSec?: number
+  /**
+   * Verified signatures held, so a client that sends one token per request pays for its EdDSA
+   * verification once rather than 28 µs every time. `0` turns the cache off. Expiry and revocation
+   * are re-checked on every request either way — see `SignatureCache`.
+   */
+  verifyCacheSize?: number
   /** Clock override, milliseconds since the epoch. */
   now?: () => number
 }
@@ -541,6 +639,8 @@ export interface AuthenticatorOptions {
 export class Authenticator {
   readonly keys: KeyRing
   readonly revocations: RevocationList | undefined
+  /** Verified signatures for this ring. Null when the node turned the cache off. */
+  readonly signatures: SignatureCache | null
   #adminKey: Uint8Array | null
   #clockToleranceSec: number
   #now: () => number
@@ -553,6 +653,8 @@ export class Authenticator {
         : new KeyRing(keys === undefined ? [] : keys instanceof AuthKeys ? [keys] : [...keys])
     this.#adminKey = options.adminKey ? encoder.encode(options.adminKey) : null
     this.revocations = options.revocations
+    const cacheSize = options.verifyCacheSize ?? 1024
+    this.signatures = cacheSize > 0 ? new SignatureCache(cacheSize) : null
     this.#clockToleranceSec = options.clockToleranceSec ?? 30
     this.#now = options.now ?? Date.now
   }
@@ -579,6 +681,7 @@ export class Authenticator {
       now: this.#now(),
       clockToleranceSec: this.#clockToleranceSec,
       revocations: this.revocations,
+      ...(this.signatures ? { cache: this.signatures } : {}),
     })
     return tokenPrincipal(claims)
   }

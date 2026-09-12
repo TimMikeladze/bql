@@ -463,6 +463,7 @@ export async function createRuntime(
     adminKey: resolved.adminKey,
     revocations,
     clockToleranceSec: config.auth.clockToleranceSec,
+    verifyCacheSize: config.auth.verifyCacheSize,
   })
   const runtime = new ServerRuntime({
     config,

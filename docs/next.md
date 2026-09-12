@@ -138,8 +138,11 @@ Carried forward from phase 0, still true:
 
 What the surfaces work (H1-H5) added to the list:
 
-- **`PRAGMA foreign_keys` is never turned on**, so a foreign key declared in a schema is not
-  enforced on any connection BunQL opens. A generated insert can reference a row that does not
+- ~~**`PRAGMA foreign_keys` is never turned on**~~ **Now a setting (`[sqlite] foreignKeys`,
+  `docs/p1-pragmas.md`), still off by default.** A foreign key declared in a schema is enforced on
+  no connection until a node turns it on, because turning it on changes the meaning of existing
+  schemas. It belongs per database rather than per node, which needs a catalog column and a
+  lifecycle route; that is the remaining work. The original finding: A generated insert can reference a row that does not
   exist, and so can a hand-written one through `/v1/db/{db}/query`. Found by H4 while generating
   the data API, which declares `SQLITE_CONSTRAINT_FOREIGNKEY` on its write operations and records
   the current behaviour in a test rather than asserting the constraint fires. SQLite defaults the

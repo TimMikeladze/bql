@@ -39,6 +39,44 @@ export interface DataSection {
   quotaBytes: number
 }
 
+/**
+ * SQLite settings BunQL states rather than inherits (`docs/p1-pragmas.md`). Everything here is a
+ * pragma applied per connection, so the values a connection carries do not depend on which
+ * libsqlite3 was found — Apple's defaults `cache_size` to pages where upstream defaults it to KiB,
+ * which is four times the cache and a different moment for dirty pages to reach the `-wal`.
+ *
+ * Only `writerCacheBytes` moves a default, and it moves a performance one: a 20 000-row
+ * transaction goes from 41 ms to 23 ms and a single-row write does not change. Every setting that
+ * changes what a statement *means* — `foreignKeys`, `trustedSchema` — defaults to today's
+ * behaviour, per the rule in `docs/c6-packaging.md`.
+ */
+export interface SqliteSection {
+  /** `PRAGMA cache_size` on the writer, in bytes. Allocated lazily, so an idle tenant pays none. */
+  writerCacheBytes: number
+  /** The same on each pooled reader. Reads barely move past 2 MiB; `readerMmapBytes` is the lever. */
+  readerCacheBytes: number
+  /**
+   * `PRAGMA mmap_size` on readers, in bytes. `0` is off. A cold point read is 5.47 µs without it
+   * and 3.30 µs with it — and a read error on a mapped page is a **SIGBUS that kills the process**
+   * rather than an `SQLITE_IOERR` a request can answer. Reliable storage only.
+   */
+  readerMmapBytes: number
+  /**
+   * `PRAGMA foreign_keys`. Off, as SQLite has it: turning it on changes the meaning of existing
+   * schemas, since a write that succeeds today can start failing `SQLITE_CONSTRAINT_FOREIGNKEY`.
+   * A foreign key declared by a tenant is enforced by nothing until this is on.
+   */
+  foreignKeys: boolean
+  /**
+   * `PRAGMA trusted_schema`. SQLite defaults it on; its own hardening advice is off, which stops
+   * a schema from reaching functions flagged unsafe. Relevant because `POST /v1/db/{db}/import`
+   * opens a database file this server did not write.
+   */
+  trustedSchema: boolean
+  /** `PRAGMA cell_size_check`. Catches a corrupt page at read time, for a cost on every write. */
+  cellSizeCheck: boolean
+}
+
 export interface DurabilitySection {
   defaultAck: DefaultAck
   checkpointWalBytes: number
@@ -210,11 +248,18 @@ export interface AuthSection {
   clockToleranceSec: number
   /** Default lifetime of a minted token when the request does not say, in ms. */
   defaultTokenTtlMs: number
+  /**
+   * Verified token signatures held in memory, so a client sending one token per request pays its
+   * EdDSA verification once instead of 28 µs on every request (`docs/p1-pragmas.md`). Expiry and
+   * revocation are re-checked per request regardless; `0` turns the cache off.
+   */
+  verifyCacheSize: number
 }
 
 export interface ServerConfig {
   server: ServerSection
   data: DataSection
+  sqlite: SqliteSection
   durability: DurabilitySection
   realtime: RealtimeSection
   limits: LimitsSection
@@ -238,6 +283,14 @@ export const DEFAULT_CONFIG: ServerConfig = {
     cors: true,
   },
   data: { dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },
+  sqlite: {
+    writerCacheBytes: 8_388_608,
+    readerCacheBytes: 2_097_152,
+    readerMmapBytes: 0,
+    foreignKeys: false,
+    trustedSchema: true,
+    cellSizeCheck: false,
+  },
   durability: {
     defaultAck: "local",
     checkpointWalBytes: 4_000_000,
@@ -270,6 +323,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     keysFile: null,
     clockToleranceSec: 30,
     defaultTokenTtlMs: 30 * 24 * 60 * 60 * 1000,
+    verifyCacheSize: 1024,
   },
   replication: {
     role: "primary",
@@ -460,6 +514,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   let config: ServerConfig = {
     server: { ...DEFAULT_CONFIG.server },
     data: { ...DEFAULT_CONFIG.data },
+    sqlite: { ...DEFAULT_CONFIG.sqlite },
     durability: { ...DEFAULT_CONFIG.durability },
     realtime: { ...DEFAULT_CONFIG.realtime },
     limits: { ...DEFAULT_CONFIG.limits },
@@ -477,6 +532,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     config = {
       server: mergeSection(config.server, patch.server, env),
       data: mergeSection(config.data, patch.data, env),
+      sqlite: mergeSection(config.sqlite, patch.sqlite, env),
       durability: mergeSection(config.durability, patch.durability, env),
       realtime: mergeSection(config.realtime, patch.realtime, env),
       limits: mergeSection(config.limits, patch.limits, env),

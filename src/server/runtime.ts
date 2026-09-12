@@ -183,6 +183,7 @@ export class ServerRuntime {
         readers: options.config.data.readers,
         pageSize: options.config.data.pageSize,
         quotaBytes: options.config.data.quotaBytes,
+        sqlite: options.config.sqlite,
         checkpointWalBytes: options.config.durability.checkpointWalBytes,
         defaultAck: options.config.durability.defaultAck,
         segmentBytes: options.config.durability.segmentBytes,

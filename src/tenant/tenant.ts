@@ -135,6 +135,13 @@ export interface TenantOptions {
   logFsync?: "never" | "each" | "interval"
   /** `sqlite3_limit` overrides; the defaults below are applied first. */
   limits?: Partial<Record<LimitName, number>>
+  /**
+   * Pragmas BunQL states rather than inherits (`docs/p1-pragmas.md`). Left undefined, a connection
+   * carries whatever the loaded libsqlite3 defaults to — which differs between builds: Apple's
+   * `cache_size` default is in pages where upstream's is in KiB, four times the cache and a
+   * different moment for dirty pages to reach the `-wal`.
+   */
+  sqlite?: SqlitePragmas
   /** Where a throwing commit hook goes. Defaults to `console.error`. */
   onError?: (err: unknown) => void
   /**
@@ -143,6 +150,20 @@ export interface TenantOptions {
    * since readers are opened lazily and a pooled one outlives the request that created it.
    */
   onConnection?: (db: Database, role: "writer" | "reader") => void
+}
+
+/**
+ * Per-connection pragmas, in bytes where SQLite takes a count. `undefined` leaves the library's
+ * own default in place, which is what every path that does not come from `[sqlite]` wants.
+ */
+export interface SqlitePragmas {
+  writerCacheBytes?: number
+  readerCacheBytes?: number
+  /** Readers only, and off by default: a read error on a mapped page is a SIGBUS, not an error. */
+  readerMmapBytes?: number
+  foreignKeys?: boolean
+  trustedSchema?: boolean
+  cellSizeCheck?: boolean
 }
 
 /** Design §4.7: SQL bombs are bounded by the library, not by parsing. */
@@ -1299,6 +1320,32 @@ export class Tenant {
 
 // ── opening ────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * `PRAGMA cache_size` takes KiB when negative and pages when positive; BunQL configures bytes and
+ * converts here, so an operator never has to know which. Everything else is applied only when it
+ * was asked for — an unset key means "whatever the library does", not "the value we think it is".
+ */
+function applyPragmas(db: Database, pragmas: SqlitePragmas | undefined, writer: boolean): void {
+  if (!pragmas) return
+  const cacheBytes = writer ? pragmas.writerCacheBytes : pragmas.readerCacheBytes
+  if (cacheBytes !== undefined && cacheBytes > 0) {
+    db.exec(`pragma cache_size = -${Math.max(1, Math.floor(cacheBytes / 1024))}`)
+  }
+  // Readers only: the writer measured no gain from it, and a mapped page is one more way to die.
+  if (!writer && pragmas.readerMmapBytes !== undefined && pragmas.readerMmapBytes > 0) {
+    db.exec(`pragma mmap_size = ${Math.floor(pragmas.readerMmapBytes)}`)
+  }
+  if (pragmas.foreignKeys !== undefined) {
+    db.exec(`pragma foreign_keys = ${pragmas.foreignKeys ? "on" : "off"}`)
+  }
+  if (pragmas.trustedSchema !== undefined) {
+    db.exec(`pragma trusted_schema = ${pragmas.trustedSchema ? "on" : "off"}`)
+  }
+  if (pragmas.cellSizeCheck !== undefined) {
+    db.exec(`pragma cell_size_check = ${pragmas.cellSizeCheck ? "on" : "off"}`)
+  }
+}
+
 function openConnection(
   dbPath: string,
   options: TenantOptions,
@@ -1319,6 +1366,7 @@ function openConnection(
       // reopen does not pay for recreating it.
       db.fileControl("SQLITE_FCNTL_PERSIST_WAL", new Int32Array([1]))
     }
+    applyPragmas(db, options.sqlite, role.writer)
     const limits = { ...DEFAULT_LIMITS, ...options.limits }
     for (const [name, value] of Object.entries(limits)) {
       if (value !== undefined) db.limit(name as LimitName, value)

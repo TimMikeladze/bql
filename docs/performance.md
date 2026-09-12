@@ -202,23 +202,33 @@ The reader's `wal_autocheckpoint` is still SQLite's default 1000, and that is sa
 `query_only` is pinned on it: a connection that cannot commit can never autocheckpoint. The "we own
 checkpoints" invariant rests on that pin, not on the autocheckpoint value.
 
+**Exposed since this audit** (`[sqlite]`, `docs/p1-pragmas.md`): `writerCacheBytes` — the one
+changed default, 8 MiB — plus `readerCacheBytes`, `readerMmapBytes`, `foreignKeys`,
+`trustedSchema` and `cellSizeCheck`. The list below is what remains inherited.
+
 **Inherited from SQLite, never set:** `cache_size` (-2000), `mmap_size` (0), `temp_store` (0),
 `foreign_keys` (**0**), `auto_vacuum` (0), `secure_delete` (0), `journal_size_limit` (-1),
-`trusted_schema` (1), `cell_size_check` (0), `defensive` (off), `recursive_triggers` (0),
-`threads` (0), `analysis_limit` (0). There is also no `ANALYZE` and no `PRAGMA optimize` anywhere
+`defensive` (off, and unreachable — see below), `recursive_triggers` (0), `threads` (0),
+`analysis_limit` (0). There is also no `ANALYZE` and no `PRAGMA optimize` anywhere
 in `src/`, so no database ever collects planner statistics.
 
 Which of those are worth changing, measured:
 
 - **`foreign_keys` is off, so a declared foreign key is enforced on nothing.** Not a performance
-  matter — a correctness one, already recorded in `docs/next.md`. It is per connection and would
-  change the meaning of existing schemas, so it belongs behind a per-database setting.
-- **`cache_size` and `mmap_size` are the two real levers**, and §4E has the numbers.
-- **Hardening is off, and `POST /v1/db/{db}/import` accepts a SQLite file.** The import is
-  admin-only, size-capped and header-checked, but the file it accepts is then opened by the same
-  process that serves every other tenant. `defensive`, `trusted_schema = 0` and `cell_size_check`
-  are SQLite's own recommendations for a file you did not write, and none is set. The driver has
-  no `sqlite3_db_config` binding at all, so `defensive` is not currently reachable.
+  matter — a correctness one, recorded in `docs/next.md`. Now a switch (`[sqlite] foreignKeys`),
+  still off by default because turning it on changes the meaning of existing schemas. It belongs
+  per database rather than per node, which needs a catalog column.
+- **`cache_size` and `mmap_size` are the two real levers**, and §4E has the numbers. Both are
+  settings now; the writer's cache is the one default that moved.
+- **Hardening is off, and `POST /v1/db/{db}/import` accepts a SQLite file.** `trusted_schema = 0`
+  and `cell_size_check` are now reachable as settings. **`defensive` is not reachable at all**:
+  it has no pragma, and `sqlite3_db_config` is variadic. Binding it fixed-arity through bun:ffi was
+  tested rather than assumed and fails three ways — the value passed is ignored (asking for
+  `DEFENSIVE = 0` left it on), the out-parameter is never written, and the second call killed the
+  process with SIGKILL. On arm64 a variadic argument goes on the stack where a fixed parameter goes
+  in a register, so SQLite reads whatever was there. The remedy is a non-variadic shim compiled
+  into the vendored library by `scripts/sqlite.ts`, declared optional exactly as `sqlite3_snapshot_*`
+  is — `docs/p1-pragmas.md` has the sketch.
 - **`temp_store = memory` is not a win here.** A 24 MB sort: 48.3 ms with the default file-backed
   temp store, **56.7 ms** in memory. The OS page cache already makes the file memory, and the
   allocation is not free. Left alone.
