@@ -102,8 +102,13 @@ at 2, because both capability blocks that could flip are satisfied here as well.
 ## 2. `scripts/sqlite.ts`
 
 `bun run sqlite:build` fetches the official SQLite amalgamation, verifies it, compiles it with a
-fixed flag list, and writes `vendor/sqlite/libsqlite3.dylib` (macOS) or `libsqlite3.so` (Linux).
-`vendor/` is gitignored.
+fixed flag list **together with `scripts/native/walsum.c`**, and writes
+`vendor/sqlite/libsqlite3.dylib` (macOS) or `libsqlite3.so` (Linux). `vendor/` is gitignored.
+
+`walsum.c` is BunQL's own C — the WAL frame checksum, which costs 4.5 µs a frame in JavaScript and
+17% of a write (`docs/p3-wal-checksum.md`). It rides this build rather than a second one so that
+there is one library, one `dlopen` and one capability check; `src/sqlite/lib.ts` resolves its two
+symbols optionally, so a node on a system libsqlite3 simply does not get them.
 
 - **Pinned to SQLite 3.53.4**, the same version Homebrew installs, so a macOS developer who has
   not run the script is on the same SQLite as one who has.
@@ -113,8 +118,8 @@ fixed flag list, and writes `vendor/sqlite/libsqlite3.dylib` (macOS) or `libsqli
   skip it. Verified by corrupting the cached archive: it refuses, names both digests, removes the
   poisoned file, and the next run re-fetches and succeeds.
 - **Idempotent.** A stamp beside the artefact records a hash of the pinned version, the flag list,
-  the platform and the architecture. A matching stamp skips the build; changing the version or any
-  flag invalidates it. `--force` rebuilds regardless.
+  `scripts/native/walsum.c`, the platform and the architecture. A matching stamp skips the build;
+  changing the version, any flag or the C invalidates it. `--force` rebuilds regardless.
 - **Self-verifying.** After compiling it loads the artefact through `loadFrom` and refuses to
   leave one behind that does not report preupdate, session and snapshot. A library that compiled
   but did not gain its capabilities is worse than none: the driver would load it and quietly fall
@@ -269,9 +274,9 @@ a Bun release cannot turn a green branch red on its own), restore `vendor/sqlite
 `bun install --frozen-lockfile`, `bun run sqlite:build`, print the library actually loaded and its
 features, `bun run typecheck`, `bun test`, `bun run scripts/routes.ts --check`.
 
-The cache key is `sqlite-<os>-<arch>-<hash of scripts/sqlite.ts>`. That file holds both the pinned
-version and the flag list, so its hash *is* the identity of the artefact: change either and the
-cache misses, as it should. The amalgamation compiles once per (OS, arch, pin), not once per run.
+The cache key is `sqlite-<os>-<arch>-<hash of scripts/sqlite.ts and scripts/native/walsum.c>`.
+Between them those two files hold the pinned version, the flag list and BunQL's own C, so their
+hash *is* the identity of the artefact: change any of it and the cache misses, as it should. The amalgamation compiles once per (OS, arch, pin), not once per run.
 
 **No secrets, and none needed.** The storage tests use the in-process `FakeS3` unless
 `BUNQL_TEST_S3_ENDPOINT` names a real bucket (`test/storage/harness.ts:69`); this workflow never

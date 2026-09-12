@@ -161,6 +161,19 @@ const SNAPSHOT = {
 } as const
 
 /**
+ * Not SQLite's. `scripts/native/walsum.c` is compiled into the vendored artefact, so these resolve
+ * there and nowhere else — a system libsqlite3 simply does not have them and `src/wal/native.ts`
+ * keeps the JavaScript. `docs/p3-wal-checksum.md`.
+ */
+const WALSUM = {
+  bunql_wal_checksum: { args: [T.ptr, T.u32, T.i32, T.ptr], returns: T.void },
+  bunql_wal_check_frame: {
+    args: [T.ptr, T.u32, T.u32, T.u32, T.u32, T.u32, T.i32, T.ptr],
+    returns: T.void,
+  },
+} as const
+
+/**
  * bun:ffi hands pointers back as plain numbers and accepts a number, a typed array or null
  * wherever C wants a `void *`. The symbol tables below are declared by hand in those terms:
  * inferring them from `dlopen` loses the pointer types and makes every call site `any`.
@@ -300,6 +313,23 @@ export interface SnapshotSymbols {
   sqlite3_snapshot_cmp(a: Ptr, b: Ptr): number
 }
 
+/** BunQL's own C, from `scripts/native/walsum.c`. `docs/p3-wal-checksum.md` §3.2. */
+export interface WalsumSymbols {
+  /** `io[0]`, `io[1]` are the chain, in and out. */
+  bunql_wal_checksum(a: PtrArg, n: number, native: number, io: PtrArg): void
+  /** `out` is five `u32`: valid, pgno, commitSize, s0, s1. */
+  bunql_wal_check_frame(
+    frame: PtrArg,
+    pageSize: number,
+    salt1: number,
+    salt2: number,
+    s0: number,
+    s1: number,
+    native: number,
+    out: PtrArg,
+  ): void
+}
+
 export interface SqliteFeatures {
   /** `sqlite3_preupdate_*` present (built with `SQLITE_ENABLE_PREUPDATE_HOOK`). */
   readonly preupdate: boolean
@@ -307,6 +337,8 @@ export interface SqliteFeatures {
   readonly session: boolean
   /** `sqlite3_snapshot_*` present (built with `SQLITE_ENABLE_SNAPSHOT`). */
   readonly snapshot: boolean
+  /** `bunql_wal_*` present: the artefact `bun run sqlite:build` produced, not a system library. */
+  readonly walsum: boolean
   readonly fts5: boolean
   readonly rtree: boolean
   readonly dbstat: boolean
@@ -325,6 +357,7 @@ export interface SqliteLibrary {
   readonly preupdate: PreupdateSymbols | null
   readonly session: SessionSymbols | null
   readonly snapshot: SnapshotSymbols | null
+  readonly walsum: WalsumSymbols | null
   readonly features: SqliteFeatures
   readonly compileOptions: readonly string[]
 }
@@ -361,6 +394,7 @@ export function loadFrom(candidates: readonly string[]): SqliteLibrary {
   const preupdate = tryOpen<PreupdateSymbols>(path, PREUPDATE)
   const session = tryOpen<SessionSymbols>(path, SESSION)
   const snapshot = tryOpen<SnapshotSymbols>(path, SNAPSHOT)
+  const walsum = tryOpen<WalsumSymbols>(path, WALSUM)
 
   const s = core.symbols as unknown as CoreSymbols
   const compileOptions = readCompileOptions(s)
@@ -376,11 +410,13 @@ export function loadFrom(candidates: readonly string[]): SqliteLibrary {
     preupdate,
     session,
     snapshot,
+    walsum,
     compileOptions,
     features: {
       preupdate: preupdate !== null && has("ENABLE_PREUPDATE_HOOK"),
       session: session !== null && has("ENABLE_SESSION"),
       snapshot: snapshot !== null,
+      walsum: walsum !== null,
       fts5: has("ENABLE_FTS5"),
       rtree: has("ENABLE_RTREE"),
       dbstat: has("ENABLE_DBSTAT_VTAB"),

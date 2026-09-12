@@ -40,12 +40,15 @@ jobs:
           # turn a green branch red on its own.
           bun-version: 1.4.2
 
-      # scripts/sqlite.ts holds both the pinned SQLite version and the flag list, so its hash is
-      # exactly the identity of the artefact. Change either and the cache misses, as it should.
+      # scripts/sqlite.ts holds the pinned SQLite version and the flag list, and
+      # scripts/native/walsum.c is compiled into the same artefact, so the two hashed together are
+      # exactly its identity. Change either and the cache misses, as it should. (The stamp beside
+      # the artefact hashes both as well, so a stale cache would be rebuilt rather than trusted —
+      # this key is what stops that from happening on every run.)
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendor/sqlite
-          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sqlite.ts') }}
+          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sqlite.ts', 'scripts/native/walsum.c') }}
 
       - run: bun install --frozen-lockfile
 

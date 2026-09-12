@@ -264,6 +264,8 @@ export const FILE_CONTROLS = {
   SQLITE_FCNTL_LOCKSTATE: 1,
   SQLITE_FCNTL_SIZE_HINT: 5,
   SQLITE_FCNTL_CHUNK_SIZE: 6,
+  /** Writes the `sqlite3_file*` of the main database into the caller's 8-byte buffer. */
+  SQLITE_FCNTL_FILE_POINTER: 7,
   SQLITE_FCNTL_PERSIST_WAL: 10,
   SQLITE_FCNTL_POWERSAFE_OVERWRITE: 13,
   SQLITE_FCNTL_MMAP_SIZE: 18,
@@ -281,6 +283,16 @@ export const FILE_CONTROLS = {
 } as const
 
 export type FileControlName = keyof typeof FILE_CONTROLS
+
+/**
+ * `xShmLock` flags. The wal-index's eight lock slots are write (0), checkpoint (1), recover (2)
+ * and five read marks (3..7); taking them all exclusively is what design §4.5's page apply needs
+ * to keep a reader out of a database file it is rewriting. `src/wal/shmlock.ts`.
+ */
+export const SHM_UNLOCK = 1
+export const SHM_LOCK = 2
+export const SHM_SHARED = 4
+export const SHM_EXCLUSIVE = 8
 
 /**
  * `sqlite3_stmt_status` counters. `MEMUSED` is 99 in sqlite3.h, not the next number in the run.

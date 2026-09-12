@@ -138,7 +138,7 @@ async function main(argv: string[]): Promise<number> {
   }
   log(quiet, `extracted the amalgamation to ${src}`)
 
-  compile(join(src, "sqlite3.c"), artefact, quiet)
+  compile([join(src, "sqlite3.c"), helperSource()], artefact, quiet)
   check(artefact)
   writeFileSync(stampPath, `${stamp}\n`)
   report(artefact, `built SQLite ${PIN.version}`, quiet)
@@ -150,6 +150,8 @@ function currentStamp(): string {
   const h = new Bun.CryptoHasher("sha256")
   h.update(`${PIN.version} ${PIN.sha256} ${process.platform} ${process.arch} `)
   h.update(FLAGS.map((f) => f.flag).join(" "))
+  // An edit to BunQL's own C has to force a rebuild exactly as a changed flag does.
+  h.update(readFileSync(helperSource()))
   return h.digest("hex")
 }
 
@@ -181,7 +183,16 @@ function verify(zip: string): void {
   if (sha256 !== PIN.sha256) fail("sha256", sha256, PIN.sha256)
 }
 
-function compile(source: string, artefact: string, quiet: boolean): void {
+/**
+ * BunQL's own C, compiled into the same artefact as the amalgamation so that there is one library,
+ * one `dlopen` and one capability check. `src/sqlite/lib.ts` resolves its symbols optionally, so a
+ * node on a system libsqlite3 simply does not get them. `docs/p3-wal-checksum.md`.
+ */
+function helperSource(): string {
+  return new URL("./native/walsum.c", import.meta.url).pathname
+}
+
+function compile(sources: string[], artefact: string, quiet: boolean): void {
   const cc = compiler()
   const args = [cc, ...FLAGS.map((f) => f.flag)]
   if (process.platform === "darwin") {
@@ -191,7 +202,7 @@ function compile(source: string, artefact: string, quiet: boolean): void {
     // are inside libc on a current glibc and harmless to ask for anyway.
     args.push("-shared", "-lm", "-lpthread", "-ldl")
   }
-  args.push("-o", artefact, source)
+  args.push("-o", artefact, ...sources)
 
   log(quiet, `${args[0]} … -o ${artefact}`)
   const built = Bun.spawnSync(args, { stdout: "inherit", stderr: "inherit" })
@@ -221,15 +232,19 @@ function compiler(): string {
  */
 function check(artefact: string): void {
   const lib = loadFrom([artefact])
-  const missing = (["preupdate", "session", "snapshot"] as const).filter((f) => !lib.features[f])
+  const missing = (["preupdate", "session", "snapshot", "walsum"] as const).filter(
+    (f) => !lib.features[f],
+  )
   if (missing.length > 0) {
     throw new Error(
-      `${artefact} built but reports no ${missing.join(", ")}. The flag list and the ` +
-        "amalgamation disagree, which should not be possible — do not ship this artefact.",
+      `${artefact} built but reports no ${missing.join(", ")}. The flag list, the amalgamation ` +
+        "and scripts/native/walsum.c disagree, which should not be possible — do not ship this " +
+        "artefact.",
     )
   }
   console.log(
-    `  SQLite ${lib.version} · preupdate ✓ session ✓ snapshot ✓ fts5 ${mark(lib.features.fts5)} ` +
+    `  SQLite ${lib.version} · preupdate ✓ session ✓ snapshot ✓ walsum ✓ ` +
+      `fts5 ${mark(lib.features.fts5)} ` +
       `rtree ${mark(lib.features.rtree)} math ${mark(lib.features.math)} ` +
       `dbstat ${mark(lib.features.dbstat)} threadsafe=${lib.features.threadsafe}`,
   )

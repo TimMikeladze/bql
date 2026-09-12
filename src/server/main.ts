@@ -4,6 +4,7 @@
 // Invariant: this file starts a server and prints where it is. Everything else belongs in
 // `app.ts`, so the embedded API and the tests take exactly the same path as the CLI does.
 
+import { walChecksumIsNative } from "../wal/native.ts"
 import { startServer } from "./app.ts"
 import { loadConfig } from "./config.ts"
 
@@ -21,6 +22,13 @@ async function main(): Promise<void> {
     `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
       `ack ${config.durability.defaultAck}`,
   )
+  if (!walChecksumIsNative()) {
+    console.log(
+      "bunql: this libsqlite3 carries no bunql_wal_* helper, so WAL frames are checksummed in " +
+        "JavaScript — about 4.5 µs a frame, 16% of a write. `bun run sqlite:build` " +
+        "fixes it. docs/p3-wal-checksum.md",
+    )
+  }
   if (!process.env.BUNQL_ADMIN_KEY && !process.env.BUNQL_AUTH_ADMIN_KEY) {
     console.log(
       `bunql: the admin key is in ${config.auth.keysFile}; set BUNQL_AUTH_ADMIN_KEY to override`,

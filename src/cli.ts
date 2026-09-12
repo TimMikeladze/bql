@@ -13,6 +13,7 @@ import type { QueryResult } from "./client/protocol.ts"
 import { SocketClient, defaultWebSocketFactory } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
 import { loadConfig, type ServerConfigInput } from "./server/config.ts"
+import { walChecksumIsNative } from "./wal/native.ts"
 
 const VERSION = "0.0.0"
 
@@ -321,6 +322,13 @@ async function serve(args: ParsedArgs): Promise<void> {
       `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
       `ack ${config.durability.defaultAck}${threads}${replication}${cluster}${storage}`,
   )
+  if (!walChecksumIsNative()) {
+    console.log(
+      "bunql: this libsqlite3 carries no bunql_wal_* helper, so WAL frames are checksummed in " +
+        "JavaScript — about 4.5 µs a frame, 16% of a write. `bun run sqlite:build` " +
+        "fixes it. docs/p3-wal-checksum.md",
+    )
+  }
   let stopping = false
   const stop = (signal: string): void => {
     if (stopping) return

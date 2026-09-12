@@ -7,10 +7,13 @@
 //
 // A salt change in the header means the WAL was reset (salt1 increments, salt2 is re-randomised
 // on the first write after a RESTART or TRUNCATE checkpoint): restart at frame 1.
+//
+// Frames are verified through `checkFrameFast`, which is `codec.checkFrame` in C when the vendored
+// libsqlite3 carries `scripts/native/walsum.c` and the JavaScript otherwise. Identical results
+// either way; it is 4.5 µs a frame, which is most of a poll. `docs/p3-wal-checksum.md`.
 
 import fs from "node:fs"
 import {
-  checkFrame,
   type Checksum,
   headerChecksum,
   parseWalHeader,
@@ -21,6 +24,7 @@ import {
   walFrameSize,
 } from "./codec.ts"
 import { WalFormatError } from "./errors.ts"
+import { checkFrameFast } from "./native.ts"
 
 /** Where a tailer stands, in a form that survives a restart. */
 export interface WalPosition {
@@ -122,7 +126,7 @@ export class WalTailer {
     while (offset + frameSize <= size) {
       const read = fs.readSync(fd, frame, 0, frameSize, offset)
       if (read < frameSize) break
-      const check = checkFrame(frame, 0, header, running)
+      const check = checkFrameFast(frame, 0, header, running)
       if (!check.valid) break
 
       running = check.next
@@ -190,7 +194,7 @@ export class WalTailer {
         )
       }
       fs.readSync(fd, frame, 0, frameSize, offset)
-      const check = checkFrame(frame, 0, header, running)
+      const check = checkFrameFast(frame, 0, header, running)
       if (!check.valid) {
         throw new WalFormatError(
           `cannot resume at frame ${position.frame}: frame ${index} of ${this.path} no longer verifies`,
@@ -315,7 +319,7 @@ export function scanWalPages(
       const offset = walFrameOffset(index, header.pageSize)
       if (offset + frameSize > size) break
       fs.readSync(fd, frame, 0, frameSize, offset)
-      const check = checkFrame(frame, 0, header, running)
+      const check = checkFrameFast(frame, 0, header, running)
       if (!check.valid) break
       running = check.next
       pending.set(check.header.pgno, frame.slice(WAL_FRAME_HEADER_SIZE))
