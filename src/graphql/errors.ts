@@ -1,0 +1,62 @@
+// Invariant: **one error vocabulary.** A refusal that reaches a resolver keeps the code
+// `src/server/errors.ts` gave it — `NOT_AUTHORIZED`, `SQLITE_CONSTRAINT_UNIQUE`, `NOT_PRIMARY` —
+// all the way to the GraphQL error's `extensions`, so a client handles a GraphQL failure with the
+// same switch it already has for REST. `docs/plan-surfaces.md` forbids a second vocabulary and
+// this is where one would otherwise appear.
+//
+// Where the loss would happen: a generated resolver dispatches, gets a non-2xx back and throws a
+// `GraphQLError` of its own — message `"GET /users failed with 403 Forbidden"`, extensions
+// `{code: "OPENAPI_REQUEST_FAILED", status, body}`. The BunQL error is in there, parsed, under
+// `body.error`; left alone it reads to a client as one opaque generic failure whatever went wrong.
+// So the body is unwrapped: its `message` becomes the error's message and every field of
+// `body.error` — `code`, `status`, and the `txid`, `primary`, `problems`, `failedIndex`, `acks`
+// and `needed` that `mapError` attaches — becomes an extension.
+//
+// Nothing else is rewritten. An error the generator did not raise, or one whose body is not a
+// BunQL error body, is passed through exactly as GraphQL formatted it.
+
+/** A GraphQL error as `GraphQLError.toJSON()` writes it. */
+export interface FormattedGraphQLError {
+  message: string
+  locations?: readonly { line: number; column: number }[]
+  path?: readonly (string | number)[]
+  extensions?: Record<string, unknown>
+}
+
+/** The extensions key the generator marks a failed REST call with. */
+export const REQUEST_FAILED = "OPENAPI_REQUEST_FAILED"
+
+/** The `{error: {...}}` body every BunQL refusal carries (`src/server/errors.ts`). */
+interface BunQLErrorBody {
+  error: { code: string; message: string; status?: number } & Record<string, unknown>
+}
+
+function isErrorBody(value: unknown): value is BunQLErrorBody {
+  if (typeof value !== "object" || value === null) return false
+  const error = (value as { error?: unknown }).error
+  if (typeof error !== "object" || error === null) return false
+  const { code, message } = error as { code?: unknown; message?: unknown }
+  return typeof code === "string" && typeof message === "string"
+}
+
+/**
+ * The same error, with a BunQL refusal lifted out of the generator's wrapper. Anything else is
+ * returned unchanged.
+ */
+export function liftBunQLError(formatted: FormattedGraphQLError): FormattedGraphQLError {
+  const extensions = formatted.extensions
+  if (!extensions || extensions.code !== REQUEST_FAILED) return formatted
+  if (!isErrorBody(extensions.body)) return formatted
+
+  const { message, ...rest } = extensions.body.error
+  const lifted: Record<string, unknown> = { ...rest }
+  if (typeof extensions.operationId === "string") lifted.operationId = extensions.operationId
+  if (lifted.status === undefined && typeof extensions.status === "number") {
+    lifted.status = extensions.status
+  }
+  return {
+    ...formatted,
+    message,
+    extensions: lifted,
+  }
+}
