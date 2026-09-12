@@ -31,7 +31,7 @@ import {
   type LimitName,
 } from "./constants.ts"
 import { FeatureUnavailableError, SqliteError } from "./errors.ts"
-import { cbuf, cstr, sqlite, type SqliteLibrary } from "./lib.ts"
+import { capabilityDetail, cbuf, cstr, sqlite, type SqliteLibrary } from "./lib.ts"
 import {
   prepareStatement,
   Statement,
@@ -502,7 +502,7 @@ export class Database implements StatementHost {
       if (cb === null) return
       throw new FeatureUnavailableError(
         "preupdate hook",
-        `${this.lib.path} was built without SQLITE_ENABLE_PREUPDATE_HOOK`,
+        capabilityDetail(this.lib, "SQLITE_ENABLE_PREUPDATE_HOOK"),
       )
     }
     this.#onPreupdate = cb
@@ -674,7 +674,7 @@ export class Database implements StatementHost {
     if (!api || !this.lib.features.session) {
       throw new FeatureUnavailableError(
         "session extension",
-        `${this.lib.path} was built without SQLITE_ENABLE_SESSION`,
+        capabilityDetail(this.lib, "SQLITE_ENABLE_SESSION"),
       )
     }
     const out = new BigUint64Array(1)
@@ -727,7 +727,7 @@ export class Database implements StatementHost {
     if (!api || !this.lib.features.session) {
       throw new FeatureUnavailableError(
         "session extension",
-        `${this.lib.path} was built without SQLITE_ENABLE_SESSION`,
+        capabilityDetail(this.lib, "SQLITE_ENABLE_SESSION"),
       )
     }
     const verdict =

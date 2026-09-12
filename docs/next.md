@@ -82,19 +82,31 @@ Build in this order. The first is the gate for everything after it.
 
 Carried forward from phase 0, still true:
 
-- **Linux packaging.** The driver needs an external libsqlite3; `Database.setCustomSQLite` is a
-  no-op on Linux and Bun exports no sqlite symbols. Ship prebuilt `@bunql/sqlite-{linux-x64,
-  linux-arm64,darwin-arm64}` libraries, or fall back to the loadable-extension shim in
-  `experiments/bunql_native.c`. The `engine: "builtin"` path over `node:sqlite` in design §4.1 is
-  not built.
+- ~~**Linux packaging.**~~ **Done (C6, `868d548`), and the gap was not what this list said it
+  was.** It claimed Linux needed prebuilt libraries because a distro libsqlite3 would not do.
+  Measured, that is false: Debian 13 (3.46.1), Ubuntu 24.04 (3.45.1) and Ubuntu 22.04 (3.37.2) all
+  ship `ENABLE_PREUPDATE_HOOK`, `ENABLE_SESSION` and a working `load_extension`, and the whole
+  suite already passed on Linux against the stock library — same counts as macOS. **Linux was
+  never blocked; it was unwatched.** `apt-get install libsqlite3-dev` changes no capability at all.
+  What *is* absent from every distro build is `SQLITE_ENABLE_SNAPSHOT`, which `src/sqlite/lib.ts`
+  declares a symbol table for and design §11 phase 3 wants; and base `ubuntu:24.04`, `ubuntu:22.04`
+  and `debian:12` carry no libsqlite3 whatsoever, so "the distro ships it" is not dependable even
+  where it is true. The real floor is **SQLite 3.37.0** — `sqlite3_changes64` is in the core symbol
+  table, so below that the whole `dlopen` fails and an old library reads as *no* library.
+  `scripts/sqlite.ts` now builds 3.53.4 from a hash-pinned amalgamation, `src/sqlite/lib.ts`
+  prefers it, and CI runs the suite on macOS and Linux. The `engine: "builtin"` path over
+  `node:sqlite` in design §4.1 is still not built. Evidence: `docs/c6-packaging.md` §1.
 - **Replica apply mechanism A** (design §4.5) — now phase-2 milestone 5 above.
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a server restart. Spill
   it to disk or serve old positions from the log.
 - **`schema` events reach WebSocket subscribers only**, not the SSE change feed.
 - **WS mixed-throughput budget missed** (130k vs 150k msg/s) because writes serialise on the
   single writer. Batch commits or pipeline the write path. Unchanged by phase 1.
-- **No CI.** Add a workflow running `bun install`, `bun test`, `bun run typecheck` on macOS and
-  Linux — the Linux leg needs the packaging fix above.
+- ~~**No CI.**~~ **Done (C6).** `.github/workflows/ci.yml` runs install, the vendored SQLite
+  build, typecheck, the suite and the routes check on `macos-latest` (arm64) and `ubuntu-latest`
+  (x64), green on real runners. Actions are SHA-pinned, `permissions: contents: read`, no secrets,
+  and the storage tests run against the in-process `FakeS3` because the workflow never sets
+  `BUNQL_TEST_S3_ENDPOINT`.
 - Nothing is published to npm; `package.json` has `exports`, `bin`, `engines` but no release flow.
 
 What phase 1 added to the list:
