@@ -79,8 +79,18 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
    28.1k msg/s), so the bound is the process, not the database.
 5. **HTTP framing** — 35 µs before any query runs. Nothing to fix in BunQL; it is a reason to
    prefer the socket, and a reason the Data API (§H4) should be reachable over the socket too.
-6. **`recorder.poll` at 8 µs** — the WAL tail and the page checksums. Unavoidable in mechanism B,
-   and the price of physical replication.
+6. **`recorder.poll` at 8 µs** — and it is **memory-bound, not overhead-bound**, which was worth
+   finding out before optimising it. Split: the tailer is 7.25 µs and folding the pages into the
+   database checksum is 0.38. Inside the tailer, `checkFrame` is 5.16 µs — SQLite's WAL checksum
+   over a 4 KiB page that has just been read. Rewriting that path to allocate nothing (a cached
+   `DataView` over the scratch buffer, a reused frame header, a checksum advanced in place instead
+   of a tuple per frame) moved it from 7.25 µs to 7.21: **no change**. The same loop over a hot
+   buffer in isolation is 1.0 µs, so the extra four are cache misses on a page fresh from the page
+   cache, not JavaScript.
+   The write path touches each page about four times — read from the WAL, WAL checksum, xxHash3 for
+   the database checksum, zstd — so the lever is to stop re-reading the page, not to make the loop
+   tighter. That is what apply mechanism A and capturing pages from SQLite directly would change.
+   The allocation-free version was reverted: unmeasured complexity is what this codebase avoids.
 
 ## 4. What to do about it, in order of measured win per unit of risk
 

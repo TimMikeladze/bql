@@ -543,6 +543,11 @@ export class Tenant {
     }
   }
 
+  /** Snapshots this database holds, oldest first. */
+  snapshots(): SnapshotRef[] {
+    return listSnapshots(this.dir)
+  }
+
   /** Subscribes to durable commits. Returns the unsubscribe function. */
   onCommit(listener: CommitListener): () => void {
     this.#listeners.add(listener)

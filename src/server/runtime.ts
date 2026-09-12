@@ -331,7 +331,11 @@ export class ServerRuntime {
       // touching each through `open` leaves the LRU's recency order exactly as it found it.
       for (const name of this.registry.openNames) {
         try {
-          this.retainTenant(this.registry.open(name), retentionMs)
+          const tenant = this.registry.open(name)
+          // Before retention, not after: the floor the sweep is about to apply is derived from the
+          // oldest snapshot kept, so a database with none has no floor to protect it.
+          void this.maybeSnapshot(tenant).catch((err) => this.#onError(err))
+          this.retainTenant(tenant, retentionMs)
         } catch (err) {
           // A database deleted underneath the sweep, or one that failed to open. Neither is a
           // reason to leave the rest of the node's logs unswept.
@@ -344,6 +348,30 @@ export class ServerRuntime {
     if (!(every > 0)) return
     this.#sweeper = setInterval(sweep, every)
     this.#sweeper.unref?.()
+  }
+
+  /**
+   * Takes a local snapshot when the newest one is older than `[durability] snapshotIntervalMs`,
+   * which is what gives a node with no bucket and no replicas a retention floor at all
+   * (`docs/r6-retention.md`'s open finding). A node that snapshots for another reason — the S3
+   * shipper, a replica bootstrap — rarely reaches the interval, so it does nothing there.
+   *
+   * Skipped for a replica (it has no write path to snapshot), for a database nothing has written
+   * since its last snapshot (the snapshot would be the same file at the same txid), and while
+   * anything else holds the tenant exclusively.
+   */
+  async maybeSnapshot(tenant: Tenant, now = Date.now()): Promise<boolean> {
+    const every = this.config.durability.snapshotIntervalMs
+    if (!(every > 0) || tenant.role !== "primary" || tenant.closed) return false
+    const stats = tenant.stats()
+    if (stats.txid === 0n) return false
+    const newest = tenant.snapshots().at(-1)
+    if (newest) {
+      if (BigInt(newest.txid) >= stats.txid) return false
+      if (now - newest.createdAtMs < every) return false
+    }
+    await tenant.snapshot()
+    return true
   }
 
   /**

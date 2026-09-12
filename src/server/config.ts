@@ -101,6 +101,19 @@ export interface DurabilitySection {
   /** Roll to a new log segment past this many bytes. Design §4.4 says 16 MB. */
   segmentBytes: number
   /**
+   * Take a local snapshot of a database whose newest one is older than this, in milliseconds.
+   * One hour by default; `0` turns it off.
+   *
+   * It closes the hole `docs/r6-retention.md` left open: the log's retention floor is derived from
+   * the **oldest snapshot kept**, and only the S3 shipper and a replica bootstrap ever took one.
+   * A plain node with no bucket and no replica therefore took none, ever, had no floor at all, and
+   * once its oldest segment aged out it stopped being restorable to any point before it — with
+   * nothing reporting that. A node that already snapshots for another reason rarely reaches this
+   * interval, so it costs such a node nothing; a reflink makes it nearly free where the filesystem
+   * has one.
+   */
+  snapshotIntervalMs: number
+  /**
    * Compress transaction records with zstd. On, as every record has been since phase 0: it is
    * 4.3x on disk, on every replica's socket and in the bucket, for ~9.5 µs a record — a third of
    * a single-row write (`docs/performance.md` §1). A node with local storage, no replicas and no
@@ -321,6 +334,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     maxLogBytes: 0,
     segmentBytes: 16 * 1024 * 1024,
     compress: true,
+    snapshotIntervalMs: 60 * 60 * 1000,
   },
   realtime: {
     ringBytes: 10_000_000,

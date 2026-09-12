@@ -163,7 +163,12 @@ What the surfaces work (H1-H5) added to the list:
 
 What phase 1 added to the list:
 
-- **A standalone node never takes a snapshot, so retention can make it unrestorable.** Found by R6
+- ~~**A standalone node never takes a snapshot, so retention can make it unrestorable.**~~
+  **Fixed: `[durability] snapshotIntervalMs`, one hour by default.** The sweep takes a local
+  snapshot before retention runs when the newest is older than the interval and the database has
+  moved on since — so every node has a floor, not only one with a bucket or a replica. A node that
+  snapshots for another reason rarely reaches the interval and pays nothing;
+  `test/server/snapshot-interval.test.ts`. The original finding: Found by R6
   while wiring log retention (`docs/r6-retention.md`). The retention floor never drops a segment
   that point-in-time restore still needs — but the floor is derived from the *oldest snapshot kept*,
   and only the S3 shipper and a replica bootstrap take snapshots on their own. A plain single node
