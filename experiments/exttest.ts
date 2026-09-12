@@ -1,0 +1,21 @@
+import { Database } from "bun:sqlite";
+import { CFunction, FFIType, JSCallback, CString } from "bun:ffi";
+const ext = process.argv[2];
+if (process.platform === "darwin") Database.setCustomSQLite(process.env.BUNQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib");
+const db = new Database(":memory:");
+db.loadExtension(ext, "sqlite3_bunqlnative_init");
+const dbp = Number((db.query("select bunql_db() p").get() as any).p);
+const api = (name: string, args: FFIType[], returns: FFIType) => new CFunction({ ptr: Number((db.query("select bunql_api(?) p").get(name) as any).p), args, returns });
+console.log("db ptr", dbp, "version via api:", api("libversion", [], FFIType.cstring)());
+const walHook = api("wal_hook", [FFIType.ptr, FFIType.ptr, FFIType.ptr], FFIType.ptr);
+const progress = api("progress_handler", [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.ptr], FFIType.void);
+const updHook = api("update_hook", [FFIType.ptr, FFIType.ptr, FFIType.ptr], FFIType.ptr);
+const ev: any[] = [];
+const upd = new JSCallback((_a: number, op: number, _d: number, tbl: number, rowid: bigint) => { ev.push([op, new CString(tbl).toString(), rowid]); }, { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.ptr, FFIType.i64], returns: FFIType.void });
+updHook(dbp, upd.ptr, null);
+db.exec("create table t(x); insert into t values (1),(2)");
+console.log("update_hook events", ev);
+let ticks = 0; const prog = new JSCallback(() => (++ticks > 20 ? 1 : 0), { args: [FFIType.ptr], returns: FFIType.i32 });
+progress(dbp, 1000, prog.ptr, null);
+try { db.query("with recursive c(x) as (select 1 union all select x+1 from c limit 50000000) select count(*) from c").get(); console.log("not interrupted"); } catch (e: any) { console.log("interrupt ->", e.message); }
+console.log("OK");

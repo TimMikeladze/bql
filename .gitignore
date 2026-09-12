@@ -1,0 +1,9 @@
+experiments/wp/
+experiments/*.db
+experiments/*.db-wal
+experiments/*.db-shm
+experiments/*.dylib
+experiments/*.so
+experiments/big.bin*
+node_modules/
+data/
