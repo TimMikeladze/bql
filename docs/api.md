@@ -165,6 +165,7 @@ write arrives under the primary's own code and status — a constraint violation
 | `UNAUTHENTICATED` | 401 | no token, a bad signature, an expired or revoked token |
 | `NOT_AUTHORIZED` | 403 | the token's scope or table ACL refuses this |
 | `DB_NOT_FOUND` | 404 | no such database |
+| `NOT_FOUND` | 404 | no such row: the data API's `/{pk}` routes, when the key matches nothing |
 | `TX_NOT_FOUND` | 404 | unknown or expired baton |
 | `QUERY_TIMEOUT` | 408 | the deadline interrupted the statement |
 | `CONFLICT` | 409 | importing over a name that exists |
@@ -527,9 +528,10 @@ DELETE /v1/db/acme/api/users/1
 
 Filtering is PostgREST's URL grammar: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`,
 `is`, with `select=` projecting and `order=col.asc|desc` sorting. A write answers with the row it
-wrote, because every write statement carries `RETURNING`. A single-row read, update or delete that
-matches nothing answers `200` with `null` — `src/server/errors.ts` has no "no such row" code and
-inventing one here would be a second error vocabulary.
+wrote, because every write statement carries `RETURNING`. A single-row read, update or delete whose
+key matches nothing answers `404` with `{"error": {"code": "NOT_FOUND"}}` — one code from
+`src/server/errors.ts`'s own vocabulary, not a second one. Through GraphQL the same row is `null`,
+since a missing row is not an error there (`docs/h8-validated-requests.md`).
 
 **Every identifier in the generated SQL comes from introspection and every value is a bound
 parameter.** A filter, a `select=` or an `order=` naming a column the table does not have is a

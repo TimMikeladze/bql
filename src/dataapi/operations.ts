@@ -13,9 +13,10 @@
 //   * **A row component's properties are all optional**, because `?select=id,name` narrows the
 //     row and a document declaring them required would be lying about its own responses.
 //     Nullability *is* published faithfully, and an insert body keeps real `required`.
-//   * **A single-row read, update or delete that matches nothing answers `200` with `null`**, not
-//     a 404: `src/server/errors.ts` has no "no such row" code and inventing one here would be the
-//     second error vocabulary `docs/plan-surfaces.md` forbids (`docs/h4-dataapi.md`).
+//   * **A single-row read, update or delete that matches nothing answers `404 NOT_FOUND`.** The
+//     code is `src/server/errors.ts`'s, not a second vocabulary invented here
+//     (`docs/h8-validated-requests.md`). GraphQL still answers `null`, because a missing row is
+//     not an error there: `src/graphql/errors.ts` turns this one status back into a null body.
 //   * **A write answers with the row it wrote**, because every write statement carries `RETURNING`
 //     and is therefore one statement, one `exec.ts` call and one txid.
 //   * **Views are read-only**, and a table with neither a primary key nor a rowid gets the
@@ -83,6 +84,9 @@ const READ_ERRORS = [
   "BUSY",
 ]
 
+/** Those, plus the answer a route addressing one row by key can give. */
+const ROW_ERRORS = [...READ_ERRORS, "NOT_FOUND"]
+
 const WRITE_ERRORS = [
   ...READ_ERRORS,
   "PAYLOAD_TOO_LARGE",
@@ -93,6 +97,9 @@ const WRITE_ERRORS = [
   "SQLITE_CONSTRAINT_FOREIGNKEY",
   "SQLITE_CONSTRAINT_CHECK",
 ]
+
+/** Those, plus `NOT_FOUND`, for the write routes that address one row by key. */
+const ROW_WRITE_ERRORS = [...WRITE_ERRORS, "NOT_FOUND"]
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -175,7 +182,6 @@ function tableOperations(
   const collection = `${prefix}/${encodeURIComponent(table.name)}`
   const keys = keyParameters(table, prefixParams)
   const rowNode = rowSchema(table, names)
-  const nullableRow = s.union([rowNode, s.null()])
   const writable = table.columns.filter((column) => column.writable)
   const what = table.kind === "view" ? "view" : "table"
 
@@ -231,23 +237,23 @@ function tableOperations(
       summary: `One row of ${table.name} by primary key`,
       description: `The row of ${table.name} whose key is ${keys
         .map((key) => key.column.name)
-        .join(", ")}, or null when there is none.`,
+        .join(", ")}. A key that matches nothing is a 404.`,
       tags: [table.name],
       security: "bearer",
       graphql: { kind: "query" },
-      errors: READ_ERRORS,
+      errors: ROW_ERRORS,
       params: {
         path: pathSchema(prefixParams, keys),
         query: s.object({ select: selectSchema(table) }),
       },
-      response: { status: 200, schema: nullableRow },
+      response: { status: 200, schema: rowNode },
       handler: async (input, ctx) => {
         assertDb(ctx, input.path)
         onlyKeys(input.query, ["select"])
         const select = parseSelect(table, input.query.select)
         const key = keyConditions(input.path)
         const result = await ctx.exec(buildStatement({ kind: "get", table, select, key }))
-        return rowObjects(result)[0] ?? null
+        return rowObjects(result)[0] ?? missing(table, keys, input.path)
       },
     })
   }
@@ -293,14 +299,14 @@ function tableOperations(
     summary: `Update one row of ${table.name}`,
     description:
       `Sets the columns the body names and leaves the rest alone. Answers with the row as it is ` +
-      `now, or null when the key matched nothing.`,
+      `now. A key that matches nothing is a 404, and nothing is written.`,
     tags: [table.name],
     security: "bearer",
     graphql: { kind: "mutation" },
-    errors: WRITE_ERRORS,
+    errors: ROW_WRITE_ERRORS,
     params: { path: pathSchema(prefixParams, keys) },
     body: { schema: patchSchema(table, names, writable), required: true },
-    response: { status: 200, schema: nullableRow },
+    response: { status: 200, schema: rowNode },
     handler: async (input, ctx) => {
       assertDb(ctx, input.path)
       const patch = (input.body ?? {}) as Row
@@ -320,7 +326,7 @@ function tableOperations(
           returning: table.columns,
         }),
       )
-      return rowObjects(result)[0] ?? null
+      return rowObjects(result)[0] ?? missing(table, keys, input.path)
     },
   })
 
@@ -329,13 +335,15 @@ function tableOperations(
     method: "delete",
     path: rowPath,
     summary: `Delete one row of ${table.name}`,
-    description: "Answers with the row that was deleted, or null when the key matched nothing.",
+    description:
+      "Answers with the row that was deleted. A key that matches nothing is a 404, and nothing " +
+      "is deleted.",
     tags: [table.name],
     security: "bearer",
     graphql: { kind: "mutation" },
-    errors: WRITE_ERRORS,
+    errors: ROW_WRITE_ERRORS,
     params: { path: pathSchema(prefixParams, keys) },
-    response: { status: 200, schema: nullableRow },
+    response: { status: 200, schema: rowNode },
     handler: async (input, ctx) => {
       assertDb(ctx, input.path)
       const result = await ctx.exec(
@@ -346,11 +354,22 @@ function tableOperations(
           returning: table.columns,
         }),
       )
-      return rowObjects(result)[0] ?? null
+      return rowObjects(result)[0] ?? missing(table, keys, input.path)
     },
   })
 
   return operations
+}
+
+/**
+ * The `404` a `/{pk}` route answers. The message names the key it looked for, which the caller
+ * already sent in the path, so it discloses nothing the request did not carry.
+ */
+function missing(table: TableInfo, keys: readonly KeyParam[], path: Row): never {
+  const key = keys
+    .map(({ column, parameter }) => `${column.name}=${String(path[parameter] ?? "")}`)
+    .join(", ")
+  throw BunQLError.notFound(`no row of ${table.name} with ${key}`)
 }
 
 /**

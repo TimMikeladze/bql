@@ -12,6 +12,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   UNAUTHENTICATED: 401,
   NOT_AUTHORIZED: 403,
   DB_NOT_FOUND: 404,
+  /** No such row. The data API's `/{pk}` routes; see `docs/h8-validated-requests.md`. */
+  NOT_FOUND: 404,
   QUERY_TIMEOUT: 408,
   CONFLICT: 409,
   RESET_REQUIRED: 409,
@@ -79,6 +81,11 @@ export class BunQLError extends Error {
 
   static dbNotFound(db: string): BunQLError {
     return new BunQLError("DB_NOT_FOUND", `no such database: ${db}`, 404)
+  }
+
+  /** No such row. Distinct from `DB_NOT_FOUND`, which is about the database itself. */
+  static notFound(message = "no such row"): BunQLError {
+    return new BunQLError("NOT_FOUND", message, 404)
   }
 
   static queryTimeout(timeoutMs?: number): BunQLError {

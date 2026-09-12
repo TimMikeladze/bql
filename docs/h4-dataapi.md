@@ -124,8 +124,9 @@ Components per table: `User` (the row), `NewUser` (the insert body), `UserPatch`
 - **An insert takes one row or an array of them.** Every row of an array has to name the same
   columns: SQLite's multi-row `VALUES` takes one column list, and a row silently filled with NULL
   where another row named a column would be a different write from the one that was asked for.
-- **A single-row read, update or delete that matches nothing answers `200` with `null`**, not a
-  404. See the findings.
+- **A single-row read, update or delete that matches nothing answers `404 NOT_FOUND`.** It
+  answered `200` with `null` as this milestone shipped; the finding below was taken up in
+  `docs/h8-validated-requests.md`, which added `NOT_FOUND: 404` to `ERROR_STATUS`.
 
 ## The filter grammar
 
@@ -244,14 +245,16 @@ reads either mode, so an `"object"`-mode context works too.
 Things this milestone wanted that the repo could not give it. None of them was worked around
 silently.
 
-- **There is no "no such row" error code, so a `/{pk}` that matches nothing answers `200` with
-  `null`.** `ERROR_STATUS` in `src/server/errors.ts` has `DB_NOT_FOUND` and `TX_NOT_FOUND` and
-  nothing that means *row*; `statusForCode` in `src/openapi/errors.ts` **throws** for a code it has
-  never heard of, so inventing `NOT_FOUND` here would produce either an undocumented status or a
-  document that refuses to build — the second error vocabulary `plan-surfaces.md` forbids. `null`
-  is honest, it is published exactly (`anyOf: [User, null]`), and it is what GraphQL would do
-  anyway. **If a 404 is wanted, `ERROR_STATUS` needs a `NOT_FOUND: 404` entry and every operation
-  here gains one line.**
+- ~~**There is no "no such row" error code, so a `/{pk}` that matches nothing answers `200` with
+  `null`.**~~ **Fixed in `docs/h8-validated-requests.md`:** `NOT_FOUND: 404` is in `ERROR_STATUS`,
+  the three `/{pk}` operations declare it, and their `200` schema is the row rather than
+  `anyOf: [User, null]`. GraphQL still answers `null`, because a missing row is not an error there
+  — `nullOnNotFound` in `src/graphql/errors.ts` unmakes that one status on the dispatch the
+  resolvers run through. The original finding: `ERROR_STATUS` had `DB_NOT_FOUND` and `TX_NOT_FOUND`
+  and nothing that means *row*; `statusForCode` in `src/openapi/errors.ts` **throws** for a code it
+  has never heard of, so inventing `NOT_FOUND` here would have produced either an undocumented
+  status or a document that refuses to build — the second error vocabulary `plan-surfaces.md`
+  forbids.
 - **`PRAGMA table_xinfo` and `PRAGMA index_info` are denied to a token.** `PRAGMA_SUBJECT` in
   `src/server/auth.ts` allows `table_info`, `table_list`, `index_list` and `foreign_key_list`;
   `table_xinfo` (needed for generated columns) and `index_info` (needed for a unique index's

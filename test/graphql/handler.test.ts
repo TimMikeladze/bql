@@ -47,6 +47,17 @@ describe("a query and a mutation", () => {
     expect(filtered.body.data?.listUsers).toEqual([])
   })
 
+  // REST answers `404 NOT_FOUND` for a key that matches nothing; GraphQL answers `null`, because
+  // a missing row is not an error there. `nullOnNotFound` in `src/graphql/errors.ts` is the seam.
+  test("a key that matches nothing is null, not an error", async () => {
+    const { status, body } = await fixture.ask<{ getUser: { name: string } | null }>(
+      `{ getUser(id: "9999") { name } }`,
+    )
+    expect(status).toBe(200)
+    expect(body.errors).toBeUndefined()
+    expect(body.data?.getUser).toBeNull()
+  })
+
   test("a mutation writes a real row and answers with what SQLite stored", async () => {
     const created = await fixture.ask<{ createUser: { id: number; name: string }[] }>(
       `mutation { createUser(input: { name: "bo" }) { id name } }`,

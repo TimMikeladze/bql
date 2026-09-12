@@ -115,14 +115,18 @@ describe("the generated operations", () => {
     expect(one.body.id).toEqual({ $i: "9007199254740993" })
   })
 
-  test("get, and a key that matches nothing", async () => {
+  test("get, and a key that matches nothing is a 404", async () => {
     expect((await read(await json("GET", "/v1/db/ops/api/orders/1"))).body).toEqual({
       id: 1,
       user_id: 1,
       total: 12.5,
     })
-    const missing = await read(await json("GET", "/v1/db/ops/api/orders/404"))
-    expect(missing).toEqual({ status: 200, body: null })
+    const missing = await read<{ error: { code: string; message: string } }>(
+      await json("GET", "/v1/db/ops/api/orders/404"),
+    )
+    expect(missing.status).toBe(404)
+    expect(missing.body.error.code).toBe("NOT_FOUND")
+    expect(missing.body.error.message).toBe("no row of orders with id=404")
   })
 
   test("insert one row, and the columns SQLite filled in come back", async () => {
@@ -167,23 +171,25 @@ describe("the generated operations", () => {
     expect((await read(await json("POST", "/v1/db/ops/api/users", { email: "x" }))).status).toBe(400)
   })
 
-  test("update, and an update that matches nothing", async () => {
+  test("update, and an update that matches nothing is a 404", async () => {
     const patched = await read<Record<string, unknown>>(
       await json("PATCH", "/v1/db/ops/api/users/1", { email: "ann@bunql.dev" }),
     )
     expect(patched.status).toBe(200)
     expect(patched.body).toMatchObject({ id: 1, name: "ann", email: "ann@bunql.dev" })
-    expect((await read(await json("PATCH", "/v1/db/ops/api/users/404", { email: "x" }))).body).toBe(null)
+    expect(
+      (await read(await json("PATCH", "/v1/db/ops/api/users/404", { email: "x" }))).status,
+    ).toBe(404)
     expect((await read(await json("PATCH", "/v1/db/ops/api/users/1", {}))).status).toBe(400)
   })
 
-  test("delete answers with the row that went, and null when there was none", async () => {
+  test("delete answers with the row that went, and 404 when there was none", async () => {
     const { status, body } = await read<Record<string, unknown>>(
       await json("DELETE", "/v1/db/ops/api/orders/1"),
     )
     expect(status).toBe(200)
     expect(body).toMatchObject({ id: 1, user_id: 1 })
-    expect((await read(await json("DELETE", "/v1/db/ops/api/orders/1"))).body).toBe(null)
+    expect((await read(await json("DELETE", "/v1/db/ops/api/orders/1"))).status).toBe(404)
   })
 
   test("a table with no primary key is addressed by its rowid", async () => {
@@ -286,11 +292,13 @@ describe("the OpenAPI document", () => {
       type: "array",
       items: { $ref: "#/components/schemas/User" },
     })
-    expect(document.paths["/v1/db/{db}/api/users/{id}"]?.get?.responses["200"]?.content?.[
-      "application/json"
-    ]?.schema).toEqual({
-      anyOf: [{ $ref: "#/components/schemas/User" }, { type: "null" }],
+    // The row itself, not a union with null: a key that matches nothing is a 404 now, which the
+    // same operation documents under its own status.
+    const one = document.paths["/v1/db/{db}/api/users/{id}"]?.get
+    expect(one?.responses["200"]?.content?.["application/json"]?.schema).toEqual({
+      $ref: "#/components/schemas/User",
     })
+    expect(one?.responses["404"]).toBeDefined()
   })
 
   test("documents every filter as a query parameter, and the errors under their real statuses", () => {

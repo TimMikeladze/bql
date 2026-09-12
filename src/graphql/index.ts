@@ -38,7 +38,12 @@ export {
   type TenantDocumentOptions,
   tenantPrefix,
 } from "./document.ts"
-export { type FormattedGraphQLError, liftBunQLError, REQUEST_FAILED } from "./errors.ts"
+export {
+  type FormattedGraphQLError,
+  liftBunQLError,
+  nullOnNotFound,
+  REQUEST_FAILED,
+} from "./errors.ts"
 export {
   databaseFromPath,
   type GraphQLHandler,

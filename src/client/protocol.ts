@@ -173,6 +173,7 @@ export type BunQLErrorCode =
   | "UNAUTHENTICATED"
   | "NOT_AUTHORIZED"
   | "DB_NOT_FOUND"
+  | "NOT_FOUND"
   | "QUERY_TIMEOUT"
   | "TXID_NOT_AVAILABLE"
   | "NOT_PRIMARY"

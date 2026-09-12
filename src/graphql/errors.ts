@@ -14,6 +14,12 @@
 //
 // Nothing else is rewritten. An error the generator did not raise, or one whose body is not a
 // BunQL error body, is passed through exactly as GraphQL formatted it.
+//
+// One refusal is not lifted but *unmade*: `NOT_FOUND`. A `/{pk}` route answers `404` when the key
+// matches nothing (`docs/h8-validated-requests.md`), which is right for REST and wrong for
+// GraphQL, where a missing row is `null` and not an error. `nullOnNotFound` wraps the dispatch the
+// resolvers run through and turns that one status back into a `200` with a `null` body, so both
+// surfaces read idiomatically from one handler. Every other 4xx and 5xx travels untouched.
 
 /** A GraphQL error as `GraphQLError.toJSON()` writes it. */
 export interface FormattedGraphQLError {
@@ -58,5 +64,23 @@ export function liftBunQLError(formatted: FormattedGraphQLError): FormattedGraph
     ...formatted,
     message,
     extensions: lifted,
+  }
+}
+
+/**
+ * The dispatch a generated resolver runs through, with `404 NOT_FOUND` answered as `null`. Only
+ * that code: a `DB_NOT_FOUND`, which is also a 404, is a real error in either surface and is left
+ * alone.
+ */
+export function nullOnNotFound(dispatch: (request: Request) => Promise<Response>) {
+  return async (request: Request): Promise<Response> => {
+    const response = await dispatch(request)
+    if (response.status !== 404) return response
+    const body = await response.clone().json().catch(() => undefined)
+    if (!isErrorBody(body) || body.error.code !== "NOT_FOUND") return response
+    return new Response("null", {
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    })
   }
 }

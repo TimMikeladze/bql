@@ -32,11 +32,13 @@ describe("the generated data API", () => {
     expect(projected).toEqual([{ id: 1, name: "ann" }])
   })
 
-  test("reads one row by primary key, and answers null for one that is not there", async () => {
+  test("reads one row by primary key, and 404s for one that is not there", async () => {
     expect(await server.json(`/v1/db/${DB}/api/users/1`)).toMatchObject({ name: "ann" })
     const missing = await server.fetch(`/v1/db/${DB}/api/users/9999`)
-    expect(missing.status).toBe(200)
-    expect(await missing.json()).toBeNull()
+    expect(missing.status).toBe(404)
+    expect((await missing.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: "NOT_FOUND", status: 404 },
+    })
   })
 
   test("writes, and the answer carries the row and the txid the write got", async () => {

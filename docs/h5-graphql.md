@@ -186,7 +186,7 @@ input UserPatchInput { id: JSON, name: String, email: String }
 ```
 
 Every field carries the operation's `summary` and `description` — the filter grammar, the primary
-key's declared type, "answers with the row as it is now, or null when the key matched nothing" —
+key's declared type, "answers with the row as it is now" —
 which is why H3 and H4 treat those as load-bearing rather than as polish.
 
 - **No `db` argument**, per the edit above. The tenant is in the base URL.

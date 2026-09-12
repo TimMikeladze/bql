@@ -23,6 +23,7 @@ import type { InfoObject, OpenApiDocument } from "../openapi/index.ts"
 import type { GraphQLSchema } from "graphql"
 import type { CreateSchemaOptions, OpenApiSource } from "openapi-x-graphql"
 import { currentCall } from "./ambient.ts"
+import { nullOnNotFound } from "./errors.ts"
 import {
   DEFAULT_API_PREFIX,
   INTERNAL_ORIGIN,
@@ -141,7 +142,8 @@ export class SchemaCache {
         baseUrl: tenantBaseUrl(db, prefix, origin),
         // Bun's `typeof fetch` also carries `preconnect`, which a dispatcher has no use for and
         // the generator never reaches for: `executeOperation` calls the function and nothing else.
-        fetch: dispatch as unknown as typeof globalThis.fetch,
+        // `nullOnNotFound` is the one edit: a missing row is `null` in GraphQL, not an error.
+        fetch: nullOnNotFound(dispatch) as unknown as typeof globalThis.fetch,
       },
     )
     const built: TenantGraphQL = { db, schemaVersion: version, schema, document, dispatch, warnings }
