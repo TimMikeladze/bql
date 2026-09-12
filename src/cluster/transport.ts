@@ -33,13 +33,48 @@ import {
 import type { LogEntry, RaftMessage, RaftSnapshot } from "./raft.ts"
 import type { NodeId } from "./state.ts"
 
-/** The path `app.ts` will mount this on. */
+/** The path `app.ts` mounts this on. */
 export const RAFT_PATH = "/v1/cluster/raft"
+
+/**
+ * The socket URL for a peer, from either form an operator or the state machine can supply.
+ *
+ * `[cluster] advertise` is documented as `ws://host:port` — it is also the base a client is
+ * redirected to — while a peer entry names the socket itself. Normalising here is what stops a
+ * node dialling a peer's *root* path, where the upgrade fails, the socket closes, no heartbeat
+ * ever lands and the group re-elects for ever. That is exactly what `ClusterNode.#syncPeers`
+ * produced once the state machine started supplying addresses.
+ */
+export function raftUrl(url: string): string {
+  if (!url) return ""
+  return url.includes(RAFT_PATH) ? url : `${url.replace(/\/+$/, "")}${RAFT_PATH}`
+}
 
 export const RAFT_FRAME = {
   HELLO: 0x01,
   RAFT: 0x02,
+  /** A follower asking the leader to do something it can only do as the leader (C2). */
+  REQUEST: 0x03,
+  /** The leader's answer to one `REQUEST`. */
+  REPLY: 0x04,
 } as const
+
+/**
+ * What a follower sends the leader. Both kinds exist because a follower cannot propose — Raft
+ * entries are the leader's to append — and because C2's promotion decision has to be *taken* on
+ * the leader, against the leader's own wall clock, rather than taken on the candidate and rubber
+ * stamped. `command` covers the first, `promote` the second.
+ */
+export interface RaftRequest {
+  id: number
+  kind: "command" | "promote"
+  payload: unknown
+}
+
+export interface RaftReply {
+  id: number
+  result: unknown
+}
 
 /** Ceiling for the reconnect backoff, as in `src/replication/replica.ts`. */
 const MAX_RECONNECT_MS = 10_000
@@ -95,6 +130,10 @@ export interface RaftTransportOptions {
   /** Peer id to `ws://host:port` — the advertise addresses from `ClusterState.nodes`. */
   peers?: Record<NodeId, string>
   onMessage: (from: NodeId, message: RaftMessage) => void
+  /** C2: a follower has asked this node, as leader, to do something. */
+  onRequest?: (from: NodeId, request: RaftRequest) => void
+  /** C2: the leader has answered a request this node sent. */
+  onReply?: (from: NodeId, reply: RaftReply) => void
   onError?: (err: unknown) => void
   /** First backoff step; doubles with jitter up to 10 s. Default 250 ms. */
   reconnectMs?: number
@@ -129,6 +168,8 @@ export class RaftTransport {
 
   #peers: Record<NodeId, string>
   #onMessage: (from: NodeId, message: RaftMessage) => void
+  #onRequest: (from: NodeId, request: RaftRequest) => void
+  #onReply: (from: NodeId, reply: RaftReply) => void
   #onError: (err: unknown) => void
   #factory: RaftSocketFactory | null
   #random: () => number
@@ -141,8 +182,12 @@ export class RaftTransport {
     this.id = options.id
     this.secret = options.secret
     this.reconnectMs = options.reconnectMs ?? 250
-    this.#peers = { ...(options.peers ?? {}) }
+    this.#peers = Object.fromEntries(
+      Object.entries(options.peers ?? {}).map(([node, url]) => [node, raftUrl(url)]),
+    )
     this.#onMessage = options.onMessage
+    this.#onRequest = options.onRequest ?? (() => {})
+    this.#onReply = options.onReply ?? (() => {})
     this.#onError = options.onError ?? (() => {})
     this.#factory = options.factory ?? null
     this.#random = options.random ?? Math.random
@@ -170,13 +215,15 @@ export class RaftTransport {
    * that is gone has its socket closed; one whose address moved is redialled.
    */
   setPeers(peers: Record<NodeId, string>): void {
-    this.#peers = { ...peers }
+    this.#peers = Object.fromEntries(
+      Object.entries(peers).map(([node, url]) => [node, raftUrl(url)]),
+    )
     for (const [node, peer] of this.#outbound) {
-      const url = peers[node]
+      const url = this.#peers[node]
       if (url === undefined || url !== peer.url) this.#drop(node)
     }
     if (!this.#started) return
-    for (const [node, url] of Object.entries(peers)) {
+    for (const [node, url] of Object.entries(this.#peers)) {
       if (node === this.id || this.#outbound.has(node)) continue
       this.#dial(node, url)
     }
@@ -192,6 +239,30 @@ export class RaftTransport {
       this.#onError(err)
       this.#drop(to)
       this.#redial(to)
+    }
+  }
+
+  /** C2: a request to the leader, over this node's own outbound socket. Dropped like any send. */
+  request(to: NodeId, request: RaftRequest): boolean {
+    return this.#sendFrame(to, encodeJsonFrame(RAFT_FRAME.REQUEST, request))
+  }
+
+  /** C2: the leader's answer, over its own outbound socket to the asking node. */
+  reply(to: NodeId, reply: RaftReply): boolean {
+    return this.#sendFrame(to, encodeJsonFrame(RAFT_FRAME.REPLY, reply))
+  }
+
+  #sendFrame(to: NodeId, frame: Uint8Array): boolean {
+    const peer = this.#outbound.get(to)
+    if (!peer || !peer.ready || !peer.ws) return false
+    try {
+      peer.ws.send(frame)
+      return true
+    } catch (err) {
+      this.#onError(err)
+      this.#drop(to)
+      this.#redial(to)
+      return false
     }
   }
 
@@ -287,6 +358,14 @@ export class RaftTransport {
     // The one rule that matters on this side: nothing but the handshake is read from a socket that
     // has not completed it.
     if (!conn.authed) throw new ProtocolError("raft frame before the handshake")
+    if (type === RAFT_FRAME.REQUEST) {
+      this.#onRequest(conn.node, decodeJsonBody<RaftRequest>(body))
+      return
+    }
+    if (type === RAFT_FRAME.REPLY) {
+      this.#onReply(conn.node, decodeJsonBody<RaftReply>(body))
+      return
+    }
     if (type !== RAFT_FRAME.RAFT) throw new ProtocolError(`unknown raft frame 0x${type.toString(16)}`)
     const { from, message } = decodeRaft(body)
     this.#onMessage(from || conn.node, message)
@@ -297,7 +376,7 @@ export class RaftTransport {
   #dial(node: NodeId, url: string): void {
     if (node === this.id || this.#closed) return
     const peer: Outbound = {
-      url,
+      url: raftUrl(url),
       ws: null,
       reader: new FrameReader(),
       ready: false,

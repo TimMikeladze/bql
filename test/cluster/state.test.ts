@@ -79,31 +79,50 @@ describe("apply", () => {
 })
 
 describe("the epoch", () => {
+  test("the first grant of an unplaced database fences nobody, so it does not bump", () => {
+    const state = run([{ type: "grantLease", db: "acme", node: "n1", until: 1000 }])
+    expect(state.dbs.acme?.epoch).toBe(0)
+    expect(state.dbs.acme?.primary).toBe("n1")
+  })
+
   test("bumps when the lease changes holder", () => {
     let state = run([{ type: "grantLease", db: "acme", node: "n1", until: 1000 }])
-    expect(state.dbs.acme?.epoch).toBe(1)
-    expect(state.dbs.acme?.primary).toBe("n1")
-
     state = apply(state, { type: "grantLease", db: "acme", node: "n2", until: 2000 })
-    expect(state.dbs.acme?.epoch).toBe(2)
+    expect(state.dbs.acme?.epoch).toBe(1)
     expect(state.dbs.acme?.primary).toBe("n2")
+
+    state = apply(state, { type: "grantLease", db: "acme", node: "n1", until: 3000 })
+    expect(state.dbs.acme?.epoch).toBe(2)
+    expect(state.dbs.acme?.primary).toBe("n1")
   })
 
   test("does not bump on a renewal by the node that already holds it", () => {
-    let state = run([{ type: "grantLease", db: "acme", node: "n1", until: 1000 }])
+    let state = run([
+      { type: "grantLease", db: "acme", node: "n1", until: 1000 },
+      { type: "grantLease", db: "acme", node: "n2", until: 1500 },
+    ])
     for (const until of [2000, 3000, 4000]) {
-      state = apply(state, { type: "grantLease", db: "acme", node: "n1", until })
+      state = apply(state, { type: "grantLease", db: "acme", node: "n2", until })
     }
     expect(state.dbs.acme?.epoch).toBe(1)
     expect(state.dbs.acme?.lease?.until).toBe(4000)
   })
 
-  test("bumps again after a release, because the lease has to change hands to come back", () => {
-    let state = run([{ type: "grantLease", db: "acme", node: "n1", until: 1000 }])
+  test("a release does not let the same node's own re-take burn an epoch", () => {
+    // C2: a primary whose lease lapsed and is re-taking it has fenced nobody, so the fencing token
+    // must not move — every replica of that database would otherwise re-snapshot for nothing.
+    let state = run([
+      { type: "grantLease", db: "acme", node: "n1", until: 1000 },
+      { type: "grantLease", db: "acme", node: "n2", until: 1500 },
+    ])
+    expect(state.dbs.acme?.epoch).toBe(1)
     state = apply(state, { type: "releaseLease", db: "acme" })
     expect(state.dbs.acme?.lease).toBeNull()
+    state = apply(state, { type: "grantLease", db: "acme", node: "n2", until: 2000 })
     expect(state.dbs.acme?.epoch).toBe(1)
-    state = apply(state, { type: "grantLease", db: "acme", node: "n1", until: 2000 })
+    // A different node taking it after the release is a real change of hands.
+    state = apply(state, { type: "releaseLease", db: "acme" })
+    state = apply(state, { type: "grantLease", db: "acme", node: "n3", until: 3000 })
     expect(state.dbs.acme?.epoch).toBe(2)
   })
 
@@ -115,6 +134,25 @@ describe("the epoch", () => {
     expect(state.dbs.acme?.epoch).toBe(40)
     state = apply(state, { type: "grantLease", db: "acme", node: "n2", until: 3000, epoch: 7 })
     expect(state.dbs.acme?.epoch).toBe(41)
+  })
+
+  test("claimDb merges one node at a time and only a primary may state the generation", () => {
+    let state = run([
+      { type: "claimDb", db: "acme", node: "n1", role: "primary", generation: "aaaa" },
+      { type: "claimDb", db: "acme", node: "n2", role: "replica", generation: "bbbb" },
+      { type: "claimDb", db: "acme", node: "n3", role: "replica" },
+      { type: "claimDb", db: "acme", node: "n3", role: "replica" },
+    ])
+    expect(state.dbs.acme?.primary).toBe("n1")
+    expect(state.dbs.acme?.replicas).toEqual(["n2", "n3"])
+    // A replica that has been disconnected across a delete and a re-create still holds the old id;
+    // letting it write that here would overwrite the fact promotion checks against.
+    expect(state.dbs.acme?.generation).toBe("aaaa")
+
+    // A node that says it is following is no longer the recorded primary.
+    state = apply(state, { type: "claimDb", db: "acme", node: "n1", role: "replica" })
+    expect(state.dbs.acme?.primary).toBeNull()
+    expect(state.dbs.acme?.replicas).toEqual(["n2", "n3", "n1"])
   })
 
   test("is monotonic across a long run of grants", () => {

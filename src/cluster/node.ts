@@ -10,18 +10,27 @@
 //
 //   * The Raft *leader* stamps `until = Date.now() + leaseTtlMs` into the `grantLease` command. It
 //     is the leader's wall clock, and it is the only wall clock in the system.
-//   * The *holder* ignores that number for its own purposes entirely. When the grant applies, it
-//     stamps `grantedAtLocalMs` from its own monotonic clock and treats the lease as valid until
-//     `grantedAtLocalMs + leaseTtlMs - leaseGuardMs` on that same clock.
+//   * The *holder* ignores that number for its own purposes entirely. It stamps its own monotonic
+//     clock at the moment it **asks** for the grant — `#leaseAsked`, not the moment the grant comes
+//     back — and treats the lease as valid until `askedAtLocalMs + leaseTtlMs - leaseGuardMs` on
+//     that same clock.
 //   * So only elapsed time is ever compared, and only ever the holder's own. A clock *offset*
 //     between two machines — the thing NTP is usually blamed for — cannot matter here, because no
 //     node ever reads another node's clock.
-//   * `leaseGuardMs` covers clock *rate* skew over one TTL, and nothing else. The holder stamps
-//     strictly after the leader did (the grant had to commit and reach it), so its deadline is
-//     already earlier in real time than the leader's `until`; the guard is the margin on top that
-//     makes it impossible for the holder to still believe it holds the lease at the moment the
-//     leader becomes free to grant it elsewhere. That margin is what makes two writers impossible,
-//     and it is why 500 ms of a 3000 ms lease is spent on nothing.
+//   * Stamping at the *ask* is what makes the margin unconditional, and C1 had this backwards.
+//     The leader stamps `until` at `t_grant`, which is after `t_ask` in real time; a holder that
+//     stamped when the grant *arrived* would have a deadline of `leaderUntil + (t_grant - t_ask)
+//     - guard`, so a slow commit eats the guard and can push the holder's deadline past the
+//     leader's. Stamping at `t_ask` makes the holder's deadline earlier than `until` by at least
+//     `guard` whatever the commit cost, so `leaseGuardMs` has to cover clock *rate* skew over one
+//     TTL and nothing else.
+//   * That margin is what makes two writers impossible, and it is why 500 ms of a 3000 ms lease is
+//     spent on nothing. `docs/c2-promotion.md` sets it out in full.
+//
+// C2's half: the lease is renewed by the **holder**, never by the leader on the holder's behalf.
+// A leader that renewed for a node that has died would keep a dead primary's lease alive for ever,
+// and nothing would ever fail over. `pickFailover` then grants the lapsed lease elsewhere, on the
+// leader's own wall clock, which is the only clock allowed to decide that a lease has lapsed.
 //
 // Raft's own timers run on `performance.now()`, not `Date.now()`: an election timeout is an
 // elapsed-time question and a wall clock that steps backwards over NTP would otherwise stall an
@@ -45,6 +54,13 @@ import {
 } from "./raft.ts"
 import { RaftLog } from "./log.ts"
 import {
+  type ClusterFacts,
+  decidePromotion,
+  pickFailover,
+  type PromotionOutcome,
+  type PromotionRequest,
+} from "./promotion.ts"
+import {
   apply,
   type ClusterState,
   type Command,
@@ -58,6 +74,9 @@ import {
   type NodeStatus,
 } from "./state.ts"
 import {
+  RAFT_PATH,
+  type RaftReply,
+  type RaftRequest,
   RaftTransport,
   type RaftSocket,
   type RaftSocketData,
@@ -94,6 +113,7 @@ export interface ClusterViewDb {
   epoch: number
   lease: { node: NodeId; until: number } | null
   acked: Record<NodeId, string>
+  generation: string | null
 }
 
 /** What `GET /v1/cluster` will render. */
@@ -180,6 +200,15 @@ export class ClusterNode {
 
   /** One cached handle per database, replaced only when the lease actually changes. */
   #leases = new Map<string, LeaseHandle>()
+  /**
+   * Per database, this node's own monotonic clock at the moment it last *asked* for a grant naming
+   * itself. The holder's deadline is measured from here and not from when the grant arrived; see
+   * the header for why that is the whole margin.
+   */
+  #leaseAsked = new Map<string, number>()
+  /** Requests this node has sent the leader and is waiting on. C2's forwarding. */
+  #requests = new Map<number, { resolve: (value: unknown) => void; timer: ReturnType<typeof setTimeout> }>()
+  #nextRequest = 1
   #peerUrls: Record<NodeId, string>
   #pending = new Map<ProposalId, PendingProposal>()
   #listeners = new Set<(view: ClusterView) => void>()
@@ -187,6 +216,8 @@ export class ClusterNode {
 
   #tickTimer: ReturnType<typeof setInterval> | null = null
   #renewTimer: ReturnType<typeof setInterval> | null = null
+  /** Databases this node is the primary for, as the server told it. Renewal reads it. */
+  #owned = new Set<string>()
   #started = false
   #closed = false
   #lastRole: RaftRole = "follower"
@@ -218,8 +249,46 @@ export class ClusterNode {
     return this.#leases.get(db) ?? null
   }
 
+  /**
+   * The whole write-path check, in one call so the monotonic clock stays inside this module: does
+   * this node hold a lease on `db` that is still valid on its own clock? Synchronous,
+   * allocation-free, one `Map.get` and one `performance.now()`.
+   */
+  holdsLease(db: string): boolean {
+    const lease = this.#leases.get(db)
+    return (
+      lease !== undefined &&
+      lease.node === this.id &&
+      this.#monotonic() < lease.validUntilLocalMs
+    )
+  }
+
+  /** Whether the control plane has ever heard of this database. */
+  knows(db: string): boolean {
+    return this.#state.dbs[db] !== undefined
+  }
+
+  /** The epoch the control plane holds for a database, or null when it has never heard of it. */
+  epochOf(db: string): number | null {
+    const entry = this.#state.dbs[db]
+    return entry ? entry.epoch : null
+  }
+
   isLeader(): boolean {
     return this.#raft?.role === "leader"
+  }
+
+  /** `ws://host:port` for a node the state machine knows, or null. C2 redirects clients with it. */
+  advertiseOf(node: NodeId): string | null {
+    const advertise = node === this.id ? (this.#options.advertise ?? "") : (this.#state.nodes[node]?.advertise ?? "")
+    return advertise.length > 0 ? advertise : null
+  }
+
+  /** The node the control plane says owns `db` right now, lease first and placement second. */
+  primaryOf(db: string): NodeId | null {
+    const entry = this.#state.dbs[db]
+    if (!entry) return null
+    return entry.lease?.node ?? entry.primary
   }
 
   get term(): number {
@@ -247,6 +316,16 @@ export class ClusterNode {
   propose(command: Command): Promise<{ ok: boolean; reason?: string }> {
     const raft = this.#raft
     if (!raft) return Promise.resolve({ ok: false, reason: "the cluster node is not started" })
+
+    // Only the leader may append. A follower hands the command over the raft socket it already
+    // holds rather than failing: the alternative is every caller in the server learning to find
+    // the leader and to re-find it after an election.
+    if (raft.role !== "leader") {
+      return this.#askLeader<{ ok: boolean; reason?: string }>("command", command, {
+        ok: false,
+        reason: "this node is not the raft leader and cannot reach one",
+      })
+    }
 
     const change = this.#configChangeFor(command, raft)
     const id = this.#nextProposal++
@@ -287,6 +366,7 @@ export class ClusterNode {
       epoch: entry.epoch,
       lease: entry.lease ? { ...entry.lease } : null,
       acked: { ...entry.acked },
+      generation: entry.generation ?? null,
     }))
     return {
       id: this.id,
@@ -358,6 +438,8 @@ export class ClusterNode {
       secret: this.#options.secret ?? "",
       peers: this.#peerUrls,
       onMessage: (from, message) => this.#onMessage(from, message),
+      onRequest: (from, request) => void this.#onRequest(from, request),
+      onReply: (_from, reply) => this.#onReply(reply),
       onError: this.#onError,
       ...(this.#options.factory ? { factory: this.#options.factory } : {}),
       ...(this.#options.random ? { random: this.#options.random } : {}),
@@ -390,6 +472,11 @@ export class ClusterNode {
       pending.resolve({ ok: false, reason: "the cluster node is shutting down" })
     }
     this.#pending.clear()
+    for (const [, request] of this.#requests) {
+      clearTimeout(request.timer)
+      request.resolve(null)
+    }
+    this.#requests.clear()
     this.#transport?.close()
     this.#transport = null
     this.#log?.close()
@@ -521,7 +608,7 @@ export class ClusterNode {
       // A renewal moves `until`, and a renewal is exactly when the holder has to re-stamp its own
       // clock; only a record that did not move at all keeps the handle it already has.
       if (cached && unchanged && cached.epoch === entry.epoch) continue
-      this.#leases.set(db, this.#handleFor(lease.node, entry.epoch))
+      this.#leases.set(db, this.#handleFor(db, lease.node, entry.epoch))
     }
     for (const db of [...this.#leases.keys()]) {
       if (!this.#state.dbs[db]?.lease) this.#leases.delete(db)
@@ -531,40 +618,236 @@ export class ClusterNode {
   #rebuildLeases(): void {
     this.#leases.clear()
     for (const [db, entry] of Object.entries(this.#state.dbs)) {
-      if (entry.lease) this.#leases.set(db, this.#handleFor(entry.lease.node, entry.epoch))
+      if (entry.lease) this.#leases.set(db, this.#handleFor(db, entry.lease.node, entry.epoch))
     }
   }
 
-  #handleFor(node: NodeId, epoch: number): LeaseHandle {
+  #handleFor(db: string, node: NodeId, epoch: number): LeaseHandle {
+    // The deadline is measured from the moment this node *asked* for the grant, not from now: the
+    // grant had to commit and travel to get here, and counting that latency inside the lease is
+    // what would eat the guard. A lease this node never asked for falls back to now, which is
+    // conservative in the same direction.
+    const asked = this.#leaseAsked.get(db) ?? this.#monotonic()
     return {
       node,
       epoch,
       // 0 for a lease held elsewhere: always in the past on this clock, which is exactly right.
-      validUntilLocalMs:
-        node === this.id ? this.#monotonic() + this.leaseTtlMs - this.leaseGuardMs : 0,
+      validUntilLocalMs: node === this.id ? asked + this.leaseTtlMs - this.leaseGuardMs : 0,
     }
   }
 
+  /** The server tells the node which databases it authors, so renewal knows what to keep. */
+  setOwned(dbs: Iterable<string>): void {
+    this.#owned = new Set(dbs)
+  }
+
+  /** Records the ask *before* the propose, which is what makes the handle's deadline honest. */
+  #markAsked(db: string): void {
+    this.#leaseAsked.set(db, this.#monotonic())
+  }
+
   /**
-   * The leader renews every lease it has granted. In C1 renewal is leader-driven because the
-   * leader is the one that must not grant the database elsewhere; a primary that is not the Raft
-   * leader asking for its own renewal is C2's failover path.
+   * Two jobs on one timer.
+   *
+   * **The holder renews its own lease.** C1 had the leader renew every lease it had granted, which
+   * meant a primary that died kept its lease for ever and nothing ever failed over. A lease is now
+   * asked for by the node that holds it and wants to keep holding it, so silence is what makes it
+   * lapse.
+   *
+   * **The leader hands a lapsed lease on.** `pickFailover` is pure and is given the leader's own
+   * wall clock; it answers `null` while the lease is live, which is the guard that makes two
+   * primaries impossible.
    */
   #renewLeases(): void {
-    if (!this.isLeader() || this.#closed) return
+    if (this.#closed || !this.#raft) return
+    this.#renewOwn()
+    this.#failover()
+  }
+
+  #renewOwn(): void {
     const now = this.#wall()
     for (const [db, entry] of Object.entries(this.#state.dbs)) {
       const lease = entry.lease
-      if (!lease) continue
-      // Already renewed inside this interval — an out-of-band grant, usually.
+      if (!lease || lease.node !== this.id) continue
+      if (!this.#owned.has(db)) continue
+      // Renew once the lease is inside its last `leaseRenewMs`, so a renewal that fails still
+      // leaves time for another attempt before the holder's own deadline passes.
       if (lease.until - now > this.leaseTtlMs - this.leaseRenewMs) continue
+      this.#markAsked(db)
       void this.propose({
         type: "grantLease",
         db,
-        node: lease.node,
+        node: this.id,
         until: now + this.leaseTtlMs,
       }).catch(this.#onError)
     }
+  }
+
+  #failover(): void {
+    if (!this.isLeader()) return
+    const now = this.#wall()
+    const reachable = new Set<NodeId>([this.id])
+    for (const node of this.#transport?.connected() ?? []) reachable.add(node)
+    for (const [db, entry] of Object.entries(this.#state.dbs)) {
+      const pick = pickFailover({
+        db,
+        primary: entry.primary,
+        replicas: entry.replicas,
+        lease: entry.lease,
+        acked: entry.acked,
+        reachable,
+        nowMs: now,
+      })
+      if (!pick) continue
+      if (entry.lease && entry.lease.node === pick.node) {
+        // The holder is reachable and simply late. Hand it back without changing hands, which
+        // costs no epoch and re-snapshots nobody.
+        if (pick.node === this.id) this.#markAsked(db)
+        void this.propose({
+          type: "grantLease",
+          db,
+          node: pick.node,
+          until: now + this.leaseTtlMs,
+        }).catch(this.#onError)
+        continue
+      }
+      const decision = decidePromotion({
+        db,
+        node: pick.node,
+        hasCopy: true,
+        isPrimaryLocally: entry.primary === pick.node,
+        localGeneration: entry.generation ?? null,
+        placedGeneration: entry.generation ?? null,
+        applied: pick.applied,
+        localEpoch: entry.epoch,
+        streamLive: false,
+        cluster: this.#factsFor(db, now),
+        force: false,
+      })
+      if (!decision.ok) continue
+      if (pick.node === this.id) this.#markAsked(db)
+      void this.propose({
+        type: "grantLease",
+        db,
+        node: pick.node,
+        until: now + this.leaseTtlMs,
+        epoch: decision.epoch,
+      }).catch(this.#onError)
+    }
+  }
+
+  #factsFor(db: string, nowMs: number): ClusterFacts {
+    const entry = this.#state.dbs[db]
+    return {
+      epoch: entry?.epoch ?? 0,
+      primary: entry?.primary ?? null,
+      replicas: entry?.replicas ?? [],
+      lease: entry?.lease ?? null,
+      acked: entry?.acked ?? {},
+      nowMs,
+    }
+  }
+
+  // ── promotion (C2) ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Asks the control plane to make `request.node` the primary for `request.db`.
+   *
+   * The decision is taken **on the Raft leader**, against the leader's own wall clock, because the
+   * lease's `until` is in that clock and no other node may compare against it. A follower forwards
+   * the request rather than deciding locally and asking the leader to rubber stamp it — the
+   * difference is the whole `LEASE_HELD` guard.
+   */
+  async promote(request: PromotionRequest): Promise<PromotionOutcome> {
+    const raft = this.#raft
+    if (!raft) return { ok: false, code: "NO_LEADER", why: "the cluster node is not started" }
+    if (raft.role !== "leader") {
+      return await this.#askLeader<PromotionOutcome>("promote", request, {
+        ok: false,
+        code: "NO_LEADER",
+        why: `${this.id} is not the raft leader and could not reach ${raft.leaderId ?? "one"}`,
+      })
+    }
+    return await this.#decideAndGrant(request)
+  }
+
+  async #decideAndGrant(request: PromotionRequest): Promise<PromotionOutcome> {
+    const now = this.#wall()
+    const entry = this.#state.dbs[request.db]
+    const decision = decidePromotion({
+      db: request.db,
+      node: request.node,
+      hasCopy: request.hasCopy,
+      isPrimaryLocally: request.isPrimaryLocally,
+      localGeneration: request.localGeneration,
+      placedGeneration: entry?.generation ?? null,
+      applied: request.applied,
+      localEpoch: request.localEpoch,
+      streamLive: request.streamLive,
+      cluster: this.#factsFor(request.db, now),
+      force: request.force,
+    })
+    if (!decision.ok) return decision
+    if (request.node === this.id) this.#markAsked(request.db)
+    const committed = await this.propose({
+      type: "grantLease",
+      db: request.db,
+      node: request.node,
+      until: this.#wall() + this.leaseTtlMs,
+      epoch: decision.epoch,
+    })
+    if (!committed.ok) {
+      return {
+        ok: false,
+        code: "NOT_COMMITTED",
+        why: committed.reason ?? "the grant did not commit",
+      }
+    }
+    return decision
+  }
+
+  // ── asking the leader ────────────────────────────────────────────────────────────────────────
+
+  #askLeader<T>(kind: RaftRequest["kind"], payload: unknown, fallback: T): Promise<T> {
+    const leader = this.#raft?.leaderId ?? null
+    const transport = this.#transport
+    if (!leader || leader === this.id || !transport) return Promise.resolve(fallback)
+    const id = this.#nextRequest++
+    if (!transport.request(leader, { id, kind, payload })) return Promise.resolve(fallback)
+    return new Promise<T>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#requests.delete(id)
+        resolve(fallback)
+      }, this.proposeTimeoutMs)
+      timer.unref?.()
+      this.#requests.set(id, {
+        resolve: (value) => resolve(value === null || value === undefined ? fallback : (value as T)),
+        timer,
+      })
+    })
+  }
+
+  async #onRequest(from: NodeId, request: RaftRequest): Promise<void> {
+    let result: unknown
+    try {
+      if (request.kind === "promote") {
+        result = await this.promote(request.payload as PromotionRequest)
+      } else {
+        result = await this.propose(request.payload as Command)
+      }
+    } catch (err) {
+      this.#onError(err)
+      result = null
+    }
+    this.#transport?.reply(from, { id: request.id, result })
+  }
+
+  #onReply(reply: RaftReply): void {
+    const pending = this.#requests.get(reply.id)
+    if (!pending) return
+    this.#requests.delete(reply.id)
+    clearTimeout(pending.timer)
+    pending.resolve(reply.result)
   }
 
   // ── membership ───────────────────────────────────────────────────────────────────────────────
@@ -612,7 +895,14 @@ export class ClusterNode {
     if (!raft) return
     for (const node of raft.config) {
       const known = this.#state.nodes[node]
-      const advertise = node === this.id ? (this.#options.advertise ?? "") : (this.#peerUrls[node] ?? "")
+      // The state machine records the *advertise* form, `ws://host:port`, for every node: it is
+      // what a client is redirected to, and the raft socket's own path is added when dialling.
+      // Recording a peer's dial URL here instead would put `/v1/cluster/raft` in `GET /v1/cluster`
+      // for peers and not for this node, which is untidy where it is read by a human.
+      const advertise =
+        node === this.id
+          ? (this.#options.advertise ?? "")
+          : advertiseForm(this.#peerUrls[node] ?? "")
       const zone = node === this.id ? (this.#options.zone ?? "") : (known?.zone ?? "")
       if (known && known.advertise === advertise && known.zone === zone) continue
       void this.propose({ type: "addNode", node, advertise, zone, status: "voter" }).catch(
@@ -645,6 +935,11 @@ export class ClusterNode {
       }
     }
   }
+}
+
+/** `ws://host:port/v1/cluster/raft` → `ws://host:port`; anything else is left alone. */
+function advertiseForm(url: string): string {
+  return url.endsWith(RAFT_PATH) ? url.slice(0, -RAFT_PATH.length) : url
 }
 
 /** Turns a committed configuration change into the state machine's own membership command. */

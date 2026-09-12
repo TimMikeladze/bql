@@ -10,8 +10,9 @@
 // Second invariant: `epoch` only goes up, and no epoch is ever handed out twice. It is the same
 // fencing token every `TxnRecord` already carries (`src/wal/record.ts`) and that a replica already
 // refuses when it is behind, with `EPOCH_AHEAD` (`docs/r1-replication.md`) — not a second number
-// beside it. A change of lease holder bumps it; a renewal by the node that already holds it does
-// not, because a renewal fences nobody off.
+// beside it. A change of lease *holder* bumps it; a renewal by the node that already holds it does
+// not, and neither does a node re-taking a database it is already the recorded primary of, because
+// neither fences anybody off.
 //
 // What `apply` deliberately does *not* decide: whether a lease may be granted at all. Refusing to
 // hand a database to a second node before the first can possibly have noticed it lost it needs a
@@ -45,6 +46,17 @@ export interface DbState {
   lease: Lease | null
   /** Highest txid each node has told the control plane it has durably applied, decimal. */
   acked: Record<NodeId, string>
+  /**
+   * The database's generation id (`generationId` in `src/replication/protocol.ts`), or null when
+   * nothing has recorded one. A name is not an identity — one `beta` is not the next `beta` — and
+   * this is the cluster's record of which one it placed, so a replica holding a copy of the
+   * previous `beta` can be refused promotion (C2, `docs/r7-unfollow.md`).
+   *
+   * **Only a node claiming the database as its primary may set it.** A replica that has been
+   * disconnected across a delete and a re-create still holds the old id, and letting it write that
+   * here would overwrite the very fact the check depends on.
+   */
+  generation: string | null
 }
 
 export interface ClusterState {
@@ -58,7 +70,20 @@ export interface ClusterState {
 export type Command =
   | { type: "addNode"; node: NodeId; advertise?: string; zone?: string; status?: NodeStatus }
   | { type: "removeNode"; node: NodeId }
-  | { type: "placeDb"; db: string; primary: NodeId | null; replicas: NodeId[] }
+  | { type: "placeDb"; db: string; primary: NodeId | null; replicas: NodeId[]; generation?: string }
+  /**
+   * One node's own claim on one database, merged rather than replaced — C2's way in, because two
+   * nodes claiming the same database race on `placeDb` and clobber each other's half of it. C3's
+   * placement still writes the whole record with `placeDb`.
+   */
+  | {
+      type: "claimDb"
+      db: string
+      node: NodeId
+      role: "primary" | "replica"
+      /** Honoured for `role: "primary"` only; see `DbState.generation`. */
+      generation?: string
+    }
   | { type: "grantLease"; db: string; node: NodeId; until: number; epoch?: number }
   | { type: "releaseLease"; db: string }
   | { type: "ack"; db: string; node: NodeId; txid: string }
@@ -79,7 +104,7 @@ export function emptyState(): ClusterState {
 }
 
 function emptyDb(): DbState {
-  return { primary: null, replicas: [], epoch: 0, lease: null, acked: {} }
+  return { primary: null, replicas: [], epoch: 0, lease: null, acked: {}, generation: null }
 }
 
 /**
@@ -124,13 +149,45 @@ export function apply(state: ClusterState, command: Command, term = state.term):
         const seen = current.acked[node]
         if (seen !== undefined) acked[node] = seen
       }
-      next.dbs[command.db] = { ...current, primary: command.primary, replicas, acked }
+      next.dbs[command.db] = {
+        ...current,
+        primary: command.primary,
+        replicas,
+        acked,
+        generation: command.generation ?? current.generation ?? null,
+      }
+      return next
+    }
+
+    case "claimDb": {
+      const current = next.dbs[command.db] ?? emptyDb()
+      const primary = command.role === "primary" ? command.node : current.primary
+      const replicas = current.replicas.filter((one) => one !== command.node)
+      if (command.role === "replica") replicas.push(command.node)
+      next.dbs[command.db] = {
+        ...current,
+        // A node that claims the database as a replica and is recorded as its primary has been
+        // demoted; leaving it as primary would make `pickFailover` offer a lease to a node that
+        // has already said it is following somebody else.
+        primary: command.role === "replica" && current.primary === command.node ? null : primary,
+        replicas,
+        generation:
+          command.role === "primary" && command.generation
+            ? command.generation
+            : (current.generation ?? null),
+      }
       return next
     }
 
     case "grantLease": {
       const current = next.dbs[command.db] ?? emptyDb()
-      const changedHands = current.lease === null || current.lease.node !== command.node
+      // "Changed hands" is about who *was* the primary, not merely about whether a lease object
+      // existed. A node re-taking a database it is already recorded as the primary of — after a
+      // restart, or after its own lease was released — fences nobody, and bumping the epoch there
+      // would move every replica's fencing token on every restart for nothing.
+      const changedHands = current.lease
+        ? current.lease.node !== command.node
+        : current.primary !== null && current.primary !== command.node
       let epoch = current.epoch
       if (changedHands) epoch += 1
       // An explicit epoch is how C2 will float the control plane up to a tenant's own on-disk
@@ -169,7 +226,7 @@ export function apply(state: ClusterState, command: Command, term = state.term):
 }
 
 /** Decimal u64 strings, compared as numbers would be: length first, then lexically. */
-function compareTxid(a: string, b: string): number {
+export function compareTxid(a: string, b: string): number {
   const left = a.replace(/^0+(?=\d)/, "")
   const right = b.replace(/^0+(?=\d)/, "")
   if (left.length !== right.length) return left.length - right.length

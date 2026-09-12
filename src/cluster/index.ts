@@ -35,7 +35,20 @@ export {
   type RaftSnapshot,
 } from "./raft.ts"
 export {
+  type ClusterFacts,
+  decidePromotion,
+  type FailoverInput,
+  pickFailover,
+  type PromotionDecision,
+  type PromotionInput,
+  type PromotionOutcome,
+  type PromotionOutcomeCode,
+  type PromotionRefusal,
+  type PromotionRequest,
+} from "./promotion.ts"
+export {
   apply,
+  compareTxid,
   type ClusterState,
   ClusterFormatError,
   type Command,
@@ -56,6 +69,9 @@ export {
   encodeRaft,
   RAFT_FRAME,
   RAFT_PATH,
+  raftUrl,
+  type RaftReply,
+  type RaftRequest,
   type RaftClientSocket,
   type RaftSocket,
   type RaftSocketData,

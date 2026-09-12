@@ -61,7 +61,10 @@ function listen(id: string): { port: number; attach(node: ClusterNode): void; st
   }
 }
 
-async function startCluster(ids: string[]): Promise<Node[]> {
+async function startCluster(
+  ids: string[],
+  options: { bootstrap?: boolean } = {},
+): Promise<Node[]> {
   const listeners = ids.map((id) => ({ id, listener: listen(id) }))
   const urls: Record<string, string> = {}
   for (const { id, listener } of listeners) {
@@ -85,6 +88,7 @@ async function startCluster(ids: string[]): Promise<Node[]> {
       leaseRenewMs: 250,
       leaseGuardMs: 200,
       proposeTimeoutMs: 5000,
+      ...(options.bootstrap === false ? { bootstrap: false } : {}),
       onError: process.env.BUNQL_TEST_CLUSTER_LOG ? (err) => console.error(id, err) : () => {},
     })
     await node.start()
@@ -154,7 +158,8 @@ describe("three nodes over real sockets", () => {
     // The holder's own view of the lease is a local deadline on a local clock.
     const held = first.node.leaseFor("acme")
     expect(held?.node).toBe(first.id)
-    expect(held?.epoch).toBe(1)
+    // No bump: `placeDb` already named this node the primary, so the grant fenced nobody (C2).
+    expect(held?.epoch).toBe(0)
     expect(held?.validUntilLocalMs).toBeGreaterThan(performance.now())
     // And it is the same object every time: the data path allocates nothing to read it.
     expect(first.node.leaseFor("acme")).toBe(held)
@@ -169,11 +174,34 @@ describe("three nodes over real sockets", () => {
       expect(node.node.leaseFor("acme")?.validUntilLocalMs).toBe(0)
     }
 
-    // A follower refuses to propose and says where to go.
+    // A follower's proposal reaches the leader over the raft socket it already holds (C2). Only
+    // the leader may append, so this is a forward and not a local append — the C1 behaviour it
+    // replaces was to refuse with "not the leader", which made every caller in the server learn to
+    // find the leader for itself.
     const follower = nodes.find((node) => node.id !== first.id) as Node
-    const refused = await follower.node.propose({ type: "releaseLease", db: "acme" })
-    expect(refused.ok).toBe(false)
-    expect(refused.reason).toContain("not the leader")
+    expect(await follower.node.propose({ type: "releaseLease", db: "acme" })).toEqual({ ok: true })
+    await waitFor(
+      "the release to reach every node",
+      () => nodes.every((node) => node.node.leaseFor("acme") === null),
+    )
+    // And it is still refused when there is no leader to forward to.
+    const orphan = await startCluster(["solo"], { bootstrap: false })
+    expect((await orphan[0]?.node.propose({ type: "releaseLease", db: "acme" }))?.ok).toBe(false)
+    for (const node of orphan) await node.stop()
+
+    // Put the lease back, so the rest of the test still has one to watch move.
+    expect(
+      await first.node.propose({
+        type: "grantLease",
+        db: "acme",
+        node: first.id,
+        until: Date.now() + 1000,
+      }),
+    ).toEqual({ ok: true })
+    await waitFor(
+      "the lease to reach the followers again",
+      () => nodes.every((node) => node.node.leaseFor("acme")?.node === first.id),
+    )
 
     // Kill the leader.
     await first.stop()
@@ -186,7 +214,7 @@ describe("three nodes over real sockets", () => {
     // else is C2's job, and it may not happen before the old lease has lapsed.
     const survived = second.node.observe().dbs.find((entry) => entry.db === "acme")
     expect(survived?.primary).toBe(first.id)
-    expect(survived?.epoch).toBe(1)
+    expect(survived?.epoch).toBe(0)
 
     // And the new leader can commit.
     const released = await second.node.propose({ type: "releaseLease", db: "acme" })
