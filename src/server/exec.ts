@@ -134,6 +134,12 @@ function step(db: Database, request: StatementRequest, timeoutMs: number, maxRow
   const stmt = db.prepare(request.sql)
   const params = decodeArgs(request.args as Args | undefined)
   const writes = !stmt.readonly
+  // `sqlite3_last_insert_rowid` is a property of the connection, not of the statement: it keeps
+  // reporting the last insert long after it. Reading it either side of the step is what tells an
+  // UPDATE that inserted nothing from an INSERT that did, so `lastInsertRowid` describes this
+  // statement rather than some earlier one on the same pooled connection. (An insert that reuses
+  // the rowid it just deleted reports null, which is a value the client supplied anyway.)
+  const rowidBefore = writes ? db.lastInsertRowid : 0
   stmt.vmSteps(true)
   db.deadline(timeoutMs)
   let rows: SqliteValue[][]
@@ -143,13 +149,14 @@ function step(db: Database, request: StatementRequest, timeoutMs: number, maxRow
     db.deadline(null)
   }
   if (rows.length > maxRows) throw BunQLError.tooManyRows(maxRows)
+  const rowidAfter = writes ? db.lastInsertRowid : 0
   return {
     rows,
     stmt,
     writes,
     vmSteps: stmt.vmSteps(),
     rowsAffected: writes ? Number(db.changes) : 0,
-    lastInsertRowid: writes ? db.lastInsertRowid : null,
+    lastInsertRowid: writes && rowidAfter !== rowidBefore ? rowidAfter : null,
   }
 }
 

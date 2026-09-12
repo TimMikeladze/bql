@@ -75,67 +75,73 @@ the error shape of §6.6.
    checked after `values()` materialises the result, so the deadline and the per-connection
    `sqlite3_limit` set are what bound the work before that point.
 
-6. **`ack: "replica"` and `"quorum"` are a 400, not a silent downgrade.** Phase 0 has no replicas,
+6. **`lastInsertRowid` is read either side of the step.** `sqlite3_last_insert_rowid` belongs to
+   the connection, not the statement, so an `UPDATE` on a pooled connection would otherwise report
+   the rowid of somebody else's earlier `INSERT`. Comparing before and after makes the field
+   describe the statement that was asked for; an insert that reuses a rowid it just deleted
+   reports null, which is a value the client supplied anyway.
+
+7. **`ack: "replica"` and `"quorum"` are a 400, not a silent downgrade.** Phase 0 has no replicas,
    and answering "durable on a replica" when there is none would be a lie the client cannot detect.
 
-7. **Interactive transactions are new `Tenant` methods**, not a `tenant.write` held open around a
+8. **Interactive transactions are new `Tenant` methods**, not a `tenant.write` held open around a
    promise: `write()` is synchronous. `txBegin/txExec/txCommit/txRollback` take the writer with
    `BEGIN IMMEDIATE`, run statements across requests, and commit through the same post-commit path
    `write()` uses (tail → append → save → publish → checkpoint). A tenant with an open transaction
    reports `busy`, so the LRU will not evict it, and `write()` refuses with `TX_BUSY`.
 
-8. **Batons are 128 random bits and one per database.** A second transaction is refused with 409
+9. **Batons are 128 random bits and one per database.** A second transaction is refused with 409
    and `Retry-After: 1` rather than queued: the writer is the scarce thing, and a queue lets one
    stalled client hold everybody else's latency. The idle timer lives on the `Tenant` next to the
    state it protects and calls back into the route layer to drop the baton.
 
-9. **Every WebSocket subscription id is the topic it came from** — `db:acme:changes`,
+10. **Every WebSocket subscription id is the topic it came from** — `db:acme:changes`,
    `db:acme:changes:users`, `db:acme:live:s1`. That is what lets change fan-out go through
    `ws.subscribe` / `server.publish`: the published frame
    `{"sub":"db:acme:changes:users","event":"change","data":{…}}` is the same bytes for every
    subscriber, so Bun fans it out without entering JavaScript per socket. Per-socket ids would
    have made every payload different and the pub/sub useless.
 
-10. **The publisher builds the envelope by concatenation.** `RealtimeBus` hands the publisher the
+11. **The publisher builds the envelope by concatenation.** `RealtimeBus` hands the publisher the
     payload as JSON text; `busPublisher` wraps it in the envelope as a string rather than parsing
     it back into an object. Live topics are skipped there, because live results are
     per-subscription and go out with `ws.send`.
 
-11. **Live results are dropped under backpressure; change events never are.** `ws.send` returning
+12. **Live results are dropped under backpressure; change events never are.** `ws.send` returning
     `≤ 0` puts the latest live frame in a per-socket map that `drain` flushes, so a client that is
     behind gets the newest result rather than a queue of stale ones. Change events go through
     Bun's pub/sub, where Bun owns the buffering.
 
-12. **A tenant with a subscriber is pinned in the registry.** The capture hooks live on the
+13. **A tenant with a subscriber is pinned in the registry.** The capture hooks live on the
     writer connection, so an LRU eviction would end the feed silently. `TenantRegistry.pin/unpin`
     was added for this; the eviction sweep skips pinned names the same way it skips busy ones.
 
-13. **The realtime engine outlives its last subscriber by `realtime.idleRetainMs` (15 s).** The
+14. **The realtime engine outlives its last subscriber by `realtime.idleRetainMs` (15 s).** The
     ring is what serves a `Last-Event-ID` reconnect, and a client that drops and comes back a
     second later would otherwise always be told to re-query. While retained, capture stays at
     `pk`: a ring that stopped filling would answer a reconnect with "nothing happened" when the
     truth is "I stopped looking".
 
-14. **A fresh ring is sealed at the tenant's current txid** (`ChangeRing.seal`, added in M6's
+15. **A fresh ring is sealed at the tenant's current txid** (`ChangeRing.seal`, added in M6's
     module). A ring created for a database that already has a history must answer `reset` for
     positions before it existed, not an empty backlog — an empty backlog reads as "you are up to
     date" and would silently lose everything in between.
 
-15. **An SSE stream opens with `retry: 1000` and a comment.** A subscriber that is up to date has
+16. **An SSE stream opens with `retry: 1000` and a comment.** A subscriber that is up to date has
     no event to send yet, and a response whose body stays empty is one that intermediaries — and
     some HTTP clients, including the one `bun test` uses — hold on to instead of delivering the
     headers. The first bytes are what turn it into a live stream.
 
-16. **The default `BunQL-Node` is a hash of the hostname**, not the hostname. That header travels
+17. **The default `BunQL-Node` is a hash of the hostname**, not the hostname. That header travels
     on every response and into whatever a client logs. `[server] node` or `BUNQL_NODE` sets a
     readable one.
 
-17. **`wait` is what switches `/changes` between SSE and the long poll**, not `Accept`. A plain
+18. **`wait` is what switches `/changes` between SSE and the long poll**, not `Accept`. A plain
     `*/*` — what curl and most HTTP clients send — gets the stream, because the design calls the
     long poll "the same feed without SSE" and reaches it through the parameter. `Accept` only
     decides the case where a client asked for `application/json` and nothing else.
 
-18. **A 500 is reported to the runtime's error sink.** Clients are told only "internal error"
+19. **A 500 is reported to the runtime's error sink.** Clients are told only "internal error"
     (§6.6), so the wrapper logs the real one or it is lost entirely.
 
 ## Deviations from design §6 and §7
@@ -205,11 +211,11 @@ another core, which belongs to the end-to-end pass in M8.
 
 ## Testing
 
-`test/server/` — 113 new tests over a real listener on port 0 (215 in `test/server/` in total, with M5a's unit tests for the codec, the errors and the policy):
+`test/server/` — 116 new tests over a real listener on port 0 (218 in `test/server/` in total, with M5a's unit tests for the codec, the errors and the policy):
 
 | file | covers |
 |---|---|
-| `routes.test.ts` | value round trips including tagged integers and blobs, named arguments, both row modes, headers, `maxRows`, the 408 deadline, `minTxid` both waiting and 425, SQLite error mapping, atomic and non-atomic batches with `failedIndex` |
+| `routes.test.ts` | value round trips including tagged integers and blobs, named arguments, both row modes, headers, `maxRows`, the 408 deadline, `minTxid` both waiting and 425, `lastInsertRowid` on writes that insert nothing, a no-op write holding its txid, SQLite error mapping, atomic and non-atomic batches with `failedIndex` |
 | `authmatrix.test.ts` | no token, bad token, admin key, `?token=`, `ro`/`rw`, globs, table ACLs, `ATTACH`, expiry, revocation, admin-only routes |
 | `tx.test.ts` | commit, rollback, `TX_BUSY` with `Retry-After`, a plain write refused while a baton holds the writer, the idle rollback, an unknown baton, a failed statement leaving the transaction usable, independence across databases |
 | `admin.test.ts` | create, name validation, fork, fork at a txid, restore, snapshot, dump, import (including a body that is not a database), checkpoint, replication, delete |
@@ -218,4 +224,4 @@ another core, which belongs to the end-to-end pass in M8.
 | `ops.test.ts` | `healthz`, `readyz`, the Prometheus exposition and its counters, metrics auth, CORS preflight and exposure, `cors: false`, 404 |
 | `config.test.ts` | defaults, TOML, `${VAR}` expansion, environment precedence and coercion, missing files, key generation and persistence, a token surviving a restart, limits and `tenantFromHost` end to end |
 
-`bun test` runs 417 tests in 9.1 s; `bun run typecheck` is clean.
+`bun test` runs 420 tests in 9.5 s; `bun run typecheck` is clean.

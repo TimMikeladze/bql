@@ -58,6 +58,40 @@ describe("query", () => {
     expect(written.txid).toBeGreaterThan(before.txid)
   })
 
+  test("lastInsertRowid describes this statement, not an earlier one on the same connection", async () => {
+    const inserted = await post<QueryResult>("/v1/db/acme/query", {
+      sql: "insert into notes(body) values ('for the rowid')",
+    })
+    expect(inserted.lastInsertRowid).toBeGreaterThan(0)
+
+    // An update and a delete that match nothing changed no rows and inserted none.
+    for (const sql of [
+      "update notes set body = 'x' where id = -1",
+      "delete from notes where id = -1",
+    ]) {
+      const result = await post<QueryResult>("/v1/db/acme/query", { sql })
+      expect(result.rowsAffected).toBe(0)
+      expect(result.lastInsertRowid).toBeNull()
+    }
+
+    // And one that did change a row still inserted nothing.
+    const updated = await post<QueryResult>("/v1/db/acme/query", {
+      sql: "update notes set body = 'changed' where id = ?",
+      args: [inserted.lastInsertRowid as number],
+    })
+    expect(updated.rowsAffected).toBe(1)
+    expect(updated.lastInsertRowid).toBeNull()
+  })
+
+  test("a write that matches nothing keeps the database at the txid it was already at", async () => {
+    const before = await post<QueryResult>("/v1/db/acme/query", { sql: "select 1" })
+    const noop = await post<QueryResult>("/v1/db/acme/query", {
+      sql: "delete from notes where id = -1",
+    })
+    expect(noop.rowsAffected).toBe(0)
+    expect(noop.txid).toBe(before.txid)
+  })
+
   test("named arguments bind with or without their sigil", async () => {
     const result = await post<QueryResult>("/v1/db/acme/query", {
       sql: "select title from todos where id = :id",
