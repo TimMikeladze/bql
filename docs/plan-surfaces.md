@@ -165,6 +165,31 @@ no socket, no port, no serialisation to a real HTTP connection — forwarding th
 `Authorization` header so the token's table ACLs apply to GraphQL exactly as they do to REST. A
 GraphQL query against a tenant costs one dispatch per field, not one TCP connection per field.
 
+### Proven before designing (`experiments/graphql-inproc.ts`)
+
+This repo's habit is to prove the load-bearing mechanism on real bits before building on it (§2).
+Two things were checked against `openapi-x-graphql` 1.0.0 and `graphql` 17.0.2 on Bun before this
+plan was written:
+
+| check | result |
+|---|---|
+| a generated resolver dispatches through `ExecutorOptions.fetch` with no socket opened | ok — `GET /v1/db/acme/api/users?limit=1` arrived at a plain function |
+| the same for a mutation built from a `requestBody` | ok — `POST …/users`, argument named `input` |
+| `$ref` component schemas become GraphQL object and input types | ok — `User`, `NewUserInput` |
+| a **schema built once** still serves a **per-request token**, via `AsyncLocalStorage` around `graphql()` | ok — three calls on one cached schema carried three different tokens |
+
+That last row is the one that matters and it is not obvious. The schema is cached per tenant on
+`PRAGMA schema_version`, but the caller's token changes every request and is what the table ACLs
+are enforced from — so it cannot be baked into the generator's static `headers` option. The token
+travels in an `AsyncLocalStorage` store entered before `graphql()` is called and read inside
+`inProcessFetch`, and it survives the resolver chain under Bun. **A schema cache keyed on anything
+that includes the token would defeat the cache; a `fetch` closure that captures a token would leak
+one caller's rights to the next.** Neither happens, because the token is ambient per request and
+the closure reads it rather than holding it.
+
+The generator also adds an `_info` field to `Query` describing the source document. Harmless, and
+worth knowing about before someone reports it as a bug.
+
 `graphql` and `openapi-x-graphql` are **optional peer dependencies**, the arrangement `kysely` and
 `drizzle-orm` already have in `package.json`: BunQL keeps zero runtime dependencies, `bunql/graphql`
 throws a message naming the two packages if they are absent, and the GraphQL route is not mounted
