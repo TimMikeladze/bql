@@ -32,6 +32,20 @@ db.close()
 On macOS install a full build with `brew install sqlite`; Apple's system library is compiled
 without the session and preupdate extensions.
 
+## Measured
+
+`bun run bench` on an M-series Mac, Homebrew SQLite 3.53.4, 100k-row table:
+
+| op | bunql | bun:sqlite |
+|---|---|---|
+| point read by primary key | 0.81 µs | 1.93 µs |
+| 100-row scan to objects | 9.5 µs | 7.8 µs |
+| insert inside a transaction | 0.29 µs | 0.23 µs |
+| the same insert with an update hook installed | 0.36 µs | not available |
+
+Point reads win because the per-statement overhead is much lower. Wide scans lose because every
+column costs one extra FFI call for `sqlite3_column_type`, which bun:sqlite does in native code.
+
 ## Tests
 
 ```sh

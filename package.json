@@ -5,7 +5,6 @@
   "private": true,
   "description": "SQLite as a multi-tenant database server for Bun, with WAL shipping and hook-driven realtime.",
   "exports": {
-    ".": "./src/index.ts",
     "./sqlite": "./src/sqlite/index.ts"
   },
   "scripts": {
