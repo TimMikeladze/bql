@@ -6,14 +6,14 @@
 //
 // Second invariant: the stream's transaction state and the tenant's agree at every await point.
 // `BEGIN`, `COMMIT`, `ROLLBACK` and `END` are intercepted (see `./sql.ts`) and turned into
-// `runtime.beginTx` / `runtime.endTx`; nothing else is allowed to move that state.
+// `runtime.beginTxQueued` / `runtime.endTx`; nothing else is allowed to move that state.
 //
 // Every call is `async` and every call into `../exec.ts` is awaited. Those functions are
 // synchronous today and may not stay that way once a write can wait on a replica ack, and a
 // missing `await` there would be a silently torn transaction rather than a type error.
 
 import type { QueryResult, Value } from "../../client/protocol.ts"
-import { requireScope } from "../auth.ts"
+import { applyPolicy, requireScope } from "../auth.ts"
 import { BunQLError } from "../errors.ts"
 import { executeInTx, executeStatement } from "../exec.ts"
 import { cstr } from "../../sqlite/lib.ts"
@@ -85,6 +85,38 @@ function noTransaction(what: string): BunQLError {
 }
 
 /**
+ * Refuses a write inside a transaction opened as `BEGIN TRANSACTION READONLY` — which is what
+ * `@libsql/client` emits for `transaction("read")` and `batch(…, "read")`, and the only thing
+ * that makes those modes mean anything. Classification is `sqlite3_stmt_readonly`, not a guess
+ * about the SQL, so it is the same test `../exec.ts` uses to route a statement.
+ *
+ * The prepare happens under the principal's own policy, exactly as `executeInTx` does it: a
+ * statement compiled with a different authorizer installed would be the wrong statement to cache,
+ * and releasing the policy expires the driver's cache anyway. That costs a second
+ * `sqlite3_set_authorizer` cycle per statement, which is the price of the read mode meaning
+ * something and is paid only inside a read transaction.
+ */
+function assertReadOnly(service: HranaService, stream: HranaStream, sql: string): void {
+  const runtime = service.runtime
+  const tenant = runtime.tenant(stream.db)
+  const readonly = tenant.txExec((db) => {
+    const handle = applyPolicy(db, runtime.hubFor(db), stream.principal, stream.db)
+    try {
+      return db.prepare(sql).readonly
+    } finally {
+      handle.release()
+    }
+  })
+  if (!readonly) {
+    throw new BunQLError(
+      "SQLITE_READONLY",
+      "attempt to write in a read-only transaction",
+      403,
+    )
+  }
+}
+
+/**
  * One Hrana statement. Transaction control moves the stream's state; everything else runs inside
  * the stream's transaction when it has one and as its own statement when it does not.
  */
@@ -106,21 +138,30 @@ export async function executeStmt(
       if (stream.tx) {
         throw new BunQLError("BAD_REQUEST", "cannot start a transaction within a transaction", 400)
       }
-      requireScope(stream.principal, stream.db, "rw")
-      stream.tx = await runtime.beginTx(tenant, stream.principal, {
-        mode: verb.mode,
-        owner: stream.owner,
-      })
+      requireScope(stream.principal, stream.db, verb.readonly ? "ro" : "rw")
+      // `beginTxQueued` on an HTTP stream, not `beginTx`: `@libsql/client` has a concurrency
+      // window of 20 and any ORM over it runs request handlers in parallel, so two
+      // `client.transaction()` calls overlap routinely. R5 found the same thing on the native
+      // path and put the queue in the runtime; taking it here is what stops the second of two
+      // concurrent transactions from failing `TX_BUSY` the instant it is opened. A socket stream
+      // must not wait — see `HranaStream.waitsForWriter`.
+      const begin = { mode: verb.mode, owner: stream.owner }
+      stream.tx = stream.waitsForWriter
+        ? await runtime.beginTxQueued(tenant, stream.principal, begin)
+        : runtime.beginTx(tenant, stream.principal, begin)
+      stream.txReadonly = verb.readonly
       return emptyResult(tenant.txid, startedNs)
     }
     if (verb?.kind === "commit" || verb?.kind === "rollback") {
       const tx = stream.tx
       if (!tx) throw noTransaction(verb.kind)
       stream.tx = null
+      stream.txReadonly = false
       const txid = await runtime.endTx(tx, verb.kind)
       return emptyResult(txid, startedNs)
     }
 
+    if (stream.tx && stream.txReadonly) assertReadOnly(service, stream, sql)
     const args = argsOf(stmt)
     const request = { sql, ...(args !== undefined ? { args } : {}) }
     const options = service.options()

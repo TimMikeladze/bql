@@ -53,9 +53,11 @@
     }
   },
   "devDependencies": {
+    "@libsql/client": "^0.18.0",
     "bun-types": "^1.4.2",
     "drizzle-orm": "^0.45.2",
     "kysely": "^0.29.5",
+    "kysely-libsql": "^0.7.1",
     "typescript": "^7.0.2"
   }
 }

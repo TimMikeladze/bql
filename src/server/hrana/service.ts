@@ -36,9 +36,19 @@ export class HranaStream {
   readonly sql: Map<number, string>
   /** Identity for `runtime.rollbackOwned`, so closing a socket ends what it began. */
   readonly owner: object
+  /**
+   * Whether a `BEGIN` on this stream may *wait* for the tenant's writer instead of being refused
+   * at once. True for an HTTP stream, whose requests arrive as independent requests, so a wait
+   * blocks nothing but itself. False for a socket stream: `../hrana/ws.ts` answers a socket's
+   * requests in arrival order, so a stream that waited would hold up the very statements that
+   * would release the writer — a deadlock down to `limits.txWaitMs` rather than a queue.
+   */
+  readonly waitsForWriter: boolean
   /** Responses issued so far. A baton naming any other number is stale. */
   seq = 0
   tx: TxSession | null = null
+  /** Set when the open transaction began as `BEGIN TRANSACTION READONLY`, so writes are refused. */
+  txReadonly = false
   closed = false
   lastUsedMs = Date.now()
 
@@ -48,12 +58,14 @@ export class HranaStream {
     principal: Principal
     sql: Map<number, string>
     owner: object
+    waitsForWriter: boolean
   }) {
     this.id = options.id
     this.db = options.db
     this.principal = options.principal
     this.sql = options.sql
     this.owner = options.owner
+    this.waitsForWriter = options.waitsForWriter
   }
 
   /** The SQL a statement means: its own text, or the one `store_sql` filed under `sql_id`. */
@@ -121,7 +133,13 @@ export class HranaService {
    * for the same reason `routes.ts` does it in `open()`: a token with no access to a database must
    * not be able to learn whether it exists.
    */
-  openStream(db: string, principal: Principal, owner: object, sql?: Map<number, string>): HranaStream {
+  openStream(
+    db: string,
+    principal: Principal,
+    owner: object,
+    sql?: Map<number, string>,
+    waitsForWriter = true,
+  ): HranaStream {
     this.sweep()
     if (this.#streams.size >= MAX_STREAMS) {
       throw new BunQLError("TOO_MANY_REQUESTS", "this node holds all the streams it will", 429)
@@ -131,7 +149,14 @@ export class HranaService {
     // "open a stream on a database that is not there".
     this.runtime.tenant(db)
     const id = this.#nextId++
-    const stream = new HranaStream({ id, db, principal, sql: sql ?? new Map(), owner })
+    const stream = new HranaStream({
+      id,
+      db,
+      principal,
+      sql: sql ?? new Map(),
+      owner,
+      waitsForWriter,
+    })
     this.#streams.set(id, stream)
     this.#arm()
     return stream

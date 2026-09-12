@@ -204,7 +204,9 @@ async function handle(ws: HranaSocket, request: WsRequest): Promise<WsResponse> 
       if (data.streams.size >= MAX_SOCKET_STREAMS) {
         throw new BunQLError("TOO_MANY_REQUESTS", "this socket holds all the streams it will", 429)
       }
-      data.streams.set(id, service.openStream(data.db, principal, data.owner, data.sql))
+      // `false`: this socket answers in arrival order, so a `BEGIN` that waited for the writer
+      // would stall the statements that release it. See `HranaStream.waitsForWriter`.
+      data.streams.set(id, service.openStream(data.db, principal, data.owner, data.sql, false))
       return { type: "open_stream" }
     }
     case "close_stream": {

@@ -13,7 +13,8 @@
 // statement, and a migration script that got that wrong would apply half of itself.
 
 export type TxVerb =
-  | { kind: "begin"; mode: "deferred" | "immediate" | "exclusive" }
+  /** `readonly` is `BEGIN TRANSACTION READONLY`, which is not SQLite syntax — see `txVerb`. */
+  | { kind: "begin"; mode: "deferred" | "immediate" | "exclusive"; readonly: boolean }
   | { kind: "commit" }
   | { kind: "rollback" }
   | null
@@ -61,7 +62,9 @@ function leadingWords(sql: string, limit: number): string[] {
  * so it belongs on the ordinary statement path.
  *
  * `BEGIN TRANSACTION READONLY` is `@libsql/client`'s read-transaction spelling and is not SQLite
- * syntax; it opens a deferred transaction here. A bare `BEGIN` is deferred, as SQLite defines it.
+ * syntax; it opens a deferred transaction here and reports `readonly`, which is what
+ * `../hrana/execute.ts` needs to refuse a write inside it. A bare `BEGIN` is deferred, as SQLite
+ * defines it.
  */
 export function txVerb(sql: string): TxVerb {
   const words = leadingWords(sql, 4)
@@ -70,10 +73,10 @@ export function txVerb(sql: string): TxVerb {
     let at = 1
     if (words[at] === "transaction") at++
     const mode = words[at]
-    if (mode === "immediate") return { kind: "begin", mode: "immediate" }
-    if (mode === "exclusive") return { kind: "begin", mode: "exclusive" }
+    if (mode === "immediate") return { kind: "begin", mode: "immediate", readonly: false }
+    if (mode === "exclusive") return { kind: "begin", mode: "exclusive", readonly: false }
     // "deferred", "readonly", or nothing at all.
-    return { kind: "begin", mode: "deferred" }
+    return { kind: "begin", mode: "deferred", readonly: mode === "readonly" }
   }
   if (first === "commit") return { kind: "commit" }
   if (first === "end") {

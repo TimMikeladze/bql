@@ -7,13 +7,15 @@ import { isExplain, splitStatements, txVerb } from "../../src/server/hrana/sql.t
 
 describe("txVerb", () => {
   test("the four transaction verbs, with their modes", () => {
-    expect(txVerb("BEGIN")).toEqual({ kind: "begin", mode: "deferred" })
-    expect(txVerb("begin transaction")).toEqual({ kind: "begin", mode: "deferred" })
-    expect(txVerb("BEGIN IMMEDIATE")).toEqual({ kind: "begin", mode: "immediate" })
-    expect(txVerb("begin transaction immediate")).toEqual({ kind: "begin", mode: "immediate" })
-    expect(txVerb("BEGIN EXCLUSIVE")).toEqual({ kind: "begin", mode: "exclusive" })
-    // `@libsql/client`'s read mode, which SQLite itself does not understand.
-    expect(txVerb("BEGIN TRANSACTION READONLY")).toEqual({ kind: "begin", mode: "deferred" })
+    const begin = (mode: string, readonly = false) => ({ kind: "begin", mode, readonly })
+    expect(txVerb("BEGIN")).toEqual(begin("deferred") as never)
+    expect(txVerb("begin transaction")).toEqual(begin("deferred") as never)
+    expect(txVerb("BEGIN IMMEDIATE")).toEqual(begin("immediate") as never)
+    expect(txVerb("begin transaction immediate")).toEqual(begin("immediate") as never)
+    expect(txVerb("BEGIN EXCLUSIVE")).toEqual(begin("exclusive") as never)
+    // `@libsql/client`'s read mode, which SQLite itself does not understand: a deferred
+    // transaction that refuses writes.
+    expect(txVerb("BEGIN TRANSACTION READONLY")).toEqual(begin("deferred", true) as never)
     expect(txVerb("commit")).toEqual({ kind: "commit" })
     expect(txVerb("COMMIT TRANSACTION")).toEqual({ kind: "commit" })
     expect(txVerb("end")).toEqual({ kind: "commit" })
@@ -29,6 +31,7 @@ describe("txVerb", () => {
     expect(txVerb("  -- start here\n  /* really */ begin immediate")).toEqual({
       kind: "begin",
       mode: "immediate",
+      readonly: false,
     })
   })
 
