@@ -271,6 +271,28 @@ export class TenantRealtime {
     return report
   }
 
+  /**
+   * The replica's counterpart to `afterCommit` (design §5.2, `plan-phase1.md` finding 3). A
+   * replica's transactions arrive as WAL frames through `Tenant.applyRecord`, so there is no hook
+   * buffer to drain and no row-level detail to publish: the change feed gets a `txid`-only event
+   * with an empty `changes` array, and every live query is re-run so it converges on the
+   * primary's state. Phase 3's logical CDC is what turns the empty array into rows.
+   */
+  afterApply(txid: number): CommitReport {
+    this.setTxid(txid)
+    const report: CommitReport = { txid, change: null, schema: null, affected: 0, tables: [] }
+    if (this.#closed) return report
+    const event: ChangeEvent = { txid, changes: [] }
+    report.change = event
+    this.ring.push(txid, event)
+    const topic = changesTopic(this.name)
+    if (this.bus.hasAudience(topic)) this.bus.publish(topic, event)
+    const affected = this.live.invalidateAll(txid)
+    report.affected = affected.size
+    if (affected.size > 0) this.live.scheduleRuns(affected, txid)
+    return report
+  }
+
   /** Subscribes to the change feed, optionally replaying from `since`. */
   subscribeChanges(
     options: ChangesSubscribeOptions,

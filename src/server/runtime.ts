@@ -13,7 +13,13 @@
 // re-scoping free, and it is only safe while every borrow goes through the same door.
 
 import type { Args } from "../client/protocol.ts"
-import { ReplicaClient, ReplicationServer } from "../replication/index.ts"
+import {
+  AckTimeout,
+  AckTracker,
+  NoReplicas,
+  ReplicaClient,
+  ReplicationServer,
+} from "../replication/index.ts"
 import {
   AuthorizerHub,
   type IncludeLevel,
@@ -23,6 +29,7 @@ import {
 import type { Publisher } from "../realtime/index.ts"
 import type { Database } from "../sqlite/index.ts"
 import {
+  type AckLevel,
   type ReaderLease,
   type Tenant,
   TenantError,
@@ -36,6 +43,7 @@ import {
 } from "./auth.ts"
 import type { ServerConfig } from "./config.ts"
 import { BunQLError } from "./errors.ts"
+import { Forwarder, runForward } from "./forward.ts"
 import { decodeArgs, encodeRows, type EncodedRows } from "./json.ts"
 import { Metrics } from "./metrics.ts"
 
@@ -48,8 +56,26 @@ export interface TxSession {
   principal: Principal
   /** Set for a transaction begun over a WebSocket, so closing the socket rolls it back. */
   owner: object | null
+  /** The replica node that forwarded this transaction, when it came from one (R2). */
+  origin?: string
   startedAt: number
   rowsMode: "array" | "object"
+}
+
+/** What `beginTx` and `beginTxQueued` accept. */
+export interface BeginTxOptions {
+  mode?: "deferred" | "immediate" | "exclusive"
+  owner?: object | null
+  rows?: "array" | "object"
+  /** The replica node that forwarded this transaction (R2). */
+  origin?: string
+}
+
+/** One transaction waiting for a database's writer. */
+interface TxWaiter {
+  resolve: () => void
+  reject: (err: unknown) => void
+  timer: ReturnType<typeof setTimeout>
 }
 
 export interface RuntimeOptions {
@@ -77,6 +103,10 @@ export class ServerRuntime {
   readonly replication: ReplicationServer | null
   /** The replica's client, or null on a primary. Started by `startServer`, stopped by `close`. */
   replica: ReplicaClient | null = null
+  /** R2: the waiter behind `ack: "replica" | "quorum"`. */
+  readonly acks: AckTracker
+  /** R2: the path a write takes off a replica. `enabled` is false everywhere else. */
+  readonly forwarder: Forwarder
 
   #hubs = new WeakMap<Database, AuthorizerHub>()
   #realtime = new Map<string, TenantRealtime>()
@@ -86,6 +116,8 @@ export class ServerRuntime {
   #retiring = new Map<string, ReturnType<typeof setTimeout>>()
   #tx = new Map<string, TxSession>()
   #txByDb = new Map<string, TxSession>()
+  /** Transactions waiting for the writer, per database, in arrival order (R5's finding). */
+  #txQueue = new Map<string, TxWaiter[]>()
   #publisher: Publisher | null = null
   #onError: (err: unknown) => void
   #closed = false
@@ -111,6 +143,7 @@ export class ServerRuntime {
         segmentBytes: options.config.durability.segmentBytes,
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
+        onChange: (event) => this.#databasesChanged(event),
         ...(options.onTenantOpen ? { onOpen: options.onTenantOpen } : {}),
       })
     this.replication = options.config.replication.secret
@@ -120,9 +153,72 @@ export class ServerRuntime {
           secret: options.config.replication.secret,
           heartbeatMs: options.config.replication.heartbeatMs,
           slowReplicaMs: options.config.replication.slowReplicaMs,
+          onForward: (request, node) => runForward(this, request, node),
+          onDisconnect: (node) => this.rollbackOrigin(node),
           onError: this.#onError,
         })
       : null
+    this.acks = new AckTracker({
+      server: this.replication,
+      timeoutMs: options.config.replication.ackTimeoutMs,
+      withoutReplicas: options.config.replication.ackWithoutReplicas,
+    })
+    this.forwarder = new Forwarder(this)
+  }
+
+  /**
+   * `plan-phase1.md` finding 1: a database created here must reach a `follow: ["*"]` replica now,
+   * not at the next heartbeat. The registry calls this; the announcement is one frame per
+   * attached replica.
+   */
+  #databasesChanged(event: { kind: "create" | "delete"; name: string }): void {
+    if (event.kind === "delete") this.acks.forget(event.name)
+    this.replication?.announce()
+  }
+
+  // ── durability levels (design §5.4) ──────────────────────────────────────────────────────────
+
+  /**
+   * Raises `NO_REPLICAS` when this node could not possibly answer the requested level. Called
+   * before the statement runs, so the common misconfiguration costs no write at all.
+   */
+  assertAckAvailable(db: string, ack: AckLevel): void {
+    try {
+      this.acks.assertAvailable(db, ack)
+    } catch (err) {
+      throw this.#ackError(err)
+    }
+  }
+
+  /**
+   * Holds the answer until the requested durability level is met. A no-op for `local` and
+   * `fsync`, which `Tenant.write` already satisfied before returning.
+   */
+  async awaitDurable(db: string, txid: bigint, ack: AckLevel): Promise<void> {
+    if (ack !== "replica" && ack !== "quorum") return
+    try {
+      await this.acks.wait(db, txid, ack)
+    } catch (err) {
+      if (err instanceof AckTimeout) this.metrics.ackTimeout()
+      throw this.#ackError(err)
+    }
+  }
+
+  #ackError(err: unknown): unknown {
+    if (err instanceof AckTimeout) {
+      return BunQLError.ackTimeout(err.message, {
+        txid: Number(err.txid),
+        acks: err.outcome.acks,
+        needed: err.outcome.needed,
+      })
+    }
+    if (err instanceof NoReplicas) {
+      return BunQLError.noReplicas(
+        err.message,
+        err.txid === null ? undefined : { txid: Number(err.txid) },
+      )
+    }
+    return err
   }
 
   /**
@@ -140,6 +236,8 @@ export class ServerRuntime {
       follow: section.follow,
       reconnectMs: section.reconnectMs,
       heartbeatMs: section.heartbeatMs,
+      forwardTimeoutMs: section.forwardTimeoutMs,
+      maxForwards: section.maxForwards,
       onError: this.#onError,
     })
     this.replica.start()
@@ -231,11 +329,16 @@ export class ServerRuntime {
     // now is unservable rather than "nothing happened".
     realtime.ring.seal(Number(tenant.txid))
     this.#realtime.set(tenant.name, realtime)
+    // A replica has no preupdate hooks to drain — its transactions arrive as WAL frames through
+    // `applyRecord` — so its realtime is driven by `afterApply`, which re-runs every live query
+    // and emits a txid-only change event (`plan-phase1.md` finding 3).
+    const replicaMode = tenant.isReplica
     this.#unhook.set(
       tenant.name,
       tenant.onCommit((event) => {
         try {
-          realtime.afterCommit(Number(event.txid))
+          if (replicaMode) realtime.afterApply(Number(event.txid))
+          else realtime.afterCommit(Number(event.txid))
         } catch (err) {
           this.#onError(err)
         }
@@ -319,18 +422,13 @@ export class ServerRuntime {
   // ── interactive transactions (design §6.3) ───────────────────────────────────────────────────
 
   /**
-   * Takes the tenant's writer and files a baton for it. A second transaction on the same database
-   * is refused with 409 `TX_BUSY` rather than queued: the writer is the scarce thing, and a queue
-   * would let one stalled client hold every other one's latency hostage.
+   * Takes the tenant's writer and files a baton for it, or refuses `409 TX_BUSY` at once. This is
+   * the immediate form; `beginTxQueued` is what the routes use.
    */
   beginTx(
     tenant: Tenant,
     principal: Principal,
-    options: {
-      mode?: "deferred" | "immediate" | "exclusive"
-      owner?: object | null
-      rows?: "array" | "object"
-    } = {},
+    options: BeginTxOptions = {},
   ): TxSession {
     if (this.#txByDb.has(tenant.name) || tenant.txOpen) {
       throw new BunQLError("TX_BUSY", `${tenant.name} already has an open transaction`, 409)
@@ -342,6 +440,7 @@ export class ServerRuntime {
       tenant,
       principal,
       owner: options.owner ?? null,
+      ...(options.origin ? { origin: options.origin } : {}),
       startedAt: Date.now(),
       rowsMode: options.rows ?? "array",
     }
@@ -356,6 +455,88 @@ export class ServerRuntime {
     this.registry.pin(tenant.name)
     this.metrics.transaction()
     return session
+  }
+
+  /**
+   * The same thing, but a database whose writer is busy is *waited* for, up to `limits.txWaitMs`,
+   * instead of refused at once.
+   *
+   * A tenant has one writer, so `limits.maxOpenTx` is 1 and the phase-0 behaviour was an immediate
+   * `409 TX_BUSY`. R5 found that this breaks any client with two concurrent request handlers and
+   * worked around it with a queue in the Drizzle shim; the queue belongs here, where every client
+   * gets it. `TX_BUSY` now means "the writer was busy for the whole wait", which is a real
+   * overload rather than a race between two of one client's own handlers.
+   */
+  async beginTxQueued(
+    tenant: Tenant,
+    principal: Principal,
+    options: BeginTxOptions = {},
+  ): Promise<TxSession> {
+    const deadline = Date.now() + this.config.limits.txWaitMs
+    for (;;) {
+      try {
+        return this.beginTx(tenant, principal, options)
+      } catch (err) {
+        if (!(err instanceof BunQLError) || err.code !== "TX_BUSY") throw err
+        const remainingMs = deadline - Date.now()
+        if (remainingMs <= 0) throw err
+        this.metrics.txQueued()
+        // Waits its turn in arrival order, and re-tries `beginTx` on the way out: the slot it was
+        // handed can be taken by a plain `write()` in between, and the loop is what makes that a
+        // second wait rather than a lost error. The deadline is the *total* wait, not one per
+        // round, so a database that keeps being taken still answers inside `txWaitMs`.
+        await this.#waitForWriter(tenant.name, remainingMs)
+      }
+    }
+  }
+
+  /** Resolves when the database's writer is handed on, or rejects `TX_BUSY` after `waitMs`. */
+  #waitForWriter(db: string, waitMs: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const queue = this.#txQueue.get(db) ?? []
+      const waiter: TxWaiter = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.#dropWaiter(db, waiter)
+          reject(
+            new BunQLError(
+              "TX_BUSY",
+              `${db} still had an open transaction after ${waitMs}ms`,
+              409,
+            ),
+          )
+        }, waitMs),
+      }
+      waiter.timer.unref?.()
+      queue.push(waiter)
+      this.#txQueue.set(db, queue)
+    })
+  }
+
+  /** Hands the writer to the next transaction waiting for it, if there is one. */
+  #wakeNextTx(db: string): void {
+    const queue = this.#txQueue.get(db)
+    if (!queue || queue.length === 0) return
+    const waiter = queue.shift() as TxWaiter
+    if (queue.length === 0) this.#txQueue.delete(db)
+    clearTimeout(waiter.timer)
+    waiter.resolve()
+  }
+
+  #dropWaiter(db: string, waiter: TxWaiter): void {
+    const queue = this.#txQueue.get(db)
+    if (!queue) return
+    const at = queue.indexOf(waiter)
+    if (at >= 0) queue.splice(at, 1)
+    if (queue.length === 0) this.#txQueue.delete(db)
+  }
+
+  /** Transactions queued for a writer right now, across every database. */
+  get queuedTxCount(): number {
+    let total = 0
+    for (const queue of this.#txQueue.values()) total += queue.length
+    return total
   }
 
   /** The session behind a baton, or 404. */
@@ -377,8 +558,9 @@ export class ServerRuntime {
     }
   }
 
-  /** Rolls back every transaction a WebSocket left behind when it closed. */
+  /** Rolls back every transaction a WebSocket left behind when it closed, here or on the primary. */
   rollbackOwned(owner: object): void {
+    this.forwarder.rollbackOwned(owner)
     for (const session of [...this.#tx.values()]) {
       if (session.owner !== owner) continue
       try {
@@ -397,6 +579,19 @@ export class ServerRuntime {
     this.#tx.delete(session.baton)
     if (this.#txByDb.get(session.db) === session) this.#txByDb.delete(session.db)
     if (!this.#subscribers.has(session.db)) this.registry.unpin(session.db)
+    this.#wakeNextTx(session.db)
+  }
+
+  /** Rolls back every transaction a replica node forwarded, because its socket is gone. */
+  rollbackOrigin(node: string): void {
+    for (const session of [...this.#tx.values()]) {
+      if (session.origin !== node) continue
+      try {
+        this.endTx(session, "rollback")
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────────────────────────
@@ -429,6 +624,14 @@ export class ServerRuntime {
     }
     this.#tx.clear()
     this.#txByDb.clear()
+    for (const [db, queue] of this.#txQueue) {
+      for (const waiter of queue) {
+        clearTimeout(waiter.timer)
+        waiter.reject(new BunQLError("BUSY", `${db} is closing`, 503))
+      }
+    }
+    this.#txQueue.clear()
+    this.acks.close()
     for (const name of [...this.#realtime.keys()]) this.closeRealtime(name)
     this.#subscribers.clear()
     this.replica?.stop()
@@ -484,8 +687,9 @@ export function mapTenantError(err: unknown, primary?: string | null): unknown {
   if (!(err instanceof TenantError)) return err
   switch (err.code) {
     case "NOT_PRIMARY":
-      // R2 replaces this with a `FORWARD` round-trip; the code and the header stay the same, so a
-      // client that already follows `BunQL-Primary` keeps working when it lands.
+      // What is left once R2's forwarding has declined to act: `forwardWrites = false`, or a
+      // replica that cannot reach its primary. The code and the `BunQL-Primary` header are the
+      // ones phase 0 documented, so a client that already follows them keeps working.
       return BunQLError.notPrimary(primary ?? undefined)
     case "DB_EXISTS":
       return new BunQLError("CONFLICT", err.message, 409)

@@ -31,6 +31,7 @@ import {
 } from "../realtime/index.ts"
 import type { Principal } from "./auth.ts"
 import { requireScope } from "./auth.ts"
+import type { RemoteTx } from "./forward.ts"
 import { BunQLError, mapError } from "./errors.ts"
 import {
   assertStatement,
@@ -145,8 +146,19 @@ function enqueue(ws: Socket, db: string, id: number | undefined, fn: () => unkno
   })
 }
 
+/**
+ * The `hello` event of design §7. The role is this node's real one and a replica names its
+ * primary, so a socket client can route `consistency: "primary"` without provoking an error.
+ */
 export function greet(ws: Socket, node: string): void {
-  send(ws, { event: "hello", protocol: WS_PROTOCOL, node, role: "primary" })
+  const runtime = ws.data.runtime
+  send(ws, {
+    event: "hello",
+    protocol: WS_PROTOCOL,
+    node,
+    role: runtime.role,
+    ...(runtime.primaryUrl ? { primary: runtime.primaryUrl } : {}),
+  })
 }
 
 /** Entry point for one client frame. */
@@ -188,10 +200,14 @@ export async function handleMessage(ws: Socket, raw: string | Buffer): Promise<v
       }
       case "tx.commit":
       case "tx.rollback": {
+        const how = message.op === "tx.commit" ? "commit" : "rollback"
+        const remote = remoteOf(ws, message as WsAny)
+        if (remote) {
+          enqueue(ws, remote.db, id, () => remoteTxEnd(ws, message as WsAny, remote, how))
+          return
+        }
         const session = sessionOf(ws, message as WsAny)
-        enqueue(ws, session.db, id, () =>
-          txEnd(ws, message as WsAny, session, message.op === "tx.commit" ? "commit" : "rollback"),
-        )
+        enqueue(ws, session.db, id, () => txEnd(ws, message as WsAny, session, how))
         return
       }
       case "subscribe": {
@@ -246,7 +262,10 @@ async function hello(ws: Socket, message: WsAny): Promise<void> {
 
 function databaseOf(ws: Socket, message: WsRequest): string {
   const any = message as WsAny
-  if (any.tx) return sessionOf(ws, any).db
+  if (any.tx) {
+    const remote = remoteOf(ws, any)
+    return remote ? remote.db : sessionOf(ws, any).db
+  }
   if (any.db) return any.db
   throw BunQLError.badRequest(`${any.op} needs a db or a tx`)
 }
@@ -260,12 +279,50 @@ function sessionOf(ws: Socket, message: WsAny): TxSession {
   return session
 }
 
+/** The forwarded transaction behind a baton, when this node is a replica holding one (R2). */
+function remoteOf(ws: Socket, message: WsAny): RemoteTx | undefined {
+  if (!message.tx) return undefined
+  const remote = ws.data.runtime.forwarder.remoteTx(message.tx)
+  if (!remote) return undefined
+  if (remote.owner !== null && remote.owner !== ws.data.owner) {
+    throw BunQLError.notAuthorized("that transaction belongs to another connection")
+  }
+  return remote
+}
+
 async function statement(ws: Socket, message: WsAny, db: string): Promise<void> {
   const runtime = ws.data.runtime
   const principal = principalOf(ws)
   const id = message.id as number
 
   if (message.tx) {
+    const remote = remoteOf(ws, message)
+    if (remote) {
+      // The transaction lives on the primary; every statement in it goes the same way.
+      if (message.op === "batch") {
+        const statements = message.statements
+        if (!Array.isArray(statements) || statements.length === 0) {
+          throw BunQLError.badRequest("batch needs a non-empty statements array")
+        }
+        const results = []
+        for (let i = 0; i < statements.length; i++) {
+          results.push(
+            await runtime.forwarder.txExec(
+              remote,
+              principal,
+              assertStatement(statements[i], `statements[${i}]`),
+            ),
+          )
+        }
+        const last = results[results.length - 1] as { txid?: number } | undefined
+        send(ws, { id, ok: true, result: { results, txid: last?.txid ?? 0 } })
+        return
+      }
+      assertStatement(message, "query")
+      const result = await runtime.forwarder.txExec(remote, principal, message as StatementRequest)
+      send(ws, { id, ok: true, result })
+      return
+    }
     const session = sessionOf(ws, message)
     requireScope(principal, session.db, "rw")
     const options = resolveOptions(message as QueryRequest, null, runtime.config)
@@ -292,22 +349,46 @@ async function statement(ws: Socket, message: WsAny, db: string): Promise<void> 
   await awaitTxid(tenant, options)
   try {
     if (message.op === "batch") {
-      const result = executeBatch(runtime, tenant, principal, message as BatchRequest, options)
+      const body = message as BatchRequest
+      if (runtime.forwarder.enabled && wsBatchNeedsPrimary(runtime, tenant, principal, body)) {
+        send(ws, { id, ok: true, result: await runtime.forwarder.batch(tenant, principal, body, options) })
+        return
+      }
+      const result = executeBatch(runtime, tenant, principal, body, options)
+      await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
       send(ws, { id, ok: true, result })
       return
     }
     assertStatement(message, "query")
-    const { result } = executeStatement(
-      runtime,
-      tenant,
-      principal,
-      message as StatementRequest,
-      options,
-    )
+    const body = message as StatementRequest
+    if (runtime.forwarder.enabled && runtime.forwarder.needsPrimary(tenant, principal, [body.sql])) {
+      send(ws, { id, ok: true, result: await runtime.forwarder.query(tenant, principal, body, options) })
+      return
+    }
+    const { result, kind } = executeStatement(runtime, tenant, principal, body, options)
+    if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     send(ws, { id, ok: true, result })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, runtime.primaryUrl)
   }
+}
+
+/** The socket's copy of `batchNeedsPrimary`: an atomic batch always writes, a loose one may not. */
+function wsBatchNeedsPrimary(
+  runtime: ServerRuntime,
+  tenant: TxSession["tenant"],
+  principal: Principal,
+  body: BatchRequest,
+): boolean {
+  const statements = body.statements
+  if (!Array.isArray(statements) || statements.length === 0) return false
+  for (let i = 0; i < statements.length; i++) assertStatement(statements[i], `statements[${i}]`)
+  if (body.atomic !== false) return true
+  return runtime.forwarder.needsPrimary(
+    tenant,
+    principal,
+    statements.map((one) => (one as StatementRequest).sql),
+  )
 }
 
 /** A batch inside an open transaction: each statement runs on the writer the baton already holds. */
@@ -334,13 +415,18 @@ function runBatch(
   return { results, txid: Number(tenant.txid) }
 }
 
-function txBegin(ws: Socket, message: WsAny, db: string): void {
+async function txBegin(ws: Socket, message: WsAny, db: string): Promise<void> {
   const runtime = ws.data.runtime
   const principal = principalOf(ws)
   requireScope(principal, db, "rw")
   const tenant = runtime.tenant(db)
   try {
-    const session = runtime.beginTx(tenant, principal, {
+    if (runtime.forwarder.enabled) {
+      const remote = await runtime.forwarder.txBegin(tenant, principal, message, ws.data.owner)
+      send(ws, { id: message.id, ok: true, tx: remote.tx, expiresInMs: remote.expiresInMs })
+      return
+    }
+    const session = await runtime.beginTxQueued(tenant, principal, {
       ...(message.mode ? { mode: message.mode } : {}),
       ...(message.rows ? { rows: message.rows } : {}),
       owner: ws.data.owner,
@@ -352,19 +438,40 @@ function txBegin(ws: Socket, message: WsAny, db: string): void {
       expiresInMs: runtime.config.limits.txIdleTimeoutMs,
     })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, runtime.primaryUrl)
   }
 }
 
-function txEnd(ws: Socket, message: WsAny, session: TxSession, how: "commit" | "rollback"): void {
+async function txEnd(
+  ws: Socket,
+  message: WsAny,
+  session: TxSession,
+  how: "commit" | "rollback",
+): Promise<void> {
+  const runtime = ws.data.runtime
   const principal = principalOf(ws)
   requireScope(principal, session.db, "rw")
   try {
-    const txid = ws.data.runtime.endTx(session, how)
+    const txid = runtime.endTx(session, how)
+    if (how === "commit") {
+      await runtime.awaitDurable(session.db, txid, runtime.config.durability.defaultAck)
+    }
     send(ws, { id: message.id, ok: true, txid: Number(txid) })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, runtime.primaryUrl)
   }
+}
+
+/** The same, for a transaction this replica opened on the primary. */
+async function remoteTxEnd(
+  ws: Socket,
+  message: WsAny,
+  remote: RemoteTx,
+  how: "commit" | "rollback",
+): Promise<void> {
+  const principal = principalOf(ws)
+  const answer = await ws.data.runtime.forwarder.txEnd(remote, principal, how)
+  send(ws, { id: message.id, ok: true, txid: answer.txid })
 }
 
 // ── subscriptions (design §7) ──────────────────────────────────────────────────────────────────

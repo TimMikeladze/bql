@@ -90,6 +90,12 @@ export interface SubscribeBody {
   epoch: number
   /** The replica's rolling database checksum at `fromTxid`, decimal. */
   checksum: string
+  /**
+   * "My local file cannot be trusted at `fromTxid`; send a snapshot even at txid 0." Set by a
+   * replica that is re-subscribing after an apply it could not verify, which is the one case
+   * where `fromTxid: 0` does not mean "I am a pristine database".
+   */
+  reset?: boolean
 }
 
 export interface SubscribedBody {
@@ -137,12 +143,24 @@ export interface ForwardBody {
   body: unknown
 }
 
-/** R2. */
+/**
+ * R2. `error` is the primary's *own* failure, mapped to the HTTP shape before it left — so a
+ * `SQLITE_CONSTRAINT` arrives as a `SQLITE_CONSTRAINT` with its 409 and the client never learns
+ * that a second node was involved.
+ */
 export interface ResultBody {
   id: number
   ok: boolean
   result?: unknown
-  error?: { code: string; message: string }
+  error?: {
+    code: string
+    message: string
+    status?: number
+    /** The database's txid as the failure saw it. */
+    txid?: number
+    /** Which statement of a forwarded batch failed. */
+    failedIndex?: number
+  }
 }
 
 export interface UnsubscribeBody {

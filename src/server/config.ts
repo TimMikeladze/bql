@@ -12,8 +12,12 @@ import path from "node:path"
 import { AuthKeys, type Ed25519Jwk, KeyRing } from "./auth.ts"
 import { BunQLError } from "./errors.ts"
 
-/** Durability a write is answered at when the request does not say (design §5.4). */
-export type DefaultAck = "local" | "fsync"
+/**
+ * Durability a write is answered at when the request does not say (design §5.4). `"replica"` and
+ * `"quorum"` are answered by `src/replication/ack.ts` and need replicas attached; a node with
+ * none answers them per `[replication] ackWithoutReplicas`.
+ */
+export type DefaultAck = "local" | "fsync" | "replica" | "quorum"
 
 export interface ServerSection {
   port: number
@@ -63,6 +67,12 @@ export interface LimitsSection {
   maxRows: number
   /** Interactive transactions open at once, per database. The tenant has one writer, so: 1. */
   maxOpenTx: number
+  /**
+   * How long a second interactive transaction waits for the writer before it is refused
+   * `409 TX_BUSY`. R5 found that failing at once breaks any client with two concurrent request
+   * handlers, so the queue lives here rather than in every client.
+   */
+  txWaitMs: number
   /** Largest request body accepted, in bytes. `import` gets its own, larger, cap. */
   maxBodyBytes: number
   /** Largest SQLite file `POST /v1/db/{db}/import` accepts, in bytes. */
@@ -82,6 +92,12 @@ export interface ReplicationSection {
   follow: string[]
   /** R2: how long a write waits for replica acks before it gives up. */
   ackTimeoutMs: number
+  /**
+   * R2: what `ack: "replica" | "quorum"` means on a node with no replicas attached. `"error"`
+   * refuses with `503 NO_REPLICAS`, because silently answering locally would be a durability
+   * promise this node cannot keep; `"allow"` opts into exactly that.
+   */
+  ackWithoutReplicas: "error" | "allow"
   heartbeatMs: number
   /** Close a replica socket that has been backpressured this long. */
   slowReplicaMs: number
@@ -89,6 +105,10 @@ export interface ReplicationSection {
   reconnectMs: number
   /** R2: forward a write that arrives on a replica to the primary instead of refusing it. */
   forwardWrites: boolean
+  /** R2: how long a forwarded write waits for the primary's `RESULT` before `504 FORWARD_TIMEOUT`. */
+  forwardTimeoutMs: number
+  /** R2: forwarded writes in flight at once, per replica node. Past this, `503 BUSY`. */
+  maxForwards: number
 }
 
 export interface AuthSection {
@@ -148,6 +168,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     txIdleTimeoutMs: 5_000,
     maxRows: 10_000,
     maxOpenTx: 1,
+    txWaitMs: 5000,
     maxBodyBytes: 8 * 1024 * 1024,
     maxImportBytes: 1024 * 1024 * 1024,
   },
@@ -165,10 +186,13 @@ export const DEFAULT_CONFIG: ServerConfig = {
     secret: "",
     follow: ["*"],
     ackTimeoutMs: 2000,
+    ackWithoutReplicas: "error",
     heartbeatMs: 5000,
     slowReplicaMs: 30_000,
     reconnectMs: 250,
     forwardWrites: true,
+    forwardTimeoutMs: 10_000,
+    maxForwards: 256,
   },
 }
 
@@ -201,6 +225,7 @@ const ENV_ALIASES: Readonly<Record<string, string>> = {
   BUNQL_TX_IDLE_TIMEOUT_MS: "limits.txIdleTimeoutMs",
   BUNQL_MAX_ROWS: "limits.maxRows",
   BUNQL_MAX_OPEN_TX: "limits.maxOpenTx",
+  BUNQL_TX_WAIT_MS: "limits.txWaitMs",
   BUNQL_MAX_BODY_BYTES: "limits.maxBodyBytes",
   BUNQL_MAX_IMPORT_BYTES: "limits.maxImportBytes",
   BUNQL_ADMIN_KEY: "auth.adminKey",
@@ -346,6 +371,18 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   config.data.dir = path.resolve(config.data.dir)
   if (config.auth.keysFile === null) config.auth.keysFile = path.join(config.data.dir, "keys.json")
 
+  const ack = config.durability.defaultAck
+  if (ack !== "local" && ack !== "fsync" && ack !== "replica" && ack !== "quorum") {
+    throw BunQLError.badRequest(
+      `[durability] defaultAck must be "local", "fsync", "replica" or "quorum", got ${JSON.stringify(ack)}`,
+    )
+  }
+  const without = config.replication.ackWithoutReplicas
+  if (without !== "error" && without !== "allow") {
+    throw BunQLError.badRequest(
+      `[replication] ackWithoutReplicas must be "error" or "allow", got ${JSON.stringify(without)}`,
+    )
+  }
   // Validate before deriving, or a typo in `role` would be silently corrected by `primary`.
   if (config.replication.role !== "primary" && config.replication.role !== "replica") {
     throw BunQLError.badRequest(

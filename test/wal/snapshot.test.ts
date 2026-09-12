@@ -14,6 +14,7 @@ import {
   type SnapshotRef,
   TxnLog,
   TxnRecorder,
+  WalApplier,
   WalError,
 } from "../../src/wal/index.ts"
 import { cleanupTempDirs, dump, dumpFile, integrityOk, openPrimary, tempDir } from "./tmp.ts"
@@ -133,6 +134,142 @@ describe("snapshots", () => {
     await snapshot({ db, dbPath, dir }, 1n)
     await expect(snapshot({ db, dbPath, dir }, 1n)).rejects.toThrow(WalError)
     db.close()
+  })
+})
+
+/**
+ * A database snapshotted at txid 0 — before anything was ever written to it — and then given a
+ * short history in its log. This is the shape `plan-phase1.md` finding 2 is about: the file holds
+ * the header page SQLite creates when it first opens in WAL mode, while the tenant stands at
+ * "0 pages, checksum 0" because that page belongs to no transaction.
+ */
+async function pristineThenWritten(): Promise<{
+  root: string
+  dir: string
+  zero: SnapshotRef
+  lastTxid: bigint
+  liveDump: string
+  finalChecksum: bigint
+}> {
+  const root = tempDir()
+  const dir = path.join(root, "tenant")
+  fs.mkdirSync(dir)
+  const { db, dbPath } = openPrimary(dir)
+  // A fresh tenant opens its recorder at its catalog position, which for a database nothing has
+  // written to is "0 pages, checksum 0" — not the file's own, which counts the header page.
+  const recorder = TxnRecorder.open({ dbPath, epoch: 0, txid: 0n, checksum: 0n, dbSizePages: 0 })
+  // The trap in one line: the file is one page, the position is none.
+  expect(recorder.position.checksum).toBe(0n)
+  expect(recorder.position.dbSizePages).toBe(0)
+  expect(computeFull(dbPath, { includeWal: false }).pages).toBe(1)
+  expect(computeFull(dbPath, { includeWal: false }).checksum).not.toBe(0n)
+
+  const zero = await snapshot({ db, dbPath, dir }, 0n, {
+    position: { checksum: recorder.position.checksum, pages: recorder.position.dbSizePages },
+  })
+
+  const log = TxnLog.open({ dir, fsync: "never" })
+  db.exec("create table t(id integer primary key, v text)")
+  for (const input of recorder.poll()) log.append(input)
+  const insert = db.prepare("insert into t(v) values (?)")
+  for (let round = 0; round < 5; round++) {
+    db.transaction(() => {
+      for (let i = 0; i < 4; i++) insert.run(`r${round}-${i}`)
+    })()
+    for (const input of recorder.poll()) log.append(input)
+  }
+  const lastTxid = recorder.position.txid
+  const finalChecksum = recorder.position.checksum
+  const liveDump = dump(db)
+  log.close()
+  recorder.close()
+  db.close()
+  return { root, dir, zero, lastTxid, liveDump, finalChecksum }
+}
+
+describe("restore from a snapshot of a pristine database", () => {
+  test("the ref records the tenant's position, not the file's", async () => {
+    const marks = await pristineThenWritten()
+    expect(marks.zero.txid).toBe("0")
+    expect(marks.zero.checksum).toBe("0")
+    expect(marks.zero.pages).toBe(0)
+  })
+
+  test("restoring to txid 0 and replaying the whole log lands on the primary's state", async () => {
+    const marks = await pristineThenWritten()
+    const into = path.join(marks.root, "from-zero")
+    // Every record in the log is applied on top of the txid-0 snapshot. Before the fix, record 1
+    // failed `ChecksumMismatch`: the applier had been seeded with the header page counted in.
+    const result = await restore({ dir: marks.dir, at: marks.lastTxid, into })
+    expect(result.fromTxid).toBe(0n)
+    expect(result.applied).toBe(Number(marks.lastTxid))
+    expect(result.checksum).toBe(marks.finalChecksum)
+    expect(dumpFile(result.path)).toBe(marks.liveDump)
+    expect(integrityOk(result.path)).toBe(true)
+  })
+
+  test("a restore that stops at txid 0 leaves an applier that accepts record 1", async () => {
+    const marks = await pristineThenWritten()
+    const into = path.join(marks.root, "stopped-at-zero")
+    const result = await restore({ dir: marks.dir, at: 0n, into })
+    expect(result.applied).toBe(0)
+    expect(result.checksum).toBe(0n)
+
+    // The position `restore` persisted is the one a later applier picks up, which is where the
+    // old bug would have surfaced — one apply later, in a different process, far from the cause.
+    const applier = new WalApplier({ dir: path.dirname(result.path), dbPath: result.path })
+    const log = TxnLog.open({ dir: marks.dir, fsync: "never" })
+    try {
+      for (const record of log.iterate(1n)) applier.apply(record)
+      expect(applier.position.txid).toBe(marks.lastTxid)
+      expect(applier.position.postChecksum).toBe(marks.finalChecksum)
+    } finally {
+      log.close()
+      applier.close()
+    }
+    expect(dumpFile(result.path)).toBe(marks.liveDump)
+  })
+
+  test("a mid-log restore can be carried forward by a second applier", async () => {
+    const marks = await pristineThenWritten()
+    const into = path.join(marks.root, "mid-log")
+    const stopAt = marks.lastTxid - 2n
+    const result = await restore({ dir: marks.dir, at: stopAt, into })
+    expect(result.txid).toBe(stopAt)
+
+    const applier = new WalApplier({ dir: path.dirname(result.path), dbPath: result.path })
+    const log = TxnLog.open({ dir: marks.dir, fsync: "never" })
+    try {
+      for (const record of log.iterate(stopAt + 1n)) applier.apply(record)
+      expect(applier.position.txid).toBe(marks.lastTxid)
+      expect(applier.position.postChecksum).toBe(marks.finalChecksum)
+    } finally {
+      log.close()
+      applier.close()
+    }
+    expect(dumpFile(result.path)).toBe(marks.liveDump)
+  })
+
+  test("an index written before R2, with the file's own checksum at txid 0, still restores", async () => {
+    const marks = await pristineThenWritten()
+    // What `snapshot()` used to record: `computeFull` over the file, header page and all.
+    const full = computeFull(marks.zero.path, { includeWal: false })
+    const indexFile = path.join(marks.dir, "snapshots", "index.json")
+    const index = JSON.parse(fs.readFileSync(indexFile, "utf8")) as {
+      version: number
+      snapshots: SnapshotRef[]
+    }
+    for (const ref of index.snapshots) {
+      ref.checksum = full.checksum.toString()
+      ref.pages = full.pages
+    }
+    fs.writeFileSync(indexFile, JSON.stringify(index))
+    expect(full.checksum).not.toBe(0n)
+
+    const into = path.join(marks.root, "old-index")
+    const result = await restore({ dir: marks.dir, at: marks.lastTxid, into })
+    expect(result.checksum).toBe(marks.finalChecksum)
+    expect(dumpFile(result.path)).toBe(marks.liveDump)
   })
 })
 

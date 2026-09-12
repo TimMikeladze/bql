@@ -40,6 +40,12 @@ export interface MetricsSnapshot {
   liveSubscriptions: number
   changeSubscriptions: number
   droppedLiveResults: number
+  /** Writes this node handed to its primary (R2 forwarding). */
+  forwarded: number
+  /** Writes answered `ACK_TIMEOUT` after committing locally. */
+  ackTimeouts: number
+  /** Interactive transactions that had to wait for the writer before they could begin. */
+  txQueued: number
   openTenants: number
   tenants: number
   evictions: number
@@ -58,6 +64,9 @@ export class Metrics {
   #batches = 0
   #transactions = 0
   #vmSteps = 0
+  #forwarded = 0
+  #ackTimeouts = 0
+  #txQueued = 0
   #errors = 0
   #wsConnections = 0
   #wsOpen = 0
@@ -130,6 +139,21 @@ export class Metrics {
     this.#droppedLive++
   }
 
+  /** A write this replica handed to the primary. */
+  forwarded(): void {
+    this.#forwarded++
+  }
+
+  /** A write that committed locally and then ran out of patience waiting for replica acks. */
+  ackTimeout(): void {
+    this.#ackTimeouts++
+  }
+
+  /** An interactive transaction that found the writer busy and waited instead of failing. */
+  txQueued(): void {
+    this.#txQueued++
+  }
+
   snapshot(registry: { open: number; tenants: number; evictions: number }): MetricsSnapshot {
     return {
       requests: this.#requests,
@@ -146,6 +170,9 @@ export class Metrics {
       liveSubscriptions: this.#liveSubs,
       changeSubscriptions: this.#changeSubs,
       droppedLiveResults: this.#droppedLive,
+      forwarded: this.#forwarded,
+      ackTimeouts: this.#ackTimeouts,
+      txQueued: this.#txQueued,
       openTenants: registry.open,
       tenants: registry.tenants,
       evictions: registry.evictions,
@@ -207,6 +234,21 @@ export class Metrics {
       "bunql_live_results_dropped_total",
       "Live-query results dropped under socket backpressure.",
       this.#droppedLive,
+    )
+    counter(
+      "bunql_forwarded_writes_total",
+      "Writes this replica handed to its primary.",
+      this.#forwarded,
+    )
+    counter(
+      "bunql_ack_timeouts_total",
+      "Writes committed locally that ran out of patience waiting for replica acks.",
+      this.#ackTimeouts,
+    )
+    counter(
+      "bunql_tx_queued_total",
+      "Interactive transactions that waited for the writer instead of failing TX_BUSY.",
+      this.#txQueued,
     )
     counter("bunql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
 

@@ -85,7 +85,10 @@ describe("transport choice", () => {
     }
   })
 
-  test("a second transaction on the same database is refused, not queued", async () => {
+  // R2 queues a second transaction for `limits.txWaitMs` (500 ms in the harness) before refusing,
+  // so a nested one on the same database still fails — just after waiting for a writer its own
+  // caller is holding.
+  test("a nested transaction on the same database is refused once the queue wait expires", async () => {
     const db = fixture.client.db("acme")
     let inner: BunQLClientError | null = null
     await db.transaction(async () => {

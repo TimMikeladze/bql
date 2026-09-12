@@ -17,6 +17,7 @@ import { decode, type TxnRecord } from "../wal/index.ts"
 import {
   ACK_FSYNCED,
   decodeJson,
+  type ForwardBody,
   decodeSnapshotChunk,
   encodeAck,
   encodeJson,
@@ -30,6 +31,7 @@ import {
   makeProof,
   ProtocolError,
   PROTO_VERSION,
+  type ResultBody,
   type SnapshotBeginBody,
   type SnapshotEndBody,
   type SubscribedBody,
@@ -68,6 +70,39 @@ export interface ReplicaClientOptions {
   onError?: (err: unknown) => void
   /** Injectable for the tests; defaults to the global `WebSocket`. */
   factory?: SocketFactory
+  /** R2: how long a forwarded write waits for the primary's `RESULT`. Default 10 s. */
+  forwardTimeoutMs?: number
+  /** R2: forwarded writes in flight at once. Past this, `forward` throws `BUSY`. Default 256. */
+  maxForwards?: number
+}
+
+/** A write this node could not take, on its way to the primary (R2). */
+export interface ForwardRequest {
+  db: string
+  /** `query`, `batch`, `tx.begin`, `tx.exec`, `tx.commit` or `tx.rollback`. */
+  op: string
+  body: unknown
+}
+
+/** Extra fields a forwarded failure carries back, when the primary knew them. */
+export interface ForwardErrorDetails {
+  txid?: number
+  failedIndex?: number
+}
+
+/** What the primary answered, re-raised by the caller as if it had happened locally. */
+export class ForwardError extends Error {
+  readonly code: string
+  readonly status: number | undefined
+  readonly details: ForwardErrorDetails | undefined
+
+  constructor(code: string, message: string, status?: number, details?: ForwardErrorDetails) {
+    super(message)
+    this.name = "ForwardError"
+    this.code = code
+    this.status = status
+    this.details = details
+  }
 }
 
 export interface StreamStatus {
@@ -94,6 +129,13 @@ interface Bootstrap {
   fd: number
   bytes: number
   seq: number
+}
+
+/** One forwarded write waiting for its `RESULT`. */
+interface Forward {
+  resolve: (value: unknown) => void
+  reject: (err: unknown) => void
+  timer: ReturnType<typeof setTimeout>
 }
 
 interface Stream {
@@ -139,6 +181,10 @@ export class ReplicaClient {
   #retry: ReturnType<typeof setTimeout> | null = null
   #heartbeat: ReturnType<typeof setInterval> | null = null
   #stopped = false
+  readonly forwardTimeoutMs: number
+  readonly maxForwards: number
+  #forwards = new Map<number, Forward>()
+  #nextForward = 1
 
   constructor(options: ReplicaClientOptions) {
     this.registry = options.registry
@@ -154,6 +200,81 @@ export class ReplicaClient {
     this.#factory =
       options.factory ??
       ((url: string) => new WebSocket(url) as unknown as ClientSocket)
+    this.forwardTimeoutMs = options.forwardTimeoutMs ?? 10_000
+    this.maxForwards = options.maxForwards ?? 256
+  }
+
+  /** Forwarded writes waiting on the primary right now. */
+  get inflightForwards(): number {
+    return this.#forwards.size
+  }
+
+  /**
+   * Hands a write to the primary over the socket this node already holds (R2, frames `FORWARD`
+   * and `RESULT`) and resolves with the primary's own result.
+   *
+   * Rejects with `ForwardError`: `NOT_PRIMARY` when there is no socket to forward over — which is
+   * the same answer the caller would have given without forwarding at all — `BUSY` past
+   * `maxForwards` in flight, and `FORWARD_TIMEOUT` when the primary does not answer. Any failure
+   * the *primary* raised comes back under its own code, never wrapped.
+   */
+  forward(request: ForwardRequest): Promise<unknown> {
+    if (!this.connected) {
+      return Promise.reject(
+        new ForwardError(
+          "NOT_PRIMARY",
+          `this node is not connected to ${this.primary}, so it cannot forward the write`,
+          503,
+        ),
+      )
+    }
+    if (this.#forwards.size >= this.maxForwards) {
+      return Promise.reject(
+        new ForwardError(
+          "BUSY",
+          `${this.maxForwards} writes are already in flight to the primary`,
+          503,
+        ),
+      )
+    }
+    const id = this.#nextForward++
+    return new Promise<unknown>((resolve, reject) => {
+      const pending: Forward = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.#forwards.delete(id)
+          reject(
+            new ForwardError(
+              "FORWARD_TIMEOUT",
+              `the primary did not answer the forwarded ${request.op} in ${this.forwardTimeoutMs}ms`,
+              504,
+            ),
+          )
+        }, this.forwardTimeoutMs),
+      }
+      pending.timer.unref?.()
+      this.#forwards.set(id, pending)
+      this.#send(
+        encodeJson(FRAME.FORWARD, {
+          id,
+          db: request.db,
+          op: request.op,
+          body: request.body,
+        } satisfies ForwardBody),
+      )
+    })
+  }
+
+  /** Fails every forward still waiting; the socket they were riding is gone. */
+  #failForwards(message: string): void {
+    if (this.#forwards.size === 0) return
+    const pending = [...this.#forwards.values()]
+    this.#forwards.clear()
+    for (const one of pending) {
+      clearTimeout(one.timer)
+      one.reject(new ForwardError("NOT_PRIMARY", message, 503))
+    }
   }
 
   get connected(): boolean {
@@ -210,6 +331,7 @@ export class ReplicaClient {
       this.#retry = null
     }
     this.#stopHeartbeat()
+    this.#failForwards(`${this.node} stopped following ${this.primary}`)
     const socket = this.#socket
     this.#socket = null
     this.#connected = false
@@ -280,6 +402,7 @@ export class ReplicaClient {
     this.#connected = false
     this.#handshook = false
     this.#stopHeartbeat()
+    this.#failForwards(`the connection to ${this.primary} closed before the write was answered`)
     for (const stream of this.#streams.values()) this.#abortBootstrap(stream)
     // The stream table is rebuilt on the next handshake; the *positions* live in the tenants, so
     // nothing is lost by forgetting it.
@@ -373,11 +496,30 @@ export class ReplicaClient {
         this.#errorIn(decodeJson<ErrorBody>(type, body))
         return
       case FRAME.RESULT:
-        // R2's write forwarding. Nothing forwards yet, so a result is an answer to nobody.
+        this.#result(decodeJson<ResultBody>(type, body))
         return
       default:
         throw new ProtocolError(`a primary sent ${frameName(type)}`)
     }
+  }
+
+  /** The primary's answer to one forwarded write. */
+  #result(body: ResultBody): void {
+    const pending = this.#forwards.get(Number(body.id))
+    if (!pending) return
+    this.#forwards.delete(Number(body.id))
+    clearTimeout(pending.timer)
+    if (body.ok) {
+      pending.resolve(body.result)
+      return
+    }
+    const error = body.error ?? { code: "INTERNAL", message: "the primary refused the write" }
+    pending.reject(
+      new ForwardError(error.code, error.message, error.status, {
+        ...(error.txid !== undefined ? { txid: error.txid } : {}),
+        ...(error.failedIndex !== undefined ? { failedIndex: error.failedIndex } : {}),
+      }),
+    )
   }
 
   #hello(hello: HelloBody): void {
@@ -474,6 +616,9 @@ export class ReplicaClient {
         fromTxid: "0",
         epoch: 0,
         checksum: "0",
+        // This database is here because an apply did not verify, so its file holds pages from a
+        // history the primary does not share. Only a snapshot can settle that, even at txid 0.
+        reset: true,
       }),
     )
   }

@@ -49,8 +49,21 @@ import {
 } from "../wal/index.ts"
 import { Catalog, positionOf, type TenantRole } from "./catalog.ts"
 
-/** How durable a write has to be before it is acknowledged (design §5.4, minus the replicas). */
-export type AckLevel = "local" | "fsync"
+/**
+ * How durable a write has to be before it is acknowledged (design §5.4).
+ *
+ * The tenant itself can only keep two of these promises: `"local"` is SQLite's own
+ * `synchronous=NORMAL` commit, `"fsync"` adds an explicit `fdatasync` of the WAL and the log.
+ * `"replica"` and `"quorum"` are waited for one layer up, by `src/replication/ack.ts`, because
+ * they depend on other nodes and `write()` is synchronous — here they mean exactly what `"fsync"`
+ * means, since a primary that counts itself in a quorum has to hold the record on disk.
+ */
+export type AckLevel = "local" | "fsync" | "replica" | "quorum"
+
+/** True for the levels that cost an `fdatasync` on this node. */
+export function acksLocallyDurable(ack: AckLevel): boolean {
+  return ack !== "local"
+}
 
 /** What a commit hook is handed. M6 turns this into change events; nothing here knows how. */
 export interface CommitEvent {
@@ -474,7 +487,7 @@ export class Tenant {
         throw translateWriteError(err, this.name)
       }
       const txid = this.#capture()
-      if (ack === "fsync") this.#syncDurable()
+      if (acksLocallyDurable(ack)) this.#syncDurable()
       this.#maybeCheckpoint()
       return { result, txid }
     } finally {
@@ -553,7 +566,7 @@ export class Tenant {
         throw translateWriteError(err, this.name)
       }
       const txid = this.#capture()
-      if (ack === "fsync") this.#syncDurable()
+      if (acksLocallyDurable(ack)) this.#syncDurable()
       this.#maybeCheckpoint()
       return txid
     } finally {
@@ -756,10 +769,14 @@ export class Tenant {
       const txid = this.position.txid
       const existing = listSnapshots(this.dir).find((ref) => BigInt(ref.txid) === txid)
       if (existing) return existing
+      const position = this.position
       const ref = await snapshot(
         { db: this.writer, dbPath: this.dbPath, dir: this.dir },
         txid,
-        { epoch: this.epoch },
+        // The ref records *this tenant's* position, not the file's own page count and XOR: they
+        // differ on a pristine database, and a replica or a PITR restore seeded from the file
+        // there would diverge on the first record (`docs/r1-replication.md` deviation 9).
+        { epoch: this.epoch, position: { checksum: position.checksum, pages: position.dbSizePages } },
       )
       this.catalog.recordSnapshot(this.name, txid, ref.path)
       this.#lastSnapshotTxid = txid

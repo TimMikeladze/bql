@@ -21,6 +21,7 @@ export {
 } from "./registry.ts"
 export {
   type AckLevel,
+  acksLocallyDurable,
   assertValidName,
   type CommitEvent,
   type CommitListener,

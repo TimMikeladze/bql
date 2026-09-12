@@ -129,12 +129,21 @@ export const query: Handler = async (ctx) => {
   assertStatement(body, "request")
   const options = resolveOptions(body, ctx.request.headers, ctx.runtime.config)
   await awaitTxid(tenant, options)
+  const runtime = ctx.runtime
   try {
-    const { result } = executeStatement(ctx.runtime, tenant, principal, body, options)
+    // On a replica, a statement SQLite calls a write goes to the primary and comes back with its
+    // result; a read never leaves this node (R2, design §5.2).
+    if (runtime.forwarder.enabled && runtime.forwarder.needsPrimary(tenant, principal, [body.sql])) {
+      const forwarded = await runtime.forwarder.query(tenant, principal, body, options)
+      ctx.txid = forwarded.txid
+      return json(forwarded)
+    }
+    const { result, kind } = executeStatement(runtime, tenant, principal, body, options)
     ctx.txid = result.txid
+    if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     return json(result)
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrl)
   }
 }
 
@@ -143,20 +152,54 @@ export const batch: Handler = async (ctx) => {
   const body = await readJson<BatchRequest>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   const options = resolveOptions(body, ctx.request.headers, ctx.runtime.config)
   await awaitTxid(tenant, options)
+  const runtime = ctx.runtime
   try {
-    const result = executeBatch(ctx.runtime, tenant, principal, body, options)
+    if (runtime.forwarder.enabled && batchNeedsPrimary(runtime, tenant, principal, body)) {
+      const forwarded = await runtime.forwarder.batch(tenant, principal, body, options)
+      ctx.txid = forwarded.txid
+      return json(forwarded)
+    }
+    const result = executeBatch(runtime, tenant, principal, body, options)
     ctx.txid = result.txid
+    await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     return json(result)
   } catch (err) {
-    throw mapTenantError(err, ctx.runtime.primaryUrl)
+    throw mapTenantError(err, runtime.primaryUrl)
   }
+}
+
+/**
+ * Whether a batch has to go to the primary. An `atomic` batch is one `BEGIN IMMEDIATE` whatever
+ * it contains, so it always does; a non-atomic one only when a statement in it writes.
+ */
+function batchNeedsPrimary(
+  runtime: ServerRuntime,
+  tenant: Tenant,
+  principal: Principal,
+  body: BatchRequest,
+): boolean {
+  const statements = body.statements
+  if (!Array.isArray(statements) || statements.length === 0) return false
+  for (let i = 0; i < statements.length; i++) assertStatement(statements[i], `statements[${i}]`)
+  if (body.atomic !== false) return true
+  return runtime.forwarder.needsPrimary(
+    tenant,
+    principal,
+    statements.map((one) => (one as StatementRequest).sql),
+  )
 }
 
 export const txBegin: Handler = async (ctx) => {
   const { principal, tenant } = await open(ctx, "rw")
   const body = await readJson<TxBeginRequest>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   try {
-    const session = ctx.runtime.beginTx(tenant, principal, {
+    // An interactive transaction is a write that arrives in parts, so on a replica the whole
+    // baton lifecycle lives on the primary and this node only holds the mapping.
+    if (ctx.runtime.forwarder.enabled) {
+      const remote = await ctx.runtime.forwarder.txBegin(tenant, principal, body, null)
+      return json(remote)
+    }
+    const session = await ctx.runtime.beginTxQueued(tenant, principal, {
       ...(body.mode ? { mode: body.mode } : {}),
       ...(body.rows ? { rows: body.rows } : {}),
     })
@@ -184,7 +227,16 @@ export const txBegin: Handler = async (ctx) => {
 /** A statement inside a baton transaction. The baton alone identifies the database. */
 export const txQuery: Handler = async (ctx) => {
   const principal = await principalOf(ctx)
-  const session = ctx.runtime.txSession(ctx.params.tx as string)
+  const baton = ctx.params.tx as string
+  const remote = ctx.runtime.forwarder.remoteTx(baton)
+  if (remote) {
+    const body = await readJson<QueryRequest>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+    assertStatement(body, "request")
+    const result = await ctx.runtime.forwarder.txExec(remote, principal, body)
+    ctx.txid = result.txid
+    return json(result)
+  }
+  const session = ctx.runtime.txSession(baton)
   requireScope(principal, session.db, "rw")
   ctx.txid = Number(session.tenant.txid)
   const body = await readJson<QueryRequest>(ctx, ctx.runtime.config.limits.maxBodyBytes)
@@ -206,11 +258,21 @@ export const txQuery: Handler = async (ctx) => {
 function endTx(how: "commit" | "rollback"): Handler {
   return async (ctx) => {
     const principal = await principalOf(ctx)
-    const session = ctx.runtime.txSession(ctx.params.tx as string)
+    const baton = ctx.params.tx as string
+    const remote = ctx.runtime.forwarder.remoteTx(baton)
+    if (remote) {
+      const answer = await ctx.runtime.forwarder.txEnd(remote, principal, how)
+      ctx.txid = answer.txid
+      return json(answer)
+    }
+    const session = ctx.runtime.txSession(baton)
     requireScope(principal, session.db, "rw")
     try {
       const txid = ctx.runtime.endTx(session, how)
       ctx.txid = Number(txid)
+      if (how === "commit") {
+        await ctx.runtime.awaitDurable(session.db, txid, ctx.runtime.config.durability.defaultAck)
+      }
       return json({ txid: Number(txid) })
     } catch (err) {
       throw mapTenantError(err, ctx.runtime.primaryUrl)

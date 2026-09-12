@@ -79,12 +79,33 @@ Accepted as body fields on every statement-bearing request, and two of them as h
 | `rows` | — | `"array"`, `"object"` | `"array"` |
 | `maxRows` | — | positive integer; a result above it fails the request | `[limits] maxRows`, 10000 |
 | `timeoutMs` | — | positive integer, clamped to the configured limit | `[limits] queryTimeoutMs` |
-| `ack` | `BunQL-Ack` | `"local"`, `"fsync"` | `[durability] defaultAck`, `local` |
+| `ack` | `BunQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `local` |
 | `minTxid` | `BunQL-Min-Txid` | integer; the request waits up to 2 s, then `425` | none |
 | `consistency` | — | `"ryw"`, `"primary"`, `"any"` | `"ryw"` |
 
-`ack: "replica"` and `"quorum"` are a `400` on a standalone node rather than a silent downgrade.
 `consistency` is validated but changes nothing on a single node; `minTxid` does the work.
+
+#### Durability levels
+
+| `ack` | the answer waits for |
+|---|---|
+| `local` | SQLite's commit under `synchronous = NORMAL`, plus the log record. Survives a process crash. |
+| `fsync` | an explicit `fdatasync` of the WAL and the log. Survives power loss on this node. |
+| `replica` | `fsync` here, **and** one replica node reporting the record fsynced. |
+| `quorum` | `fsync` here, **and** a majority of (primary + replicas) holding it: `floor((replicas + 1) / 2)` replica acks. |
+
+The level is read from the body, then the `BunQL-Ack` header, then `[durability] defaultAck`, and
+applies to `query`, `batch` and the WebSocket equivalents. An interactive transaction takes the
+node's default at commit.
+
+Two failures belong to the replica levels, and **neither rolls anything back**:
+
+- `503 NO_REPLICAS` — no replica is attached to that database. Raised *before* the statement runs
+  where it can be, so the usual misconfiguration costs no write at all. `[replication]
+  ackWithoutReplicas = "allow"` opts into answering locally instead.
+- `503 ACK_TIMEOUT` — the transaction committed and is durable on this node, but the acks did not
+  arrive within `[replication] ackTimeoutMs`. The body carries the `txid` that committed, plus
+  `acks` and `needed`. Retrying the statement would write it twice; read the txid back instead.
 
 ### Value encoding
 
@@ -111,7 +132,10 @@ The same tagging applies to arguments. `args` is a positional array, or an objec
              "status": 409, "txid": 4813 } }
 ```
 
-`failedIndex` is added for a batch, `primary` for `NOT_PRIMARY`.
+`failedIndex` is added for a batch, `primary` for `NOT_PRIMARY` and for anything a replica
+forwarded, `acks` and `needed` for `ACK_TIMEOUT`. An error raised by the primary for a forwarded
+write arrives under the primary's own code and status — a constraint violation is still a
+`SQLITE_CONSTRAINT_*` with its 409, never a transport failure.
 
 | code | status | when |
 |---|---|---|
@@ -124,12 +148,15 @@ The same tagging applies to arguments. `args` is a positional array, or an objec
 | `QUERY_TIMEOUT` | 408 | the deadline interrupted the statement |
 | `CONFLICT` | 409 | importing over a name that exists |
 | `RESET_REQUIRED` | 409 | the change ring cannot serve that `since` |
-| `TX_BUSY` | 409 | another transaction holds the writer; `Retry-After: 1` |
+| `TX_BUSY` | 409 | another transaction held the writer for the whole `[limits] txWaitMs`; `Retry-After: 1` |
 | `SQLITE_CONSTRAINT_*` | 409 | the constraint SQLite names |
 | `PAYLOAD_TOO_LARGE` | 413 | body over `[limits] maxBodyBytes` or `maxImportBytes` |
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
-| `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, or a snapshot in progress |
-| `NOT_PRIMARY` | 503 | a write reached a replica; carries `BunQL-Primary` |
+| `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, a snapshot in progress, or too many forwards in flight |
+| `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it; carries `BunQL-Primary` |
+| `NO_REPLICAS` | 503 | `ack: "replica"`/`"quorum"` on a node with no replica attached |
+| `ACK_TIMEOUT` | 503 | committed and locally durable, but not enough replica acks in time |
+| `FORWARD_TIMEOUT` | 504 | the primary never answered a write a replica forwarded to it |
 | `REPLICATION_DISABLED` | 403 | `GET /v1/replication` on a node with no `[replication] secret` |
 | `QUOTA_EXCEEDED` | 507 | `max_page_count` reached, or `SQLITE_FULL` |
 | `INTERNAL` | 500 | a bug; the client is told nothing more, the server logs the rest |
@@ -240,10 +267,16 @@ POST /v1/db/acme/tx/b7f3…/rollback   → { "txid": 4813 }
 `mode` is `deferred`, `immediate` (default) or `exclusive`. The baton is 128 random bits and
 identifies the database on its own, so the statement routes do not re-check the name.
 
-An open transaction holds the tenant's single writer. One per database: a second `POST /v1/db/{db}/tx`
-is `409 TX_BUSY` with `Retry-After: 1`, and a plain write to the same database is refused the same
-way. The transaction is rolled back after `[limits] txIdleTimeoutMs` (5 s) without a statement, and
-when the WebSocket that opened it closes. A failed statement leaves the transaction usable.
+An open transaction holds the tenant's single writer, so there is one per database. A second
+`POST /v1/db/{db}/tx` **waits in line** for up to `[limits] txWaitMs` (5 s) and is answered
+`409 TX_BUSY` with `Retry-After: 1` only if the writer is still busy when that expires — so two
+concurrent request handlers on one database both get served instead of one of them failing on
+arrival. Waiters are served in the order they arrived. A plain write (not a transaction) is still
+refused `409` at once: it is a single statement and has nothing to hold a place in a queue for.
+
+The transaction is rolled back after `[limits] txIdleTimeoutMs` (5 s) without a statement, when the
+WebSocket that opened it closes, and — for one a replica forwarded — when that replica's
+replication socket drops. A failed statement leaves the transaction usable.
 
 ### `GET /v1/db/:db/changes`
 
@@ -404,6 +437,11 @@ node that replicates adds four series: `bunql_replication_lag_txid` and
 `bunql_replication_records_total` (counters). On a primary they count what was streamed out and
 how far the furthest-behind replica is; on a replica, what was received and applied.
 
+Three more counters cover R2's paths: `bunql_forwarded_writes_total` (writes this replica handed
+to its primary), `bunql_ack_timeouts_total` (writes that committed locally and then ran out of
+patience waiting for replica acks) and `bunql_tx_queued_total` (interactive transactions that
+waited for the writer instead of failing `TX_BUSY`).
+
 ### Node-to-node replication
 
 `GET /v1/replication` upgrades to the binary node-to-node protocol of design §8, opened by a
@@ -412,8 +450,39 @@ the primary issues, and `Authorization` is not consulted. A node with `[replicat
 answers `403 REPLICATION_DISABLED`. The frame format, the bootstrap rules and the deviations from
 `docs/plan-phase1.md` are in `docs/r1-replication.md`.
 
-Writes on a replica answer `503 NOT_PRIMARY` with `BunQL-Primary`; forwarding them to the primary
-is R2.
+#### Write forwarding
+
+A write that arrives on a replica is handed to the primary over the socket the replica already
+holds (`FORWARD` out, `RESULT` back) and the replica answers with the primary's own result, plus
+the `BunQL-Txid` the transaction committed under. Before answering it waits for its own applier to
+reach that txid, so the caller's next read *on that node* sees its own write with no `minTxid`.
+
+- Classification is `sqlite3_stmt_readonly`, the same call the local path makes: a read is served
+  on the replica and never leaves it.
+- `query`, `batch` and the whole interactive-transaction lifecycle forward. A baton opened through
+  a replica is the primary's baton, handed straight through.
+- The principal crosses the wire as its claims, not its token — two nodes share a cluster secret,
+  not JWT key material — and the primary applies the same scope and table ACLs it would locally.
+- `[replication] forwardWrites = false` restores the phase-0 answer: `503 NOT_PRIMARY` with
+  `BunQL-Primary`. A replica that cannot reach its primary answers the same way.
+- In flight forwards are capped by `[replication] maxForwards` (`503 BUSY` past it) and bounded by
+  `[replication] forwardTimeoutMs` (`504 FORWARD_TIMEOUT`).
+
+#### Realtime on a replica (phase-1 limitation)
+
+A replica has no preupdate hooks: its transactions arrive as WAL pages, not as rows. Its realtime
+is driven by the applier instead, and the two feeds differ:
+
+- **Live queries work fully.** Every applied transaction re-runs every live query on that database
+  and the result converges on the primary's state, which is what makes a replica useful for reads.
+  The cost is that a replica cannot tell which tables moved, so it re-runs all of them.
+- **The change feed carries txids and no rows.** A `change` event on a replica is
+  `{"txid": 4814, "changes": []}`. Subscribe to it to know *that* something changed and at which
+  txid; re-query, or subscribe on the primary, to know what. Design §4.6's row-level CDC on a
+  replica needs logical decoding of the WAL, which is phase 3.
+
+New databases reach a `follow: ["*"]` replica as soon as they are created — the primary announces
+its database list on every create, import and delete rather than waiting for a heartbeat.
 
 ---
 
@@ -434,7 +503,10 @@ presents none is accepted and must send `hello` before anything else.
 ```
 
 `hello` is answered with the greeting whether or not it carried an `id`; a socket that arrived
-already authenticated gets the greeting on open.
+already authenticated gets the greeting on open. On a replica the greeting says `"role":"replica"`
+and adds `"primary"`, so a socket client can find the write path without provoking an error.
+Writes over a socket on a replica are forwarded exactly as the HTTP ones are, transactions
+included.
 
 ```jsonc
 // query — `db`, or `tx` when it runs inside an open transaction
@@ -758,7 +830,7 @@ the canonical one wins when both are set.
 | `[data] readers` | `2` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |
 | `[data] pageSize` | `4096` | `BUNQL_DATA_PAGE_SIZE` | `BUNQL_PAGE_SIZE` |
 | `[data] quotaBytes` | `0` (unlimited) | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
-| `[durability] defaultAck` | `"local"` | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
+| `[durability] defaultAck` | `"local"` (also `fsync`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
 | `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
 | `[durability] retention` | `"7d"` | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
 | `[durability] segmentBytes` | `16777216` | `BUNQL_DURABILITY_SEGMENT_BYTES` | — |
@@ -772,6 +844,7 @@ the canonical one wins when both are set.
 | `[limits] txIdleTimeoutMs` | `5000` | `BUNQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BUNQL_TX_IDLE_TIMEOUT_MS` |
 | `[limits] maxRows` | `10000` | `BUNQL_LIMITS_MAX_ROWS` | `BUNQL_MAX_ROWS` |
 | `[limits] maxOpenTx` | `1` | `BUNQL_LIMITS_MAX_OPEN_TX` | `BUNQL_MAX_OPEN_TX` |
+| `[limits] txWaitMs` | `5000` | `BUNQL_LIMITS_TX_WAIT_MS` | `BUNQL_TX_WAIT_MS` |
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
 | `[auth] adminKey` | generated on first start | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
@@ -784,11 +857,14 @@ the canonical one wins when both are set.
 | `[replication] primary` | `""` | `BUNQL_REPLICATION_PRIMARY` | `BUNQL_REPLICA_OF` |
 | `[replication] secret` | `""` (replication off) | `BUNQL_REPLICATION_SECRET` | `BUNQL_CLUSTER_SECRET` |
 | `[replication] follow` | `["*"]` | `BUNQL_REPLICATION_FOLLOW` (comma-separated) | `BUNQL_FOLLOW` |
-| `[replication] ackTimeoutMs` | `2000` (R2) | `BUNQL_REPLICATION_ACK_TIMEOUT_MS` | — |
+| `[replication] ackTimeoutMs` | `2000` | `BUNQL_REPLICATION_ACK_TIMEOUT_MS` | — |
+| `[replication] ackWithoutReplicas` | `"error"` (or `"allow"`) | `BUNQL_REPLICATION_ACK_WITHOUT_REPLICAS` | — |
 | `[replication] heartbeatMs` | `5000` | `BUNQL_REPLICATION_HEARTBEAT_MS` | — |
 | `[replication] slowReplicaMs` | `30000` | `BUNQL_REPLICATION_SLOW_REPLICA_MS` | — |
 | `[replication] reconnectMs` | `250` | `BUNQL_REPLICATION_RECONNECT_MS` | — |
-| `[replication] forwardWrites` | `true` (R2) | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
+| `[replication] forwardWrites` | `true` | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
+| `[replication] forwardTimeoutMs` | `10000` | `BUNQL_REPLICATION_FORWARD_TIMEOUT_MS` | — |
+| `[replication] maxForwards` | `256` | `BUNQL_REPLICATION_MAX_FORWARDS` | — |
 
 Setting `[replication] primary` makes the node a replica; `role` need not be set as well. A
 replica with no `primary` is refused at start.
@@ -810,10 +886,14 @@ document is not edited; this is the list.
 | §8 replication protocol (`/v1/replication` binary frames) | R1. `GET /v1/db/{db}/replication` is the JSON status route of §6.5; the socket is the protocol |
 | §9.3 `bunql serve --replica-of` | R1, with `--cluster-secret` and `--follow` |
 | §9.4 `[replication]` | R1 |
-| §5.2 replicas serve reads and refuse writes | R1. Forwarding is R2, so a write is `503 NOT_PRIMARY` |
+| §5.2 replicas serve reads and forward writes | R2. `forwardWrites = false` keeps R1's `503 NOT_PRIMARY` |
+| §5.4 `ack: "replica" \| "quorum"` | R2, with `NO_REPLICAS` and `ACK_TIMEOUT` as the two refusals |
+| §5.4 read-your-writes across nodes | R2. `BunQL-Min-Txid` waits on the applier; every response carries `BunQL-Txid` and `BunQL-Role` |
+| §5.2 a new database reaches a wildcard replica at once | R2. The primary announces its database list on create, import and delete |
+| §5.2 replica realtime | R2, in part: live queries converge, the change feed is txid-only. See "Realtime on a replica" above |
 
-A replica's `live` queries and `changes` feed are **not** driven by its stream in R1: the realtime
-engine is fed by the write path's hooks, and a replica has none. See `docs/r1-replication.md`.
+The as-built notes are `docs/r1-replication.md` (transport) and `docs/r2-durability.md`
+(durability, forwarding, the transaction queue).
 
 ### Not implemented in phase 0
 
@@ -821,7 +901,6 @@ engine is fed by the write path's hooks, and a replica has none. See `docs/r1-re
 |---|---|
 | §6.7 Hrana compatibility (`/v2/pipeline`, `/v3/pipeline`, `hrana3`/`hrana2` sockets) | phase 1 (§11) |
 | §6.5 `POST /v1/db/{db}/promote` | phase 1; nothing to promote to on a standalone node |
-| §5.4 `ack: "replica"` and `"quorum"` | R2. Still a `400` today, not a silent downgrade |
 | §9.2 `bunql/kysely`, `bunql/drizzle` | phase 1 |
 | §9.2 `BunQL.open({ s3 })` | phase 1; the option would be a promise the node cannot keep |
 | §9.3 `bunql promote`, `bunql cluster` | phase 1 and 2 |
@@ -845,7 +924,11 @@ engine is fed by the write path's hooks, and a replica has none. See `docs/r1-re
 - **`consistency` is accepted and validated but changes nothing** on a single node, which is always
   the primary. `minTxid` does all the work.
 - **`maxOpenTx` is fixed at 1 per database** by the tenant having one writer. The config key exists
-  but a larger value would not be honoured.
+  but a larger value would not be honoured; `[limits] txWaitMs` is the knob that matters, since it
+  decides how long the second transaction waits for the first rather than how many may run.
+- **A forwarded write is not retried.** A replica sends it once. `FORWARD_TIMEOUT` and a socket
+  that drops mid-flight both mean "this may or may not have committed on the primary" — read the
+  txid back rather than sending it again.
 - **The long poll's `wait` is capped at 60 s**, so a client cannot pin a subscription open.
 - **`wait` is what switches `/changes` between SSE and the long poll**, not `Accept`.
 - **`maxRows` fails a one-shot query and truncates a live one.** `400 TOO_MANY_ROWS` on `/query`;

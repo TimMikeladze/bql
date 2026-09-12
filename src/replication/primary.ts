@@ -22,6 +22,7 @@ import {
 import {
   decodeAck,
   decodeJson,
+  type ForwardBody,
   encodeJson,
   encodeSnapshotChunk,
   encodeTxn,
@@ -33,6 +34,7 @@ import {
   ProtocolError,
   PROTO_VERSION,
   type ReplicationErrorCode,
+  type ResultBody,
   type SubscribeBody,
   type UnsubscribeBody,
   verifyProof,
@@ -83,6 +85,18 @@ export interface ReplicationServerOptions {
   heartbeatMs?: number
   /** Close a socket that has been backpressured for this long. */
   slowReplicaMs?: number
+  /**
+   * R2's write forwarding. A replica hands a write it cannot take to the primary as a `FORWARD`
+   * frame; this runs it and its answer goes back as `RESULT`. Left unset, a `FORWARD` is refused
+   * with `PROTO`, which is what a node that predates R2 does.
+   */
+  onForward?: (request: ForwardBody, node: string) => Promise<unknown>
+  /**
+   * A replica socket that had completed the handshake has gone. R2 uses it to roll back the
+   * interactive transactions that replica had open here, rather than leaving this node's only
+   * writer held until the idle timer notices.
+   */
+  onDisconnect?: (node: string) => void
   onError?: (err: unknown) => void
 }
 
@@ -143,6 +157,8 @@ export class ReplicationServer {
   #snapshots = new Map<string, Promise<SnapshotRef>>()
   #timer: ReturnType<typeof setInterval> | null = null
   #ackListeners = new Set<(event: AckEvent) => void>()
+  #onForward: ((request: ForwardBody, node: string) => Promise<unknown>) | null
+  #onDisconnect: ((node: string) => void) | null
   #onError: (err: unknown) => void
   #closed = false
 
@@ -152,6 +168,8 @@ export class ReplicationServer {
     this.secret = options.secret
     this.heartbeatMs = options.heartbeatMs ?? 5000
     this.slowReplicaMs = options.slowReplicaMs ?? 30_000
+    this.#onForward = options.onForward ?? null
+    this.#onDisconnect = options.onDisconnect ?? null
     this.#onError =
       options.onError ?? ((err: unknown) => console.error("bunql: replication", err))
   }
@@ -351,9 +369,7 @@ export class ReplicationServer {
         this.#onError(new Error(`replica ${conn.node}: ${new TextDecoder().decode(body)}`))
         return
       case FRAME.FORWARD:
-        // R2. Until it lands, a replica that forwards is talking to a primary that cannot listen,
-        // and saying so is better than dropping the write silently.
-        this.#error(conn, undefined, "PROTO", "write forwarding is not implemented on this node")
+        void this.#forward(conn, decodeJson<ForwardBody>(type, body))
         return
       default:
         this.#fail(conn, "PROTO", `unexpected frame ${frameName(type)}`)
@@ -381,6 +397,64 @@ export class ReplicationServer {
         databases: this.#databases(),
       } satisfies HelloBody),
     )
+  }
+
+  /**
+   * Pushes the current database list to every authenticated replica, now. `plan-phase1.md`
+   * finding 1: a `follow: ["*"]` replica must reach a database created on the primary in the same
+   * millisecond range as a record, not at the next heartbeat tick up to `heartbeatMs` later. The
+   * frame is a `HEARTBEAT`, which already carries `databases` (r1 deviation 2), so a replica
+   * needs no new code to act on it.
+   */
+  announce(): void {
+    if (this.#closed || this.#conns.size === 0) return
+    const databases = this.#databases()
+    for (const conn of [...this.#conns]) {
+      if (!conn.authed || conn.closed) continue
+      this.#send(
+        conn,
+        encodeJson(FRAME.HEARTBEAT, {
+          ts: Date.now(),
+          streams: [...conn.streams.values()].map((stream) => ({
+            stream: stream.id,
+            txid: stream.tenant.txid.toString(),
+          })),
+          databases,
+        }),
+      )
+    }
+  }
+
+  /**
+   * R2's other half of write forwarding. The work is the caller's — `src/server/forward.ts` runs
+   * it through the same request path an HTTP write takes — and everything here does is keep the
+   * `id` and turn a throw into a `RESULT` the replica can re-raise verbatim.
+   */
+  async #forward(conn: Conn, request: ForwardBody): Promise<void> {
+    const id = Number(request?.id)
+    if (!Number.isFinite(id)) {
+      this.#fail(conn, "PROTO", "a FORWARD frame needs a numeric id")
+      return
+    }
+    if (!this.#onForward) {
+      this.#result(conn, {
+        id,
+        ok: false,
+        error: { code: "NOT_PRIMARY", message: "this node does not run forwarded writes" },
+      })
+      return
+    }
+    try {
+      const result = await this.#onForward(request, conn.node)
+      this.#result(conn, { id, ok: true, result })
+    } catch (err) {
+      this.#result(conn, { id, ok: false, error: errorOf(err) })
+    }
+  }
+
+  #result(conn: Conn, body: ResultBody): void {
+    if (conn.closed) return
+    this.#send(conn, encodeJson(FRAME.RESULT, body))
   }
 
   #databases(): string[] {
@@ -435,7 +509,12 @@ export class ReplicationServer {
     // the commit listener and the stream would silently stop.
     this.registry.pin(request.db, PIN_OWNER)
 
-    const decision = this.#decide(tenant, fromTxid, parseBig(request.checksum))
+    const decision = this.#decide(
+      tenant,
+      fromTxid,
+      parseBig(request.checksum),
+      request.reset === true,
+    )
     if (decision.kind === "stream") {
       this.#send(
         conn,
@@ -475,8 +554,18 @@ export class ReplicationServer {
     tenant: Tenant,
     fromTxid: bigint,
     checksum: bigint,
+    reset: boolean,
   ): { kind: "stream" } | { kind: "snapshot"; reason: { code: ReplicationErrorCode; message: string } | null } {
-    if (fromTxid === 0n) return { kind: "snapshot", reason: null }
+    if (fromTxid === 0n) {
+      // Two pristine databases need no file between them. A primary that has never committed has
+      // nothing to copy, and the replica's own empty database is exactly what a snapshot of this
+      // one would leave it with — so the stream starts at record 1 and the writer is never taken.
+      // That matters beyond the saved copy: a snapshot holds the tenant exclusively, and a
+      // database announced the moment it is created (finding 1) is one a client is usually
+      // writing to in the same breath.
+      if (!reset && tenant.txid === 0n && checksum === 0n) return { kind: "stream" }
+      return { kind: "snapshot", reason: null }
+    }
 
     // Fully caught up: nothing to compare but the database's own state.
     if (fromTxid === tenant.txid) {
@@ -770,6 +859,13 @@ export class ReplicationServer {
   #teardown(conn: Conn): void {
     if (conn.closed) return
     conn.closed = true
+    if (conn.authed && this.#onDisconnect) {
+      try {
+        this.#onDisconnect(conn.node)
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
     for (const stream of [...conn.streams.values()]) this.#endStream(conn, stream)
     conn.queue = []
     this.#conns.delete(conn)
@@ -814,6 +910,32 @@ export class ReplicationServer {
         }),
       )
     }
+  }
+}
+
+/**
+ * A thrown value as the `{code, message, status}` a replica re-raises. The shape is deliberately
+ * the server's error body rather than a replication code: the client on the far side must see the
+ * primary's own failure, not a transport wrapper around it.
+ */
+function errorOf(err: unknown): NonNullable<ResultBody["error"]> {
+  const any = err as {
+    code?: unknown
+    message?: unknown
+    status?: unknown
+    details?: { txid?: number; failedIndex?: number }
+  }
+  const code = typeof any?.code === "string" ? any.code : "INTERNAL"
+  const message = typeof any?.message === "string" ? any.message : "internal error"
+  const status = typeof any?.status === "number" ? any.status : undefined
+  const txid = any?.details?.txid
+  const failedIndex = any?.details?.failedIndex
+  return {
+    code,
+    message,
+    ...(status === undefined ? {} : { status }),
+    ...(txid === undefined ? {} : { txid }),
+    ...(failedIndex === undefined ? {} : { failedIndex }),
   }
 }
 

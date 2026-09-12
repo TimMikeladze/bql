@@ -103,6 +103,26 @@ describe("streaming", () => {
     expect((await query(replica, "later", "select v from t")).rows).toEqual([["x"]])
   })
 
+  test("a new database reaches a replica in milliseconds, not at the next heartbeat", async () => {
+    // `plan-phase1.md` finding 1. The heartbeat is set to five seconds precisely so that waiting
+    // for one would be visible: the announcement has to be what carries the database across.
+    const slow = { overrides: { replication: { heartbeatMs: 5000 } } }
+    const primary = track(await startPrimary(slow.overrides))
+    const replica = track(await startReplica(primary, slow))
+    await until(
+      () => Boolean(replica.handle.runtime.replica?.connected),
+      "the replica to finish its handshake",
+    )
+
+    const startedMs = Date.now()
+    await createDb(primary, "fresh", SCHEMA)
+    const written = await query(primary, "fresh", "insert into t (v) values ('now')")
+    await untilTxid(replica, "fresh", written.txid)
+    const tookMs = Date.now() - startedMs
+    expect((await query(replica, "fresh", "select v from t")).rows).toEqual([["now"]])
+    expect(tookMs).toBeLessThan(1500)
+  })
+
   test("only the databases in `follow` are replicated", async () => {
     const primary = track(await startPrimary())
     await createDb(primary, "wanted", SCHEMA)
@@ -288,11 +308,15 @@ describe("resume", () => {
 })
 
 describe("refusals", () => {
+  // R2 forwards writes by default, so `NOT_PRIMARY` is now what a node answers when forwarding is
+  // turned off — the one configuration in which a replica still refuses a write outright.
+  const noForwarding = { overrides: { replication: { forwardWrites: false } } }
+
   test("a write on a replica is 503 NOT_PRIMARY with a BunQL-Primary header", async () => {
-    const cluster = track(await startCluster(1))
-    const [replica] = cluster.replicas as [Node]
-    await createDb(cluster.primary, "acme", SCHEMA)
-    await untilSynced(cluster.primary, replica, "acme")
+    const primary = track(await startPrimary())
+    await createDb(primary, "acme", SCHEMA)
+    const replica = track(await startReplica(primary, noForwarding))
+    await untilSynced(primary, replica, "acme")
 
     const response = await replica.fetch("/v1/db/acme/query", {
       method: "POST",
@@ -300,16 +324,16 @@ describe("refusals", () => {
     })
     expect(response.status).toBe(503)
     expect(response.headers.get(HEADERS.role)).toBe("replica")
-    expect(response.headers.get(HEADERS.primary)).toBe(cluster.primary.replicationUrl)
+    expect(response.headers.get(HEADERS.primary)).toBe(primary.replicationUrl)
     const body = (await response.json()) as { error: { code: string } }
     expect(body.error.code).toBe("NOT_PRIMARY")
   })
 
   test("an interactive transaction on a replica is refused too", async () => {
-    const cluster = track(await startCluster(1))
-    const [replica] = cluster.replicas as [Node]
-    await createDb(cluster.primary, "acme", SCHEMA)
-    await untilSynced(cluster.primary, replica, "acme")
+    const primary = track(await startPrimary())
+    await createDb(primary, "acme", SCHEMA)
+    const replica = track(await startReplica(primary, noForwarding))
+    await untilSynced(primary, replica, "acme")
 
     const response = await replica.fetch("/v1/db/acme/tx", { method: "POST", body: "{}" })
     expect(response.status).toBe(503)

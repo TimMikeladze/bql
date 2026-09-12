@@ -235,6 +235,17 @@ export class LiveQueryRegistry {
   }
 
   /**
+   * Every subscription, as "assume this commit touched everything". A replica has no preupdate
+   * hooks — its pages arrive as WAL frames, not as rows — so `applyRecord` cannot say which tables
+   * moved and the honest answer is all of them. Over-invalidation costs a query per live
+   * subscription per applied transaction; under-invalidation would cost correctness.
+   */
+  invalidateAll(txid: number): Set<string> {
+    if (txid > this.#pendingTxid) this.#pendingTxid = txid
+    return new Set(this.#subs.keys())
+  }
+
+  /**
    * Queues `ids` for a re-run at the end of this tick. Several commits in one tick collapse into
    * one run per subscription.
    */

@@ -9,7 +9,10 @@ import { createDb, startTestServer, stopAll, type TestServer } from "./harness.t
 let server: TestServer
 
 beforeAll(async () => {
-  server = await startTestServer({ limits: { txIdleTimeoutMs: 300 } })
+  // A short queue wait so the `TX_BUSY` case does not have to outlast a real one, and an idle
+  // timeout longer than it so a queued transaction is refused by the queue rather than served by
+  // the holder's leash expiring.
+  server = await startTestServer({ limits: { txIdleTimeoutMs: 300, txWaitMs: 100 } })
   await createDb(server, "acme", "create table t(id integer primary key, v text)")
 })
 afterAll(stopAll)
@@ -56,13 +59,34 @@ describe("baton transactions", () => {
     expect(await count()).toBe(before)
   })
 
-  test("a second transaction on the same database is refused with Retry-After", async () => {
+  test("a second transaction waits for the writer and is refused once the wait expires", async () => {
     const { tx } = (await (await begin()).json()) as TxBeginResult
+    const startedMs = Date.now()
     const second = await begin()
+    // It queued rather than failing on arrival: R5's finding, fixed on the server (R2).
+    expect(Date.now() - startedMs).toBeGreaterThanOrEqual(90)
     expect(second.status).toBe(409)
     expect(second.headers.get("retry-after")).toBe("1")
     expect(((await second.json()) as ErrorBody).error.code).toBe("TX_BUSY")
     await server.fetch(`/v1/db/acme/tx/${tx}/rollback`, { method: "POST" })
+  })
+
+  test("two concurrent transactions on one database both commit, in order", async () => {
+    const before = await count()
+    const run = async (tag: string): Promise<number> => {
+      const { tx } = (await (await begin()).json()) as TxBeginResult
+      await server.fetch(`/v1/db/acme/tx/${tx}`, {
+        method: "POST",
+        body: JSON.stringify({ sql: "insert into t(v) values (?)", args: [tag] }),
+      })
+      const committed = await server.fetch(`/v1/db/acme/tx/${tx}/commit`, { method: "POST" })
+      expect(committed.status).toBe(200)
+      return ((await committed.json()) as { txid: number }).txid
+    }
+    // Both start before either has the writer; the loser waits its turn instead of failing.
+    const [first, second] = await Promise.all([run("first"), run("second")])
+    expect(Math.abs(first - second)).toBe(1)
+    expect(await count()).toBe(before + 2)
   })
 
   test("a plain write waits for nothing and is refused while a transaction holds the writer", async () => {

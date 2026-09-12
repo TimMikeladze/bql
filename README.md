@@ -36,8 +36,8 @@ Phase 0 is complete and usable end to end on a single node.
 
 Phase 1 turns the single node into a primary with replicas, on the log that already exists:
 
-- replica streaming over the WebSocket, with bootstrap and write forwarding;
-- `ack: "replica"` and `"quorum"` — semi-synchronous durability, which today is a `400`;
+- replica streaming over the WebSocket, with bootstrap and write forwarding — built;
+- `ack: "replica"` and `"quorum"` — semi-synchronous durability — built;
 - the S3 shipper and restore-from-S3;
 - the Hrana compatibility layer, which buys the whole libsql/Turso client ecosystem;
 - Kysely and Drizzle adapters — built, see "Use it with your ORM" below;

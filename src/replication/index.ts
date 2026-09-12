@@ -41,6 +41,13 @@ export {
   verifyProof,
 } from "./protocol.ts"
 export {
+  AckTimeout,
+  AckTracker,
+  type AckTrackerOptions,
+  type AckOutcome,
+  NoReplicas,
+} from "./ack.ts"
+export {
   type AckEvent,
   type ReplicaView,
   ReplicationServer,
@@ -49,6 +56,8 @@ export {
 } from "./primary.ts"
 export {
   type ClientSocket,
+  ForwardError,
+  type ForwardRequest,
   ReplicaClient,
   type ReplicaClientOptions,
   type ReplicaStatus,

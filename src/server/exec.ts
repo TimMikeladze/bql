@@ -52,15 +52,12 @@ function asNumber(value: unknown, what: string): number | undefined {
 
 function asAck(value: unknown): AckLevel | undefined {
   if (value === undefined || value === null || value === "") return undefined
-  if (value === "local" || value === "fsync") return value
-  // Replica durability needs replicas, and phase 0 has none. Asking for it is a client error
-  // rather than a promise this node silently downgrades (design §5.4).
-  if (value === "replica" || value === "quorum") {
-    throw BunQLError.badRequest(
-      `ack ${JSON.stringify(value)} needs a replica, and this node has none`,
-    )
+  if (value === "local" || value === "fsync" || value === "replica" || value === "quorum") {
+    return value
   }
-  throw BunQLError.badRequest(`ack must be "local" or "fsync", got ${JSON.stringify(value)}`)
+  throw BunQLError.badRequest(
+    `ack must be "local", "fsync", "replica" or "quorum", got ${JSON.stringify(value)}`,
+  )
 }
 
 /**
@@ -214,6 +211,9 @@ export function executeStatement(
   }
 
   requireScope(principal, tenant.name, "rw")
+  // A durability level this node cannot answer is refused before anything is written, so the
+  // common misconfiguration leaves no committed transaction behind to explain (design §5.4).
+  runtime.assertAckAvailable(tenant.name, options.ack)
   const written = tenant.write(
     (db) => {
       const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
@@ -272,6 +272,7 @@ export function executeBatch(
   // pure reads pays a `BEGIN IMMEDIATE` it did not need, which is the price of `atomic` meaning
   // exactly one thing.
   requireScope(principal, tenant.name, "rw")
+  runtime.assertAckAvailable(tenant.name, options.ack)
   const startedNs = Bun.nanoseconds()
   const written = tenant.write(
     (db) => {

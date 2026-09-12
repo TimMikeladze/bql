@@ -40,7 +40,9 @@ export async function startTestServer(overrides: ServerConfigInput = {}): Promis
       server: { port: 0, host: "127.0.0.1", node: "test-node", ...overrides.server },
       data: { dir, ...overrides.data },
       // Tests must not be kept waiting by the idle checkpoint sweep or a long transaction leash.
-      limits: { txIdleTimeoutMs: 1000, ...overrides.limits },
+      // `txWaitMs` is the R2 queue: short enough that a test which *wants* `TX_BUSY` gets it
+      // quickly, long enough that two honest concurrent transactions still take their turn.
+      limits: { txIdleTimeoutMs: 1000, txWaitMs: 500, ...overrides.limits },
     },
   })
   const handle = await startServer(config, { log: () => {} })

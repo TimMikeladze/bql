@@ -23,6 +23,12 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   TOO_MANY_REQUESTS: 429,
   BUSY: 503,
   NOT_PRIMARY: 503,
+  // R2's durability answers. Both mean "the transaction committed, on this node, at this txid" —
+  // they are refusals of the *promise* the request asked for, never of the write itself.
+  ACK_TIMEOUT: 503,
+  NO_REPLICAS: 503,
+  /** The primary never answered a forwarded write. */
+  FORWARD_TIMEOUT: 504,
   REPLICATION_DISABLED: 403,
   QUOTA_EXCEEDED: 507,
   INTERNAL: 500,
@@ -35,6 +41,10 @@ export interface ErrorDetails {
   failedIndex?: number
   /** Where the client should go instead, for `NOT_PRIMARY`. */
   primary?: string
+  /** Distinct replica nodes that acked in time, for `ACK_TIMEOUT`. */
+  acks?: number
+  /** How many were needed. */
+  needed?: number
 }
 
 /** An error the server raises itself, as opposed to one SQLite raised. */
@@ -79,6 +89,18 @@ export class BunQLError extends Error {
       425,
       { txid: have },
     )
+  }
+
+  /**
+   * A write that is committed and locally durable, but did not collect the replica acks the
+   * request asked for. Never a rollback: the txid in `details` happened.
+   */
+  static ackTimeout(message: string, details: ErrorDetails): BunQLError {
+    return new BunQLError("ACK_TIMEOUT", message, 503, details)
+  }
+
+  static noReplicas(message: string, details?: ErrorDetails): BunQLError {
+    return new BunQLError("NO_REPLICAS", message, 503, details)
   }
 
   static notPrimary(primary?: string): BunQLError {
@@ -184,9 +206,16 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   const txid = details?.txid ?? own?.txid
   const failedIndex = details?.failedIndex ?? own?.failedIndex
   const primary = details?.primary ?? own?.primary
+  const acks = details?.acks ?? own?.acks
+  const needed = details?.needed ?? own?.needed
   if (txid !== undefined) error.txid = txid
   if (failedIndex !== undefined) error.failedIndex = failedIndex
   if (primary !== undefined) error.primary = primary
+  // `ErrorInfo` is the client's shape and does not name these; they ride along for `ACK_TIMEOUT`,
+  // where "how close did it get" is the one thing an operator wants from the body.
+  const extra = error as unknown as Record<string, unknown>
+  if (acks !== undefined) extra.acks = acks
+  if (needed !== undefined) extra.needed = needed
   return { status, body: { error } }
 }
 

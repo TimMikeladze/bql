@@ -56,6 +56,13 @@ export interface RegistryOptions {
    * them all open itself, which is what a process-wide commit listener needs.
    */
   onOpen?: (tenant: Tenant) => void
+  /**
+   * Called after a database is created, imported or deleted — the set `list()` returns has
+   * changed. R2's finding 1: the primary announces its databases to attached replicas the moment
+   * one appears, so a `follow: ["*"]` replica starts streaming it in milliseconds rather than at
+   * the next heartbeat.
+   */
+  onChange?: (event: { kind: "create" | "delete"; name: string }) => void
 }
 
 export interface CreateOptions {
@@ -185,7 +192,9 @@ export class TenantRegistry {
       const forked = await source.fork(name, options.from.at)
       const row = this.catalog.getTenant(forked.name)
       if (!row) throw new TenantError("DB_MISSING", `fork of ${name} left no catalog row`)
-      return this.#openRow(row)
+      const tenant = this.#openRow(row)
+      this.#changed("create", name)
+      return tenant
     }
 
     const dir = tenantDir(this.dir, name)
@@ -197,7 +206,9 @@ export class TenantRegistry {
       ...(options.role ? { role: options.role } : {}),
       ...(options.epoch !== undefined ? { epoch: options.epoch } : {}),
     })
-    return this.#openRow(row)
+    const tenant = this.#openRow(row)
+    this.#changed("create", name)
+    return tenant
   }
 
   // ── replica mode (design §5.2) ───────────────────────────────────────────────────────────────
@@ -242,7 +253,11 @@ export class TenantRegistry {
       role: "replica",
       ...(options.epoch !== undefined ? { epoch: options.epoch } : {}),
     })
-    return this.#openRow(row)
+    const tenant = this.#openRow(row)
+    // A replica that picks up a new database announces it downstream too: chained replication
+    // (primary → replica → replica) reaches the third node the same way the second one did.
+    this.#changed("create", name)
+    return tenant
   }
 
   /**
@@ -328,7 +343,9 @@ export class TenantRegistry {
           wal: { salt1: 0, salt2: 0, frame: 0 },
         },
       })
-      return this.#openRow(row)
+      const tenant = this.#openRow(row)
+      this.#changed("create", name)
+      return tenant
     } catch (err) {
       fs.rmSync(dir, { recursive: true, force: true })
       throw err
@@ -346,7 +363,20 @@ export class TenantRegistry {
     const tenant = this.open(name)
     this.#open.delete(name)
     this.#pinned.delete(name)
-    return tenant.delete()
+    const trash = tenant.delete()
+    this.#changed("delete", name)
+    return trash
+  }
+
+  /** Tells the owner the database set moved. A throwing listener must not fail the operation. */
+  #changed(kind: "create" | "delete", name: string): void {
+    const onChange = this.#options.onChange
+    if (!onChange) return
+    try {
+      onChange({ kind, name })
+    } catch (err) {
+      this.#report(err)
+    }
   }
 
   /**

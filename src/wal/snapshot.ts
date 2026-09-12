@@ -26,8 +26,12 @@ export interface SnapshotRef {
   epoch: number
   bytes: number
   pageSize: number
+  /**
+   * Database size in pages at `txid`, as the *owner of the write path* counts it — which is not
+   * always the number of pages in the file. Seeding an applier from anything else diverges it.
+   */
   pages: number
-  /** Rolling database checksum of the snapshot, decimal. */
+  /** Rolling database checksum at `txid`, decimal, from the same source as `pages`. */
   checksum: string
   createdAtMs: number
 }
@@ -44,6 +48,15 @@ export interface SnapshotTarget {
 export interface SnapshotOptions {
   /** Leadership term to stamp on the snapshot. */
   epoch?: number
+  /**
+   * The tenant's own position at `txid`, which is what an applier seeded from this snapshot has to
+   * start at. Without it the position is computed from the file, and the two disagree in exactly
+   * one case: a database nothing has ever written to holds the header page SQLite creates when the
+   * file is first opened in WAL mode, while its tenant stands at "0 pages, checksum 0" because
+   * that page belongs to no transaction. An applier seeded from the file there XORs that page out
+   * of its first apply and fails `ChecksumMismatch` on record 1.
+   */
+  position?: { checksum: bigint; pages: number }
 }
 
 function snapshotDir(dir: string): string {
@@ -120,14 +133,15 @@ export async function snapshot(
   }
 
   const full = computeFull(file, { includeWal: false })
+  const position = options.position ?? { checksum: full.checksum, pages: full.pages }
   const ref: SnapshotRef = {
     path: file,
     txid: txid.toString(),
     epoch: options.epoch ?? 0,
     bytes: fs.statSync(file).size,
     pageSize: full.pageSize,
-    pages: full.pages,
-    checksum: full.checksum.toString(),
+    pages: position.pages,
+    checksum: position.checksum.toString(),
     createdAtMs: Date.now(),
   }
 
@@ -204,8 +218,12 @@ export async function restore(options: RestoreOptions): Promise<RestoreResult> {
   applier.seed({
     txid: fromTxid,
     epoch: chosen.epoch,
-    postChecksum: BigInt(chosen.checksum),
-    dbSizePages: chosen.pages,
+    // A snapshot at txid 0 is a database no transaction has ever touched, whatever its file says:
+    // the header page in it was written when SQLite first opened the file in WAL mode, outside
+    // any transaction, so record 1's `preChecksum` is 0 over 0 pages. Snapshots taken from R2 on
+    // carry the tenant's position and already agree; this keeps an older index honest.
+    postChecksum: fromTxid === 0n ? 0n : BigInt(chosen.checksum),
+    dbSizePages: fromTxid === 0n ? 0 : chosen.pages,
     pageSize: chosen.pageSize,
   })
 

@@ -178,11 +178,9 @@ export async function createDb(node: Node, name: string, schema?: string): Promi
     .map((sql) => sql.trim())
     .filter((sql) => sql.length > 0)
     .map((sql) => ({ sql }))
-  const response = await node.fetch(`/v1/db/${name}/batch`, {
-    method: "POST",
-    body: JSON.stringify({ statements }),
-  })
-  if (!response.ok) throw new Error(`schema for ${name}: ${await response.text()}`)
+  // Through `query`'s retry, because a replica bootstrapping this database holds the writer for
+  // the length of one snapshot and a schema that lands inside that window is told to come back.
+  for (const statement of statements) await query(node, name, statement.sql)
 }
 
 export interface QueryBody {
@@ -216,6 +214,72 @@ export async function query(
       continue
     }
     throw new Error(`${sql}: ${response.status} ${text}`)
+  }
+}
+
+/**
+ * A replica that attaches and then says nothing: it completes the handshake, subscribes to `db`
+ * from the primary's current txid, and never sends an `ACK`. It is how a test gets an
+ * `ack: "replica"` *timeout* rather than a `NO_REPLICAS` — a replica that has gone away is not
+ * attached at all, and the two failures are deliberately different answers.
+ */
+export async function silentReplica(
+  primary: Node,
+  db: string,
+  node = "silent",
+): Promise<{ close(): Promise<void> }> {
+  const { FRAME, FrameReader, encodeJson, makeProof, PROTO_VERSION } = await import(
+    "../../src/replication/protocol.ts"
+  )
+  const tenant = primary.handle.registry.open(db)
+  const socket = new WebSocket(primary.replicationUrl)
+  socket.binaryType = "arraybuffer"
+  const reader = new FrameReader()
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${node} never subscribed to ${db}`)), 5000)
+    socket.addEventListener("message", (event) => {
+      for (const frame of reader.push(event.data as ArrayBuffer)) {
+        if (frame.type !== FRAME.HELLO) continue
+        const body = JSON.parse(new TextDecoder().decode(frame.body)) as Record<string, string>
+        if (body.nonce) {
+          socket.send(
+            encodeJson(FRAME.HELLO, {
+              proto: PROTO_VERSION,
+              node,
+              proof: makeProof(primary.handle.config.replication.secret, body.nonce),
+            }),
+          )
+          continue
+        }
+        if (body.ok) {
+          socket.send(
+            encodeJson(FRAME.SUBSCRIBE, {
+              stream: 1,
+              db,
+              fromTxid: tenant.txid.toString(),
+              epoch: tenant.epoch,
+              checksum: tenant.checksum.toString(),
+            }),
+          )
+          clearTimeout(timer)
+          resolve()
+        }
+      }
+    })
+    socket.addEventListener("error", () => {
+      clearTimeout(timer)
+      reject(new Error(`${node} could not open the replication socket`))
+    })
+  })
+  await until(
+    () => (primary.handle.runtime.replication?.replicasOf(db).length ?? 0) > 0,
+    `${node} to appear as a replica of ${db}`,
+  )
+  return {
+    close(): Promise<void> {
+      socket.close()
+      return Promise.resolve()
+    },
   }
 }
 
