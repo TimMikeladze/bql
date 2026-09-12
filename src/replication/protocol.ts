@@ -446,7 +446,7 @@ export function makeProof(secret: string, nonce: string): string {
 // ── database identity ──────────────────────────────────────────────────────────────────────────
 
 /** The byte the three identity inputs are joined with; it cannot occur in a database name. */
-const IDENTITY_SEPARATOR = " "
+const IDENTITY_SEPARATOR = "\0"
 
 /**
  * A database's generation id: the 64 bits of hex that tell one `beta` from the next one.

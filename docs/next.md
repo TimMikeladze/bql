@@ -111,6 +111,17 @@ Carried forward from phase 0, still true:
 
 What phase 1 added to the list:
 
+- **A standalone node never takes a snapshot, so retention can make it unrestorable.** Found by R6
+  while wiring log retention (`docs/r6-retention.md`). The retention floor never drops a segment
+  that point-in-time restore still needs — but the floor is derived from the *oldest snapshot kept*,
+  and only the S3 shipper and a replica bootstrap take snapshots on their own. A plain single node
+  with no bucket and no replica takes **none, ever**, so it has no floor at all, its log is bounded
+  by age alone, and once the oldest segment ages out the database stops being restorable to any
+  point before it. Nothing reports this; PITR simply stops reaching back. The fix is a snapshot
+  interval that does not require a bucket — `[durability] snapshotIntervalMs` as a sibling of the
+  `[s3]` one, taken locally with the reflink copy `src/wal/snapshot.ts` already does, which makes
+  it nearly free. Until then, a node that wants PITR needs `[s3]` configured or a replica attached.
+
 - **A database deleted on the primary is never dropped by a replica, and the name can be reused
   underneath it.** Verified by hand: create `beta` on the primary, let a `follow: ["*"]` replica
   bootstrap it, `DELETE /v1/db/beta` on the primary, then re-create `beta` and write to it. The
@@ -157,10 +168,15 @@ What they changed, in case it matters to phase 2:
   tenants through the registry, which is how a bootstrap works at all. **Promotion (milestone 2)
   has to flip `runtime.role`, not just the catalog row**, or a promoted node will keep refusing its
   own lifecycle routes.
-- `[durability] retention` now has a consumer — it was a dead key before — and a new
-  `[durability] trashSweepIntervalMs` beside it. `sweepTrash(dataDir, retentionMs, now?, onError?)`
-  in `src/tenant/registry.ts` is pure; `ServerRuntime` calls it at start and on the interval. The
-  local transaction log is still never pruned, which is the next thing that key could grow into.
+- `[durability] retention` now has consumers — it was a dead key before. `sweepTrash(dataDir,
+  retentionMs, now?, onError?)` in `src/tenant/registry.ts` sweeps the trash, and R6 (`49db1c4`)
+  grew it into the log and snapshot retention it was always documented to govern: `retain()` and
+  `removeSnapshot()` had been written, tested and **never called**, so the log and the snapshot
+  directory grew without bound. Both now run behind `logRetentionFloor()`, the minimum over the
+  consumers that could still read the log — the oldest snapshot kept, the slowest connected
+  replica, and the S3 shipper's position. One `[durability] sweepIntervalMs` (300000) replaced the
+  short-lived `trashSweepIntervalMs` and runs both; `[durability] maxLogBytes` (0 = unlimited)
+  bounds a log by size, still behind the same floor. See `docs/r6-retention.md`.
 
 ## House rules for this repo
 
