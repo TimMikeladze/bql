@@ -10,14 +10,19 @@
 // Second invariant: this module does no I/O and holds no sockets. Everything here is a pure
 // function of bytes, which is what makes the codec testable without a server on either end.
 
-import { createHmac, timingSafeEqual } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 
 /** Bun's default `maxPayloadLength`, and the cap this codec refuses to encode or decode past. */
 export const MAX_BODY_BYTES = 16 * 1024 * 1024
 
 export const FRAME_HEADER_SIZE = 5
 
-/** Protocol version carried in every `HELLO`. */
+/**
+ * Protocol version carried in every `HELLO`. Still 1 after R7 added `generations` to `HELLO` and
+ * `HEARTBEAT` and `generation` to `SUBSCRIBE`/`SUBSCRIBED`: every one of those fields is optional
+ * and additive, so a peer that sends none of them behaves exactly as version 1 always did. That
+ * is the same call `docs/r1-replication.md` deviation 2 made when `HEARTBEAT` gained `databases`.
+ */
 export const PROTO_VERSION = 1
 
 export const FRAME = {
@@ -79,6 +84,12 @@ export interface HelloBody {
   ok?: boolean
   /** Primary's third frame: every live database, so `follow: ["*"]` can be resolved. */
   databases?: string[]
+  /**
+   * Primary's third frame: `name -> generation id` for every name in `databases`. A name is not an
+   * identity — one `beta` is not the next `beta` — and this is what tells them apart. Absent from a
+   * peer that predates R7, which a replica reads as "no identity to check" (`docs/r7-unfollow.md`).
+   */
+  generations?: Record<string, string>
 }
 
 export interface SubscribeBody {
@@ -96,6 +107,12 @@ export interface SubscribeBody {
    * where `fromTxid: 0` does not mean "I am a pristine database".
    */
   reset?: boolean
+  /**
+   * The generation id the replica's local copy was bootstrapped under, when it knows one. A
+   * primary that holds a different id for this name is holding a different database, and answers
+   * with a snapshot however well the txid and the checksum line up.
+   */
+  generation?: string
 }
 
 export interface SubscribedBody {
@@ -107,6 +124,8 @@ export interface SubscribedBody {
   txid: string
   epoch: number
   pageSize: number
+  /** This node's generation id for `db`; the replica records it against the copy it ends up with. */
+  generation?: string
 }
 
 export interface SnapshotBeginBody {
@@ -133,6 +152,8 @@ export interface HeartbeatBody {
   streams: { stream: number; txid: string }[]
   /** Primary only: the live databases, so a `follow: ["*"]` replica sees new ones (deviation 2). */
   databases?: string[]
+  /** Primary only: `name -> generation id` for every name in `databases`. See `HelloBody`. */
+  generations?: Record<string, string>
 }
 
 /** R2. Defined here so both halves agree on the shape before either implements it. */
@@ -420,6 +441,33 @@ export function makeNonce(): string {
 /** `base64(HMAC-SHA256(clusterSecret, nonce))`. */
 export function makeProof(secret: string, nonce: string): string {
   return createHmac("sha256", secret).update(nonce).digest("base64")
+}
+
+// ── database identity ──────────────────────────────────────────────────────────────────────────
+
+/** The byte the three identity inputs are joined with; it cannot occur in a database name. */
+const IDENTITY_SEPARATOR = " "
+
+/**
+ * A database's generation id: the 64 bits of hex that tell one `beta` from the next one.
+ *
+ * Deliberately the same shape `newGenerationId()` in `src/storage/layout.ts` mints for a bucket
+ * generation, because it is the same concept — "this particular database, not whatever else has
+ * worn the name".
+ *
+ * It is *derived* rather than minted: the catalog has no generation column, so the id is a hash of
+ * the three things on a `tenants` row that are fixed for the life of a database and different for
+ * a fresh one — its name, its creation timestamp and its page size. Everything else on the row
+ * moves: `epoch` on promotion, `txid` and `checksum` on every commit, the WAL salts on every
+ * checkpoint. The limit that follows is a delete and a re-create inside one millisecond at the
+ * same page size, which collide; `docs/r7-unfollow.md` says so out loud and says what a real
+ * column would buy. This function is the single place that column would slot into.
+ */
+export function generationId(row: { name: string; createdAtMs: number; pageSize: number }): string {
+  return createHash("sha256")
+    .update([row.name, row.createdAtMs, row.pageSize].join(IDENTITY_SEPARATOR))
+    .digest("hex")
+    .slice(0, 16)
 }
 
 /**

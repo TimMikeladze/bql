@@ -10,6 +10,11 @@
 // Second invariant: a slow replica costs the primary memory, not correctness. `ws.send` returning
 // -1 pauses the sender; frames queue; a socket that stays paused for `slowReplicaMs` is closed
 // with BUSY and resumes from its own position when it reconnects.
+//
+// Third invariant (R7): a stream outlives its database by at most one announcement. Every
+// announcement sweeps streams whose database has left the catalog, been closed underneath them or
+// been re-created under a new generation id — so a replica is never left attached to a tenant that
+// no longer means what it meant when it subscribed. See `docs/r7-unfollow.md`.
 
 import fs from "node:fs"
 import type { Tenant, TenantRegistry } from "../tenant/index.ts"
@@ -24,11 +29,13 @@ import {
   decodeJson,
   type ForwardBody,
   encodeJson,
+  generationId,
   encodeSnapshotChunk,
   encodeTxn,
   FRAME,
   FrameReader,
   frameName,
+  type HeartbeatBody,
   type HelloBody,
   makeNonce,
   ProtocolError,
@@ -36,6 +43,7 @@ import {
   type ReplicationErrorCode,
   type ResultBody,
   type SubscribeBody,
+  type SubscribedBody,
   type UnsubscribeBody,
   verifyProof,
 } from "./protocol.ts"
@@ -109,6 +117,9 @@ interface Stream {
   id: number
   db: string
   tenant: Tenant
+  /** The database's generation id when this stream was opened; a different one means a different
+   * database has taken the name, and the stream is ended so the replica re-bootstraps. */
+  generation: string
   /** Last txid written to the socket. */
   sentTxid: bigint
   ackedTxid: bigint
@@ -388,13 +399,15 @@ export class ReplicationServer {
     }
     conn.node = typeof hello.node === "string" && hello.node ? hello.node : "?"
     conn.authed = true
+    const announcement = this.#announcement()
     this.#send(
       conn,
       encodeJson(FRAME.HELLO, {
         proto: PROTO_VERSION,
         node: this.node,
         ok: true,
-        databases: this.#databases(),
+        databases: [...announcement.keys()],
+        generations: Object.fromEntries(announcement),
       } satisfies HelloBody),
     )
   }
@@ -408,20 +421,53 @@ export class ReplicationServer {
    */
   announce(): void {
     if (this.#closed || this.#conns.size === 0) return
-    const databases = this.#databases()
+    const announcement = this.#announcement()
+    this.#sweepStreams(announcement)
     for (const conn of [...this.#conns]) {
       if (!conn.authed || conn.closed) continue
-      this.#send(
-        conn,
-        encodeJson(FRAME.HEARTBEAT, {
-          ts: Date.now(),
-          streams: [...conn.streams.values()].map((stream) => ({
-            stream: stream.id,
-            txid: stream.tenant.txid.toString(),
-          })),
-          databases,
-        }),
-      )
+      this.#send(conn, this.#heartbeatFor(conn, Date.now(), announcement))
+    }
+  }
+
+  /** One `HEARTBEAT` for one connection: its stream positions plus the current announcement. */
+  #heartbeatFor(conn: Conn, now: number, announcement: Map<string, string>): Uint8Array {
+    return encodeJson(FRAME.HEARTBEAT, {
+      ts: now,
+      streams: [...conn.streams.values()].map((stream) => ({
+        stream: stream.id,
+        txid: stream.tenant.txid.toString(),
+      })),
+      databases: [...announcement.keys()],
+      generations: Object.fromEntries(announcement),
+    } satisfies HeartbeatBody)
+  }
+
+  /**
+   * Ends every stream whose database is no longer the one it subscribed to — deleted, closed
+   * underneath it, or re-created under a new generation id. Without this a deleted database leaves
+   * a stream pointing at a closed tenant: no records flow, no error is raised, `replicasOf` keeps
+   * reporting a replica of something that no longer exists, and `#tick` reads `txid` off a tenant
+   * that has been torn down. The replica learns from the announcement this runs just before.
+   */
+  #sweepStreams(announcement: Map<string, string>): void {
+    for (const conn of [...this.#conns]) {
+      for (const stream of [...conn.streams.values()]) {
+        const current = announcement.get(stream.db)
+        const replaced = current !== stream.generation
+        if (!replaced && !stream.tenant.closed) continue
+        // A delete or a re-create is somebody's deliberate act and is not this node's news to
+        // report — the replica logs what it lets go of, which is where the surprise lives. A
+        // tenant closed under a stream whose database is otherwise unchanged is not deliberate.
+        if (!replaced) {
+          this.#onError(
+            new Error(
+              `${stream.db} was closed under stream ${stream.id} to replica ${conn.node}; ` +
+                `ending it so the replica re-subscribes`,
+            ),
+          )
+        }
+        this.#endStream(conn, stream)
+      }
     }
   }
 
@@ -457,11 +503,26 @@ export class ReplicationServer {
     this.#send(conn, encodeJson(FRAME.RESULT, body))
   }
 
-  #databases(): string[] {
+  /**
+   * Every live database, in catalog order, with the generation id that identifies *this* one of
+   * them (`docs/r7-unfollow.md`). A `Map` because both halves of the announcement — the names and
+   * the ids — come off the same rows and must never disagree about which names are live.
+   */
+  #announcement(): Map<string, string> {
     try {
-      return this.registry.list().map((row) => row.name)
+      return new Map(this.registry.list().map((row) => [row.name, generationId(row)]))
     } catch {
-      return []
+      return new Map()
+    }
+  }
+
+  /** This node's generation id for one database, or `null` when it holds no such database. */
+  #generationOf(db: string): string | null {
+    try {
+      const row = this.registry.list().find((one) => one.name === db)
+      return row ? generationId(row) : null
+    } catch {
+      return null
     }
   }
 
@@ -491,10 +552,21 @@ export class ReplicationServer {
       return
     }
 
+    // A replica that names a generation this node does not hold is holding a *different*
+    // database under this name, however well its txid and checksum line up with ours. Treat it
+    // exactly as `reset` — a snapshot, whatever `#decide` would otherwise have said.
+    const generation = this.#generationOf(request.db) ?? ""
+    const stale =
+      typeof request.generation === "string" &&
+      request.generation.length > 0 &&
+      generation.length > 0 &&
+      request.generation !== generation
+
     const stream: Stream = {
       id,
       db: request.db,
       tenant,
+      generation,
       sentTxid: 0n,
       ackedTxid: fromTxid,
       ackedAtMs: Date.now(),
@@ -509,12 +581,18 @@ export class ReplicationServer {
     // the commit listener and the stream would silently stop.
     this.registry.pin(request.db, PIN_OWNER)
 
-    const decision = this.#decide(
-      tenant,
-      fromTxid,
-      parseBig(request.checksum),
-      request.reset === true,
-    )
+    const decision = stale
+      ? ({ kind: "snapshot", reason: null } as const)
+      : this.#decide(tenant, fromTxid, parseBig(request.checksum), request.reset === true)
+    if (stale) {
+      this.#error(
+        conn,
+        id,
+        "DIVERGED",
+        `${request.db}: the replica holds generation ${request.generation}, this node holds ` +
+          `${generation} — a different database has worn this name`,
+      )
+    }
     if (decision.kind === "stream") {
       this.#send(
         conn,
@@ -525,7 +603,8 @@ export class ReplicationServer {
           txid: fromTxid.toString(),
           epoch: tenant.epoch,
           pageSize: tenant.pageSize,
-        }),
+          generation,
+        } satisfies SubscribedBody),
       )
       stream.sentTxid = fromTxid
       this.#catchUp(conn, stream, fromTxid)
@@ -633,7 +712,8 @@ export class ReplicationServer {
         txid: txid.toString(),
         epoch: tenant.epoch,
         pageSize,
-      }),
+        generation: stream.generation,
+      } satisfies SubscribedBody),
     )
 
     const file = fs.readFileSync(ref.path)
@@ -887,7 +967,8 @@ export class ReplicationServer {
   /** Heartbeats, and the slow-replica cut-off. */
   #tick(): void {
     const now = Date.now()
-    const databases = this.#databases()
+    const announcement = this.#announcement()
+    this.#sweepStreams(announcement)
     for (const conn of [...this.#conns]) {
       if (conn.paused && now - conn.pausedSinceMs > this.slowReplicaMs) {
         this.#fail(
@@ -898,17 +979,7 @@ export class ReplicationServer {
         continue
       }
       if (!conn.authed) continue
-      this.#send(
-        conn,
-        encodeJson(FRAME.HEARTBEAT, {
-          ts: now,
-          streams: [...conn.streams.values()].map((stream) => ({
-            stream: stream.id,
-            txid: stream.tenant.txid.toString(),
-          })),
-          databases,
-        }),
-      )
+      this.#send(conn, this.#heartbeatFor(conn, now, announcement))
     }
   }
 }

@@ -9,6 +9,12 @@
 // Second invariant: the client never holds a position it cannot prove. A snapshot is written to a
 // temp file, hashed, and only then moved into place; an apply that fails verification leaves the
 // database untouched and the stream re-subscribes from zero, which gets it a fresh snapshot.
+//
+// Third invariant (R7): the client holds no copy the primary has stopped announcing, and no copy
+// of a database that has since been re-created. A name is not an identity, so every copy is
+// recorded against the primary's generation id for it; a database that leaves the announcement is
+// dropped through the registry's delete path, and one whose id has changed is dropped and
+// bootstrapped again from zero. See `docs/r7-unfollow.md`.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -26,6 +32,7 @@ import {
   FrameReader,
   frameName,
   type ErrorBody,
+  generationId,
   type HeartbeatBody,
   type HelloBody,
   makeProof,
@@ -34,18 +41,41 @@ import {
   type ResultBody,
   type SnapshotBeginBody,
   type SnapshotEndBody,
+  type SubscribeBody,
   type SubscribedBody,
+  type UnsubscribeBody,
 } from "./protocol.ts"
 
 /**
- * "This replica is not connected, and here is why." An operational notice, not a fault in this
- * process, so the handlers that print it leave the stack out — a stack trace on a primary that is
- * simply down is the same noise a deliberate `503` would be.
+ * Operational news from the replication client rather than a fault in this process, so the
+ * handlers that print one of these leave the stack out — a stack trace on a primary that is simply
+ * down is the same noise a deliberate `503` would be.
+ *
+ * `src/server/runtime.ts` still narrows on `ReplicaOffline` specifically; widening that check to
+ * this base is the one-line follow-up noted at the end of `docs/r7-unfollow.md`.
  */
-export class ReplicaOffline extends Error {
-  constructor(message: string) {
+export class ReplicaNotice extends Error {
+  constructor(message: string, name = "ReplicaNotice") {
     super(message)
-    this.name = "ReplicaOffline"
+    this.name = name
+  }
+}
+
+/** "This replica is not connected, and here is why." */
+export class ReplicaOffline extends ReplicaNotice {
+  constructor(message: string) {
+    super(message, "ReplicaOffline")
+  }
+}
+
+/**
+ * "This replica has let a database go, and here is why." The class of event that made the stale-
+ * replica bug expensive to find was precisely one that logged nothing, so a drop says so out loud
+ * — and lands in `status().unfollowed` besides.
+ */
+export class ReplicaUnfollowed extends ReplicaNotice {
+  constructor(message: string) {
+    super(message, "ReplicaUnfollowed")
   }
 }
 
@@ -54,6 +84,12 @@ const PIN_OWNER = "replication"
 
 /** Ceiling for the reconnect backoff, per `plan-phase1.md`. */
 const MAX_RECONNECT_MS = 10_000
+
+/** How many drops `status()` keeps. Enough to explain a surprise, small enough to be a status. */
+const MAX_UNFOLLOWED = 16
+
+/** Where the client remembers which generation each local copy is a copy of. */
+const GENERATIONS_FILE = "generations.json"
 
 /** The minimum this client accepts from a `WebSocket` implementation. */
 export interface ClientSocket {
@@ -125,6 +161,17 @@ export interface StreamStatus {
   lagTxid: number
   /** True while a snapshot is being received. */
   bootstrapping: boolean
+  /** The primary's generation id for this copy, or null against a peer that announces none. */
+  generation: string | null
+}
+
+/** A database this node has let go of, and why. */
+export interface UnfollowedDatabase {
+  db: string
+  atMs: number
+  reason: string
+  /** Where the local copy went, when the registry's delete path produced a trash directory. */
+  trash: string | null
 }
 
 export interface ReplicaStatus {
@@ -132,6 +179,8 @@ export interface ReplicaStatus {
   primary: string
   node: string | null
   streams: StreamStatus[]
+  /** The last few drops, oldest first. A silent drop is what R7 exists to stop. */
+  unfollowed: UnfollowedDatabase[]
   lastError: string | null
 }
 
@@ -154,6 +203,12 @@ interface Stream {
   id: number
   db: string
   tenant: Tenant | null
+  /**
+   * The generation id the primary named in `SUBSCRIBED` for this stream. Held here until the copy
+   * it describes actually exists locally — at `SNAPSHOT_END` for a bootstrap, immediately for a
+   * stream the primary accepted from our own position — and only then recorded against the copy.
+   */
+  generation: string | null
   /** The primary's txid as of its last heartbeat, for the lag figure. */
   primaryTxid: bigint
   bootstrap: Bootstrap | null
@@ -184,6 +239,21 @@ export class ReplicaClient {
   #reader = new FrameReader()
   #streams = new Map<number, Stream>()
   #byDb = new Map<string, Stream>()
+  /**
+   * `db -> generation id` for every local copy this client holds, persisted beside the bootstrap
+   * temp files. It is both the identity check and the record of *which* databases this node
+   * follows, which is what lets a drop survive a restart: a replica that comes back up after the
+   * primary deleted a database has no stream to notice is missing, but it still has this.
+   *
+   * This is the stand-in for the catalog column `docs/r7-unfollow.md` argues for. The three
+   * methods below are its only readers and writers.
+   */
+  #generations = new Map<string, string>()
+  #unfollowed: UnfollowedDatabase[] = []
+  /** So an empty announcement is reported once, not at every heartbeat while it persists. */
+  #emptyAnnouncementReported = false
+  /** Has this connection carried a non-empty announcement yet? See `#resolveFollow`. */
+  #sawDatabases = false
   #nextStream = 1
   #connected = false
   #handshook = false
@@ -221,6 +291,58 @@ export class ReplicaClient {
       ((url: string) => new WebSocket(url) as unknown as ClientSocket)
     this.forwardTimeoutMs = options.forwardTimeoutMs ?? 10_000
     this.maxForwards = options.maxForwards ?? 256
+    this.#loadGenerations()
+  }
+
+  // ── generation ledger ────────────────────────────────────────────────────────────────────────
+
+  #generationsPath(): string {
+    return path.join(this.bootstrapDir, GENERATIONS_FILE)
+  }
+
+  /** Best effort: a ledger that cannot be read leaves this node protected by name alone. */
+  #loadGenerations(): void {
+    let raw: string
+    try {
+      raw = fs.readFileSync(this.#generationsPath(), "utf8")
+    } catch {
+      return
+    }
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      for (const [db, generation] of Object.entries(parsed)) {
+        if (typeof generation === "string" && generation.length > 0) {
+          this.#generations.set(db, generation)
+        }
+      }
+    } catch (err) {
+      this.#onError(err)
+    }
+  }
+
+  /** Temp file then rename, so a crash mid-write leaves the previous ledger rather than none. */
+  #saveGenerations(): void {
+    const file = this.#generationsPath()
+    const temp = `${file}.${process.pid}.tmp`
+    try {
+      fs.mkdirSync(this.bootstrapDir, { recursive: true })
+      fs.writeFileSync(temp, `${JSON.stringify(Object.fromEntries(this.#generations), null, 2)}\n`)
+      fs.renameSync(temp, file)
+    } catch (err) {
+      fs.rmSync(temp, { force: true })
+      this.#onError(err)
+    }
+  }
+
+  #recordGeneration(db: string, generation: string | null): void {
+    if (!generation || this.#generations.get(db) === generation) return
+    this.#generations.set(db, generation)
+    this.#saveGenerations()
+  }
+
+  #forgetGeneration(db: string): void {
+    if (!this.#generations.delete(db)) return
+    this.#saveGenerations()
   }
 
   /** Forwarded writes waiting on the primary right now. */
@@ -316,6 +438,7 @@ export class ReplicaClient {
         applied: Number(applied),
         lagTxid: Number(lag),
         bootstrapping: stream.bootstrap !== null,
+        generation: this.#generations.get(stream.db) ?? null,
       })
     }
     return {
@@ -323,6 +446,7 @@ export class ReplicaClient {
       primary: this.primary,
       node: this.#primaryNode,
       streams,
+      unfollowed: [...this.#unfollowed],
       lastError: this.#lastError,
     }
   }
@@ -465,6 +589,10 @@ export class ReplicaClient {
     this.#socket = null
     this.#connected = false
     this.#handshook = false
+    // Per connection: a primary that comes back announcing nothing has to prove it holds
+    // databases again before this client will act on an empty announcement from it.
+    this.#sawDatabases = false
+    this.#emptyAnnouncementReported = false
     this.#stopHeartbeat()
     this.#failForwards(`the connection to ${this.primary} closed before the write was answered`)
     for (const stream of this.#streams.values()) this.#abortBootstrap(stream)
@@ -609,13 +737,65 @@ export class ReplicaClient {
     this.#everHandshook = true
     this.#lastError = null
     this.#startHeartbeat()
-    this.#resolveFollow(hello.databases ?? [])
+    this.#resolveFollow(hello.databases ?? [], hello.generations)
   }
 
-  /** Opens a stream for every database this node follows that it does not already have one for. */
-  #resolveFollow(announced: string[]): void {
+  /**
+   * Reconciles what this node holds against what the primary announces: drop what has gone, re-
+   * bootstrap what has been re-created under the name, subscribe to what is new.
+   *
+   * The set considered for a drop is every database with a stream *or* a recorded generation, not
+   * just the streams. A replica restarted after the primary deleted a database has no stream to
+   * find missing; the ledger is what remembers that it holds a copy at all.
+   */
+  #resolveFollow(announced: string[], generations?: Record<string, string>): void {
+    const held = new Set([...this.#byDb.keys(), ...this.#generations.keys()])
+
+    // An empty announcement is the one this client will not take at face value. A primary that is
+    // the wrong node, or has restarted against an empty data directory, announces nothing from its
+    // very first frame — so an empty announcement is acted on only when this connection has
+    // already carried a non-empty one, and only when it would drop a single database. Losing the
+    // last database one at a time is ordinary; losing several at once is indistinguishable from a
+    // primary that has lost its catalog, and deleting local copies on the strength of that would
+    // turn a configuration mistake into data loss.
+    if (announced.length > 0) this.#sawDatabases = true
+    else if (held.size > 0 && (!this.#sawDatabases || held.size > 1)) {
+      if (!this.#emptyAnnouncementReported) {
+        this.#emptyAnnouncementReported = true
+        this.#onError(
+          new ReplicaUnfollowed(
+            `${this.primary} announced no databases while this node holds ${held.size} ` +
+              `(${[...held].join(", ")}); nothing was dropped — check that it is the right primary`,
+          ),
+        )
+      }
+      return
+    }
+    this.#emptyAnnouncementReported = false
+
+    const live = new Set(announced)
+
+    // Gone from the announcement: the primary deleted it. A name this node follows explicitly but
+    // has never been given is not in `held`, so it is never mistaken for a deletion.
+    for (const db of held) {
+      if (live.has(db)) continue
+      this.#unfollow(db, `${db} is no longer announced by ${this.primary}`)
+    }
+
+    // Still announced, but a different database now wears the name. The local copy is not a stale
+    // copy of this database, it is a copy of another one — drop it outright rather than snapshot
+    // over it, so no read is served the old generation's rows in the gap.
+    if (generations) {
+      for (const db of [...held]) {
+        const theirs = generations[db]
+        const ours = this.#generations.get(db)
+        if (!live.has(db) || !theirs || !ours || theirs === ours) continue
+        this.#unfollow(db, `${db} was re-created on ${this.primary}: generation ${ours} -> ${theirs}`)
+      }
+    }
+
     const wildcard = this.#follow.includes("*")
-    const wanted = wildcard ? announced : this.#follow.filter((db) => announced.includes(db))
+    const wanted = wildcard ? announced : this.#follow.filter((db) => live.has(db))
     for (const db of wanted) {
       if (this.#byDb.has(db)) continue
       try {
@@ -627,15 +807,56 @@ export class ReplicaClient {
     }
   }
 
+  /**
+   * Lets go of a database: abort any bootstrap, close the stream, release the pin, forget the
+   * generation, and dispose of the local copy through the registry's own delete path so the copy
+   * is as recoverable as a primary-side delete leaves one — `<dataDir>/trash/<name>-<ms>`, never a
+   * bare `rm`.
+   *
+   * The abort comes first on purpose: an announcement that lands mid-bootstrap must not leave a
+   * half-written snapshot in `<dataDir>/bootstrap`.
+   */
+  #unfollow(db: string, reason: string): void {
+    const stream = this.#byDb.get(db)
+    if (stream) {
+      this.#abortBootstrap(stream)
+      this.#streams.delete(stream.id)
+      this.#byDb.delete(db)
+      this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id } satisfies UnsubscribeBody))
+    }
+    this.registry.unpin(db, PIN_OWNER)
+    this.#forgetGeneration(db)
+
+    let trash: string | null = null
+    try {
+      // Only a copy this node received as a follower. A database authored here that happens to
+      // share the name is somebody else's, whatever the primary announces.
+      const row = this.registry.list().find((one) => one.name === db)
+      if (row?.role === "replica") trash = this.registry.delete(db)
+    } catch (err) {
+      this.#onError(err)
+    }
+
+    this.#unfollowed.push({ db, atMs: Date.now(), reason, trash })
+    if (this.#unfollowed.length > MAX_UNFOLLOWED) this.#unfollowed.shift()
+    this.#onError(
+      new ReplicaUnfollowed(
+        `${reason}; the local copy was ${trash ? `moved to ${trash}` : "not found locally"}`,
+      ),
+    )
+  }
+
   #subscribe(db: string): void {
     const tenant = this.registry.has(db)
       ? this.registry.openReplica(db)
       : this.registry.createReplica(db)
     const id = this.#nextStream++
+    const held = this.#generations.get(db)
     const stream: Stream = {
       id,
       db,
       tenant,
+      generation: held ?? null,
       primaryTxid: tenant.txid,
       bootstrap: null,
       deferred: [],
@@ -653,7 +874,10 @@ export class ReplicaClient {
         fromTxid: tenant.txid.toString(),
         epoch: tenant.epoch,
         checksum: tenant.checksum.toString(),
-      }),
+        // What this node believes its copy is. A primary holding a different id answers with a
+        // snapshot however well the txid and checksum line up.
+        ...(held ? { generation: held } : {}),
+      } satisfies SubscribeBody),
     )
   }
 
@@ -668,6 +892,7 @@ export class ReplicaClient {
       id,
       db: stream.db,
       tenant: stream.tenant,
+      generation: null,
       primaryTxid: stream.primaryTxid,
       bootstrap: null,
       deferred: [],
@@ -685,7 +910,7 @@ export class ReplicaClient {
         // This database is here because an apply did not verify, so its file holds pages from a
         // history the primary does not share. Only a snapshot can settle that, even at txid 0.
         reset: true,
-      }),
+      } satisfies SubscribeBody),
     )
   }
 
@@ -693,6 +918,31 @@ export class ReplicaClient {
     const stream = this.#streams.get(body.stream)
     if (!stream) return
     stream.primaryTxid = big(body.txid)
+    const theirs = typeof body.generation === "string" && body.generation ? body.generation : null
+    stream.generation = theirs
+    if (!theirs) return
+    if (body.mode === "snapshot") {
+      // The copy this id names does not exist yet; it is recorded when the snapshot installs.
+      return
+    }
+    const ours = this.#generations.get(stream.db)
+    if (ours && ours !== theirs) {
+      // A peer that does not check generations accepted our position for a database that is not
+      // the one we hold. Take the existing re-snapshot path — the same one a RETENTION or a failed
+      // apply takes — which asks from zero with `reset`, and can only be answered with a snapshot.
+      this.#onError(
+        new ReplicaUnfollowed(
+          `${stream.db}: the primary streamed generation ${theirs} onto a copy of ${ours}; ` +
+            `re-bootstrapping from zero`,
+        ),
+      )
+      this.#forgetGeneration(stream.db)
+      this.#resubscribe(stream)
+      return
+    }
+    // The primary verified our txid and checksum against its own history, so this copy *is* that
+    // database; record what it is.
+    this.#recordGeneration(stream.db, theirs)
   }
 
   // ── snapshot bootstrap ───────────────────────────────────────────────────────────────────────
@@ -763,6 +1013,7 @@ export class ReplicaClient {
       pageSize: begin.pageSize,
     })
     this.registry.pin(stream.db, PIN_OWNER)
+    this.#recordGeneration(stream.db, stream.generation)
     this.#ack(stream, big(begin.txid), true)
   }
 
@@ -857,8 +1108,9 @@ export class ReplicaClient {
       const stream = this.#streams.get(entry.stream)
       if (stream) stream.primaryTxid = big(entry.txid)
     }
-    // A database created on the primary since the handshake starts replicating here (deviation 2).
-    if (body.databases) this.#resolveFollow(body.databases)
+    // A database created on the primary since the handshake starts replicating here (deviation 2);
+    // one deleted or re-created there is dropped here (R7).
+    if (body.databases) this.#resolveFollow(body.databases, body.generations)
   }
 
   #startHeartbeat(): void {
