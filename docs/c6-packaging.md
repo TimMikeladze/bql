@@ -263,8 +263,7 @@ counts.
   `@bunql/sqlite-<platform>-<arch>/libsqlite3.<ext>`, and an npm org plus publish credentials the
   project does not have yet. The build script here is the input to that work, not a substitute for it.
 - **The three `database.ts` capability messages** are not wired to `capabilityDetail` — §3 above.
-- **The workflow has not run on GitHub's runners.** It cannot be, from here. What was done instead
-  is in §7.
+  This is the one piece of the milestone left undone, and it is three one-line edits.
 - **Only glibc was measured.** Alpine/musl is untested; the script emits a `.so` there but nothing
   has run it.
 - `engine: "builtin"` over `node:sqlite` (design §4.1) is still not built, and this milestone does
@@ -309,9 +308,30 @@ Apple Silicon host), since `ubuntu-latest` is x64: build and suite both clean, `
 The supply-chain refusal was verified by corrupting the cached archive and rebuilding: it names
 both digests, deletes the poisoned file, and the next run re-fetches and succeeds.
 
-**The workflow itself is unverified on GitHub's runners** — a GitHub Actions run cannot be
-observed from here. The Docker legs reproduce every command it runs, in order, on both Linux
-architectures, but not `actions/cache`, not `setup-bun`, and not x64 natively rather than emulated.
-One difference is known and deliberate: `oven/bun:1.4` has no C compiler and the Docker runs
-install `build-essential` first, while `ubuntu-latest` and `macos-latest` both ship one, so the
-workflow has no such step. The first real run on GitHub is the thing to watch.
+**And the workflow has run on GitHub's runners.** Run `34687020222`, the push that landed this
+milestone: both jobs `success`, about 80 seconds each.
+
+```
+ubuntu-latest  Cache not found for input keys: sqlite-Linux-X64-9f5693067ef9…
+ubuntu-latest  SQLite 3.53.4 · preupdate ✓ session ✓ snapshot ✓ fts5 ✓ rtree ✓ math ✓ dbstat ✓ threadsafe=1
+ubuntu-latest  /home/runner/work/bunql/bunql/vendor/sqlite/libsqlite3.so 3.53.4 {"preupdate":true,"session":true,"snapshot":true,…}
+ubuntu-latest  934 pass / 2 skip / 0 fail
+ubuntu-latest  docs/api.md covers all 38 routes.
+ubuntu-latest  Cache saved with key: sqlite-Linux-X64-9f5693067ef9…
+
+macos-latest   Cache not found for input keys: sqlite-macOS-ARM64-9f5693067ef9…
+macos-latest   SQLite 3.53.4 · preupdate ✓ session ✓ snapshot ✓ fts5 ✓ rtree ✓ math ✓ dbstat ✓ threadsafe=1
+macos-latest   /Users/runner/work/bunql/bunql/vendor/sqlite/libsqlite3.dylib 3.53.4 {"preupdate":true,"session":true,"snapshot":true,…}
+macos-latest   934 pass / 2 skip / 0 fail
+macos-latest   docs/api.md covers all 38 routes.
+macos-latest   Cache saved with key: sqlite-macOS-ARM64-9f5693067ef9…
+```
+
+Both runners built the library from the pinned amalgamation without a compiler-install step, which
+confirms `ubuntu-latest` and `macos-latest` both ship one — the `build-essential` step the Docker
+legs need is a property of `oven/bun:1.4`, not of CI. The two `vendor/sqlite` caches were cold on
+this first run and saved at the end; the hit path is exercised by the next push that does not touch
+`scripts/sqlite.ts`.
+
+Nothing in this milestone is now unverified except the npm packages it deliberately does not
+publish (§6).
