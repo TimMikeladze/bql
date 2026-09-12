@@ -1,50 +1,68 @@
 # BunQL
 
 BunQL turns SQLite into a multi-tenant database server for Bun. It runs thousands of small
-databases in one process, ships their WAL frames to replicas from userland, and drives realtime
-subscriptions off SQLite's own `preupdate`/`update` hooks rather than triggers or SQL parsing.
+databases in one process, streams their WAL frames to replicas over a socket, backs them up
+continuously to any S3-compatible bucket, and drives realtime subscriptions off SQLite's own
+`preupdate`/`update` hooks rather than triggers or SQL parsing. It speaks its own API and libsql's
+Hrana, so `@libsql/client`, Drizzle and Kysely reach it unmodified.
+
 The engine is a `bun:ffi` driver over a shared libsqlite3, which measures about twice as fast as
 `bun:sqlite` on point reads and exposes the parts of the C API that `bun:sqlite` does not:
 hooks, the authorizer, query cancellation, per-connection limits and session changesets.
 
-[**docs/api.md**](docs/api.md) is the API as implemented: every route, the WebSocket protocol, the
-SSE formats, the SDKs, the CLI, every config key, and every place the implementation differs from
-the design. [docs/design.md](docs/design.md) is the design it was built from, including the
-replication and cluster protocols that are not here yet; [docs/plan-phase0.md](docs/plan-phase0.md)
-is the build order.
+[**docs/api.md**](docs/api.md) is the API as implemented: every route, the Hrana surface, the
+WebSocket protocol, the SSE formats, the SDKs, the CLI, every config key, and every place the
+implementation differs from the design. [docs/design.md](docs/design.md) is the design it was built
+from, including the cluster that is not here yet; [docs/next.md](docs/next.md) is where phase 2
+picks up.
 
 ## What exists today
 
-Phase 0 is complete and usable end to end on a single node.
+Phase 0 and phase 1 are complete: a primary with replicas, backed up to a bucket, with the libsql
+ecosystem pointed at it.
 
 - **Engine** — a `bun:ffi` driver over a shared libsqlite3 (`src/sqlite`), with hooks, the
   authorizer, query cancellation, per-connection limits and statement counters.
 - **Tenancy** — thousands of databases in one process, LRU-managed, one writer each, per-tenant
   quotas and checkpoint policy (`src/tenant`).
 - **WAL shipping** — committed transactions tailed out of the `-wal`, turned into self-verifying
-  records, kept in a segment log, and applied to a replica directory (`src/wal`). Snapshots,
-  point-in-time restore and O(1) forks are built on the same log.
+  records, kept in a segment log, and applied to a replica (`src/wal`). Snapshots, point-in-time
+  restore and O(1) forks are built on the same log.
+- **Replication** — one binary WebSocket per node pair (`src/replication`): snapshot bootstrap,
+  resume with no gap and no duplicate, epoch fencing, divergence and retention detection, and
+  chained replicas. `bunql serve --replica-of ws://…` is the whole deployment.
+- **Durability and routing** — `ack: "local" | "fsync" | "replica" | "quorum"`; a replica serves
+  reads locally, forwards writes to the primary transparently, and honours `BunQL-Min-Txid`, so
+  read-your-writes holds across nodes.
+- **Backup** — continuous shipping of segments and snapshots to any S3-compatible bucket over
+  `Bun.S3Client`, with retention and point-in-time restore onto a node that has never seen the
+  database (`src/storage`).
 - **Server** — HTTP, WebSocket and SSE over tenants, Ed25519 tokens with database globs and table
-  ACLs, baton transactions, Prometheus metrics (`src/server`).
+  ACLs, baton transactions with a fair queue, Prometheus metrics (`src/server`).
+- **libsql compatibility** — Hrana `/v2/pipeline`, `/v3/pipeline`, `/v3/cursor` and the
+  `hrana3`/`hrana2` sockets (`src/server/hrana`), over the same execution path as the native
+  routes.
 - **Realtime** — row-level change feeds and live queries driven by SQLite's own hooks, with a ring
-  buffer behind `Last-Event-ID` (`src/realtime`).
+  buffer behind `Last-Event-ID` (`src/realtime`). On a replica, live queries converge and the
+  change feed carries txids.
 - **Surfaces** — a `Bun.SQL`-shaped client SDK for browsers, Bun, Node and Workers
   (`src/client`), the same interface in-process plus a synchronous escape hatch
-  (`src/embedded.ts`), and the `bunql` CLI (`src/cli.ts`).
+  (`src/embedded.ts`), Kysely and Drizzle adapters (`src/kysely.ts`, `src/drizzle.ts`), and the
+  `bunql` CLI (`src/cli.ts`).
 
-## What is phase 1, and phase 2
+Zero runtime dependencies, in every one of those.
 
-Phase 1 turns the single node into a primary with replicas, on the log that already exists:
+## What is left
 
-- replica streaming over the WebSocket, with bootstrap and write forwarding — built;
-- `ack: "replica"` and `"quorum"` — semi-synchronous durability — built;
-- the S3 shipper and restore-from-S3 — built, see "Back it up to a bucket" below;
-- the Hrana compatibility layer, which buys the whole libsql/Turso client ecosystem;
-- Kysely and Drizzle adapters — built, see "Use it with your ORM" below;
-- replica apply through mechanism A, removing the wal-index rebuild the current one forces.
+| phase | scope | state |
+|---|---|---|
+| 0 | engine, tenancy, HTTP/WS/SSE, tokens, WAL log, snapshots, PITR, realtime, client, embedded, CLI | **built** |
+| 1 | replica streaming and bootstrap, write forwarding, `ack` levels, read-your-writes across nodes, S3 shipper and restore, Hrana compatibility, Kysely and Drizzle | **built** |
+| 2 | the cluster: a Raft control plane, placement, leases, failover, `promote`, `moved`, `workers: N`; replica apply mechanism A | next |
+| 3 | WAL-decoded logical CDC (row-level events on a replica), snapshot reads across requests, per-tenant encryption at rest, a query-plan cache | later |
 
-Phase 2 is the cluster: a Raft control plane, placement, leases, failover and the `moved` event.
-Nothing in either phase changes the API above; they add to it.
+A replica cannot be promoted yet: recovery from a lost primary is a new node pointed at the
+bucket, not an election. That, and the control plane it needs, is phase 2.
 
 ## Back it up to a bucket
 
@@ -104,6 +122,59 @@ curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
 
 The route table, the WebSocket protocol, the SSE formats and every deviation from the design are in
 [docs/api.md](docs/api.md).
+
+### A primary and a replica
+
+Two `serve` commands sharing a cluster secret. The replica follows every database the primary
+announces, serves reads locally, and hands writes to the primary without the client knowing.
+
+```sh
+SECRET=$(openssl rand -hex 32)   # the two nodes prove this to each other; it is not a client token
+# Both nodes are given the same admin key here, so one token reads and writes either of them.
+bun run src/cli.ts serve --dir ./p --port 4501 --admin-key $KEY --cluster-secret $SECRET
+bun run src/cli.ts serve --dir ./r --port 4502 --admin-key $KEY --cluster-secret $SECRET \
+    --replica-of ws://127.0.0.1:4501/v1/replication
+
+BUNQL_TOKEN=$KEY
+BUNQL_URL=http://127.0.0.1:4501 bun run src/cli.ts db create acme
+BUNQL_URL=http://127.0.0.1:4501 bun run src/cli.ts exec acme \
+    --sql "create table notes (id integer primary key, body text)"
+```
+
+A write sent to the **replica** comes back with the primary's txid, and the replica has already
+applied it by the time it answers:
+
+```sh
+curl -sD- -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+     -d '{"sql":"insert into notes (body) values (@1)","args":["written through the replica"]}' \
+     http://127.0.0.1:4502/v1/db/acme/query
+# BunQL-Role: replica
+# BunQL-Primary: ws://127.0.0.1:4501/v1/replication
+# BunQL-Txid: 2
+# {"rowsAffected":1,"lastInsertRowid":1,"txid":2,...}
+
+BUNQL_URL=http://127.0.0.1:4502 bun run src/cli.ts exec acme --sql "select * from notes" --json
+curl -s -H "authorization: Bearer $KEY" http://127.0.0.1:4502/v1/db/acme/replication
+# {"role":"replica","connected":true,"applied":2,"lagTxid":0,"bootstrapping":false,...}
+```
+
+Both nodes also answer libsql clients — the replica for reads, the primary for everything:
+
+```ts
+import { createClient } from "@libsql/client"
+
+// The trailing slash matters: the client resolves `v2/pipeline` relative to this URL.
+const primary = createClient({ url: "http://127.0.0.1:4501/v1/db/acme/", authToken: KEY })
+const replica = createClient({ url: "http://127.0.0.1:4502/v1/db/acme/", authToken: KEY })
+
+await primary.execute("insert into notes (body) values ('written by @libsql/client')")
+await replica.execute("select id, body from notes order by id") // 2 rows, already applied
+await replica.execute("insert into notes (body) values ('nope')") // LibsqlError: NOT_PRIMARY
+```
+
+`ack: "replica"` holds a write on the primary until a replica has the record on disk; `quorum`
+waits for a majority. Both are per request, per node default, or a header —
+[docs/api.md](docs/api.md#durability-levels) has the failure modes.
 
 ### The client (browsers, Bun, Node, Workers)
 
@@ -225,11 +296,17 @@ has both examples in full, the mapping, and every limitation.
 
 ```sh
 bunql serve --dir ./data --port 4321          # or: bun run src/cli.ts serve
+bunql serve --dir ./r --replica-of ws://primary:4321/v1/replication --cluster-secret $SECRET
+bunql serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
 bunql db create acme
 bunql db list
 bunql db fork acme-copy --from acme@4812      # a txid, or @2026-09-11T10:00:00Z
 bunql restore acme --at 2026-09-11T10:00:00Z --into acme-recovered
+bunql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+bunql backup status acme
+bunql backup verify acme --at 4812
 bunql token --db acme --scope ro --ttl 30d --tables 'todos:r'
+bunql exec acme --sql "select 1"              # one statement, --json for the server's own body
 bunql shell acme                              # a REPL over the WebSocket protocol
 ```
 
@@ -312,48 +389,52 @@ Design notes and byte layouts are in [docs/m3-wal.md](docs/m3-wal.md).
 
 ## Measured
 
-`bun run bench:driver` on an M-series Mac, Homebrew SQLite 3.53.4, 100k-row table:
+`bun run bench:driver` on an M5 Pro, Homebrew SQLite 3.53.4, 100k-row table:
 
 | op | bunql | bun:sqlite |
 |---|---|---|
-| point read by primary key | 0.81 µs | 1.93 µs |
-| 100-row scan to objects | 9.5 µs | 7.8 µs |
-| insert inside a transaction | 0.29 µs | 0.23 µs |
+| point read by primary key | 0.77 µs | 1.77 µs |
+| 100-row scan to objects | 8.98 µs | 6.86 µs |
+| insert inside a transaction | 0.28 µs | 0.22 µs |
 | the same insert with an update hook installed | 0.36 µs | not available |
 
 Point reads win because the per-statement overhead is much lower. Wide scans lose because every
 column costs one extra FFI call for `sqlite3_column_type`, which bun:sqlite does in native code.
 
-`bun run bench:wal`, 500 transactions of 5 rows each, primary and replica in one process on APFS:
+`bun run bench:replication`, a primary and a replica as two whole servers on loopback:
 
 | leg | p50 | p90 |
 |---|---|---|
-| primary commit | 11.0 µs | 17.3 µs |
-| tail + checksum chain | 9.2 µs | 15.7 µs |
-| encode (zstd level 3) | 11.2 µs | 14.9 µs |
-| log append | 2.7 µs | 5.5 µs |
-| decode | 5.2 µs | 7.7 µs |
-| replica apply, including `fdatasync` | 191 µs | 235 µs |
-| replica read sees the row | 47 µs | 74 µs |
-| **end to end** | **285 µs** | **337 µs** |
+| write on the primary over HTTP | 303 µs | 374 µs |
+| commit → applied on the replica | 220 µs | 256 µs |
+| write forwarded through the replica | 353 µs | 380 µs |
+| write, `ack: "replica"` | 407 µs | 446 µs |
+| write, `ack: "quorum"` | 383 µs | 410 µs |
 
-Records compress about 4.8x. The apply leg is almost entirely `fdatasync`, and the replica read
-pays for the wal-index rebuild that mechanism B forces on every apply — the cost design §4.5
-names as the reason to move to mechanism A in phase 1.
+Forwarding costs 49 µs over a write on the primary, and waiting for a replica to have the record
+on disk costs 104 µs. Over HTTP on one node a point read is 48 µs, a write 79 µs, and the Hrana
+pipeline is within a microsecond of both. The whole table, the design §10 budget it is read
+against, and the machine it came from are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Tests
 
 ```sh
-bun test              # 496 tests, including test/e2e/ — the whole product in one scenario
+bun test              # 861 tests, including test/e2e/ — the whole product in two scenarios
 bun run typecheck
-bun run bench         # all four, then one table against the design §10 budget
+bun run bench         # every benchmark, then the design §10 table and the phase-1 table
 bun run bench --quick # the same, with fewer rounds
 
 bun run bench:driver  # the driver against bun:sqlite
-bun run bench:wal     # primary -> replica shipping latency, leg by leg
+bun run bench:wal     # primary -> replica shipping latency, leg by leg, no transport
 bun run bench:tenant  # the write path through the tenant owner
-bun run bench:http    # HTTP and WebSocket, with the load client in its own process
+bun run bench:http    # HTTP, WebSocket and Hrana, with the load client in its own process
+bun run bench:replication  # two nodes over a real socket: latency, forwarding, ack levels
+bun run bench:storage     # shipping to an in-process S3
 ```
+
+`test/e2e/scenario.test.ts` is the single-node story end to end; `test/e2e/phase1.test.ts` is the
+cluster one — a primary, two replicas, a bucket and a `@libsql/client`, all at once, over real
+sockets.
 
 The last recorded numbers, and the machine they came from, are in
 [docs/benchmarks.md](docs/benchmarks.md).

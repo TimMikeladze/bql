@@ -69,6 +69,38 @@ await measure("single-row write, ack local, HTTP", ROUNDS, (i) =>
 
 await measure("healthz, HTTP", ROUNDS, () => fetch(`${base}/healthz`).then((r) => r.json()))
 
+// ── the same two statements through Hrana ──────────────────────────────────────────────────────
+//
+// One `POST /v2/pipeline` carrying `execute` and `close`, which is one round trip for one
+// statement — the same unit of work as the native legs above, so the gap between them is what the
+// compatibility layer costs. A stream is opened and closed per request here; `@libsql/client`
+// keeps a baton alive instead, which saves the close but not the encoding.
+
+const HRANA = `/v1/db/${db}/v2/pipeline`
+
+async function pipeline(sql: string, args: unknown[]): Promise<unknown> {
+  const body = await post(HRANA, {
+    baton: null,
+    requests: [{ type: "execute", stmt: { sql, args } }, { type: "close" }],
+  })
+  const first = (body as { results?: { type: string; error?: { message: string } }[] }).results?.[0]
+  if (!first || first.type !== "ok") {
+    throw new Error(`hrana pipeline failed: ${JSON.stringify(first)}`)
+  }
+  return body
+}
+
+const hranaInt = (value: number) => ({ type: "integer", value: String(value) })
+const hranaText = (value: string) => ({ type: "text", value })
+
+await measure("point read, Hrana pipeline", ROUNDS, (i) =>
+  pipeline("select v, n from t where id = ?", [hranaInt((i % 1000) + 1)]),
+)
+
+await measure("single-row write, ack local, Hrana pipeline", ROUNDS, (i) =>
+  pipeline("insert into t(v, n) values (?, ?)", [hranaText(`p${i}`), hranaInt(i)]),
+)
+
 // ── WebSocket ──────────────────────────────────────────────────────────────────────────────────
 
 interface Conn {

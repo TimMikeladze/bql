@@ -1,18 +1,24 @@
-// Runs the four benchmarks and prints one table against the performance budget of design §10.
+// Runs every benchmark and prints two tables: the performance budget of design §10, and the
+// phase-1 legs that budget never named.
 //
 //   bun run bench                 # everything
 //   bun run bench --quick         # fewer rounds, for a laptop on battery
-//   bun run bench --only http     # one of driver | wal | tenant | http | replication
+//   bun run bench --only http     # one of driver | wal | tenant | http | replication | storage
 //   bun run bench --json          # every report as JSON, for docs/benchmarks.md
 //
 // Each benchmark runs as its own process: `bench/driver.ts` loads bun:sqlite, `bench/http.ts`
-// binds a port and spawns a load client of its own, and four benchmarks sharing one heap would
-// measure a JIT that four separate runs do not share. Every child prints its usual human table
+// binds a port and spawns a load client of its own, and six benchmarks sharing one heap would
+// measure a JIT that six separate runs do not share. Every child prints its usual human table
 // plus one `##BENCH##` line, which is the only thing read back.
 //
 // This never fails a build. A benchmark is a measurement of the machine it ran on, so a missed
 // budget is a WARN and the exit code stays 0 — the one hard gate is `bench/driver.ts`'s own
 // point-read target, which it enforces itself.
+//
+// Two tables come out: design §10's budget, which is the contract, and the phase-1 legs, which
+// design §10 never budgeted — routing, durability levels, the Hrana surface and the S3 shipper.
+// Those are printed with the number they should be read against rather than a verdict, because a
+// forwarded write is not slow or fast on its own, only next to the local one.
 
 import os from "node:os"
 import path from "node:path"
@@ -40,6 +46,7 @@ const BENCHES: BenchSpec[] = [
     file: "replication.ts",
     args: QUICK ? ["100", "500"] : ["300", "2000"],
   },
+  { name: "storage", file: "storage.ts", args: QUICK ? ["500"] : ["2000"] },
 ]
 
 /** One row of design §10. `direction` says which side of the budget is good. */
@@ -138,6 +145,66 @@ const BUDGETS: Budget[] = [
     direction: "min",
     unit: "msg/s",
   },
+]
+
+/**
+ * A phase-1 leg. `against` names the leg on the same bench it should be read next to — the local
+ * write for a forwarded one, the native route for the Hrana one — so the table shows the cost of
+ * the feature rather than the cost of the machine.
+ */
+interface Phase1Row {
+  row: string
+  bench: string
+  leg: string
+  unit: "µs" | "rec/s" | "MiB/s"
+  against?: string
+}
+
+const PHASE1: Phase1Row[] = [
+  {
+    row: "write, ack local, on the primary (HTTP)",
+    bench: "replication",
+    leg: "primary write (HTTP)",
+    unit: "µs",
+  },
+  {
+    row: "write forwarded through a replica",
+    bench: "replication",
+    leg: "write forwarded via replica",
+    unit: "µs",
+    against: "primary write (HTTP)",
+  },
+  {
+    row: "write, ack replica",
+    bench: "replication",
+    leg: "write, ack replica",
+    unit: "µs",
+    against: "primary write (HTTP)",
+  },
+  {
+    row: "write, ack quorum",
+    bench: "replication",
+    leg: "write, ack quorum",
+    unit: "µs",
+    against: "primary write (HTTP)",
+  },
+  {
+    row: "point read, Hrana pipeline",
+    bench: "http",
+    leg: "point read, Hrana pipeline",
+    unit: "µs",
+    against: "point read, HTTP keep-alive",
+  },
+  {
+    row: "write, Hrana pipeline",
+    bench: "http",
+    leg: "single-row write, ack local, Hrana pipeline",
+    unit: "µs",
+    against: "single-row write, ack local, HTTP",
+  },
+  { row: "records shipped to S3 per second", bench: "storage", leg: "records shipped/s", unit: "rec/s" },
+  { row: "pushed to S3, MiB/s", bench: "storage", leg: "MiB/s to the bucket", unit: "MiB/s" },
+  { row: "one commit to the bucket", bench: "storage", leg: "one commit to the bucket", unit: "µs" },
 ]
 
 // ── run ────────────────────────────────────────────────────────────────────────────────────────
@@ -247,6 +314,50 @@ if (warned.length === 0 && skipped.length === 0) {
 for (const note of rows.filter((r) => r.note)) console.log(`  · ${note.row}: ${note.note}`)
 for (const failure of failures) console.log(`  ! ${failure}`)
 
+// ── the phase-1 legs ───────────────────────────────────────────────────────────────────────────
+
+export interface Phase1Measurement {
+  row: string
+  measured: number | null
+  unit: string
+  against: number | null
+}
+
+const phase1: Phase1Measurement[] = PHASE1.map((one) => {
+  const report = reports.get(one.bench)
+  const sample = report?.legs[one.leg]
+  const reference = one.against === undefined ? undefined : report?.legs[one.against]
+  return {
+    row: one.row,
+    measured: sample === undefined ? null : (sample.value ?? sample.p50),
+    unit: one.unit,
+    against: reference === undefined ? null : (reference.value ?? reference.p50),
+  }
+})
+
+if (phase1.some((one) => one.measured !== null)) {
+  console.log(`\n${"═".repeat(84)}`)
+  console.log("phase 1: routing, durability, Hrana and the shipper (no design §10 budget)")
+  console.log("═".repeat(84))
+  const phaseWidth = Math.max(...phase1.map((one) => one.row.length))
+  console.log(
+    `${"path".padEnd(phaseWidth)}  ${"measured".padStart(12)}  ${"read against".padStart(14)}  unit`,
+  )
+  console.log("-".repeat(phaseWidth + 40))
+  for (const one of phase1) {
+    if (one.measured === null) continue
+    // Only a per-second count is rounded to whole units; a latency or a rate keeps its decimal.
+    const as = one.unit === "rec/s" ? "req/s" : "µs"
+    const measured = format(one.measured, as)
+    const against = one.against === null ? "—" : format(one.against, as)
+    console.log(
+      `${one.row.padEnd(phaseWidth)}  ${measured.padStart(12)}  ${against.padStart(14)}  ${one.unit}`,
+    )
+  }
+  const missing = phase1.filter((one) => one.measured === null)
+  if (missing.length > 0) console.log(`not measured: ${missing.map((o) => o.row).join("; ")}`)
+}
+
 if (JSON_OUT) {
   console.log(
     `\n##REPORTS## ${JSON.stringify({
@@ -261,6 +372,7 @@ if (JSON_OUT) {
         at: new Date().toISOString(),
       },
       budget: rows,
+      phase1,
       benches: Object.fromEntries(reports),
     })}`,
   )

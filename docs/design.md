@@ -9,33 +9,60 @@ eyes most. Section 2 is what was actually proven on real bits before writing any
 
 ---
 
-## 0. Status — phase 0 is built (2026-09-12)
+## 0. Status — phase 1 is built (2026-09-12)
 
-Everything in §11 phase 0 exists, is tested, and runs: `bun test` → 494 pass, 0 fail across 36
-files; `bun run typecheck` clean; ~17.6k lines in `src/`. The as-built API reference is
-`docs/api.md` (every route, WS op, SSE event, SDK/embedded/CLI surface, config keys, and a
-"differences from the design" list); measured numbers are in `docs/benchmarks.md`; each
-milestone's deviations are in `docs/m3-wal.md` … `docs/m8-e2e.md`.
+Everything in §11 phase 0 and phase 1 exists, is tested, and runs: `bun test` → 861 pass, 2 skip,
+0 fail across 62 files; `bun run typecheck` clean. The as-built API reference is `docs/api.md`
+(every route, the Hrana surface, WS ops, SSE events, SDK/embedded/ORM/CLI surfaces, config keys,
+and a "differences from the design" list); measured numbers are in `docs/benchmarks.md`; each
+milestone's deviations are in `docs/m3-wal.md` … `docs/m8-e2e.md` (phase 0) and
+`docs/r1-replication.md` … `docs/r5-orm.md` (phase 1).
+
+**What phase 1 added.** The §8 replication transport over one binary WebSocket per node pair, with
+snapshot bootstrap, resume, epoch fencing and retention/divergence re-snapshot (R1). `ack:
+"replica"` and `"quorum"`, write forwarding from a replica to the primary, read-your-writes across
+nodes, and a server-side transaction queue (R2). Continuous backup to any S3-compatible bucket
+over `Bun.S3Client`, with a specified bucket layout, retention and point-in-time restore onto a
+node that has never seen the database (R3). The libsql-compatible Hrana surface — `/v2/pipeline`,
+`/v3/pipeline`, `/v3/cursor` and the `hrana3`/`hrana2` sockets — so `@libsql/client`,
+`drizzle-orm/libsql` and `kysely-libsql` work unmodified (R4). `bunql/kysely` and `bunql/drizzle`,
+both optional peers, with no runtime dependency added (R5).
 
 | path | budget (§10) | measured | verdict |
 |---|---|---|---|
-| point read, in process | ≤ 1.2 µs | 0.78 µs | pass |
-| point read over HTTP keep-alive | ≤ 60 µs | 47.8 µs | pass |
-| point read over WebSocket | ≤ 35 µs | 28.8 µs | pass |
-| single-row write, `ack: local`, incl. tail + log | ≤ 40 µs | 27.0 µs | pass |
-| write visible on a replica (applier fed from the log) | ≤ 1 ms | 291 µs | pass |
-| live-query invalidation → socket | ≤ 200 µs | 19.1 µs | pass |
+| point read, in process | ≤ 1.2 µs | 0.77 µs | pass |
+| point read over HTTP keep-alive | ≤ 60 µs | 48.2 µs | pass |
+| point read over WebSocket | ≤ 35 µs | 28.6 µs | pass |
+| single-row write, `ack: local`, incl. tail + log | ≤ 40 µs | 28.2 µs | pass |
+| write visible on a replica, over the real socket | ≤ 1 ms | 220 µs | pass |
+| live-query invalidation → socket | ≤ 200 µs | 17.3 µs | pass |
 | tenants open per process | 10k | 10k | pass |
-| mixed 90/10 throughput, HTTP, one core | ≥ 50k req/s | 52k | pass |
-| mixed 90/10 throughput, WebSocket | ≥ 150k msg/s | 129k | warn (writes serialise on the single writer) |
+| mixed 90/10 throughput, HTTP, one core | ≥ 50k req/s | 54k | pass |
+| mixed 90/10 throughput, WebSocket | ≥ 150k msg/s | 130k | warn (writes serialise on the single writer) |
 
-Not built yet (phase 1): replica streaming over the WS replication protocol (§8), `ack:
-replica|quorum`, S3 shipper, Hrana compat (§6.7), Kysely/Drizzle adapters, `promote`. Phase 2:
-cluster (§5.3). Notable as-built differences: replica apply ships mechanism B (§4.5); the change
-ring is in memory, so `Last-Event-ID` resumes gaplessly across a dropped connection but returns
-`reset` across a server restart; `schema` events reach WebSocket subscribers only; SQLite's
-`sqlite3_wal_checkpoint_v2` counters are not a reliable no-op tell, so checkpoints verify by WAL
-size; `lastInsertRowid` is null unless the statement moved it.
+Phase-1 paths the budget never named, measured in the same run: a write forwarded through a
+replica costs 49 µs more than the same write on the primary; `ack: "replica"` costs 104 µs more;
+the Hrana pipeline costs under 1 µs more than the native route for the same statement; the S3
+shipper keeps up with 29k single-row commits a second against an in-process bucket.
+
+**Deferred to phase 2 (§5.3, §11).** The cluster: a Raft control plane, placement, leases,
+failover and `moved`, plus `POST /v1/db/{db}/promote`, `bunql promote`, `bunql cluster`, the
+`[cluster]` config section and `workers: N`. A replica cannot be promoted today, which is the one
+thing standing between phase 1 and HA: a primary that dies is recovered by pointing a new node at
+the bucket, not by electing one of its replicas. Also phase 2: replica apply mechanism A (§4.5),
+`BunQL.open({s3})` for the embedded engine, and forwarding admin routes from a replica.
+
+**Deferred to phase 3.** WAL-decoded logical CDC, which is what would give a replica the row-level
+change feed it answers today with txids and an empty `changes` array; snapshot reads across
+requests over `sqlite3_snapshot`; per-tenant encryption at rest; a query-plan cache.
+
+**Notable as-built differences.** Replica apply ships mechanism B (§4.5), which rescans the WAL per
+apply. The change ring is in memory, so `Last-Event-ID` resumes gaplessly across a dropped
+connection but returns `reset` across a server restart. `schema` events reach WebSocket subscribers
+only. A replica's change feed carries txids with no rows. The Hrana surface does not forward
+writes from a replica. `lastInsertRowid` is exact as of phase 1: the prepared statement carries
+what SQLite's authorizer said about its program, so a rowid that repeats the connection's previous
+one is still reported and an upsert that updated is not.
 
 ## 1. Goals / non-goals
 

@@ -11,6 +11,11 @@
 // is applied and its position is durable — so nothing is measured by polling and the figure is
 // not rounded up to a timer tick. Throughput drives the primary's writer directly rather than
 // over HTTP, because the question is what the transport carries, not what `fetch` costs.
+//
+// Three phase-1 routing legs sit beside the transport ones, all measured from a client's point of
+// view: a write forwarded through a replica, and a write on the primary held for `ack: "replica"`
+// and `ack: "quorum"`. Each is the same single-row insert as the plain HTTP write leg, so the
+// difference between them is exactly what the routing or the durability level costs.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -122,6 +127,43 @@ for (let round = 0; round < ROUNDS; round++) {
 measuring = false
 if (latency.length === 0) throw new Error("no commit pairs were observed")
 
+// ── routing and durability: what a client waits for ────────────────────────────────────────────
+
+const ROUTING_ROUNDS = Math.max(20, Math.round(ROUNDS / 3))
+
+async function measureWrites(
+  node: ServerHandle,
+  body: (round: number) => Record<string, unknown>,
+): Promise<number[]> {
+  const samples: number[] = []
+  for (let round = -5; round < ROUTING_ROUNDS; round++) {
+    const started = Bun.nanoseconds()
+    const response = await api(node, `/v1/db/${DB}/query`, body(round))
+    if (!response.ok) throw new Error(`routing write ${round}: ${await response.text()}`)
+    await response.json()
+    // The first few rounds warm the connection and the primary's prepared-statement cache.
+    if (round >= 0) samples.push((Bun.nanoseconds() - started) / 1000)
+  }
+  return samples
+}
+
+const insertSql = "insert into t (v, n) values (?, ?)"
+const forwarded = await measureWrites(replica, (round) => ({
+  sql: insertSql,
+  args: [`fwd-${round}`, round],
+}))
+const ackReplica = await measureWrites(primary, (round) => ({
+  sql: insertSql,
+  args: [`ack-${round}`, round],
+  ack: "replica",
+}))
+const ackQuorum = await measureWrites(primary, (round) => ({
+  sql: insertSql,
+  args: [`quo-${round}`, round],
+  ack: "quorum",
+}))
+await waitUntil(() => appliedTxid() >= primaryTenant.txid, "the replica to catch up after routing")
+
 // ── throughput: how fast the transport carries a stream of records ─────────────────────────────
 
 const insert = "insert into t (v, n) values (?, ?)"
@@ -156,6 +198,9 @@ console.log("-".repeat(66))
 for (const [name, samples] of [
   ["primary write (HTTP)", httpWrite],
   ["commit -> replica applied", latency],
+  ["write forwarded via replica", forwarded],
+  ["write, ack replica", ackReplica],
+  ["write, ack quorum", ackQuorum],
 ] as const) {
   const line = [50, 90, 99, 100]
     .map((p) => percentile(samples, p).toFixed(1).padStart(9))
@@ -193,6 +238,9 @@ emit({
   legs: {
     "primary write (HTTP)": distribution(httpWrite),
     "commit -> replica applied": distribution(latency),
+    "write forwarded via replica": distribution(forwarded),
+    "write, ack replica": distribution(ackReplica),
+    "write, ack quorum": distribution(ackQuorum),
     "records/s applied": { p50: Math.round(records / drainSeconds), unit: "rps" },
   },
 })

@@ -1,16 +1,19 @@
 # BunQL API reference
 
-The API as implemented in phase 0. `docs/design.md` is the proposal; this file is the thing that
-runs. Where the two differ, the difference is listed at the end under
-[Differences from the design](#differences-from-the-design) rather than left for you to find.
+The API as implemented at the end of phase 1: one primary, any number of replicas, continuous
+backup to S3, and a libsql-compatible surface beside the native one. `docs/design.md` is the
+proposal; this file is the thing that runs. Where the two differ, the difference is listed at the
+end under [Differences from the design](#differences-from-the-design) rather than left for you to
+find.
 
 The route table below is generated from the server's own routing table — `bun run
 scripts/routes.ts` prints it, and `bun run scripts/routes.ts --check` fails if this document falls
 behind it.
 
-**Contents** — [Conventions](#conventions) · [HTTP](#http-api) · [WebSocket](#websocket-protocol) ·
-[SSE](#sse-event-formats) · [Client SDK](#client-sdk) · [Embedded](#embedded-api) ·
-[CLI](#cli) · [Configuration](#configuration) ·
+**Contents** — [Conventions](#conventions) · [HTTP](#http-api) ·
+[Hrana / libsql](#hrana--the-libsql-compatible-surface) · [WebSocket](#websocket-protocol) ·
+[SSE](#sse-event-formats) · [Client SDK](#client-sdk) · [ORM adapters](#orm-adapters) ·
+[Embedded](#embedded-api) · [CLI](#cli) · [Configuration](#configuration) ·
 [Differences from the design](#differences-from-the-design)
 
 ---
@@ -177,6 +180,9 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `DELETE /v1/db/:db` | delete | admin |
 | `GET /v1/db/:db` | stats | `ro` |
 | `POST /v1/db/:db/batch` | many statements | `ro`, `rw` for the ones that write |
+| `GET /v1/db/:db/backup` | S3 shipper position and manifest | admin |
+| `GET /v1/db/:db/backup/generations` | every generation in the bucket | admin |
+| `POST /v1/db/:db/backup/verify` | check the bucket can restore to a txid | admin |
 | `GET /v1/db/:db/changes` | change feed, SSE or long poll | `ro` |
 | `POST /v1/db/:db/checkpoint` | manual checkpoint | admin |
 | `GET /v1/db/:db/dump` | stream the SQLite file out | admin |
@@ -194,6 +200,13 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `POST /v1/tokens` | mint a scoped token | admin |
 | `DELETE /v1/tokens/:jti` | revoke one | admin |
 | `GET /v1/ws` | WebSocket upgrade, sub-protocol `bunql.v1` | any |
+| `GET /v2`, `GET /v3` | Hrana version probe | none |
+| `POST /v2/pipeline`, `POST /v3/pipeline` | Hrana pipeline, database from `x-namespace`/`Host`/`default` | `ro`, `rw` when it writes |
+| `POST /v3/cursor` | Hrana cursor, newline-delimited | as above |
+| `GET /v1/db/:db/v2`, `GET /v1/db/:db/v3` | the same probe, database in the path | none |
+| `POST /v1/db/:db/v2/pipeline`, `POST /v1/db/:db/v3/pipeline` | the same pipeline | `ro`, `rw` when it writes |
+| `POST /v1/db/:db/v3/cursor` | the same cursor | as above |
+| `GET /v1/db/:db/hrana` | Hrana WebSocket, sub-protocol `hrana3` or `hrana2` | in-band `hello` |
 
 An unknown path is a `404` in the error shape above. An unsupported method on a known path is a
 `405` from Bun's router.
@@ -227,8 +240,26 @@ non-null value. `vmSteps` is `sqlite3_stmt_status(SQLITE_STMTSTATUS_VM_STEP)` �
 quotas and billing, since SQLite has no native `rows_read`.
 
 Writes use the same route. `rowsAffected` and `lastInsertRowid` fill in and `txid` advances.
-`lastInsertRowid` is read either side of the step, so an `UPDATE` on a pooled connection never
-reports somebody else's earlier insert; an insert that reuses a rowid reports `null`.
+
+`lastInsertRowid` is **the rowid this statement inserted**, or `null`. It is not the connection's
+counter read back: the prepared statement carries what SQLite's authorizer said about its program
+at compile time, and for a statement that can insert, the counter is zeroed before the step, so a
+non-zero value afterwards is proof SQLite set it *here*. What that buys, in cases where reading
+the number either side of the step gets it wrong:
+
+- an insert whose rowid repeats the previous one on the same pooled writer — row 1 of one table
+  and then row 1 of another — reports the rowid rather than `null`;
+- `INSERT OR REPLACE` onto the rowid it just wrote reports that rowid;
+- an `UPDATE`, a `DELETE` and a DDL statement report `null`, whatever the connection inserted
+  earlier;
+- so do the statements SQLite deliberately sets no rowid for: an insert into a `WITHOUT ROWID`
+  table, an upsert that took the `DO UPDATE` branch, and an insert performed inside a trigger
+  (SQLite's counter reverts when the trigger program ends, so there is nothing to report).
+
+A statement that calls `last_insert_rowid()` itself reads the counter as an input, so the counter
+is left alone under it and the older "did the number move" test applies to that statement only.
+Inside a batch or a transaction the value a previous statement set is still visible to the next
+one, which is what makes `insert into child (parent) values (last_insert_rowid())` work.
 
 A transaction that changes no pages does not advance the txid and is not an error.
 
@@ -548,6 +579,113 @@ is driven by the applier instead, and the two feeds differ:
 New databases reach a `follow: ["*"]` replica as soon as they are created — the primary announces
 its database list on every create, import and delete rather than waiting for a heartbeat.
 
+#### Replica limitations
+
+Everything a replica cannot do in phase 1, in one place.
+
+| what | on a replica |
+|---|---|
+| reads | served locally, at the applied txid. `BunQL-Min-Txid` waits on the applier |
+| writes on the native routes | forwarded to the primary, transparently; `503 NOT_PRIMARY` with `BunQL-Primary` when `forwardWrites = false` or the socket is down |
+| writes on the Hrana surface | **not forwarded** — `NOT_PRIMARY`. Point a libsql client at the primary to write |
+| interactive transactions | forwarded whole; the baton is the primary's |
+| the change feed | txid-only events, `changes: []` |
+| live queries | full, re-run on every applied transaction |
+| `POST /v1/db` and `DELETE /v1/db/:db` | **act locally and are not forwarded** — a database created on a replica is a local primary the cluster never hears about, and a delete removes the replica's copy and stops it following that database for good — later commits on the primary never reach it. Do both on the primary; this is a known gap |
+| `POST /v1/db/:db/checkpoint` with `TRUNCATE` | `503 NOT_PRIMARY`. Every other mode runs locally |
+| `POST /v1/db/:db/snapshot` | works: a replica has the file and a snapshot of it is a valid restore source |
+| S3 shipping | off. A replica authors nothing, so it ships nothing; `restore` from a bucket still works |
+| `ack: "replica"` / `"quorum"` on a forwarded write | honoured — the level travels with the forwarded body and the primary waits for it |
+| promotion to primary | not built. `POST /v1/db/:db/promote` and `bunql promote` are phase 2 |
+
+A replica's `GET /readyz` is `503` while its stream is down, so a load balancer takes it out of
+rotation rather than serving data that only gets staler.
+
+---
+
+## Hrana — the libsql-compatible surface
+
+Everything under `/v2`, `/v3` and `/v1/db/:db/v2…` speaks libsql's Hrana protocol, so
+`@libsql/client`, `drizzle-orm/libsql`, `kysely-libsql` and the Turso CLI reach BunQL unmodified.
+It is a translation layer over the same `src/server/exec.ts` the native routes use: the same
+authorizer, deadline, row cap, single writer and txid. `docs/r4-hrana.md` is the as-built note.
+
+### Connection strings
+
+Every row below is opened against a real server by `test/hrana/libsql-client.test.ts`.
+
+| URL | database | notes |
+|---|---|---|
+| `http://host:port/v1/db/acme/` | `acme` | **the trailing slash is required** |
+| `http://host:port/v1/db/acme` | — | `404`. The client resolves `v2/pipeline` *relatively*, so this asks for `/v1/db/v2/pipeline` |
+| `http://host:port` | `default` | root addressing, no header needed |
+| `http://host:port` + `x-namespace: acme` | `acme` | the header needs a custom `fetch`; `createClient` has no header option |
+| `https://acme.sql.example.com` | `acme` | the first `Host` label, which is how a Turso deployment addresses a database |
+| `libsql://host:port/v1/db/acme/?tls=0` | `acme` | `libsql:` means TLS unless `tls=0` says otherwise |
+| `ws://host:port/v1/db/acme/hrana` | `acme` | **`/hrana` is required**: `/v1/db/:db` is already the stats route |
+| `ws://host:port` | `default` | a browser `WebSocket` cannot send `x-namespace`, so the database comes from the path or the host label |
+
+The trailing-slash rule is not ours: `encodeBaseUrl` in `@libsql/core` does not append one, and
+`new URL("v2/pipeline", base)` then discards the last path segment. Without it the failure is a
+bare `404`, reported as `SERVER_ERROR: Server returned HTTP status 404`.
+
+```ts
+import { createClient } from "@libsql/client"
+
+const client = createClient({
+  url: "http://127.0.0.1:4321/v1/db/acme/", // the trailing slash matters
+  authToken: process.env.BUNQL_TOKEN,
+  intMode: "bigint",
+})
+await client.execute({ sql: "insert into users (name) values (?)", args: ["ada"] })
+const tx = await client.transaction("write")
+await tx.execute("update users set name = 'ada2' where id = 1")
+await tx.commit()
+```
+
+Authentication is the ordinary one: `authToken` becomes `Authorization: Bearer`, and over a socket
+the token travels in the Hrana `hello`. A BunQL admin key or a minted token both work.
+
+### What is implemented
+
+| request | HTTP | WebSocket |
+|---|---|---|
+| `execute`, `batch`, `sequence`, `describe` | yes | yes |
+| `store_sql`, `close_sql`, `get_autocommit`, `close` | yes | yes |
+| `open_stream`, `close_stream`, `open_cursor`, `fetch_cursor`, `close_cursor` | — | yes |
+| `POST /v3/cursor` | yes | — |
+
+- **A stream is a real transaction holder.** `BEGIN`, `COMMIT` and `ROLLBACK` arriving as ordinary
+  statements are intercepted and turned into BunQL transactions, so `client.transaction()` (an
+  open stream) and `client.batch()` (conditioned steps in one request) are both one BunQL
+  transaction with one txid.
+- **`BEGIN TRANSACTION READONLY`**, which `transactionMode: "read"` emits, opens a deferred
+  transaction that refuses writes with `SQLITE_READONLY`.
+- **`replication_index` is our txid** as a decimal string, on every statement result.
+- **Error codes are BunQL's**: `LibsqlError.code` carries `SQLITE_CONSTRAINT_UNIQUE`,
+  `QUERY_TIMEOUT`, `NOT_AUTHORIZED`, `DB_NOT_FOUND` and the rest of the table above.
+- **Batons** are HMAC-SHA256 over `streamId:seq:expiry` with a per-process key, single-use, and
+  die with the process. A stream expires after 60 s idle; a service holds at most 4096 streams, a
+  stream at most 256 stored SQL texts, a socket at most 64 open cursors.
+- `limits.maxBodyBytes` bounds a pipeline or cursor body; `maxRows`, `queryTimeoutMs`,
+  `writeTimeoutMs` and `txIdleTimeoutMs` apply exactly as they do natively.
+
+### What is not
+
+- **No protobuf.** `hrana3-protobuf` and the `/v3-protobuf/*` routes are absent; clients negotiate
+  down to JSON on their own.
+- **No Hrana 1** (`POST /v1/execute`, `POST /v1/batch`) and no "hello" text response on `GET /`.
+- **`base_url` is always `null`**, so a client never moves its stream to another node.
+- **An integral REAL comes back as an integer** unless the column is declared REAL: the driver
+  collapses SQLite's INTEGER and FLOAT into a JS number, and the encoder re-derives the type from
+  the column's affinity. `select 1.0` reports `{"type":"integer","value":"1"}`; a declared `REAL`
+  column is always right.
+- **`rows_read` and `rows_written`** are the returned row count and `rowsAffected`; SQLite has no
+  native `rows_read` and `vmSteps` is not part of the Hrana shape.
+- **`is_explain` is a prefix test** on the SQL.
+- **On a replica the Hrana surface is read-only.** A write there answers `NOT_PRIMARY` rather than
+  being forwarded — see [Replica limitations](#replica-limitations).
+
 ---
 
 ## WebSocket protocol
@@ -777,6 +915,48 @@ Every failure a caller sees is a `BunQLClientError` carrying the server's `code`
 
 ---
 
+## ORM adapters
+
+Two adapters ship in the package and neither adds a runtime dependency: `kysely` and `drizzle-orm`
+are optional peers. `docs/r5-orm.md` is the as-built note, with the mapping tables and every
+limitation.
+
+```ts
+import { BunQLDialect } from "bunql/kysely"
+import { Kysely } from "kysely"
+
+const db = new Kysely<Schema>({
+  dialect: new BunQLDialect({ url: "http://127.0.0.1:4321", token, db: "acme" }),
+})
+```
+
+```ts
+import { drizzle } from "bunql/drizzle"
+
+const db = drizzle({ url: "http://127.0.0.1:4321", token, db: "acme" }, { schema: { todos } })
+db.$client.bunql // the BunQL `Db` underneath
+```
+
+Both take the same three sources: a client `Db` from `createClient(...).db(name)`, an embedded
+`Db` from `BunQL.open({dir}).db(name)` with no HTTP in the middle, or `{url, token, db}`, which
+the adapter builds a client from and closes with `destroy()` / `$client.close()`. A `Db` you pass
+in yourself is never closed for you. A client the adapter opens uses `intMode: "bigint"`, because
+an ORM that throws on an integer past 2^53 is worse than one that hands back a bigint.
+
+- **Transactions are real.** Kysely's `begin`/`commit` connection contract is bridged onto BunQL's
+  callback transaction; Drizzle goes through the libsql driver's `client.transaction()`, which maps
+  onto the baton. Nested transactions are savepoints.
+- **`db.batch()` in Drizzle is `POST /v1/db/{db}/batch`** — one transaction, one txid,
+  `failedIndex` on the statement that broke.
+- **No streaming.** Kysely's `.stream()` throws; page with `limit`/`offset` and cap with `maxRows`.
+- **One open transaction per database.** Kysely serialises everything from one instance; the
+  Drizzle adapter queues a second transaction for up to 10 s. Two instances over one database can
+  still collide with `409 TX_BUSY`.
+- **Errors keep BunQL's `code`.** Kysely propagates the `BunQLClientError`; Drizzle wraps it, so
+  the BunQL error is the `cause`.
+
+---
+
 ## Embedded API
 
 `bunql`. The engine in this process, over the same `Db` interface, plus a synchronous escape hatch.
@@ -998,21 +1178,26 @@ document is not edited; this is the list.
 | §6.5 "S3 position" on `GET /v1/db/{db}/replication` | R3, as the `s3` block |
 | §9.4 `[s3]` | R3, with every key taking a `BUNQL_S3_*` override |
 | `next.md`: `src/wal/log.ts` cold open walks every record header | R3. A sidecar segment index; 2.69 ms → 0.36 ms at 6k records |
+| §6.7 Hrana compatibility (`/v2/pipeline`, `/v3/pipeline`, `/v3/cursor`, `hrana3`/`hrana2` sockets) | R4. No protobuf and no Hrana 1; see [Hrana](#hrana--the-libsql-compatible-surface) |
+| §9.2 `bunql/kysely`, `bunql/drizzle` | R5, both optional peers; see [ORM adapters](#orm-adapters) |
+| `docs/r4-hrana.md` §4: `lastInsertRowid` was null when a rowid repeated | fixed. The statement answers for itself, from SQLite's authorizer at prepare time |
 
 The as-built notes are `docs/r1-replication.md` (transport), `docs/r2-durability.md`
-(durability, forwarding, the transaction queue) and `docs/r3-storage.md` (the bucket layout
-contract, the shipper and restore).
+(durability, forwarding, the transaction queue), `docs/r3-storage.md` (the bucket layout
+contract, the shipper and restore), `docs/r4-hrana.md` (the libsql surface and what the clients
+really send) and `docs/r5-orm.md` (the two adapters).
 
-### Not implemented in phase 0
+### Still not implemented
 
 | design | status |
 |---|---|
-| §6.7 Hrana compatibility (`/v2/pipeline`, `/v3/pipeline`, `hrana3`/`hrana2` sockets) | phase 1 (§11) |
-| §6.5 `POST /v1/db/{db}/promote` | phase 1; nothing to promote to on a standalone node |
-| §9.2 `bunql/kysely`, `bunql/drizzle` | phase 1 |
-| §9.2 `BunQL.open({ s3 })` | phase 1; the option would be a promise the node cannot keep |
-| §9.3 `bunql promote`, `bunql cluster` | phase 1 and 2 |
-| §9.4 `[s3]`, `[cluster]` | R3 and phase 2 |
+| §6.5 `POST /v1/db/{db}/promote` | phase 2. Promotion needs a control plane that can fence the old primary, not just a route |
+| §9.3 `bunql promote`, `bunql cluster` | phase 2, with the control plane |
+| §9.4 `[cluster]` | phase 2 |
+| §4.5 replica apply mechanism A (pages into the file, shm header rewritten under the WAL locks) | mechanism B works and is what the numbers above are; A is the way to stop rescanning the WAL per apply |
+| §4.6 row-level CDC on a replica | phase 3. A replica receives pages, so logical decoding of the WAL is what it would take |
+| §9.2 `BunQL.open({ s3 })` | phase 2; the embedded engine has no shipper of its own |
+| `workers: N` (design §2.3) | phase 2. One process owns the writers today |
 
 ### Behaviour that differs
 
@@ -1034,6 +1219,10 @@ contract, the shipper and restore).
 - **`maxOpenTx` is fixed at 1 per database** by the tenant having one writer. The config key exists
   but a larger value would not be honoured; `[limits] txWaitMs` is the knob that matters, since it
   decides how long the second transaction waits for the first rather than how many may run.
+- **The Hrana surface does not forward writes.** The native routes on a replica hand a write to
+  the primary; `/v2/pipeline` and its relatives answer `NOT_PRIMARY` instead, because a libsql
+  client has no way to be told which node ran its statement and the baton it would get back is the
+  primary's, not this node's. Point a libsql client at the primary to write.
 - **A forwarded write is not retried.** A replica sends it once. `FORWARD_TIMEOUT` and a socket
   that drops mid-flight both mean "this may or may not have committed on the primary" — read the
   txid back rather than sending it again.
