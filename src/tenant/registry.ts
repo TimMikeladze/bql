@@ -5,6 +5,11 @@
 // Invariant: a tenant with work in flight is never evicted. Eviction closes connections, and a
 // connection closed underneath a running write would lose the transaction the caller is waiting
 // on, so the sweep skips anything busy rather than waiting for it.
+//
+// Second invariant: `sweepTrash` removes a directory only when its name carries the timestamp
+// `Tenant.delete` stamped on it and that timestamp is older than the retention. Anything else in
+// `<dataDir>/trash/` is left where it is — the sweep never guesses at the age of a directory it
+// did not name.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -538,6 +543,14 @@ export class TenantRegistry {
     // Everything left is busy: the cap is a target, not a promise a correct write can break.
   }
 
+  /**
+   * `sweepTrash` against this registry's data root, with failures going wherever the registry's
+   * own failures go. The server runtime calls it at start and on `[durability] trashSweepIntervalMs`.
+   */
+  sweepTrash(retentionMs: number, now?: number): { removed: string[]; bytes: number } {
+    return sweepTrash(this.dir, retentionMs, now, (err) => this.#report(err))
+  }
+
   #startSweeper(): void {
     if (this.#sweeper !== null || this.#closed) return
     const interval = this.#options.sweepIntervalMs ?? 250
@@ -580,4 +593,77 @@ export class TenantRegistry {
 /** The trash directory a deleted tenant's files are moved to. */
 export function trashDir(dataDir: string): string {
   return path.join(dataDir, "trash")
+}
+
+/**
+ * The epoch-millisecond suffix `Tenant.delete` stamps onto a trashed directory, or null when the
+ * name does not carry one. A tenant name may itself contain digits and dashes, so the suffix is
+ * the part after the *last* dash and nothing else is guessed at: an entry an operator dropped in
+ * by hand, or one from a future naming scheme, has no timestamp and is therefore never removed.
+ */
+function trashedAt(entry: string): number | null {
+  const dash = entry.lastIndexOf("-")
+  if (dash <= 0 || dash === entry.length - 1) return null
+  const suffix = entry.slice(dash + 1)
+  if (!/^\d+$/.test(suffix)) return null
+  const at = Number(suffix)
+  return Number.isSafeInteger(at) ? at : null
+}
+
+/** Bytes under `dir`, following no symlinks and charging a directory nothing of its own. */
+function bytesUnder(dir: string): number {
+  let total = 0
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) total += bytesUnder(full)
+    else if (entry.isFile()) total += fs.statSync(full).size
+  }
+  return total
+}
+
+/**
+ * Removes the trashed databases older than `retentionMs`. `DELETE /v1/db/{db}` moves a tenant's
+ * directory to `<dataDir>/trash/<name>-<ms>` and removes nothing, so without this a node that
+ * churns databases grows its trash for ever.
+ *
+ * Pure by design — it takes a directory and a clock rather than a registry — so a test can state
+ * "older than the retention goes, newer stays" without a server. `retentionMs <= 0` means keep
+ * for ever and sweeps nothing, matching `[s3] retention = "0"`. A removal that throws (a file
+ * still mapped, a permissions error) is handed to `onError` and the sweep carries on: one
+ * undeletable directory must not pin every other one.
+ */
+export function sweepTrash(
+  dataDir: string,
+  retentionMs: number,
+  now: number = Date.now(),
+  onError?: (err: unknown) => void,
+): { removed: string[]; bytes: number } {
+  const removed: string[] = []
+  let bytes = 0
+  if (!(retentionMs > 0)) return { removed, bytes }
+  const root = trashDir(dataDir)
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true })
+  } catch (err) {
+    // Nothing has ever been deleted on this node, which is the common case and not a failure.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") onError?.(err)
+    return { removed, bytes }
+  }
+  const cutoff = now - retentionMs
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const at = trashedAt(entry.name)
+    if (at === null || at > cutoff) continue
+    const full = path.join(root, entry.name)
+    try {
+      const size = bytesUnder(full)
+      fs.rmSync(full, { recursive: true, force: true })
+      removed.push(full)
+      bytes += size
+    } catch (err) {
+      onError?.(err)
+    }
+  }
+  return { removed, bytes }
 }

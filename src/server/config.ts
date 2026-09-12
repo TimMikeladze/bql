@@ -42,7 +42,16 @@ export interface DataSection {
 export interface DurabilitySection {
   defaultAck: DefaultAck
   checkpointWalBytes: number
+  /**
+   * How long a deleted database is kept in `<dataDir>/trash/` before the sweep removes it.
+   * `"0"` (or an empty string) keeps it for ever, which is what phase 0 and phase 1 did.
+   */
   retention: string
+  /**
+   * How often the trash sweep runs. A deletion is rare and the retention is measured in days, so
+   * the default is hourly; `0` turns the interval off and leaves only the sweep at start.
+   */
+  trashSweepIntervalMs: number
   /** Roll to a new log segment past this many bytes. Design §4.4 says 16 MB. */
   segmentBytes: number
 }
@@ -189,6 +198,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     defaultAck: "local",
     checkpointWalBytes: 4_000_000,
     retention: "7d",
+    trashSweepIntervalMs: 3_600_000,
     segmentBytes: 16 * 1024 * 1024,
   },
   realtime: {
@@ -476,7 +486,10 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     config.s3.enabled = false
   }
   if (config.s3.concurrency < 1) config.s3.concurrency = 1
-  parseRetentionOrThrow(config.s3.retention)
+  parseRetentionOrThrow(config.s3.retention, "s3")
+  // The trash sweep is the one thing that reads it, and a typo there would quietly keep every
+  // deleted database for ever — the failure this key exists to prevent.
+  parseRetentionOrThrow(config.durability.retention, "durability")
   return config
 }
 
@@ -493,13 +506,13 @@ function patchSetsEnabled(
   return null
 }
 
-/** `[s3] retention` has to be a duration this node understands, and a typo must not be silent. */
-function parseRetentionOrThrow(text: string): void {
+/** A `retention` has to be a duration this node understands, and a typo must not be silent. */
+function parseRetentionOrThrow(text: string, section: "s3" | "durability"): void {
   const trimmed = text.trim()
   if (trimmed.length === 0) return
   if (!/^\d+(?:\.\d+)?\s*(ms|s|m|h|d|w)?$/i.test(trimmed)) {
     throw BunQLError.badRequest(
-      `[s3] retention must look like 30d, 12h or 3600, got ${JSON.stringify(text)}`,
+      `[${section}] retention must look like 30d, 12h or 3600, got ${JSON.stringify(text)}`,
     )
   }
 }

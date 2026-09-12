@@ -401,8 +401,12 @@ GET /v1/db/acme
 DELETE /v1/db/acme  → { "name": "acme", "deleted": true, "trash": "<dataDir>/trash/acme-1789…" }
 ```
 
-`DELETE` moves the directory to `trash/` and tombstones the catalog row; nothing sweeps the trash
-in phase 0.
+`DELETE` moves the directory to `trash/` and tombstones the catalog row; the files themselves are
+removed later, by the sweep, once they are older than `[durability] retention` (default `7d`). The
+sweep runs when the node starts and then every `[durability] trashSweepIntervalMs` (default one
+hour); `retention = "0"` keeps a deleted database for ever, which is what phase 0 and phase 1 did.
+Only a directory the server itself named — `<name>-<ms>` — is ever removed, so anything an
+operator puts in `trash/` by hand stays where it is.
 
 **On a replica, `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore` and
 `POST /v1/db/:db/import` answer `503 NOT_PRIMARY` with `BunQL-Primary`**, the same shape a
@@ -1104,7 +1108,8 @@ the canonical one wins when both are set.
 | `[data] quotaBytes` | `0` (unlimited) | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
 | `[durability] defaultAck` | `"local"` (also `fsync`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
 | `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
-| `[durability] retention` | `"7d"` | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
+| `[durability] retention` | `"7d"` (`"0"` keeps everything) | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
+| `[durability] trashSweepIntervalMs` | `3600000` (`0` sweeps only at start) | `BUNQL_DURABILITY_TRASH_SWEEP_INTERVAL_MS` | — |
 | `[durability] segmentBytes` | `16777216` | `BUNQL_DURABILITY_SEGMENT_BYTES` | — |
 | `[realtime] ringBytes` | `10000000` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
 | `[realtime] ringMaxAgeMs` | `60000` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
@@ -1159,7 +1164,9 @@ replica with no `primary` is refused at start.
 
 Setting `[s3] bucket` turns shipping on the same way. `enabled = false` keeps the bucket
 configured without shipping to it, which is how a recovery node reads a backup it does not write.
-A `[s3] retention` that is not a duration is refused at start rather than silently ignored.
+A `[s3] retention` or a `[durability] retention` that is not a duration is refused at start rather
+than silently ignored. `[durability] retention` is how long a deleted database stays in
+`<dataDir>/trash/`; the local transaction log is not pruned by it.
 
 One more, outside the config file: `BUNQL_SQLITE_LIB` names the `libsqlite3` the driver loads.
 Without it the usual Homebrew and Linux paths are tried.
@@ -1278,7 +1285,8 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **Writes during a snapshot or a fork throw `BUSY`.** A commit inside that window would make the
   snapshot newer than the txid it is filed under.
 - **`DELETE /v1/db/{db}` moves, never removes.** The directory goes to `<dataDir>/trash/<name>-<ms>`
-  and nothing sweeps it in phase 0.
+  and is removed by the trash sweep once it is older than `[durability] retention`, which is that
+  key's only consumer — the local log is kept whole.
 - **Admin writes are refused on a replica, not forwarded.** `POST /v1/db`, `DELETE /v1/db/{db}`,
   `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import` answer `503 NOT_PRIMARY`. Design §5.2's
   "forward writes to the primary" is about statement writes; the lifecycle routes act on a node's

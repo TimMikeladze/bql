@@ -11,6 +11,12 @@
 // Third invariant: readers are borrowed through `withReader` and nowhere else, because a pooled
 // reader keeps the last request's authorizer until the next one re-scopes it — that is what makes
 // re-scoping free, and it is only safe while every borrow goes through the same door.
+//
+// The trash sweep lives here because it is node-wide rather than per-database: `<dataDir>/trash/`
+// is swept once in the constructor and then every `[durability] trashSweepIntervalMs` (one hour by
+// default). A configured interval beats a derived one — an operator who shortens `retention` to an
+// hour for a test wants to say so once, not to reason about what a divisor made of it — and the
+// timer is `unref`'d and cleared in `close`, so maintenance is never why a process is still alive.
 
 import type { Args } from "../client/protocol.ts"
 import {
@@ -129,6 +135,8 @@ export class ServerRuntime {
   #onTenantOpen: ((tenant: Tenant) => void) | null = null
   #onError: (err: unknown) => void
   #closed = false
+  /** The `<dataDir>/trash/` sweep. Null when `retention` or the interval turns it off. */
+  #trashSweeper: ReturnType<typeof setInterval> | null = null
 
   constructor(options: RuntimeOptions) {
     this.config = options.config
@@ -174,6 +182,31 @@ export class ServerRuntime {
       withoutReplicas: options.config.replication.ackWithoutReplicas,
     })
     this.forwarder = new Forwarder(this)
+    this.#startTrashSweep()
+  }
+
+  /**
+   * Sweeps `<dataDir>/trash/` now and on the configured interval. Deleting a database moves its
+   * directory aside and removes nothing, so this is what keeps a node that churns databases from
+   * growing a trash directory for ever. The first sweep is synchronous: it is a `readdir` of a
+   * directory that is usually empty, and doing it at start is what makes a node that has been
+   * down past its retention come back clean.
+   */
+  #startTrashSweep(): void {
+    const retentionMs = parseRetentionMs(this.config.durability.retention)
+    if (retentionMs <= 0) return
+    const sweep = (): void => {
+      try {
+        this.registry.sweepTrash(retentionMs)
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
+    sweep()
+    const every = this.config.durability.trashSweepIntervalMs
+    if (!(every > 0)) return
+    this.#trashSweeper = setInterval(sweep, every)
+    this.#trashSweeper.unref?.()
   }
 
   /**
@@ -689,6 +722,10 @@ export class ServerRuntime {
       }
     }
     this.#txQueue.clear()
+    if (this.#trashSweeper !== null) {
+      clearInterval(this.#trashSweeper)
+      this.#trashSweeper = null
+    }
     this.acks.close()
     // The awaitable form is `closeStorage()`, which `startServer`'s handle calls first; this is
     // the backstop for a caller that closes the runtime directly.

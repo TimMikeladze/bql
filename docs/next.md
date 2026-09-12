@@ -6,8 +6,8 @@ Written 2026-09-12 at the end of the session that built phase 1. Read this, then
 ## Where things stand
 
 Phases 0 and 1 are complete on `main`, pushed to **https://github.com/TimMikeladze/bunql**
-(private; `origin/main` is current), working tree clean. `bun test` → 867 pass, 2 skip, 0 fail
-across 63 files. `bun run typecheck` clean. `bun run bench` meets every design §10 budget but one
+(private; `origin/main` is current), working tree clean. `bun test` → 874 pass, 2 skip, 0 fail
+across 65 files. `bun run typecheck` clean. `bun run bench` meets every design §10 budget but one
 (WebSocket mixed throughput, below). Zero runtime dependencies.
 
 | area | module | state |
@@ -114,29 +114,32 @@ What phase 1 added to the list:
   but blunt.
 - **`maxOpenTx` is fixed at 1** by the tenant having one writer. `txWaitMs` is the knob that
   matters. Worth revisiting only with `workers: N`.
-- **Deleted databases are moved to `<dataDir>/trash/` and nothing sweeps it.** A long-lived node
-  that churns databases grows a trash directory forever.
 - **The S3 shipper re-uploads an open segment as it grows.** Cheap here (633 bytes a record on the
   bench), but a workload with large transactions pays for the same bytes more than once. Ship
   closed segments only, or upload ranges.
 
 ## Start here, before milestone 1
 
-Two things are cheap and should land before the control plane, because they are bugs rather than
-features:
+Both items that stood here have landed — `fix(server): refuse admin writes on a replica instead of
+acting locally` and `fix(tenant): sweep the trash directory on the log's retention` — so milestone
+1, the control plane, is the next thing to build.
 
-1. ~~**Admin routes on a replica act locally.**~~ Landed: `POST /v1/db`, `DELETE /v1/db/{db}`,
-   `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import` answer `503 NOT_PRIMARY` with
-   `BunQL-Primary` on a replica. The gate is `requirePrimary` in `src/server/routes.ts`, at the
-   HTTP layer only — the replication client still creates and deletes tenants through the
-   registry, which is how a bootstrap works at all. **Promotion (milestone 2) has to flip
-   `runtime.role`, not just the catalog row**, or a promoted node will keep refusing its own
-   lifecycle routes.
-2. **Nothing sweeps `<dataDir>/trash/`.** Give it the retention the log already has.
+What they changed, in case it matters to phase 2:
 
-Found along the way and still open: **a delete on the primary does not remove the replica's copy.**
-`DELETE /v1/db/{db}` tombstones the catalog row on the primary and announces the new database list,
-but a replica that has already bootstrapped the database keeps it and simply stops receiving
+- `POST /v1/db`, `DELETE /v1/db/{db}`, `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import`
+  answer `503 NOT_PRIMARY` with `BunQL-Primary` on a replica. The gate is `requirePrimary` in
+  `src/server/routes.ts`, at the HTTP layer only: the replication client still creates and deletes
+  tenants through the registry, which is how a bootstrap works at all. **Promotion (milestone 2)
+  has to flip `runtime.role`, not just the catalog row**, or a promoted node will keep refusing its
+  own lifecycle routes.
+- `[durability] retention` now has a consumer — it was a dead key before — and a new
+  `[durability] trashSweepIntervalMs` beside it. `sweepTrash(dataDir, retentionMs, now?, onError?)`
+  in `src/tenant/registry.ts` is pure; `ServerRuntime` calls it at start and on the interval. The
+  local transaction log is still never pruned, which is the next thing that key could grow into.
+
+Still open, and still cheap: **a delete on the primary does not remove the replica's copy.**
+`DELETE /v1/db/{db}` tombstones the catalog row on the primary and announces the new database
+list, but a replica that has already bootstrapped the database keeps it and simply stops receiving
 records for it. `test/server/replica.test.ts` documents the behaviour rather than asserting it away.
 
 ## House rules for this repo

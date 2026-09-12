@@ -16,6 +16,7 @@ export {
   type RegistryOptions,
   type RegistryStats,
   type SnapshotInstall,
+  sweepTrash,
   TenantRegistry,
   trashDir,
 } from "./registry.ts"
