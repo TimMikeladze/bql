@@ -389,6 +389,10 @@ fenced on reconnect.
 - Failover: lease expires → Raft leader picks the replica with the highest acked txid →
   new epoch → clients are redirected (`307` with `BunQL-Primary` header, or WS `moved` frame).
 - Alternative adapters (`coordination: "etcd" | "postgres"`) are possible but not planned.
+- With `[server] workers > 1` the control plane stays on the router thread and the lease deadline
+  is *pushed* to the worker that takes the write, converted onto that thread's own monotonic clock
+  (C4d). The rule above is the reason: the data plane never waits on the control plane, and a
+  worker that had to ask for a lease would be waiting on it through a channel instead of a socket.
 
 ### 5.4 Consistency guarantees, stated plainly
 - Per database: serializable on the primary (one writer, SQLite).
@@ -427,10 +431,16 @@ thread that holds the writer. It is one class in three modes rather than two cla
 decision exists once. What that buys is narrower than it looks and the measurement says so: a
 replica's **HTTP** reads go 34 600/s to 55 300/s at six workers (1.60x, flat past two), while its
 **socket** reads go 259 700 to 232 300 (0.90x), because every frame is relayed by the router and a
-point read is cheaper than the hop. `workers > 1` still refuses to join a cluster
-(`[cluster] enabled`): the Raft lease is consulted on the write path, which is now a worker, and a
-worker must not block on the control plane (§5.3). Scale-out beyond one node is still more nodes
-with tenant placement.
+point read is cheaper than the hop.
+**And it joins a cluster** (C4d, `docs/c4d-cluster-workers.md`), which was the last combination
+refused. The `ClusterNode` stays whole on the router — the Raft log, the socket, the timers,
+renewal and failover are one per node — and the `Promoter` runs on the worker over its own shard,
+because a claim, an ack and a promotion request are all made of tenant facts. What crosses for the
+write path is one thing, downward only: the lease *deadline*, converted into the worker's own
+monotonic clock with an offset the worker measures itself, because each Bun worker thread has its
+own `performance.timeOrigin`. §5.3's rule is kept exactly — the state is pushed, never asked for —
+and the write path costs no message at all: **86 573 writes/s at six workers clustered against
+86 754 plain**. Scale-out beyond one node is still more nodes with tenant placement.
 
 ## 6. HTTP API (JSON)
 

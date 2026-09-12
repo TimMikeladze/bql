@@ -6,7 +6,12 @@
 // before the `fetch` fallback runs, which is what keeps the query path free of URL parsing.
 
 import { HEADERS, WS_PROTOCOL } from "../client/protocol.ts"
-import { RAFT_PATH, type RaftSocket, type RaftSocketData } from "../cluster/index.ts"
+import {
+  type ClusterLink,
+  RAFT_PATH,
+  type RaftSocket,
+  type RaftSocketData,
+} from "../cluster/index.ts"
 import type { ReplicationSocket } from "../replication/index.ts"
 import {
   hranaRoutes,
@@ -41,6 +46,7 @@ import {
   routingName,
   type RelaySocketData,
 } from "./workers/router.ts"
+import { ClusterShards, PROBES_AT_START } from "./workers/cluster.ts"
 import { WorkerPool } from "./workers/pool.ts"
 import { ReplicationRouter } from "./workers/replication.ts"
 import { followHost, WorkerShards } from "./workers/replica.ts"
@@ -346,7 +352,7 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           return
         }
         if (isCluster(ws.data as AppSocketData)) {
-          runtime.cluster?.socket.onOpen(ws as unknown as RaftSocket)
+          runtime.cluster?.socket?.onOpen(ws as unknown as RaftSocket)
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
@@ -369,7 +375,7 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           return
         }
         if (isCluster(ws.data as AppSocketData)) {
-          runtime.cluster?.socket.onMessage(ws as unknown as RaftSocket, message as Uint8Array)
+          runtime.cluster?.socket?.onMessage(ws as unknown as RaftSocket, message as Uint8Array)
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
@@ -406,7 +412,7 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           return
         }
         if (isCluster(ws.data as AppSocketData)) {
-          runtime.cluster?.socket.onClose(ws as unknown as RaftSocket)
+          runtime.cluster?.socket?.onClose(ws as unknown as RaftSocket)
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
@@ -564,7 +570,20 @@ function upgradeCluster(
       ),
     )
   }
-  const outcome = cluster.socket.onUpgrade(request)
+  const handlers = cluster.socket
+  if (!handlers) {
+    // The transport is built by `start()`, and a worker never has one at all: the router owns the
+    // listener, so an upgrade cannot reach a worker's runtime. Either way this says where the
+    // control plane is instead of throwing a 500 at a peer (C4d §5).
+    return errorResponse(
+      new BunQLError(
+        "CLUSTER_DISABLED",
+        "this node's raft transport is not running, so it cannot accept a peer",
+        503,
+      ),
+    )
+  }
+  const outcome = handlers.onUpgrade(request)
   if (outcome instanceof Response) return outcome
   const ok = (server as UpgradeHost).upgrade(request, { data: outcome.data })
   if (ok) return undefined
@@ -647,6 +666,12 @@ export async function createRuntime(
   options: Pick<StartOptions, "registry" | "onError" | "onTenantOpen"> & {
     /** C4b: which half of `/v1/replication` this runtime holds. `ServerRuntime`'s own default. */
     replicationMode?: "own" | "none" | "hosted"
+    /** C4d: which half of the control plane it holds. */
+    clusterMode?: "own" | "routed" | "hosted"
+    /** C4d: a worker's link to the router's control plane, for `clusterMode: "hosted"`. */
+    clusterLink?: ClusterLink | null
+    /** C4d: the shard this runtime is, when it is a worker. */
+    shard?: { index: number; workers: number }
   } = {},
 ): Promise<RuntimeBundle> {
   const resolved = await resolveAuth(config)
@@ -669,6 +694,9 @@ export async function createRuntime(
     ...(options.onError ? { onError: options.onError } : {}),
     ...(options.onTenantOpen ? { onTenantOpen: options.onTenantOpen } : {}),
     ...(options.replicationMode ? { replicationMode: options.replicationMode } : {}),
+    ...(options.clusterMode ? { clusterMode: options.clusterMode } : {}),
+    ...(options.clusterLink ? { clusterLink: options.clusterLink } : {}),
+    ...(options.shard ? { shard: options.shard } : {}),
   })
   catalog = runtime.registry.catalog
   return {
@@ -705,7 +733,7 @@ export async function startServer(
   const resolved: RuntimeBundle = owned
     ? await createRuntime(config, {
         ...options,
-        ...(workers > 1 ? ({ replicationMode: "none" } as const) : {}),
+        ...(workers > 1 ? ({ replicationMode: "none", clusterMode: "routed" } as const) : {}),
       })
     : {
         runtime: options.runtime as ServerRuntime,
@@ -719,12 +747,23 @@ export async function startServer(
   // `startServer` rather than leaving a node that answers `DB_NOT_FOUND` for a shard.
   const onError = options.onError ?? ((err: unknown) => console.error("bunql:", err))
   const pool = workers > 1 ? await WorkerPool.start(config, onError) : null
+  /** C4d's probe tick, or null on a node that is not both clustered and sharded. */
+  let clusterProbe: ReturnType<typeof setInterval> | null = null
   // C4c: with workers, the one upstream connection is this thread's and every stream is a
   // worker's, so the client is built in `"routed"` mode over the pool. Set before
   // `startReplication` below, because which mode the client is in is decided at construction.
   if (pool && config.replication.primary) {
     const shards = new WorkerShards(pool, onError)
     runtime.setShardHost(shards)
+  }
+  // C4d: the control plane is this thread's, and every `Promoter` that talks to it is a worker's.
+  // The link is the view pushed on every commit that changed it — plus the clock probe, because
+  // each worker has its own `performance.timeOrigin` and a lease deadline is an instant on a
+  // clock. `docs/c4d-cluster-workers.md` §3.1.
+  const clusterShards = pool && runtime.cluster ? new ClusterShards(pool, runtime.cluster, onError) : null
+  if (pool && clusterShards) {
+    pool.setClusterHost(clusterShards)
+    runtime.cluster?.onChange(() => clusterShards.push())
   }
 
   const app = pool ? await createApp(runtime, pool) : await createApp(runtime)
@@ -742,7 +781,12 @@ export async function startServer(
     // A worker has no subscribers; everything it publishes arrives here and goes out over Bun's
     // own pub/sub, which is the whole cross-worker change-feed story (`docs/c4-workers.md` §3).
     const publisher = busPublisher(server)
-    pool.setHost({ publish: (topic, data) => publisher.publish(topic, data) })
+    pool.setHost({
+      publish: (topic, data) => publisher.publish(topic, data),
+      // C4d: the router's own view of which databases it authors is a read of the catalog, and a
+      // worker's promotion rewrote a row in it without passing through this thread's `onChange`.
+      roleChanged: () => runtime.promoter.refresh(),
+    })
   }
   runtime.setPublisher(busPublisher(server))
   // Design §5.3's `moved`: a promotion or a fencing tells every socket that has named the database
@@ -751,6 +795,16 @@ export async function startServer(
   // A replica starts following only once it is listening: its own `/v1/replication` may be the
   // upstream of a third node, and a chain that opens sockets before it can answer them is racy.
   if (owned) await runtime.startCluster()
+  if (clusterShards) {
+    // Probes before the first view, so an offset is measured rather than guessed; a deadline that
+    // arrives first waits on the worker rather than being converted against nothing.
+    for (let i = 0; i < PROBES_AT_START; i++) clusterShards.probe()
+    clusterShards.push()
+    // The offset does not drift — both origins are fixed at thread start and both clocks are the
+    // same OS monotonic clock — but the bound tightens, and this tick already exists.
+    clusterProbe = setInterval(() => clusterShards.probe(), config.cluster.leaseRenewMs)
+    clusterProbe.unref?.()
+  }
   if (owned) runtime.startReplication()
   // C4c: the workers report what is not a frame — an install, a divergence, a disposed copy, a
   // forwarded write, C2's detach — and each is a decision the one `"routed"` client owns.
@@ -787,10 +841,12 @@ export async function startServer(
       // while the workers its streams live on are still there to be told.
       if (pool) runtime.replica?.stop()
       await server.stop(true)
+      if (clusterProbe !== null) clearInterval(clusterProbe)
       if (pool) {
         pool.setHost(null)
         pool.setReplicationHost(null)
         pool.setFollowHost(null)
+        pool.setClusterHost(null)
         await pool.close()
       }
       // Everything committed before the listener stopped belongs in the bucket, so the shippers

@@ -1,11 +1,15 @@
 // What `[server] workers` is worth (`docs/c4-workers.md`, phase-2 milestone 4).
 //
 //   bun run bench/workers.ts [--workers 1,2,4] [--dbs 8] [--concurrent 64] [--seconds 5]
-//                            [--replication] [--follow] [--transport ws|http]
+//                            [--replication] [--follow] [--cluster] [--transport ws|http]
 //
 // `--replication` (C4b) attaches a real replica to every node on the ladder before the load starts,
 // so the figure is what a node does while it is also serving its replicas — each commit crossing
 // the worker channel as one frame on its way to the socket the router holds.
+//
+// `--cluster` (C4d) makes each rung a one-node Raft cluster, so every write on it consults a real
+// lease on the worker that took it. The claim is that it costs a `Map.get` and a `performance.now()`
+// — the same as on one thread — so this ladder should land on the plain one.
 //
 // `--follow` (C4c) turns the ladder round: each rung is a *replica* of one single-threaded primary,
 // and the load is **reads**, because a node that follows an upstream takes no writes. This is the
@@ -40,6 +44,8 @@ const SECONDS = Number(flag("seconds", "5"))
 const REPLICATION = Bun.argv.includes("--replication")
 /** C4c: make each rung a replica of one primary, and measure reads. */
 const FOLLOW = Bun.argv.includes("--follow")
+/** C4d: make each rung a one-node cluster, so the write path consults a lease on a worker. */
+const CLUSTER = Bun.argv.includes("--cluster")
 /** Which surface the load uses. See `bench/workers-client.ts` for why it changes the answer. */
 const TRANSPORT = flag("transport", "ws")
 const SECRET = "bench-cluster-secret-0123456789"
@@ -153,14 +159,27 @@ async function run(workers: number): Promise<number> {
       "127.0.0.1",
       "--workers",
       String(workers),
-      ...(REPLICATION || FOLLOW ? ["--cluster-secret", SECRET] : []),
+      ...(REPLICATION || FOLLOW || CLUSTER ? ["--cluster-secret", SECRET] : []),
       // C4c: this rung *is* the replica, and the load below reads from it.
       ...(FOLLOW && upstream ? ["--replica-of", `ws://127.0.0.1:4399/v1/replication`] : []),
     ],
     {
       stdout: "ignore",
       stderr: "inherit",
-      env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+      env: {
+        ...process.env,
+        BUNQL_AUTH_ADMIN_KEY: ADMIN,
+        BUNQL_CONFIG: "",
+        // A cluster of one: it is its own raft leader, so every write goes through a lease this
+        // node granted itself and renews on the router, and reads on a worker.
+        ...(CLUSTER
+          ? {
+              BUNQL_CLUSTER_ENABLED: "1",
+              BUNQL_CLUSTER_BOOTSTRAP: "1",
+              BUNQL_CLUSTER_ADVERTISE: `ws://127.0.0.1:${port}`,
+            }
+          : {}),
+      },
     },
   )
   let replica: Bun.Subprocess | null = null

@@ -22,7 +22,7 @@
 
 import type { Args } from "../client/protocol.ts"
 import path from "node:path"
-import { ClusterNode, raftUrl } from "../cluster/index.ts"
+import { type ClusterLink, ClusterNode, raftUrl } from "../cluster/index.ts"
 import {
   AckTimeout,
   AckTracker,
@@ -63,6 +63,7 @@ import { Forwarder, runForward } from "./forward.ts"
 import { FencedNotice, httpBase, type NodeRole, Promoter } from "./promote.ts"
 import { decodeArgs, encodeRows, type EncodedRows } from "./json.ts"
 import { Metrics } from "./metrics.ts"
+import { shardOf } from "./workers/shard.ts"
 
 /** An interactive transaction held open across requests or WebSocket messages (design §6.3). */
 export interface TxSession {
@@ -114,6 +115,25 @@ export interface RuntimeOptions {
    *   router. `docs/c4b-replication-workers.md`.
    */
   replicationMode?: "own" | "none" | "hosted"
+  /**
+   * C4d: which half of the control plane this runtime holds.
+   *
+   * - `"own"` (default) — a single-threaded node: a real `ClusterNode` and a `Promoter` that does
+   *   everything.
+   * - `"routed"` — the router thread of a `workers > 1` node: a real `ClusterNode`, and a
+   *   `Promoter` whose control-plane half is off, because a claim, an ack and a promotion request
+   *   are all made of tenant facts and every tenant is on a worker.
+   * - `"hosted"` — a worker thread: a `HostedCluster` over the router's pushed view, and a
+   *   `Promoter` doing everything over its own shard. `docs/c4d-cluster-workers.md`.
+   */
+  clusterMode?: "own" | "routed" | "hosted"
+  /**
+   * C4d: the shard this runtime is, when it is a worker. `owns(db)` is what keeps the claim loops
+   * — which read the node-level catalog — from claiming every database from every thread.
+   */
+  shard?: { index: number; workers: number }
+  /** C4d: the worker's `HostedCluster`. Only read when `clusterMode` is `"hosted"`. */
+  clusterLink?: ClusterLink | null
 }
 
 export class ServerRuntime {
@@ -131,7 +151,7 @@ export class ServerRuntime {
    * The control plane, or null when `[cluster] enabled` is false. The data path touches it in
    * exactly one place — `assertWritable` — and never awaits it.
    */
-  readonly cluster: ClusterNode | null
+  readonly cluster: ClusterLink | null
   /** Which databases this node is the primary for, and the only thing that changes that. */
   readonly promoter: Promoter
   /**
@@ -141,12 +161,18 @@ export class ServerRuntime {
   readonly replication: ReplicationServer | null
   /** C4b: `"own"` on a single-threaded node, `"none"` on a router, `"hosted"` in a worker. */
   readonly replicationMode: "own" | "none" | "hosted"
+  /** C4d: `"own"` on a single-threaded node, `"routed"` on a router, `"hosted"` in a worker. */
+  readonly clusterMode: "own" | "routed" | "hosted"
   /** The replica's client, or null on a primary. Started by `startServer`, stopped by `close`. */
   replica: ReplicaClient | null = null
   /** C4c: where a `"routed"` client's per-database work happens, on a node with workers. */
   #shards: ShardHost | null = null
   /** C4c: where a worker sends `followPrimary`, since the one client is on the router. */
   #onFollowPrimary: ((url: string) => void) | null = null
+  /** C4d: this worker's shard, or null on a thread that owns every database it is asked about. */
+  #shard: { index: number; workers: number } | null = null
+  /** C4d: where a worker reports a role flip, since the router's catalog read cannot see it. */
+  #onRoleChanged: ((db: string, role: NodeRole) => void) | null = null
   /** R2: the waiter behind `ack: "replica" | "quorum"`. */
   readonly acks: AckTracker
   /** R2: the path a write takes off a replica. `enabled` is false everywhere else. */
@@ -254,7 +280,16 @@ export class ServerRuntime {
       withoutReplicas: options.config.replication.ackWithoutReplicas,
     })
     this.forwarder = new Forwarder(this)
-    this.cluster = buildClusterNode(options.config, this.#onError)
+    this.clusterMode = options.clusterMode ?? "own"
+    this.#shard = options.shard ?? null
+    // C4d: a worker holds no Raft log, no socket and no timer — the router holds one of each for
+    // the node — so its link to the control plane is a `HostedCluster` over the table the router
+    // pushes it, handed in by `entry.ts` rather than built here, which keeps this module from
+    // importing the worker channel it knows nothing else about.
+    this.cluster =
+      this.clusterMode === "hosted"
+        ? (options.clusterLink ?? null)
+        : buildClusterNode(options.config, this.#onError)
     this.promoter = new Promoter(this)
     this.cluster?.onChange(() => this.promoter.onClusterChange())
     this.#startSweep()
@@ -304,7 +339,20 @@ export class ServerRuntime {
   async startCluster(): Promise<void> {
     if (!this.cluster) return
     await this.cluster.start()
-    this.promoter.start()
+    // C4d: the router's `Promoter` claims nothing, acks nothing and promotes nothing — a claim, an
+    // ack and a promotion request are all made of tenant facts, and every tenant is on a worker.
+    // It keeps `roleFor` and `primaryFor`, which the node-level routes read.
+    if (this.clusterMode !== "routed") this.promoter.start()
+  }
+
+  /**
+   * Whether this thread owns `db`. True everywhere except on a worker, where it is the shard
+   * function — so the claim loops, which read the node-level catalog, do not claim every database
+   * from every thread. The same rule `entry.ts` asserts on a hopped request, applied to a loop.
+   */
+  owns(db: string): boolean {
+    const shard = this.#shard
+    return shard === null || shardOf(db, shard.workers) === shard.index
   }
 
   /**
@@ -597,6 +645,19 @@ export class ServerRuntime {
   /** C4b §6's gap: where a worker sends a demotion's convergence, since the router holds the client. */
   setFollowPrimaryHandler(handler: ((url: string) => void) | null): void {
     this.#onFollowPrimary = handler
+  }
+
+  /**
+   * C4d: where a worker reports a role flip. The router reads the catalog for `BunQL-Role` and for
+   * the `requirePrimary` gate, and a row another thread rewrote fires no `onChange` here.
+   */
+  setRoleHandler(handler: ((db: string, role: NodeRole) => void) | null): void {
+    this.#onRoleChanged = handler
+  }
+
+  /** Called by `Promoter.#flip`, the one place a database's role changes. */
+  roleChanged(db: string, role: NodeRole): void {
+    this.#onRoleChanged?.(db, role)
   }
 
   /**

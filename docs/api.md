@@ -173,11 +173,11 @@ should be told about three:
 The body is judged **after** the token and the database, so a request that may not be here is still
 `401` or `404` rather than a `400` describing what the route would have taken.
 
-`WORKERS_UNSUPPORTED` is the one code raised at startup rather than for a request: `[server]
-workers` above 1 shards databases across threads, and one thing a node can be configured for does
-not work that way yet — joining a cluster. Such a node refuses to start and says so. Both halves of
-replication are supported: *serving* replicas (`docs/c4b-replication-workers.md`) and *following*
-an upstream (`docs/c4c-replication-follow.md`).
+There is no startup-only error code any more. `[server] workers` above 1 shards databases across
+threads and can be combined with everything a node can be configured for: *serving* replicas
+(`docs/c4b-replication-workers.md`), *following* an upstream (`docs/c4c-replication-follow.md`) and
+*joining a cluster* (`docs/c4d-cluster-workers.md`). `WORKERS_UNSUPPORTED` named the combinations
+that were once refused and is gone with the last of them.
 
 | code | status | when |
 |---|---|---|
@@ -1460,9 +1460,14 @@ at six over HTTP** (1.60x, flat past two workers), against **259 700 and 232 300
 WebSocket** — 0.90x, because every socket frame is relayed by the router and a point read is
 cheaper than the hop. `bun run bench/workers.ts --follow [--transport http]`.
 
-**`workers > 1` still cannot be combined with `[cluster] enabled`** — the node refuses to start
-with `WORKERS_UNSUPPORTED`: the Raft lease is consulted on the write path, which is now a worker,
-and a worker must not block on the control plane. `docs/c4c-replication-follow.md` §7.
+**`workers > 1` can now be combined with everything, `[cluster] enabled` included**
+(`docs/c4d-cluster-workers.md`). The `ClusterNode` stays whole on the router — the Raft log, the
+socket, the timers, renewal and failover are one per node — and only the lease *deadline* is pushed
+down, converted into the worker's own monotonic clock, because each worker thread has its own
+`performance.timeOrigin`. The write path is unchanged by it: a six-worker clustered node does
+**86 573 writes/s against a plain one's 86 754**, because `assertWritable` on a worker is the same
+`Map.get` and `performance.now()` it is on one thread and costs no message at all.
+`bun run bench/workers.ts --cluster`.
 
 ## Configuration
 

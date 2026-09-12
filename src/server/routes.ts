@@ -1253,6 +1253,15 @@ export const cluster: Handler = async (ctx) => {
     )
   }
   const view = node.observe()
+  if (!view) {
+    // C4d: only reachable through a routing bug. `/v1/cluster` names no database, so the router —
+    // the thread that holds the raft log, the term and the transport — is what answers it.
+    throw new BunQLError(
+      "CLUSTER_DISABLED",
+      "the control plane runs on this node's router thread, which is what answers /v1/cluster",
+      503,
+    )
+  }
   return json({
     ...view,
     // The lease is the one thing in the view a reader cannot interpret without knowing whose clock

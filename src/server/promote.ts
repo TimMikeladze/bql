@@ -18,7 +18,7 @@
 // the tenant.
 
 import {
-  type ClusterNode,
+  type ClusterLink,
   decidePromotion,
   type PromotionOutcome,
   type PromotionRequest,
@@ -305,6 +305,10 @@ export class Promoter {
       this.runtime.replica?.attach(db)
     }
     this.runtime.replication?.announce()
+    // C4d: and so is the router, when this is a worker. It derives `BunQL-Role` and the
+    // `requirePrimary` gate from its own read of the catalog, and this row was rewritten on a
+    // thread whose `onChange` it cannot hear.
+    this.runtime.roleChanged(db, role)
     // The role this node plays for the database has changed, so the control plane is told. Never
     // awaited from here: `#flip` is called from the write-adjacent paths and from a cluster
     // notification, neither of which may block on a round trip.
@@ -313,7 +317,13 @@ export class Promoter {
 
   // ── the control plane ────────────────────────────────────────────────────────────────────────
 
-  /** Starts the position reporter. Called beside `startReplication`. */
+  /**
+   * Starts the position reporter. Called beside `startReplication`.
+   *
+   * C4d: never on the router of a sharded node. `ServerRuntime.startCluster` does not call it
+   * there, because a claim, an ack and a promotion request are made of tenant facts and the router
+   * holds no tenant — an eighth claimant with no copy of anything.
+   */
   start(): void {
     if (this.#ackTimer !== null || !this.runtime.cluster) return
     this.claimAll()
@@ -335,14 +345,22 @@ export class Promoter {
     const cluster = this.runtime.cluster
     if (!cluster) return
     this.refresh()
-    for (const row of this.runtime.registry.list()) void this.claim(row.name)
+    for (const row of this.runtime.registry.list()) {
+      if (this.runtime.owns(row.name)) void this.claim(row.name)
+    }
     cluster.setOwned(this.#ownedNames())
   }
 
+  /**
+   * The databases this thread is the primary for. `registry.list()` reads the catalog, which is
+   * node-level, so on a worker it lists every shard's databases and `owns` is what keeps this
+   * thread from claiming — and renewing — seven other threads' leases (C4d §3.2). The router
+   * unions the N answers; one shard never replaces the node's set.
+   */
   #ownedNames(): string[] {
     const owned: string[] = []
     for (const row of this.runtime.registry.list()) {
-      if (row.role !== "replica") owned.push(row.name)
+      if (row.role !== "replica" && this.runtime.owns(row.name)) owned.push(row.name)
     }
     return owned
   }
@@ -356,7 +374,7 @@ export class Promoter {
    */
   async claim(db: string): Promise<void> {
     const cluster = this.runtime.cluster
-    if (!cluster || this.#claiming.has(db)) return
+    if (!cluster || this.#claiming.has(db) || !this.runtime.owns(db)) return
     this.#claiming.add(db)
     try {
       await this.#claim(cluster, db)
@@ -365,7 +383,7 @@ export class Promoter {
     }
   }
 
-  async #claim(cluster: ClusterNode, db: string): Promise<void> {
+  async #claim(cluster: ClusterLink, db: string): Promise<void> {
     cluster.setOwned(this.#ownedNames())
     const role = this.roleFor(db)
     if (!this.runtime.registry.has(db)) return
@@ -434,6 +452,7 @@ export class Promoter {
     if (!cluster || this.#closed) return
     const me = this.runtime.node
     for (const row of this.runtime.registry.list()) {
+      if (!this.runtime.owns(row.name)) continue
       const entry = cluster.state.dbs[row.name]
       const role = this.roleFor(row.name)
       const stale =
@@ -450,7 +469,7 @@ export class Promoter {
     const cluster = this.runtime.cluster
     if (!cluster || this.#closed) return
     for (const name of this.runtime.registry.openNames) {
-      if (!cluster.knows(name)) continue
+      if (!cluster.knows(name) || !this.runtime.owns(name)) continue
       let txid: bigint
       try {
         txid = this.runtime.registry.open(name).txid
@@ -473,7 +492,12 @@ export class Promoter {
   onClusterChange(): void {
     const cluster = this.runtime.cluster
     if (!cluster || this.#closed) return
-    for (const entry of cluster.observe().dbs) {
+    // C4d: on the router of a sharded node this is somebody else's news. Promotion and demotion
+    // both go through `#flip`, which evicts, detaches, reopens and rewrites a catalog row — all on
+    // the thread that holds the tenant.
+    if (this.runtime.clusterMode === "routed") return
+    for (const entry of cluster.observeDbs()) {
+      if (!this.runtime.owns(entry.db)) continue
       const holder = entry.lease?.node ?? entry.primary
       if (!holder) continue
       if (holder !== cluster.id) {

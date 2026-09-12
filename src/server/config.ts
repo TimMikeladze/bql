@@ -775,43 +775,27 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
 }
 
 /**
- * What `[server] workers` may be combined with.
+ * What `[server] workers` may be combined with: **everything, as of C4d.**
  *
- * **Serving replicas is allowed as of C4b** (`docs/c4b-replication-workers.md`): the router owns
- * the replication socket and the worker that owns a database owns that database's stream, so
- * `tenant.onCommit`, `tenant.log`, `tenant.snapshot()` and `registry.pin` are still called on the
- * thread that holds the writer and nothing about a `Tenant` crosses the channel.
+ * - **Serving replicas** (C4b, `docs/c4b-replication-workers.md`): the router owns the replication
+ *   socket and the worker that owns a database owns that database's stream, so `tenant.onCommit`,
+ *   `tenant.log`, `tenant.snapshot()` and `registry.pin` are still called on the thread that holds
+ *   the writer and nothing about a `Tenant` crosses the channel.
+ * - **Following an upstream** (C4c, `docs/c4c-replication-follow.md`): the same seam, cut the other
+ *   way. The router owns the one upstream connection — the socket, the reconnect, the proof, the
+ *   frame reader, the generation ledger and R7's reconciliation — and the worker owns the stream.
+ * - **The cluster** (C4d, `docs/c4d-cluster-workers.md`): the `ClusterNode` stays whole on the
+ *   router and only the lease *deadline* crosses, converted into the worker's own monotonic clock
+ *   with an offset it measured itself. `assertWritable` on a worker is one `Map.get` and one
+ *   `performance.now()` and costs no message at all, which is design §5.3's rule.
  *
- * **Following an upstream is allowed as of C4c** (`docs/c4c-replication-follow.md`): the same seam,
- * cut the other way. The router owns the one upstream connection — the socket, the reconnect, the
- * proof, the frame reader, the generation ledger and R7's reconciliation — and the worker that owns
- * a database owns that database's stream, so `registry.openReplica`, the snapshot file,
- * `installSnapshot`, `registry.pin` and `tenant.applyRecord` all run on the thread that holds the
- * writer.
- *
- * One combination is still refused, for its own reason rather than for either of those:
- *
- * - **`[cluster] enabled`** — the Raft lease is consulted on the write path, which is now a worker,
- *   and a worker must not block on the control plane (design §5.3). It wants the lease state
- *   *pushed* down the channel, which is a different milestone.
+ * So all this function has left is the range check.
  */
 function assertWorkers(config: ServerConfig): void {
   const n = config.server.workers
-  if (!Number.isFinite(n) || n < 0) {
-    throw BunQLError.badRequest(
-      `[server] workers must be 0 (one per core) or a positive count, got ${JSON.stringify(n)}`,
-    )
-  }
-  if (n === 1) return
-  if (!config.cluster.enabled) return
-  throw new BunQLError(
-    "WORKERS_UNSUPPORTED",
-    `[server] workers = ${n} cannot be combined with [cluster] enabled: the Raft lease is ` +
-      "consulted on the write path, which is now a worker, and a worker must not block on the " +
-      "control plane. Run this node with workers = 1, or without it. Serving replicas and " +
-      "following an upstream are both supported — see docs/c4b-replication-workers.md and " +
-      "docs/c4c-replication-follow.md.",
-    400,
+  if (Number.isFinite(n) && n >= 0) return
+  throw BunQLError.badRequest(
+    `[server] workers must be 0 (one per core) or a positive count, got ${JSON.stringify(n)}`,
   )
 }
 

@@ -41,6 +41,7 @@ import {
   newHranaSocketData,
   type HranaSocketData,
 } from "../hrana/index.ts"
+import { HostedCluster } from "./cluster.ts"
 import { bindingsOf, headerPairs, type FromWorker, type ToWorker } from "./protocol.ts"
 import { shardOf } from "./shard.ts"
 
@@ -76,6 +77,8 @@ interface WorkerState {
   index: number
   workers: number
   runtime: ServerRuntime
+  /** C4d: this shard's view of the control plane, or null when `[cluster]` is off. */
+  cluster: HostedCluster | null
   app: App
   routes: Route[]
   /**
@@ -290,9 +293,18 @@ const FOLLOW_HOST: ReplicaHost = {
 // ── start ──────────────────────────────────────────────────────────────────────────────────────
 
 async function start(index: number, workers: number, config: ServerConfig): Promise<void> {
+  // C4d: the control plane is the router's — the Raft log, the socket and the timers are one per
+  // node — and this is the table it pushes down, plus the two round trips the `Promoter` here
+  // needs. `holdsLease` on it is one `Map.get`, which is the whole point.
+  const cluster = config.cluster.enabled ? new HostedCluster((message) => post(message)) : null
   // C4b: this runtime's `ReplicationServer` holds streams for the databases this shard owns, and
   // its connections are adopted from the router that owns the sockets.
-  const { runtime } = await createRuntime(config, { replicationMode: "hosted" })
+  const { runtime } = await createRuntime(config, {
+    replicationMode: "hosted",
+    clusterMode: "hosted",
+    clusterLink: cluster,
+    shard: { index, workers },
+  })
   const app = await createApp(runtime)
   // A worker has no subscribers of its own: everything it publishes goes to the router, which owns
   // every socket and fans out over Bun's pub/sub. `docs/c4-workers.md` §3.
@@ -303,6 +315,7 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
     },
   })
   runtime.setMovedHandler((db, primary) => post({ kind: "moved", db, primary }))
+  runtime.setRoleHandler((db, role) => post({ kind: "role", db, role }))
   // C4b: `announce()` in a worker asks the router for one, because the announcement is a fact
   // about the whole node (`plan-phase1.md` finding 1 across threads).
   runtime.replication?.setAnnounceHandler(() => post({ kind: "repl.announce" }))
@@ -312,14 +325,17 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
   runtime.setFollowPrimaryHandler((url) => post({ kind: "follow.primary", url }))
   runtime.startReplication()
   runtime.replica?.adopt(new VirtualUpstreamSocket() as unknown as ClientSocket, FOLLOW_HOST)
+  // C4d: the `Promoter` runs here, over this shard, because a claim, an ack and a promotion
+  // request are all made of tenant facts — `tenant.txid`, `tenant.epoch`, the generation ledger and
+  // the live stream — and `#flip` touches the tenant, the realtime engine and the replica client.
+  await runtime.startCluster()
   // Shipping, retention and snapshots are per database and belong to the thread that owns it.
-  // The cluster is refused by `loadConfig` when `workers > 1`, so it is not started here at all
-  // rather than started into a no-op.
   runtime.startStorage()
   state = {
     index,
     workers,
     runtime,
+    cluster,
     app,
     routes: compile(app.routes),
     sockets: new Map(),
@@ -633,6 +649,21 @@ self.onmessage = (event: MessageEvent): void => {
         ...(message.error ? { error: message.error } : {}),
       })
       return
+    case "cluster.view":
+      current.cluster?.view(message)
+      return
+    case "cluster.probe":
+      current.cluster?.probed(message.id, message.t1)
+      return
+    case "cluster.offset":
+      current.cluster?.offset(message.lower)
+      return
+    case "cluster.proposed":
+      current.cluster?.proposed(message.id, message.ok, message.reason)
+      return
+    case "cluster.promoted":
+      current.cluster?.promoted(message.id, message.outcome)
+      return
     case "repl.positions": {
       const server = current.runtime.replication
       const streams = (server?.positions() ?? []).map((one) => ({
@@ -673,6 +704,7 @@ self.onmessage = (event: MessageEvent): void => {
         for (const socketId of [...current.sockets.keys()]) closeVirtual(current, socketId)
         current.replicas.clear()
         current.runtime.replication?.stop()
+        await current.cluster?.close()
         current.app.surfaces.close()
         await current.runtime.closeStorage()
         current.runtime.close()

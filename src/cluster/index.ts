@@ -1,14 +1,17 @@
 // The public surface of the cluster control plane: the pure Raft state machine, the replicated
-// state it carries, its durable log, its socket, and `ClusterNode` — the one thing the rest of
-// BunQL calls. `docs/plan-phase2.md` C1, design §5.3.
+// state it carries, its durable log, its socket, `ClusterNode`, and `ClusterLink` — the interface
+// the rest of BunQL calls it through, so a worker can be handed the router's one instead
+// (`docs/c4d-cluster-workers.md`). `docs/plan-phase2.md` C1, design §5.3.
 
 export {
   type ClusterNodeOptions,
+  type ClusterLink,
   ClusterNode,
   type ClusterView,
   type ClusterViewDb,
   type ClusterViewNode,
   type LeaseHandle,
+  type RaftHandlers,
 } from "./node.ts"
 export {
   decodeEntry,

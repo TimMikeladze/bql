@@ -34,13 +34,10 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   REPLICATION_DISABLED: 403,
   /** `GET /v1/cluster` on a node with no `[cluster]` section enabled. */
   CLUSTER_DISABLED: 503,
-  /**
-   * `[server] workers > 1` combined with something C4 does not serve across the worker boundary.
-   * Raised by `loadConfig`, so it is a startup refusal rather than a request one — but it is in
-   * the vocabulary because `bunql serve` prints it through the same mapping every other code
-   * takes. `docs/c4-workers.md` §5.
-   */
-  WORKERS_UNSUPPORTED: 400,
+  // `WORKERS_UNSUPPORTED` was here until C4d. It refused `[server] workers > 1` beside something
+  // C4 could not serve across the worker boundary, and there is no longer anything in that set:
+  // C4b lifted serving replicas, C4c lifted following an upstream, C4d lifted the cluster. A code
+  // nothing can raise is a lie in the vocabulary, so it is gone rather than kept for symmetry.
   QUOTA_EXCEEDED: 507,
   INTERNAL: 500,
 }

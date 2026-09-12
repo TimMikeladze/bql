@@ -45,7 +45,7 @@ async function query(node: ClusterServer, db: string, sql: string): Promise<Quer
 }
 
 function dbView(node: ClusterServer, db: string) {
-  return node.handle.runtime.cluster?.observe().dbs.find((one) => one.db === db)
+  return node.handle.runtime.cluster?.observeDbs().find((one) => one.db === db)
 }
 
 /** Waits until every node's control plane agrees on one lease holder for `db`, and returns it. */

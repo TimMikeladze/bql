@@ -116,6 +116,7 @@ legs and the wrong one for the busiest. `docs/c4c-replication-follow.md` §9.
 
 | landed in this session | what it is |
 |---|---|
+| C4d: the Raft lease from a worker | `ClusterLink` in `src/cluster/node.ts` (the whole of what the `Promoter` needs from the control plane), `src/server/workers/cluster.ts` (`HostedCluster` — the pushed table, the measured clock offset, two round trips; and `ClusterShards` — the per-shard owned map, the view push, the relays), `clusterMode: "own" \| "routed" \| "hosted"` and `owns(db)` on `ServerRuntime`, five envelopes down and four up in `workers/protocol.ts` plus `role` for the router's own catalog read, `bench/workers.ts --cluster`, `test/server/workers-cluster.test.ts`. **`[cluster] enabled` beside `workers > 1` no longer refuses — it was the last one, and `WORKERS_UNSUPPORTED` is gone from the vocabulary with it.** The write path costs no message: 86 573 writes/s at six workers clustered against 86 754 plain. `docs/c4d-cluster-workers.md` |
 | C4c: *following* an upstream on a sharded node | `mode: "own" \| "routed" \| "hosted"` on `ReplicaClient` with `ShardHost`/`ReplicaHost` as its two seams, `src/server/workers/replica.ts` (`WorkerShards` + `followHost`, 151 lines of adapter), seven envelopes each way in `workers/protocol.ts`, `VirtualUpstreamSocket` in `workers/entry.ts`, `setShardHost`/`setFollowPrimaryHandler` on `ServerRuntime`, `bench/workers.ts --follow [--transport http]`, `test/server/workers-follow.test.ts` and `test/replication/hosted-follow.test.ts`. **`[replication] primary` beside `workers > 1` no longer refuses**, and C4b §6's `followPrimary` gap is closed. `docs/c4c-replication-follow.md` |
 
 | landed in the session before this one | what it is |
@@ -129,7 +130,7 @@ legs and the wrong one for the busiest. `docs/c4c-replication-follow.md` §9.
 
 | landed three sessions ago | what it is |
 |---|---|
-| C4: `workers: N` | `src/server/workers/` (shard, protocol, pool, entry, router), `[server] workers`, `--workers`, `WORKERS_UNSUPPORTED`, `Metrics.state/absorb`, `bench/workers.ts`. The main thread is a router owning the listener, every socket, the catalog and the authenticator and no database; N workers each hold a whole `ServerRuntime` over a hash shard. `ws.ts`, `routes.ts`, `runtime.ts` and `tenant/` are untouched. `docs/c4-workers.md` |
+| C4: `workers: N` | `src/server/workers/` (shard, protocol, pool, entry, router), `[server] workers`, `--workers`, `WORKERS_UNSUPPORTED` (since removed by C4d, which lifted the last combination it refused), `Metrics.state/absorb`, `bench/workers.ts`. The main thread is a router owning the listener, every socket, the catalog and the authenticator and no database; N workers each hold a whole `ServerRuntime` over a hash shard. `ws.ts`, `routes.ts`, `runtime.ts` and `tenant/` are untouched. `docs/c4-workers.md` |
 | H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
 | H8: `NOT_FOUND: 404` | the data API's `/{pk}` routes answer 404 rather than 200-with-null; GraphQL still answers `null`, through `nullOnNotFound` |
 | H8: `problems` published end to end | `errorBodySchema` declares it, `ErrorInfo` names it, `BunQLClientError.problems` carries it |
@@ -348,12 +349,14 @@ What phase 1 added to the list:
 
 ## Start here
 
-**A, B, C, C4b and C4c are all done.** What is left, biggest first: **C3** (placement and
-`[cluster]`), **H7** (GraphQL subscriptions), **the Raft lease from a worker** (the last
-`WORKERS_UNSUPPORTED`, under A below), and **deferred compression**, which is now the largest
-single line item on a write. Each section below is written so it can be started cold.
+**A, B, C, C4b, C4c and C4d are all done, and C4 is finished: there is no combination
+`[server] workers > 1` refuses any more.** What is left, biggest first: **C3** (placement and
+`[cluster]`), **H7** (GraphQL subscriptions), **deferred compression** (now the largest single line
+item on a write), and **the router's accept-and-hop loop**, which is the ceiling a sharded node's
+HTTP reads flatten against and which nobody has profiled. Each section below is written so it can
+be started cold.
 
-### A. ~~`workers: N`~~ **Done (C4).** ~~C4b~~ and ~~C4c~~ **Done too.** What is left
+### A. ~~`workers: N`~~ **Done (C4).** ~~C4b~~, ~~C4c~~ and ~~C4d~~ **Done too.** What is left
 
 `docs/c4-workers.md` is the decision, the measurements that forced it and the as-built §9.
 **28 809 → 72 817 writes/s at six workers, one port.**
@@ -383,17 +386,29 @@ the ledger stays wholly on the router and the worker reports only *that* a copy 
 are its and the router sends the one field that is not; and `readyz` is still one fact and it is
 the router's.
 
-What is left of C4 is **one** thing:
+**C4d is built too** (`docs/c4d-cluster-workers.md`), and it was the last refusal: `[cluster]
+enabled` beside `workers > 1` starts. The decision was *not* to move the control plane. The
+`ClusterNode` stays whole on the router — the Raft log, the socket, the timers, `propose`, the lease
+cache, renewal and failover — and the `Promoter` runs on the worker over its own shard, because
+every input to a claim, an ack and a promotion request is a tenant fact (`tenant.txid`,
+`tenant.epoch`, the generation ledger, the live stream) and `#flip` touches the tenant, the realtime
+engine and the replica client. What crosses for the write path is one thing, downward only: the
+lease **deadline**.
 
-- **The Raft lease from a worker.** `[cluster] enabled` with `workers > 1` is the last
-  `WORKERS_UNSUPPORTED`, because the lease is consulted on the write path, which is now a worker,
-  and a worker must not block on the control plane (design §5.3). It wants the lease state *pushed*
-  down the channel — the shape `follow.link` uses for the connection state, over a much hotter
-  fact. C4b §6's other caveat, a fenced database on a worker that demoted but could not
-  auto-follow, **C4c closed**: `followPrimary` on a worker now reports to the router's one client.
+The milestone's one genuinely new problem was in that word. A deadline is an instant on
+`performance.now()`, and **each Bun worker has its own `performance.timeOrigin`** — measured, not
+assumed: 2.465 ms apart on one run, −1.28 on another, constant to 64 µs over 2 s. So it cannot cross
+verbatim. Re-stamping a remaining duration on arrival was rejected, because its error is the transit
+time, unbounded when the worker's event loop is busy, and in the unsafe direction. It crosses as an
+instant converted with an offset the worker measures itself over a round trip on monotonic clocks
+only (`t2 − t3 ≤ offset`, the conservative bound, wrong by at most one round trip: 28–204 µs against
+a 500 ms guard). The write path then costs **no message at all** — `assertWritable` on a worker is
+one `Map.get` and one `performance.now()`, and **86 573 writes/s at six workers clustered against
+86 754 plain** is what that is worth.
 
-Two smaller things C4 left are still open, both in reporting rather than in data, listed under
-"Known gaps". The third, the missing replication gauges, **C4b closed**.
+Nothing of C4 is refused any more. Two smaller things it left are still open, both in reporting
+rather than in data, listed under "Known gaps". The third, the missing replication gauges, **C4b
+closed**.
 
 ### B. ~~Replica apply mechanism A~~ **Done (C5).** What it measured, and what it left
 

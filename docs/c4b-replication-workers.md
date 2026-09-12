@@ -8,8 +8,9 @@ channel and in what shape.
 ## 1. The thing that is refused today
 
 `loadConfig` refuses `[server] workers > 1` beside `[replication] secret`, `[replication] primary`
-or `[cluster] enabled`, with `WORKERS_UNSUPPORTED` (`src/server/config.ts`, `assertWorkers`). The
-reason, from `docs/c4-workers.md` §5:
+or `[cluster] enabled`, with `WORKERS_UNSUPPORTED` (`src/server/config.ts`, `assertWorkers`). *All
+three are lifted as of C4d, and the error code is gone with them.* The reason, from
+`docs/c4-workers.md` §5:
 
 > `src/replication/primary.ts` serves a replica from the `Tenant` itself: `tenant.onCommit`,
 > `tenant.log.iterate`, `tenant.snapshot()`, `tenant.epoch`, `tenant.checksum`, `registry.pin`. One
@@ -222,10 +223,12 @@ forwarding and the unfollow ledger tangled through it, and because a node that *
 what makes the six-worker lever and replication usable together. A replica node is a read node, and
 its reads already scale on one thread better than its applies do.
 
-**`[cluster] enabled` with `workers > 1` stays refused.** `docs/c4-workers.md` §10 lists it
-separately and it is a different problem: the Raft lease is consulted on the write path, which is
-now a worker, and a worker must not block on the control plane (design §5.3). It wants the lease
-state *pushed* down the channel, not asked for.
+**`[cluster] enabled` with `workers > 1` stays refused** — *until C4d, which built it, and it was
+the last refusal; see `docs/c4d-cluster-workers.md`.* `docs/c4-workers.md` §10 lists it separately
+and it is a different problem: the Raft lease is consulted on the write path, which is now a worker,
+and a worker must not block on the control plane (design §5.3). It wants the lease state *pushed*
+down the channel, not asked for — which is exactly what C4d does, with the twist that a deadline
+has to be *converted* on the way: each Bun worker has its own `performance.timeOrigin`.
 
 **A fenced database on a worker demotes but does not auto-follow** — *closed by C4c, which gave the
 router the one client a worker now reports to.* `Promoter.demote` ends with
@@ -233,8 +236,8 @@ router the one client a worker now reports to.* `Promoter.demote` ends with
 business being opened inside a worker thread, and which C4c is what makes possible. On a worker,
 `followPrimary` reports rather than starts. The safety half of the demotion — the database stops
 taking writes and answers `NOT_PRIMARY` — happens in full; the convergence half waits for C4c. This
-is only reachable with `[cluster] enabled`, which is refused anyway, or with an operator promoting
-by hand.
+is only reachable with `[cluster] enabled`, which was refused anyway until C4d, or with an operator
+promoting by hand.
 
 ## 7. The reporting gaps C4 left, and which of them this closes
 

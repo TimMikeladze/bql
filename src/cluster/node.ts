@@ -132,6 +132,60 @@ export interface ClusterView {
   dbs: ClusterViewDb[]
 }
 
+/**
+ * What the server needs from the control plane, wherever it is running.
+ *
+ * C4d: on a node with `[server] workers > 1` the `ClusterNode` is the router's and the `Promoter`
+ * that talks to it is a worker's, so the two are separated by a `postMessage` channel. This is the
+ * whole of what crosses that seam — `src/server/workers/cluster.ts` implements it over a pushed
+ * view and two round trips, and `ClusterNode` implements it by being it.
+ *
+ * The only member on the write path is `holdsLease`, and it is synchronous and allocation-free in
+ * both implementations. That is design §5.3's rule: the state is pushed down, and a worker never
+ * blocks on the control plane. `docs/c4d-cluster-workers.md` §5.
+ */
+export interface ClusterLink {
+  readonly id: NodeId
+  readonly proposeTimeoutMs: number
+  /** The write path's whole question. One `Map.get` and one `performance.now()`. */
+  holdsLease(db: string): boolean
+  /**
+   * The cached handle, whoever holds the lease — `holdsLease` without the comparison. C4d pushes
+   * the deadline of the ones this node holds down a worker channel, whose clock reads differently.
+   */
+  leaseFor(db: string): LeaseHandle | null
+  knows(db: string): boolean
+  epochOf(db: string): number | null
+  primaryOf(db: string): NodeId | null
+  advertiseOf(node: NodeId): string | null
+  isLeader(): boolean
+  readonly state: ClusterState
+  /** The per-database half of the view, which is all the `Promoter` reads. */
+  observeDbs(): ClusterViewDb[]
+  /**
+   * The whole view, for `GET /v1/cluster` — or null on a thread that does not hold the Raft log.
+   * A worker cannot know the term, the leader's index or the transport's reachability, and saying
+   * so is better than a plausible zero.
+   */
+  observe(): ClusterView | null
+  /** The raft socket handlers, or null where there is no transport to mount. */
+  readonly socket: RaftHandlers | null
+  propose(command: Command): Promise<{ ok: boolean; reason?: string }>
+  promote(request: PromotionRequest): Promise<PromotionOutcome>
+  setOwned(dbs: Iterable<string>): void
+  onChange(listener: () => void): () => void
+  start(): Promise<void>
+  close(): Promise<void>
+}
+
+/** What `app.ts` mounts at `/v1/cluster/raft`. */
+export interface RaftHandlers {
+  onUpgrade: (request: Request) => { data: RaftSocketData } | Response
+  onOpen: (ws: RaftSocket) => void
+  onMessage: (ws: RaftSocket, data: string | Uint8Array | ArrayBuffer) => void
+  onClose: (ws: RaftSocket) => void
+}
+
 export interface ClusterNodeOptions {
   id: NodeId
   /** Where `meta`, `entries.log` and `snapshot` live. Usually `<dataDir>/cluster`. */
@@ -177,7 +231,7 @@ const DEFAULTS = {
   snapshotEntries: 512,
 } as const
 
-export class ClusterNode {
+export class ClusterNode implements ClusterLink {
   readonly id: NodeId
   readonly dir: string
   readonly leaseTtlMs: number
@@ -211,7 +265,7 @@ export class ClusterNode {
   #nextRequest = 1
   #peerUrls: Record<NodeId, string>
   #pending = new Map<ProposalId, PendingProposal>()
-  #listeners = new Set<(view: ClusterView) => void>()
+  #listeners = new Set<() => void>()
   #nextProposal = 1
 
   #tickTimer: ReturnType<typeof setInterval> | null = null
@@ -347,6 +401,22 @@ export class ClusterNode {
     return promise
   }
 
+  /**
+   * The per-database half of the view: every database the state machine knows, copied out. It is
+   * all the `Promoter` reads, and it is the half C4d pushes down to a worker.
+   */
+  observeDbs(): ClusterViewDb[] {
+    return Object.entries(this.#state.dbs).map(([db, entry]) => ({
+      db,
+      primary: entry.primary,
+      replicas: [...entry.replicas],
+      epoch: entry.epoch,
+      lease: entry.lease ? { ...entry.lease } : null,
+      acked: { ...entry.acked },
+      generation: entry.generation ?? null,
+    }))
+  }
+
   observe(): ClusterView {
     const raft = this.#raft
     const transport = this.#transport
@@ -359,15 +429,7 @@ export class ClusterNode {
       reachable: id === this.id ? true : (transport?.isConnected(id) ?? false),
       matchIndex: 0,
     }))
-    const dbs: ClusterViewDb[] = Object.entries(this.#state.dbs).map(([db, entry]) => ({
-      db,
-      primary: entry.primary,
-      replicas: [...entry.replicas],
-      epoch: entry.epoch,
-      lease: entry.lease ? { ...entry.lease } : null,
-      acked: { ...entry.acked },
-      generation: entry.generation ?? null,
-    }))
+    const dbs = this.observeDbs()
     return {
       id: this.id,
       role: raft?.role ?? "follower",
@@ -383,23 +445,26 @@ export class ClusterNode {
     }
   }
 
-  /** Fired whenever the replicated state, the role, the term or the leader changes. */
-  onChange(listener: (view: ClusterView) => void): () => void {
+  /**
+   * Fired whenever the replicated state, the role, the term or the leader changes. The listener
+   * takes no argument: every caller reads what it needs back off the node, and C4d's router-side
+   * listener needs `observeDbs()` and the lease deadlines rather than a `ClusterView`.
+   */
+  onChange(listener: () => void): () => void {
     this.#listeners.add(listener)
     return () => {
       this.#listeners.delete(listener)
     }
   }
 
-  /** The handlers `app.ts` mounts at `/v1/cluster/raft`. */
-  get socket(): {
-    onUpgrade: (request: Request) => { data: RaftSocketData } | Response
-    onOpen: (ws: RaftSocket) => void
-    onMessage: (ws: RaftSocket, data: string | Uint8Array | ArrayBuffer) => void
-    onClose: (ws: RaftSocket) => void
-  } {
+  /**
+   * The handlers `app.ts` mounts at `/v1/cluster/raft`, or null before `start()` has built the
+   * transport. Null rather than a throw so the one caller can answer an upgrade that arrives in
+   * that window with a reason instead of a 500 (C4d §5).
+   */
+  get socket(): RaftHandlers | null {
     const transport = this.#transport
-    if (!transport) throw new Error("the cluster node is not started")
+    if (!transport) return null
     return {
       onUpgrade: (request) => transport.onUpgrade(request),
       onOpen: (ws) => transport.onOpen(ws),
@@ -926,10 +991,9 @@ export class ClusterNode {
 
   #notify(): void {
     if (this.#listeners.size === 0) return
-    const view = this.observe()
     for (const listener of this.#listeners) {
       try {
-        listener(view)
+        listener()
       } catch (err) {
         this.#onError(err)
       }

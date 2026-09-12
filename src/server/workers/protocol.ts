@@ -1,9 +1,11 @@
 // The envelopes that cross the `postMessage` channel between the router (the main thread, which
 // owns the listener) and a worker (which owns a shard of databases). `docs/c4-workers.md` §4.
 //
-// Invariant: every message carries a `kind` and, when it expects an answer, an `id` minted by the
-// router. Ids are per pool, not per worker, so a reply can be correlated without knowing which
-// worker sent it.
+// Invariant: every message carries a `kind` and, when it expects an answer, an `id`. It is minted
+// by the router for the exchanges the router starts — ids are per pool, not per worker, so a reply
+// can be correlated without knowing which worker sent it — and by the worker for the three it
+// starts itself (`follow.forward`, `cluster.propose`, `cluster.promote`), which the router keys by
+// `(shard, id)` instead.
 //
 // Second invariant: nothing here is a class and nothing here holds a function. Structured clone
 // is what moves these, so a field that cannot survive it — a `Response`, a socket, an object
@@ -14,6 +16,12 @@
 // `ArrayBuffer`, would detach the router's copy and is not worth the sharp edge for bodies that
 // are almost always a few hundred bytes.
 
+import type {
+  ClusterViewDb,
+  Command,
+  PromotionOutcome,
+  PromotionRequest,
+} from "../../cluster/index.ts"
 import type { MetricsState, ReplicationMetrics } from "../metrics.ts"
 
 /** One HTTP request, on its way to the worker that owns the database its path names. */
@@ -360,6 +368,105 @@ export interface FollowPrimary {
   url: string
 }
 
+// ── the control plane (C4d) ────────────────────────────────────────────────────────────────────
+//
+// The router owns the `ClusterNode` whole — the Raft log, the socket, the timers, `propose`, the
+// lease cache, renewal and failover — and the worker that owns a database owns everything the
+// control plane needs *told* about it, because every input to a claim, an ack or a promotion
+// request is a tenant's. What crosses for the write path is one thing, downward only: the lease
+// deadline, converted into the worker's own monotonic clock.
+//
+// Nothing here is on the write path. `assertWritable` on a worker is the same `Map.get` and the
+// same `performance.now()` it is on a single-threaded node, and costs no message at all — which
+// is design §5.3's rule and the reason the view is pushed rather than asked for.
+// `docs/c4d-cluster-workers.md` §4.
+
+/**
+ * This shard's slice of the replicated state, after every commit that changed it.
+ *
+ * Filtered to the shard: a worker only ever answers for databases that hash to it (`entry.ts`
+ * refuses anything else), so the other shards' state would be state nobody on that thread may
+ * read. `hold` carries the deadlines of the leases this *node* holds, stamped on the **router's**
+ * monotonic clock — the worker converts them with the offset it measured itself (§3.1).
+ */
+export interface ClusterViewPush {
+  kind: "cluster.view"
+  id: string
+  /** The raft leader as this node knows it, so a worker's `isLeader()` is not a guess. */
+  leader: string | null
+  /** Node id to `ws://host:port`, for the redirect a fenced database answers with. */
+  nodes: [string, string][]
+  proposeTimeoutMs: number
+  dbs: ClusterViewDb[]
+  /** `db` → `validUntilLocalMs` on the router's clock, for leases this node holds. */
+  hold: [string, number][]
+}
+
+/**
+ * One leg of the clock probe. Each Bun worker has its own `performance.timeOrigin` — measured, not
+ * assumed — so a deadline cannot cross verbatim; `t1` comes back untouched beside the worker's own
+ * stamp and the router's receive stamp bounds the offset. §3.1.
+ */
+export interface ClusterProbe {
+  kind: "cluster.probe"
+  id: number
+  t1: number
+}
+
+export interface ClusterProbeReply {
+  kind: "cluster.probe.reply"
+  id: number
+  t1: number
+  t2: number
+}
+
+/**
+ * The offset the router computed from one probe: a **lower** bound on (the worker's clock minus
+ * the router's), which is what lets a worker convert a deadline the router stamped. Conservative
+ * by construction — a low offset makes a deadline early, never late. §3.1.
+ */
+export interface ClusterOffset {
+  kind: "cluster.offset"
+  lower: number
+}
+
+/** A command for the log. The id is the worker's, as `follow.forward`'s is. */
+export interface ClusterPropose {
+  kind: "cluster.propose"
+  id: number
+  command: Command
+}
+
+export interface ClusterProposed {
+  kind: "cluster.proposed"
+  id: number
+  ok: boolean
+  reason?: string
+}
+
+/** A promotion, decided by the Raft leader against its own wall clock and applied on this worker. */
+export interface ClusterPromote {
+  kind: "cluster.promote"
+  id: number
+  request: PromotionRequest
+}
+
+export interface ClusterPromoted {
+  kind: "cluster.promoted"
+  id: number
+  outcome: PromotionOutcome
+}
+
+/**
+ * This shard's primaries, so the router can union them. **Never a replace**: `#renewOwn` renews a
+ * lease only for a database in the node's owned set, and one shard's set replacing the node's
+ * would drop the other shards' leases at the next renewal tick. §3.3.
+ */
+export interface ClusterOwned {
+  kind: "cluster.owned"
+  dbs: string[]
+}
+
 // ── worker → router, unsolicited ───────────────────────────────────────────────────────────────
 
 /**
@@ -371,6 +478,18 @@ export interface PublishEvent {
   kind: "publish"
   topic: string
   data: string
+}
+
+/**
+ * C4d: a database's role flipped on this worker — a promotion or a fencing rewrote its catalog
+ * row. The router derives `BunQL-Role` and the `requirePrimary` gate on `POST /v1/db` from its own
+ * read of that catalog, and a row rewritten on another thread reaches no `onChange` here, so a
+ * promoted sharded node would otherwise keep calling itself a replica for ever.
+ */
+export interface RoleEvent {
+  kind: "role"
+  db: string
+  role: "primary" | "replica"
 }
 
 /** Design §5.3's `moved`, raised by a worker's promoter and published by the router. */
@@ -450,6 +569,11 @@ export type ToWorker =
   | FollowGenerations
   | FollowStatus
   | FollowResult
+  | ClusterViewPush
+  | ClusterProbe
+  | ClusterOffset
+  | ClusterProposed
+  | ClusterPromoted
   | MetricsAsk
   | Shutdown
 
@@ -475,8 +599,13 @@ export type FromWorker =
   | FollowDetach
   | FollowPrimary
   | FollowStatusReply
+  | ClusterProbeReply
+  | ClusterPropose
+  | ClusterPromote
+  | ClusterOwned
   | PublishEvent
   | MovedEvent
+  | RoleEvent
   | ErrorEvent
   | MetricsReply
   | ShutdownReply

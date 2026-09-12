@@ -247,16 +247,20 @@ oracle for all of it. That is its own milestone, not a corner of this one.
 The same is true of the Raft lease on the write path (C2 consults it where the write happens, which
 is now a worker) and of the replica applier (`ReplicaClient` writes pages into tenants).
 
-So `loadConfig` refuses, at startup, with `WORKERS_UNSUPPORTED`:
+So `loadConfig` refused, at startup, with `WORKERS_UNSUPPORTED`:
 
 - `[server] workers > 1` with `[cluster] enabled = true`
 - `[server] workers > 1` with `[replication] secret` set (this node serves `/v1/replication`)
 - `[server] workers > 1` with `[replication] primary` set (this node follows one)
 
-The error names the reason and points here. A standalone node — which is what the 17 214 → 39 734
-measurement was taken on, and what the product's "many small databases" shape mostly is — gets the
-whole lever. **C4b**, the follow-on, is the `Tenant` proxy that lets a replication stream cross the
-worker boundary; it is listed at the end of this file and in `docs/next.md`.
+The error named the reason and pointed here. A standalone node — which is what the 17 214 → 39 734
+measurement was taken on, and what the product's "many small databases" shape mostly is — got the
+whole lever.
+
+**All three are lifted, and `WORKERS_UNSUPPORTED` is gone from the vocabulary.** C4b serves
+replicas, C4c follows an upstream and C4d joins a cluster; each is a document beside this one, and
+each kept the same rule — what crosses the channel is the stream, or the lease deadline, never the
+tenant. §10 says what each one decided.
 
 S3 shipping, retention, snapshots and PITR are **not** on that list: they are per tenant and run in
 the worker that owns it, unchanged.
@@ -274,9 +278,9 @@ New:
 | `src/server/workers/router.ts` | which paths are sharded, the routing name, and the socket relay |
 | `bench/workers.ts` | the measurements of §2 and the throughput claim of §8 |
 
-Touched: `src/server/config.ts` (`[server] workers`, the refusals), `src/server/app.ts` (router
-mode), `src/server/metrics.ts` (`state`/`absorb`, so counters can be added across threads),
-`src/server/errors.ts` (`WORKERS_UNSUPPORTED`), `src/server/hrana/index.ts` (`hranaTarget`, so an
+Touched: `src/server/config.ts` (`[server] workers`, and the refusals, which C4b, C4c and C4d have
+since all lifted), `src/server/app.ts` (router mode), `src/server/metrics.ts` (`state`/`absorb`, so
+counters can be added across threads), `src/server/hrana/index.ts` (`hranaTarget`, so an
 upgrade can be routed before it happens), `src/cli.ts` (`--workers`), `docs/api.md`,
 `docs/design.md` §5.5, `docs/performance.md` §5, `docs/next.md`.
 
@@ -376,7 +380,14 @@ where it did 28 809, and more than the 39 734 four separate processes did in §5
   `TXN` down and one per `ACK` up, both irreducible. What it is worth is narrower than the premise:
   a replica's HTTP reads scale 1.60x and its socket reads *lose* 10%, because the router relays
   every frame and a point read is cheaper than the hop.
-- The Raft lease consulted from a worker (a push of the lease state down the channel, since the
-  worker must not block on the control plane — design §5.3's whole premise). Still open, and still
-  why `[cluster] enabled` is refused.
+- ~~The Raft lease consulted from a worker (a push of the lease state down the channel, since the
+  worker must not block on the control plane — design §5.3's whole premise).~~ **Done —
+  `docs/c4d-cluster-workers.md`, and it was the last refusal.** The `ClusterNode` stays whole on the
+  router and only the lease *deadline* crosses, downward, converted into the worker's own monotonic
+  clock. The conversion is the milestone: each Bun worker has its own `performance.timeOrigin`
+  (measured), so a deadline cannot cross verbatim, and it is converted with an offset the worker
+  measures itself over a round trip and rounds in the direction that can only shorten a lease.
+  Re-stamping a remaining duration on arrival was rejected — its error is unbounded transit time,
+  in the unsafe direction. The write path costs **no message at all**: a clustered six-worker node
+  does 86 573 writes/s against a plain one's 86 754.
 - `maxOpenTx` is still 1 per database, which is SQLite and does not change here.

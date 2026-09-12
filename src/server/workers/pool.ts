@@ -15,15 +15,22 @@
 // it superseded — is applied in `sendFrame` exactly as `ws.ts` applies it in a single-threaded
 // node.
 
+import type { Command, PromotionOutcome, PromotionRequest } from "../../cluster/index.ts"
 import type { ServerConfig } from "../config.ts"
 import { Metrics, type MetricsState } from "../metrics.ts"
-import type { FollowResult, FromWorker, ToWorker } from "./protocol.ts"
+import type { ClusterViewPush, FollowResult, FromWorker, ToWorker } from "./protocol.ts"
 import { resolveWorkers, shardOf } from "./shard.ts"
 
 /** What the pool needs from the listener, once it exists. */
 export interface RouterHost {
   /** Bun's own pub/sub, for a change event a worker published. */
   publish(topic: string, data: string): unknown
+  /**
+   * C4d: a worker flipped a database's role. The router reads the catalog for `BunQL-Role` and for
+   * the `requirePrimary` gate on `POST /v1/db`, and a row rewritten on another thread reaches no
+   * `onChange` here — so a node promoted on a worker would keep calling itself a replica.
+   */
+  roleChanged(db: string, role: "primary" | "replica"): void
 }
 
 /** What the pool needs from the `ReplicationRouter` (C4b), when this node serves replicas. */
@@ -48,6 +55,20 @@ export interface FollowHost {
   attach(db: string): void
   /** C4b §6's gap: a database fenced on a worker wants this node pointed at its new primary. */
   followPrimary(url: string): void
+}
+
+/**
+ * What the pool needs from the router's side of the control plane (C4d), when `[cluster] enabled`.
+ * Every one of these is a decision the `ClusterNode` or `ClusterShards` owns; none is on the write
+ * path, which on a worker costs no message at all.
+ */
+export interface ClusterHost {
+  /** A probe came back: `t1` as it was sent, `t2` the worker's own stamp. */
+  probed(shard: number, t1: number, t2: number): void
+  /** One shard's primaries, to be unioned into the node's owned set — never to replace it. */
+  owned(shard: number, dbs: string[]): void
+  propose(shard: number, id: number, command: Command): Promise<void>
+  promote(shard: number, id: number, request: PromotionRequest): Promise<void>
 }
 
 export interface RouterSocket {
@@ -102,6 +123,7 @@ export class WorkerPool {
   #host: RouterHost | null = null
   #replication: ReplicationHost | null = null
   #follow: FollowHost | null = null
+  #cluster: ClusterHost | null = null
   #onError: (err: unknown) => void
   #closed = false
 
@@ -376,6 +398,40 @@ export class WorkerPool {
     this.#follow = host
   }
 
+  // ── the control plane (C4d) ──────────────────────────────────────────────────────────────────
+
+  /** One shard's slice of the replicated state. A few a second, never per write. */
+  clusterView(index: number, push: ClusterViewPush): void {
+    this.#post(index, push)
+  }
+
+  /** One leg of the clock probe. The router stamps before this and again when the reply lands. */
+  clusterProbe(index: number, id: number, t1: number): void {
+    this.#post(index, { kind: "cluster.probe", id, t1 })
+  }
+
+  /**
+   * A lower bound on (the worker's clock − the router's), which is what lets a worker convert a
+   * deadline this thread stamped. Its own envelope rather than a field on `cluster.view`, because
+   * a probe answers on its own schedule and an offset must be able to arrive without one.
+   */
+  clusterOffset(index: number, lower: number): void {
+    this.#post(index, { kind: "cluster.offset", lower })
+  }
+
+  clusterProposed(index: number, id: number, reply: { ok: boolean; reason?: string }): void {
+    this.#post(index, { kind: "cluster.proposed", id, ...reply })
+  }
+
+  clusterPromoted(index: number, id: number, outcome: PromotionOutcome): void {
+    this.#post(index, { kind: "cluster.promoted", id, outcome })
+  }
+
+  /** Where `ClusterShards` plugs in, so this module never imports the control plane. */
+  setClusterHost(host: ClusterHost | null): void {
+    this.#cluster = host
+  }
+
   // ── metrics and shutdown ─────────────────────────────────────────────────────────────────────
 
   /**
@@ -514,6 +570,9 @@ export class WorkerPool {
       case "publish":
         this.#host?.publish(message.topic, message.data)
         return
+      case "role":
+        this.#host?.roleChanged(message.db, message.role)
+        return
       case "moved":
         this.#host?.publish(`moved:${message.db}`, JSON.stringify({ event: "moved", db: message.db, primary: message.primary }))
         return
@@ -573,6 +632,18 @@ export class WorkerPool {
         return
       case "follow.primary":
         this.#follow?.followPrimary(message.url)
+        return
+      case "cluster.probe.reply":
+        this.#cluster?.probed(index, message.t1, message.t2)
+        return
+      case "cluster.owned":
+        this.#cluster?.owned(index, message.dbs)
+        return
+      case "cluster.propose":
+        void this.#cluster?.propose(index, message.id, message.command).catch(this.#onError)
+        return
+      case "cluster.promote":
+        void this.#cluster?.promote(index, message.id, message.request).catch(this.#onError)
         return
       case "follow.status.reply": {
         const waiting = this.#follows.get(message.id)

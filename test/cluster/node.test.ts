@@ -37,7 +37,8 @@ function listen(id: string): { port: number; attach(node: ClusterNode): void; st
       if (new URL(request.url).pathname !== RAFT_PATH) {
         return new Response("no route", { status: 404 })
       }
-      const upgrade = attached.socket.onUpgrade(request)
+      const upgrade = attached.socket?.onUpgrade(request)
+      if (!upgrade) return new Response("not started", { status: 503 })
       if (upgrade instanceof Response) return upgrade
       if ((host as unknown as RaftUpgradeHost).upgrade(request, { data: upgrade.data })) {
         return undefined
@@ -45,9 +46,9 @@ function listen(id: string): { port: number; attach(node: ClusterNode): void; st
       return new Response("expected a WebSocket upgrade", { status: 426 })
     },
     websocket: {
-      open: (ws) => attached?.socket.onOpen(ws as never),
-      message: (ws, message) => attached?.socket.onMessage(ws as never, message as never),
-      close: (ws) => attached?.socket.onClose(ws as never),
+      open: (ws) => attached?.socket?.onOpen(ws as never),
+      message: (ws, message) => attached?.socket?.onMessage(ws as never, message as never),
+      close: (ws) => attached?.socket?.onClose(ws as never),
     },
   })
   return {

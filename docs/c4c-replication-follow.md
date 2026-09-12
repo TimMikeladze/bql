@@ -315,10 +315,14 @@ Touched:
 
 ## 7. What C4c does **not** lift
 
-**`[cluster] enabled` with `workers > 1` stays refused**, unchanged and for its own reason: the Raft
-lease is consulted on the write path, which is now a worker, and a worker must not block on the
-control plane (design §5.3). It wants the lease state *pushed* down the channel, which is the shape
-§3.4 uses for `follow.link` but over a different and much hotter fact. Its own milestone.
+**`[cluster] enabled` with `workers > 1` stays refused** — *until C4d, which built it and was the
+last refusal; see `docs/c4d-cluster-workers.md`.* Its own reason: the Raft lease is consulted on the
+write path, which is now a worker, and a worker must not block on the control plane (design §5.3).
+It wants the lease state *pushed* down the channel, which is the shape §3.4 uses for `follow.link`
+but over a different and much hotter fact. C4d did exactly that and found one thing this section
+could not have guessed: a deadline cannot cross verbatim, because each Bun worker has its own
+`performance.timeOrigin`. It crosses as an instant converted with a measured offset, never as a
+remaining duration re-stamped on arrival.
 
 **C4b §6's `followPrimary` gap closes.** A fenced database on a worker demoted but could not
 auto-follow, because starting a `ReplicaClient` inside a worker thread was the thing C4c had to make

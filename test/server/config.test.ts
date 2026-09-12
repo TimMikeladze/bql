@@ -348,18 +348,26 @@ describe("[server] workers", () => {
     expect(config.replication.role).toBe("replica")
   })
 
-  test("refuses to shard a node in a cluster", () => {
+  // C4d: the last refusal is gone. The `ClusterNode` stays whole on the router and only the lease
+  // deadline crosses, so a sharded node joins a cluster like any other.
+  test("shards a node in a cluster", () => {
+    const config = loadConfig({
+      file: null,
+      env: {},
+      overrides: {
+        server: { workers: 2 },
+        cluster: { enabled: true },
+        replication: { secret: "s" },
+      },
+    })
+    expect(config.server.workers).toBe(2)
+    expect(config.cluster.enabled).toBe(true)
+  })
+
+  test("still refuses a workers count that is not a count", () => {
     expect(() =>
-      loadConfig({
-        file: null,
-        env: {},
-        overrides: {
-          server: { workers: 2 },
-          cluster: { enabled: true },
-          replication: { secret: "s" },
-        },
-      }),
-    ).toThrow(/\[cluster\] enabled/)
+      loadConfig({ file: null, env: {}, overrides: { server: { workers: -1 } } }),
+    ).toThrow(/\[server\] workers/)
   })
 
   test("a standalone node may shard, and one worker may do anything", () => {
