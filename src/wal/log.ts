@@ -66,6 +66,11 @@ export interface TxnLogOptions {
   indexIntervalMs?: number
   /** Set false to stop writing sidecar indexes at all; opening still reads one that is there. */
   index?: boolean
+  /**
+   * Compress record bodies with zstd. Default true. Per record and in the header, so turning it
+   * off does not make what is already written unreadable — `decode` reads either.
+   */
+  compress?: boolean
 }
 
 export interface RetentionPolicy {
@@ -170,6 +175,8 @@ export class TxnLog {
   readonly fsyncIntervalMs: number
   readonly indexIntervalMs: number
   readonly writeIndex: boolean
+  /** Whether records this log writes are compressed. Records it reads carry their own flag. */
+  readonly compress: boolean
 
   /** Segments whose torn tail was truncated when the log was opened. */
   readonly repaired: string[] = []
@@ -192,6 +199,7 @@ export class TxnLog {
     this.fsyncIntervalMs = options.fsyncIntervalMs ?? 100
     this.indexIntervalMs = options.indexIntervalMs ?? 1000
     this.writeIndex = options.index ?? true
+    this.compress = options.compress ?? true
   }
 
   /**
@@ -239,7 +247,7 @@ export class TxnLog {
 
   /** Encodes and appends a record. Returns the encoded bytes, which are also the wire format. */
   append(record: TxnRecordInput): Uint8Array {
-    const bytes = encode(record)
+    const bytes = encode(record, { compress: this.compress })
     this.appendEncoded(bytes)
     return bytes
   }

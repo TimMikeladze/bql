@@ -115,8 +115,21 @@ export function pageHash(pgno: number, page: Uint8Array): bigint {
   return Bun.hash.xxHash3(hashScratch)
 }
 
+export interface EncodeOptions {
+  /**
+   * Compress the body with zstd, which is what every record has done since phase 0 and what
+   * `FLAG_ZSTD` in the header says. `false` writes the pages plain — 4.3x larger and ~9.5 µs a
+   * record cheaper, which is a third of a single-row write (`docs/performance.md` §1).
+   *
+   * The flag is per record, and `decode` has always honoured it, so a log, a replica stream and a
+   * bucket may hold a mix: a node that changes this setting does not invalidate what it wrote
+   * before, and a replica reads either kind without being told which to expect.
+   */
+  compress?: boolean
+}
+
 /** Serialises a record. Pages are written in ascending page-number order. */
-export function encode(record: TxnRecordInput): Uint8Array {
+export function encode(record: TxnRecordInput, options: EncodeOptions = {}): Uint8Array {
   const pageSize = record.pageSize
   const pgnos = [...record.pages.keys()].sort((a, b) => a - b)
   const plain = new Uint8Array(pgnos.length * (4 + pageSize))
@@ -132,7 +145,10 @@ export function encode(record: TxnRecordInput): Uint8Array {
     at += 4 + pageSize
   }
 
-  const flags = (record.flags ?? 0) | FLAG_ZSTD
+  const flags =
+    options.compress === false
+      ? (record.flags ?? 0) & ~FLAG_ZSTD
+      : (record.flags ?? 0) | FLAG_ZSTD
   const body =
     (flags & FLAG_ZSTD) === 0
       ? plain

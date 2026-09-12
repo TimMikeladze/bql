@@ -100,6 +100,14 @@ export interface DurabilitySection {
   maxLogBytes: number
   /** Roll to a new log segment past this many bytes. Design §4.4 says 16 MB. */
   segmentBytes: number
+  /**
+   * Compress transaction records with zstd. On, as every record has been since phase 0: it is
+   * 4.3x on disk, on every replica's socket and in the bucket, for ~9.5 µs a record — a third of
+   * a single-row write (`docs/performance.md` §1). A node with local storage, no replicas and no
+   * bucket is the case for turning it off. The flag is per record, so changing it leaves
+   * everything already written readable and a replica reads either kind.
+   */
+  compress: boolean
 }
 
 export interface RealtimeSection {
@@ -298,6 +306,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     sweepIntervalMs: 300_000,
     maxLogBytes: 0,
     segmentBytes: 16 * 1024 * 1024,
+    compress: true,
   },
   realtime: {
     ringBytes: 10_000_000,

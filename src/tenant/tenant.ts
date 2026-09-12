@@ -133,6 +133,13 @@ export interface TenantOptions {
   positionIntervalMs?: number
   segmentBytes?: number
   logFsync?: "never" | "each" | "interval"
+  /**
+   * Compress record bodies with zstd. Default true. It is a third of a single-row write
+   * (`docs/performance.md` §1) against 4.3x on disk and on every replica's socket, so it is a
+   * deployment choice rather than a constant. Per record and in the header: turning it off leaves
+   * everything already written readable.
+   */
+  compressLog?: boolean
   /** `sqlite3_limit` overrides; the defaults below are applied first. */
   limits?: Partial<Record<LimitName, number>>
   /**
@@ -386,6 +393,7 @@ export class Tenant {
       dir: options.dir,
       ...(options.segmentBytes !== undefined ? { segmentBytes: options.segmentBytes } : {}),
       fsync: options.logFsync ?? "interval",
+      ...(options.compressLog !== undefined ? { compress: options.compressLog } : {}),
     })
 
     try {
@@ -1043,6 +1051,9 @@ export class Tenant {
         ? { segmentBytes: this.#options.segmentBytes }
         : {}),
       fsync: this.#options.logFsync ?? "interval",
+      ...(this.#options.compressLog !== undefined
+        ? { compress: this.#options.compressLog }
+        : {}),
     })
   }
 

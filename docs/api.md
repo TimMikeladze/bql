@@ -1345,6 +1345,7 @@ the canonical one wins when both are set.
 | `[durability] sweepIntervalMs` | `300000` (`0` sweeps only at start) | `BUNQL_DURABILITY_SWEEP_INTERVAL_MS` | — |
 | `[durability] maxLogBytes` | `0` (unlimited) | `BUNQL_DURABILITY_MAX_LOG_BYTES` | — |
 | `[durability] segmentBytes` | `16777216` | `BUNQL_DURABILITY_SEGMENT_BYTES` | — |
+| `[durability] compress` | `true` (zstd) | `BUNQL_DURABILITY_COMPRESS` | — |
 | `[realtime] ringBytes` | `10000000` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
 | `[realtime] ringMaxAgeMs` | `60000` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
 | `[realtime] maxLiveQueries` | `1000` | `BUNQL_REALTIME_MAX_LIVE_QUERIES` | `BUNQL_MAX_LIVE_QUERIES` |

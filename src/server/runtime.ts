@@ -187,6 +187,7 @@ export class ServerRuntime {
         checkpointWalBytes: options.config.durability.checkpointWalBytes,
         defaultAck: options.config.durability.defaultAck,
         segmentBytes: options.config.durability.segmentBytes,
+        compressLog: options.config.durability.compress,
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
         onChange: (event) => this.#databasesChanged(event),

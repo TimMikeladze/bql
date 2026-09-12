@@ -73,7 +73,8 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
    the one missed budget in `docs/benchmarks.md` (130k against a 150k WebSocket target, which that
    file already attributes to writes serialising).
 2. **Token verification per HTTP request** — 28 µs, unbatched, uncached, on every request.
-3. **Unconditional zstd** — 9.5 µs, 36% of a write, for a ratio nobody chose per deployment.
+3. ~~**Unconditional zstd**~~ — 9.5 µs, 36% of a write. Now `[durability] compress`; off is 28%
+   faster and 4.4x larger (§4C).
 4. **One writer thread per process.** Spreading writes over 8 databases changes nothing (28.8k vs
    28.1k msg/s), so the bound is the process, not the database.
 5. **HTTP framing** — 35 µs before any query runs. Nothing to fix in BunQL; it is a reason to
@@ -106,13 +107,25 @@ connections into one transaction. Two design constraints to settle first — eve
 gets the one transaction's txid, which coarsens read-your-writes; and one failing statement rolls
 back its neighbours, so the fold has to fall back to running the batch one at a time on error.
 
-**C. Make compression a policy, not a constant.** 9.5 µs buys 4.3x. That is an excellent trade
-when the record crosses a WAN to a replica or goes to S3, and a poor one for a single node writing
-to a local NVMe. Options, cheapest first: a size threshold (skip zstd below one page, where the
-ratio is lowest and the CPU share highest); a `[durability] compress` setting; or compress
-**after** the ack for `ack: "local"`, since the record only has to be compressed before it ships,
-not before the client is answered. The last one keeps the ratio and moves the cost off the hot
-path entirely — it is the right answer and the most work.
+**C. Make compression a policy, not a constant.** ✅ **Done** — `[durability] compress`, default
+`true`. Measured through the tenant write path, 4000 single-row transactions:
+
+| | write p50 | records | bytes/record |
+|---|---|---|---|
+| `compress = true` (default) | 27.42 µs | 36 474/s | 959 |
+| `compress = false` | **19.71 µs** | **50 741/s** | 4232 |
+
+**28% off a write and 39% more throughput, for 4.4x the bytes** on disk, on every replica's socket
+and in the bucket. That is a deployment trade rather than a constant: a node with local storage, no
+replicas and no bucket should turn it off; one shipping over a WAN should not. The flag has always
+lived in each record's header and `decode` has always honoured it, so changing the setting leaves
+everything already written readable and a replica reads either kind — `test/wal/compress.test.ts`
+replays a log written both ways onto one replica and checks the checksums match.
+
+Still open, and the better version: compress **after** the ack for `ack: "local"`, since a record
+only has to be compressed before it ships, not before the client is answered. That keeps the ratio
+*and* moves the cost off the hot path, at the price of decoupling the log append from the commit —
+which is why it is not this change.
 
 **D. Prefer the socket everywhere.** 28 µs against 48 µs for the same read before auth, 58 against
 78 for a write, and no per-request token verification. Nothing to build; it is a documentation and

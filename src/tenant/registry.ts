@@ -49,6 +49,8 @@ export interface RegistryOptions {
   waitMs?: number
   segmentBytes?: number
   logFsync?: "never" | "each" | "interval"
+  /** Compress record bodies with zstd. Default true; see `TenantOptions.compressLog`. */
+  compressLog?: boolean
   /** Per-connection pragmas for every tenant this registry opens (`docs/p1-pragmas.md`). */
   sqlite?: SqlitePragmas
   /** How often idle tenants are checked for a TRUNCATE checkpoint. Default 250 ms. */
@@ -511,6 +513,9 @@ export class TenantRegistry {
         : {}),
       ...(this.#options.logFsync !== undefined ? { logFsync: this.#options.logFsync } : {}),
       ...(this.#options.sqlite !== undefined ? { sqlite: this.#options.sqlite } : {}),
+      ...(this.#options.compressLog !== undefined
+        ? { compressLog: this.#options.compressLog }
+        : {}),
       ...(this.#options.onError !== undefined ? { onError: this.#options.onError } : {}),
       ...(this.#options.onConnection !== undefined
         ? { onConnection: this.#options.onConnection }
