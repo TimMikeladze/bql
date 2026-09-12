@@ -319,14 +319,17 @@ describe("[server] workers", () => {
     expect(loadConfig({ file: null, env: {} }).server.workers).toBe(1)
   })
 
-  test("refuses to shard a node that serves /v1/replication", () => {
-    expect(() =>
-      loadConfig({
-        file: null,
-        env: {},
-        overrides: { server: { workers: 2 }, replication: { secret: "s" } },
-      }),
-    ).toThrow(/workers = 2 cannot be combined with \[replication\] secret/)
+  // C4b moved this contract on purpose: the router owns the replication socket and the worker that
+  // owns a database owns its stream, so serving replicas and sharding are no longer exclusive.
+  // `docs/c4b-replication-workers.md`.
+  test("shards a node that serves /v1/replication", () => {
+    const config = loadConfig({
+      file: null,
+      env: {},
+      overrides: { server: { workers: 2 }, replication: { secret: "s" } },
+    })
+    expect(config.server.workers).toBe(2)
+    expect(config.replication.secret).toBe("s")
   })
 
   test("refuses to shard a node that follows an upstream", () => {

@@ -14,7 +14,7 @@
 // `ArrayBuffer`, would detach the router's copy and is not worth the sharp edge for bodies that
 // are almost always a few hundred bytes.
 
-import type { MetricsState } from "../metrics.ts"
+import type { MetricsState, ReplicationMetrics } from "../metrics.ts"
 
 /** One HTTP request, on its way to the worker that owns the database its path names. */
 export interface HttpHop {
@@ -133,6 +133,79 @@ export interface WsShut {
   reason?: string
 }
 
+// ── the replication relay (C4b) ────────────────────────────────────────────────────────────────
+//
+// A replica socket cannot be a virtual socket like the one above: it carries connection-level state
+// that is not per database — an HMAC challenge over a nonce, a frame reader over a *binary* stream,
+// one send queue, and a heartbeat that announces every database on the node. So the router owns the
+// connection whole and the **stream** is what crosses, routed by the stream id a `SUBSCRIBE` mints.
+// Nothing that touches a tenant is here; the only thing on the hot path is `repl.out`, one finished
+// frame per `TXN`. `docs/c4b-replication-workers.md` §3.
+
+/** A replica connection the router has authenticated, adopted on this worker. */
+export interface ReplAdopt {
+  kind: "repl.adopt"
+  conn: string
+  /** The replica's node id, from its `HELLO`. R2's `onDisconnect` rolls back by it. */
+  node: string
+}
+
+/** One frame the router has already decoded, for this worker's streams. */
+export interface ReplFrame {
+  kind: "repl.frame"
+  conn: string
+  type: number
+  /** The frame *body*, not the framing: the router decoded it and would only re-encode it. */
+  body: Uint8Array
+}
+
+/** The socket is gone: end its streams here, unpin, roll back what it had open. */
+export interface ReplGone {
+  kind: "repl.gone"
+  conn: string
+  node: string
+}
+
+/**
+ * The heartbeat tick, which is also R7's sweep: the router's announcement goes down, every
+ * stream's position comes back, once per `heartbeatMs` rather than once per commit.
+ */
+export interface ReplPositions {
+  kind: "repl.positions"
+  id: number
+  generations: [string, string][]
+}
+
+export interface ReplPositionsReply {
+  kind: "repl.positions.reply"
+  id: number
+  streams: { conn: string; stream: number; txid: string }[]
+}
+
+/** A finished frame for the real socket. */
+export interface ReplOut {
+  kind: "repl.out"
+  conn: string
+  bytes: Uint8Array
+}
+
+/** The worker refused the connection (`#fail`); the router closes the real socket. */
+export interface ReplShut {
+  kind: "repl.shut"
+  conn: string
+  code?: number
+  reason?: string
+}
+
+/**
+ * Something on this worker moved the node's database set or a database's identity, so the router
+ * re-announces. `plan-phase1.md` finding 1 across threads: the registry's `onChange` and C2's
+ * promotion are in-process callbacks and cannot reach the router themselves.
+ */
+export interface ReplAnnounce {
+  kind: "repl.announce"
+}
+
 // ── worker → router, unsolicited ───────────────────────────────────────────────────────────────
 
 /**
@@ -180,6 +253,12 @@ export interface MetricsReply {
   metrics: MetricsState
   /** Its share of the LRU, since `open` and `evictions` are per thread. */
   registry: { open: number; tenants: number; evictions: number }
+  /**
+   * C4b: this worker's share of the replication figures. `connected` is not here — the router owns
+   * every socket and is the only thread that can count them — so this carries only what is per
+   * stream: the records this worker emitted and the worst lag across its own streams.
+   */
+  replication?: Pick<ReplicationMetrics, "lagTxid" | "records"> | null
 }
 
 export interface Shutdown {
@@ -206,6 +285,10 @@ export type ToWorker =
   | WsMessage
   | WsClose
   | WsDrain
+  | ReplAdopt
+  | ReplFrame
+  | ReplGone
+  | ReplPositions
   | MetricsAsk
   | Shutdown
 
@@ -219,6 +302,10 @@ export type FromWorker =
   | WsSend
   | WsTopic
   | WsShut
+  | ReplOut
+  | ReplShut
+  | ReplAnnounce
+  | ReplPositionsReply
   | PublishEvent
   | MovedEvent
   | ErrorEvent

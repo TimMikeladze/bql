@@ -94,6 +94,14 @@ export interface ReplicationServerOptions {
   /** Close a socket that has been backpressured for this long. */
   slowReplicaMs?: number
   /**
+   * C4b: this server's connections are *adopted* from a router that owns the real socket. It does
+   * no handshake, mints no nonce, runs no heartbeat timer and builds no announcement — the router
+   * does all four, once for the node — and this server only holds streams for the databases its
+   * thread owns. Everything below the connection is identical in both modes, which is why this is
+   * a flag rather than a second class. `docs/c4b-replication-workers.md` §4.
+   */
+  hosted?: boolean
+  /**
    * R2's write forwarding. A replica hands a write it cannot take to the primary as a `FORWARD`
    * frame; this runs it and its answer goes back as `RESULT`. Left unset, a `FORWARD` is refused
    * with `PROTO`, which is what a node that predates R2 does.
@@ -172,6 +180,8 @@ export class ReplicationServer {
   readonly secret: string
   readonly heartbeatMs: number
   readonly slowReplicaMs: number
+  /** True when a router owns the sockets and this server only holds streams (C4b). */
+  readonly hosted: boolean
 
   /** Bytes handed to `ws.send`, for `bunql_replication_bytes_total`. */
   bytesSent = 0
@@ -189,6 +199,8 @@ export class ReplicationServer {
   #onEpochAhead: (event: { db: string; node: string; epoch: number; held: number }) => void
   #generationOf: (db: string) => string | null
   #onError: (err: unknown) => void
+  /** Hosted: where `announce()` goes, since the router assembles the node's announcement. */
+  #onAnnounce: (() => void) | null = null
   #closed = false
 
   constructor(options: ReplicationServerOptions) {
@@ -197,6 +209,7 @@ export class ReplicationServer {
     this.secret = options.secret
     this.heartbeatMs = options.heartbeatMs ?? 5000
     this.slowReplicaMs = options.slowReplicaMs ?? 30_000
+    this.hosted = options.hosted === true
     this.#onForward = options.onForward ?? null
     this.#onDisconnect = options.onDisconnect ?? null
     this.#onEpochAhead = options.onEpochAhead ?? (() => {})
@@ -276,6 +289,67 @@ export class ReplicationServer {
       } satisfies HelloBody),
     )
     this.#startTimer()
+  }
+
+  // ── hosted mode (C4b) ────────────────────────────────────────────────────────────────────────
+  //
+  // A router on another thread owns the real socket. It did the handshake, so the connection
+  // arrives already authenticated and already named; it owns the frame reader, so a frame arrives
+  // already decoded; and it owns the heartbeat and the announcement, so this server neither ticks
+  // nor announces. `docs/c4b-replication-workers.md` §4.
+
+  /** Where the worker relay plugs the router's announcement in (hosted only). */
+  setAnnounceHandler(handler: (() => void) | null): void {
+    this.#onAnnounce = handler
+  }
+
+  /** A replica connection the router has authenticated, adopted on this thread. */
+  adopt(ws: ReplicationSocket, node: string): void {
+    if (this.#closed) return
+    if (this.#byWs.has(ws as object)) return
+    const conn = new Conn(ws)
+    conn.node = node || "?"
+    // The router verified the proof against its own nonce. Trusting it here is the same trust C4's
+    // socket relay places in the router for a client socket's principal, and the alternative — a
+    // second handshake per worker over one socket — is the thing §2 rejects.
+    conn.authed = true
+    this.#conns.add(conn)
+    this.#byWs.set(ws as object, conn)
+  }
+
+  /** One frame the router decoded, handled exactly as `message` would have handled it. */
+  deliver(ws: ReplicationSocket, type: number, body: Uint8Array): void {
+    const conn = this.#byWs.get(ws as object)
+    if (!conn) return
+    try {
+      this.#handle(conn, type, body)
+    } catch (err) {
+      if (err instanceof ProtocolError) {
+        this.#fail(conn, "PROTO", err.message)
+        return
+      }
+      this.#onError(err)
+      this.#error(conn, undefined, "INTERNAL", "the primary could not handle that frame")
+    }
+  }
+
+  /** Every stream's position, for the `HEARTBEAT` the router assembles across every worker. */
+  positions(): { ws: ReplicationSocket; stream: number; txid: bigint }[] {
+    const out: { ws: ReplicationSocket; stream: number; txid: bigint }[] = []
+    for (const conn of this.#conns) {
+      for (const stream of conn.streams.values()) {
+        out.push({ ws: conn.ws, stream: stream.id, txid: stream.tenant.txid })
+      }
+    }
+    return out
+  }
+
+  /**
+   * R7's stream sweep, driven by the router's announcement rather than by this server's own tick.
+   * The announcement is one node-wide fact and the router is the one thread that assembles it.
+   */
+  sweep(announcement: Map<string, string>): void {
+    this.#sweepStreams(announcement)
   }
 
   message(ws: ReplicationSocket, data: string | Uint8Array | ArrayBuffer): void {
@@ -440,6 +514,14 @@ export class ReplicationServer {
    * needs no new code to act on it.
    */
   announce(): void {
+    // Hosted: the router owns the announcement, because it is one fact about the whole node and a
+    // worker knows only its own shard's databases as *open*. Every caller — the registry's
+    // `onChange` and C2's promotion — reaches the router through this one hook rather than each
+    // growing its own.
+    if (this.hosted) {
+      if (!this.#closed) this.#onAnnounce?.()
+      return
+    }
     if (this.#closed || this.#conns.size === 0) return
     const announcement = this.#announcement()
     this.#sweepStreams(announcement)
@@ -999,6 +1081,9 @@ export class ReplicationServer {
   }
 
   #startTimer(): void {
+    // Hosted: the router heartbeats once for the node, gathering this server's `positions()`.
+    // N workers ticking down one socket would send N announcements per interval.
+    if (this.hosted) return
     if (this.#timer !== null || this.#closed) return
     this.#timer = setInterval(() => this.#tick(), this.heartbeatMs)
     this.#timer.unref?.()

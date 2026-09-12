@@ -413,8 +413,14 @@ req/s and 307k msg/s on the router thread, well above the 50k/130k a node actual
 router is not the bottleneck; and one node went from 28 809 writes/s to 72 817 at six workers.
 Realtime crosses workers through the router's own `server.publish` rather than through
 `BroadcastChannel`, because there is no subscriber on a worker to broadcast to.
-`workers > 1` refuses to start with replication or the cluster, for the reason in
-`docs/c4-workers.md` §5. Scale-out beyond one node is still more nodes with tenant placement.
+**A sharded node serves replicas** (C4b, `docs/c4b-replication-workers.md`): the router owns the
+replication connection — the socket, the handshake, the frame reader, the send queue, the heartbeat
+and the node's announcement — and the worker that owns a database owns that database's stream, so
+`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()` and `registry.pin` are still called on
+the thread that holds the writer. Nothing about a `Tenant` crosses the channel; one finished frame
+per `TXN` does, which is what a socket on another thread costs. `workers > 1` still refuses to
+*follow* an upstream (`[replication] primary`) or to join a cluster (`[cluster] enabled`), each for
+its own reason. Scale-out beyond one node is still more nodes with tenant placement.
 
 ## 6. HTTP API (JSON)
 

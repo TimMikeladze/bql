@@ -17,6 +17,7 @@
 // run against it unchanged; `send`, `subscribe`, `unsubscribe` and `close` post back.
 
 import { HEADERS } from "../../client/protocol.ts"
+import type { ReplicationSocket } from "../../replication/index.ts"
 import { createApp, createRuntime, type App } from "../app.ts"
 import type { ServerConfig } from "../config.ts"
 import { BunQLError, errorResponse } from "../errors.ts"
@@ -82,6 +83,8 @@ interface WorkerState {
   sockets: Map<string, { socket: VirtualSocket; ready: Promise<void> }>
   /** In-flight hopped requests, so the router cancelling one aborts the handler's own signal. */
   inflight: Map<number, AbortController>
+  /** Replica connections adopted from the router (C4b), by the id it minted. */
+  replicas: Map<string, VirtualReplicationSocket>
 }
 
 let state: WorkerState | null = null
@@ -195,10 +198,43 @@ function isHranaData(data: SocketData | HranaSocketData): data is HranaSocketDat
   return (data as HranaSocketData).hrana === true
 }
 
+// ── the replication relay (C4b) ────────────────────────────────────────────────────────────────
+
+/**
+ * A replica socket the router holds, as `src/replication/primary.ts` sees it. Like the client
+ * socket above, `send` returns 1 unconditionally: the router owns the one send queue and the one
+ * slow-replica cut-off, because it is the only thread that can see the real socket's buffer.
+ * `close` does cross — a worker that refuses a connection (`#fail`) has to be able to end it.
+ */
+class VirtualReplicationSocket {
+  readyState = 1
+  data: unknown = { replication: true }
+
+  constructor(readonly id: string) {}
+
+  send(bytes: Uint8Array | string): number {
+    if (typeof bytes === "string") return 1
+    post({ kind: "repl.out", conn: this.id, bytes })
+    return 1
+  }
+
+  close(code?: number, reason?: string): void {
+    this.readyState = 3
+    post({
+      kind: "repl.shut",
+      conn: this.id,
+      ...(code !== undefined ? { code } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+    })
+  }
+}
+
 // ── start ──────────────────────────────────────────────────────────────────────────────────────
 
 async function start(index: number, workers: number, config: ServerConfig): Promise<void> {
-  const { runtime } = await createRuntime(config)
+  // C4b: this runtime's `ReplicationServer` holds streams for the databases this shard owns, and
+  // its connections are adopted from the router that owns the sockets.
+  const { runtime } = await createRuntime(config, { replicationMode: "hosted" })
   const app = await createApp(runtime)
   // A worker has no subscribers of its own: everything it publishes goes to the router, which owns
   // every socket and fans out over Bun's pub/sub. `docs/c4-workers.md` §3.
@@ -209,6 +245,9 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
     },
   })
   runtime.setMovedHandler((db, primary) => post({ kind: "moved", db, primary }))
+  // C4b: `announce()` in a worker asks the router for one, because the announcement is a fact
+  // about the whole node (`plan-phase1.md` finding 1 across threads).
+  runtime.replication?.setAnnounceHandler(() => post({ kind: "repl.announce" }))
   // Shipping, retention and snapshots are per database and belong to the thread that owns it.
   // Replication and the cluster are refused by `loadConfig` when `workers > 1`, so they are not
   // started here at all rather than started into a no-op.
@@ -221,6 +260,7 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
     routes: compile(app.routes),
     sockets: new Map(),
     inflight: new Map(),
+    replicas: new Map(),
   }
 }
 
@@ -444,18 +484,68 @@ self.onmessage = (event: MessageEvent): void => {
     case "ws.close":
       closeVirtual(current, message.socket)
       return
-    case "metrics":
+    case "repl.adopt": {
+      const server = current.runtime.replication
+      if (!server || current.replicas.has(message.conn)) return
+      const socket = new VirtualReplicationSocket(message.conn)
+      current.replicas.set(message.conn, socket)
+      server.adopt(socket as unknown as ReplicationSocket, message.node)
+      return
+    }
+    case "repl.frame": {
+      const socket = current.replicas.get(message.conn)
+      if (!socket) return
+      current.runtime.replication?.deliver(
+        socket as unknown as ReplicationSocket,
+        message.type,
+        message.body,
+      )
+      return
+    }
+    case "repl.gone": {
+      const socket = current.replicas.get(message.conn)
+      if (!socket) return
+      current.replicas.delete(message.conn)
+      socket.readyState = 3
+      // `close` ends every stream this worker held for the connection, unpins each tenant and
+      // rolls back the interactive transactions the replica had open *here* (R2's `onDisconnect`).
+      current.runtime.replication?.close(socket as unknown as ReplicationSocket)
+      return
+    }
+    case "repl.positions": {
+      const server = current.runtime.replication
+      const streams = (server?.positions() ?? []).map((one) => ({
+        conn: (one.ws as unknown as VirtualReplicationSocket).id,
+        stream: one.stream,
+        txid: one.txid.toString(),
+      }))
+      // R7's sweep rides the same tick: the announcement is the router's, and this is the thread
+      // that holds the streams it prunes.
+      server?.sweep(new Map(message.generations))
+      post({ kind: "repl.positions.reply", id: message.id, streams })
+      return
+    }
+    case "metrics": {
+      const server = current.runtime.replication
       post({
         kind: "metrics.reply",
         id: message.id,
         metrics: current.runtime.metrics.state(),
         registry: pick(current.runtime.registry.stats()),
+        // Only what is per stream. `connected` and `bytes` are the router's, which is the thread
+        // that owns every socket and writes every byte. `docs/c4b-replication-workers.md` §7.
+        replication: server
+          ? { lagTxid: server.maxLagTxid, records: server.recordsSent }
+          : null,
       })
       return
+    }
     case "shutdown": {
       const id = message.id
       void (async () => {
         for (const socketId of [...current.sockets.keys()]) closeVirtual(current, socketId)
+        current.replicas.clear()
+        current.runtime.replication?.stop()
         current.app.surfaces.close()
         await current.runtime.closeStorage()
         current.runtime.close()

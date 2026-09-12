@@ -101,6 +101,17 @@ export interface RuntimeOptions {
   onError?: (err: unknown) => void
   /** Called for every tenant the registry opens; the embedded API's `on("commit")` needs it. */
   onTenantOpen?: (tenant: Tenant) => void
+  /**
+   * C4b: which half of `/v1/replication` this runtime holds.
+   *
+   * - `"own"` (default) — a single-threaded node: one `ReplicationServer` that owns its sockets.
+   * - `"none"` — the router thread of a `workers > 1` node. It owns the sockets but no tenant, so
+   *   the server itself lives on the workers and `src/server/workers/replication.ts` is what it
+   *   holds instead.
+   * - `"hosted"` — a worker thread: a `ReplicationServer` whose connections are adopted from that
+   *   router. `docs/c4b-replication-workers.md`.
+   */
+  replicationMode?: "own" | "none" | "hosted"
 }
 
 export class ServerRuntime {
@@ -126,6 +137,8 @@ export class ServerRuntime {
    * which is what `403 REPLICATION_DISABLED` is answered from.
    */
   readonly replication: ReplicationServer | null
+  /** C4b: `"own"` on a single-threaded node, `"none"` on a router, `"hosted"` in a worker. */
+  readonly replicationMode: "own" | "none" | "hosted"
   /** The replica's client, or null on a primary. Started by `startServer`, stopped by `close`. */
   replica: ReplicaClient | null = null
   /** R2: the waiter behind `ack: "replica" | "quorum"`. */
@@ -200,32 +213,35 @@ export class ServerRuntime {
       })
     this.#onTenantOpen = options.onTenantOpen ?? null
     this.storage = buildShipperPool(options.config, this.registry, this.#onError)
-    this.replication = options.config.replication.secret
-      ? new ReplicationServer({
-          registry: this.registry,
-          node: this.node,
-          secret: options.config.replication.secret,
-          heartbeatMs: options.config.replication.heartbeatMs,
-          slowReplicaMs: options.config.replication.slowReplicaMs,
-          onForward: (request, node) => runForward(this, request, node),
-          onDisconnect: (node) => this.rollbackOrigin(node),
-          // C2's fencing signal: a peer subscribed claiming an epoch this node does not hold, so
-          // the control plane granted the database elsewhere after granting it here.
-          onEpochAhead: (event) =>
-            this.promoter.demote(
-              event.db,
-              `${event.node} subscribed at epoch ${event.epoch} while this node holds ` +
-                `${event.held}; this node has been fenced and is now a replica of it`,
-              { node: event.node },
-            ),
-          // A database this node holds as a replica copy — or was promoted for — keeps the
-          // identity it was bootstrapped under rather than one derived from a catalog row this
-          // node wrote itself. Without this, promoting a node re-mints the database's identity and
-          // every other replica trashes its copy and bootstraps again.
-          generationOf: (db) => this.replica?.generationOf(db) ?? null,
-          onError: this.#onError,
-        })
-      : null
+    this.replicationMode = options.replicationMode ?? "own"
+    this.replication =
+      options.config.replication.secret && this.replicationMode !== "none"
+        ? new ReplicationServer({
+            registry: this.registry,
+            node: this.node,
+            secret: options.config.replication.secret,
+            heartbeatMs: options.config.replication.heartbeatMs,
+            slowReplicaMs: options.config.replication.slowReplicaMs,
+            hosted: this.replicationMode === "hosted",
+            onForward: (request, node) => runForward(this, request, node),
+            onDisconnect: (node) => this.rollbackOrigin(node),
+            // C2's fencing signal: a peer subscribed claiming an epoch this node does not hold, so
+            // the control plane granted the database elsewhere after granting it here.
+            onEpochAhead: (event) =>
+              this.promoter.demote(
+                event.db,
+                `${event.node} subscribed at epoch ${event.epoch} while this node holds ` +
+                  `${event.held}; this node has been fenced and is now a replica of it`,
+                { node: event.node },
+              ),
+            // A database this node holds as a replica copy — or was promoted for — keeps the
+            // identity it was bootstrapped under rather than one derived from a catalog row this
+            // node wrote itself. Without this, promoting a node re-mints the database's identity and
+            // every other replica trashes its copy and bootstraps again.
+            generationOf: (db) => this.replica?.generationOf(db) ?? null,
+            onError: this.#onError,
+          })
+        : null
     this.acks = new AckTracker({
       server: this.replication,
       timeoutMs: options.config.replication.ackTimeoutMs,
@@ -296,6 +312,21 @@ export class ServerRuntime {
       return
     }
     if (!this.config.replication.secret) return
+    if (this.replicationMode === "hosted") {
+      // C4b lifts serving replicas from a worker, not *following* one from a worker: the upstream
+      // socket, the reconnect and the generation ledger are node-level and belong on the router
+      // (C4c). The safety half of the demotion has already happened — the database is a replica
+      // copy now and refuses writes with `NOT_PRIMARY` — so this is a convergence gap, not a
+      // correctness one, and it is worth a line rather than a silent no-op.
+      this.#onError(
+        new Error(
+          `${this.node}: a database was demoted on a worker and should now follow ${url}, but a ` +
+            "node with `[server] workers > 1` cannot follow an upstream yet " +
+            "(docs/c4b-replication-workers.md §6). Point this node at it by hand.",
+        ),
+      )
+      return
+    }
     this.config.replication.primary = url
     this.startReplicationClient()
   }
@@ -422,6 +453,9 @@ export class ServerRuntime {
       // the snapshots are retained per `retention` — but nothing more is shipped for it.
       void this.storage?.forget(event.name).catch((err) => this.#onError(err))
     }
+    // C4b: in a worker this asks the router to announce, because the announcement is one fact
+    // about the whole node and only the router can assemble it. Every other caller of `announce()`
+    // — C2's promotion among them — is carried across the same way, without a second hook.
     this.replication?.announce()
   }
 

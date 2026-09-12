@@ -247,10 +247,11 @@ measured against exactly the ceiling it was meant to lift.
 back in JavaScript. The shape is unchanged; the floor is higher. It peaks at six on 18 cores: the router
 is one thread, and eight databases over eight shards is a lumpy split.
 
-What is *not* lifted: one database still has one writer, and `workers > 1` refuses to start
-alongside replication or the cluster, because a replication stream is served from the `Tenant`,
-which lives on the thread that owns it (`docs/c4-workers.md` §5). Placement (milestone 3) is still
-what routes across *nodes*.
+What is *not* lifted: one database still has one writer, and `workers > 1` still refuses to start
+alongside `[replication] primary` or `[cluster] enabled`. *Serving* replicas is supported as of C4b
+— the router owns the replication connection and the worker that owns a database owns its stream,
+which costs 15% of write throughput on a single-threaded node and 19% on a sharded one
+(`docs/c4b-replication-workers.md` §9). Placement (milestone 3) is still what routes across *nodes*.
 
 **The ladder, in the order it pays off**
 

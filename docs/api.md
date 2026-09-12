@@ -174,9 +174,9 @@ The body is judged **after** the token and the database, so a request that may n
 `401` or `404` rather than a `400` describing what the route would have taken.
 
 `WORKERS_UNSUPPORTED` is the one code raised at startup rather than for a request: `[server]
-workers` above 1 shards databases across threads, and a database's replication stream is served
-from the thread that owns its writer, so a node configured for both refuses to start and names
-which one to drop. `docs/c4-workers.md` §5.
+workers` above 1 shards databases across threads, and two things a node can be configured for do
+not work that way yet — following an upstream and joining a cluster. Such a node refuses to start
+and names which one to drop. *Serving* replicas is supported. `docs/c4b-replication-workers.md` §6.
 
 | code | status | when |
 |---|---|---|
@@ -1434,13 +1434,20 @@ worker, 72 817 at six** — 2.67x (`bun run bench/workers.ts`, `docs/c4-workers.
 
 Two things change in what a sharded node reports, both in reporting rather than in data: `GET
 /v1/db` says `"open": false` for every database, because "open" is a fact about one worker's LRU;
-and `GET /metrics` sums every worker's counters but omits the replication and storage gauges.
+and `GET /metrics` sums every worker's counters but omits the **storage** gauges, which are per
+worker with no summing rule that is not a lie. The replication gauges are reported: `connected` and
+`bytes` from the router, which owns every socket, `records` summed and `lag_txid` maxed across the
+workers, which own the streams.
 
-**`workers > 1` cannot be combined with `[replication] secret`, `[replication] primary` or
-`[cluster] enabled`** — the node refuses to start with `WORKERS_UNSUPPORTED` and says which. A
-replication stream is served from the `Tenant` itself, which lives on the thread that owns it and
-not on the thread holding the socket; `docs/c4-workers.md` §5 and §10 argue it out and name the
-milestone that lifts it.
+**A sharded node serves replicas.** `[server] workers = N` and `[replication] secret` work together
+as of C4b: the router owns the replication socket and the worker that owns a database owns that
+database's stream, so one socket follows databases across every shard and a replica sees exactly
+the bytes a single-threaded node would have sent it. `docs/c4b-replication-workers.md`.
+
+**`workers > 1` still cannot be combined with `[replication] primary` or `[cluster] enabled`** —
+the node refuses to start with `WORKERS_UNSUPPORTED` and says which, and why. Following an upstream
+is C4b mirrored and is not built; the Raft lease is consulted on the write path, which is now a
+worker, and a worker must not block on the control plane. `docs/c4b-replication-workers.md` §6.
 
 ## Configuration
 

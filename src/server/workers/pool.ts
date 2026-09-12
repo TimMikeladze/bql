@@ -26,6 +26,13 @@ export interface RouterHost {
   publish(topic: string, data: string): unknown
 }
 
+/** What the pool needs from the `ReplicationRouter` (C4b), when this node serves replicas. */
+export interface ReplicationHost {
+  out(conn: string, bytes: Uint8Array): void
+  shut(conn: string, code?: number, reason?: string): void
+  announce(): void
+}
+
 export interface RouterSocket {
   send(data: string): number
   subscribe(topic: string): void
@@ -67,10 +74,12 @@ export class WorkerPool {
   #workers: Worker[] = []
   #pending = new Map<number, Pending>()
   #streams = new Map<number, Stream>()
-  #metrics = new Map<number, (reply: { metrics: MetricsState; registry: RegistryShare }) => void>()
+  #metrics = new Map<number, (reply: WorkerMetrics) => void>()
+  #positions = new Map<number, (streams: { conn: string; stream: number; txid: string }[]) => void>()
   #shutdowns = new Map<number, () => void>()
   #seq = 0
   #host: RouterHost | null = null
+  #replication: ReplicationHost | null = null
   #onError: (err: unknown) => void
   #closed = false
 
@@ -217,12 +226,75 @@ export class WorkerPool {
     for (const index of routing.adopted) this.#post(index, { kind: "ws.close", socket: socketId })
   }
 
+  // ── the replication relay (C4b) ──────────────────────────────────────────────────────────────
+
+  /** Adopts a replica connection the router has authenticated on one worker. */
+  replAdopt(index: number, conn: string, node: string): void {
+    this.#post(index, { kind: "repl.adopt", conn, node })
+  }
+
+  /** One decoded frame for the worker that owns the stream it names. */
+  replFrame(index: number, conn: string, type: number, body: Uint8Array): void {
+    this.#post(index, { kind: "repl.frame", conn, type, body })
+  }
+
+  replGone(index: number, conn: string, node: string): void {
+    this.#post(index, { kind: "repl.gone", conn, node })
+  }
+
+  /**
+   * The heartbeat gather: every worker's stream positions, and R7's announcement pushed the other
+   * way in the same message. Once per `heartbeatMs` for the whole node, not once per stream.
+   */
+  async replPositions(
+    generations: [string, string][],
+  ): Promise<{ conn: string; stream: number; txid: string }[]> {
+    const out: { conn: string; stream: number; txid: string }[] = []
+    await Promise.all(
+      this.#workers.map(
+        (_, index) =>
+          new Promise<void>((resolve) => {
+            const id = this.#seq++
+            const timer = setTimeout(() => {
+              this.#positions.delete(id)
+              resolve()
+            }, 2000)
+            timer.unref?.()
+            this.#positions.set(id, (streams) => {
+              clearTimeout(timer)
+              out.push(...streams)
+              resolve()
+            })
+            this.#post(index, { kind: "repl.positions", id, generations })
+          }),
+      ),
+    )
+    return out
+  }
+
+  /** Where the `ReplicationRouter` plugs in, so this module never imports it. */
+  setReplicationHost(host: ReplicationHost | null): void {
+    this.#replication = host
+  }
+
   // ── metrics and shutdown ─────────────────────────────────────────────────────────────────────
 
-  /** Every worker's counters, added together, plus its share of the LRU. */
-  async gather(): Promise<{ metrics: Metrics; registry: RegistryShare }> {
+  /**
+   * Every worker's counters, added together, plus its share of the LRU and of replication.
+   *
+   * The replication rule (C4b): `records` sums, because a `TXN` is emitted by exactly one worker;
+   * `lagTxid` takes the max, because it is already a max over streams. `connected` and `bytes` are
+   * *not* here — the router owns every socket and writes every byte, so it counts both itself and
+   * a worker's view of either would be a different quantity wearing the same name.
+   */
+  async gather(): Promise<{
+    metrics: Metrics
+    registry: RegistryShare
+    replication: { lagTxid: number; records: number } | null
+  }> {
     const merged = new Metrics()
     const registry: RegistryShare = { open: 0, tenants: 0, evictions: 0 }
+    let replication: { lagTxid: number; records: number } | null = null
     await Promise.all(
       this.#workers.map(
         (_, index) =>
@@ -233,13 +305,18 @@ export class WorkerPool {
               registry.open += reply.registry.open
               registry.evictions += reply.registry.evictions
               registry.tenants = Math.max(registry.tenants, reply.registry.tenants)
+              if (reply.replication) {
+                replication ??= { lagTxid: 0, records: 0 }
+                replication.records += reply.replication.records
+                replication.lagTxid = Math.max(replication.lagTxid, reply.replication.lagTxid)
+              }
               resolve()
             })
             this.#post(index, { kind: "metrics", id })
           }),
       ),
     )
-    return { metrics: merged, registry }
+    return { metrics: merged, registry, replication }
   }
 
   async close(): Promise<void> {
@@ -355,10 +432,29 @@ export class WorkerPool {
       case "ws.shut":
         this.#sockets.get(message.socket)?.close(message.code, message.reason)
         return
+      case "repl.out":
+        this.#replication?.out(message.conn, message.bytes)
+        return
+      case "repl.shut":
+        this.#replication?.shut(message.conn, message.code, message.reason)
+        return
+      case "repl.announce":
+        this.#replication?.announce()
+        return
+      case "repl.positions.reply": {
+        const waiting = this.#positions.get(message.id)
+        this.#positions.delete(message.id)
+        waiting?.(message.streams)
+        return
+      }
       case "metrics.reply": {
         const waiting = this.#metrics.get(message.id)
         this.#metrics.delete(message.id)
-        waiting?.({ metrics: message.metrics, registry: message.registry })
+        waiting?.({
+          metrics: message.metrics,
+          registry: message.registry,
+          replication: message.replication ?? null,
+        })
         return
       }
       case "shutdown.reply": {
@@ -422,6 +518,13 @@ export interface RegistryShare {
   open: number
   tenants: number
   evictions: number
+}
+
+/** One worker's answer to a `metrics` ask. */
+interface WorkerMetrics {
+  metrics: MetricsState
+  registry: RegistryShare
+  replication: { lagTxid: number; records: number } | null
 }
 
 /**

@@ -225,7 +225,15 @@ type WorkerEvent =
 already has the seam and `ws.ts` already spells its topics exactly as Bun's pub/sub spells them
 (`src/realtime/bus.ts`, first invariant — written in phase 0 for a reason that only pays off here).
 
-## 5. The limitation this milestone does not lift
+## 5. The limitation this milestone does not lift — **lifted for replicas by C4b**
+
+> **Update, 2026-09-12.** The refusal below was two-thirds right and one-third wrong. C4b
+> (`docs/c4b-replication-workers.md`) lifted the replication half of it without the `Tenant` proxy
+> this section proposed: **the *stream* crosses the channel, not the tenant**, so `tenant.onCommit`,
+> `tenant.log.iterate`, `tenant.snapshot()` and `registry.pin` are still called on the thread that
+> holds the writer, and the only thing on the channel is the finished frame. A three-worker node
+> now serves replicas. `[replication] primary` and `[cluster] enabled` are still refused, each for
+> its own reason — see C4b §6. The section as written stands as the analysis that led there.
 
 **`workers > 1` refuses to start alongside replication or the cluster, and says why.**
 
@@ -341,16 +349,27 @@ where it did 28 809, and more than the 39 734 four separate processes did in §5
 - `GET /v1/db` reports `"open": false` for every database, because "open" is a fact about one
   worker's LRU and the router holds none. The rest of the row is the catalog's and is exact.
 - `GET /metrics` on a router sums every worker's counters (`Metrics.state`/`absorb`) and the router's
-  own, but omits the replication and storage gauges: replication is refused with `workers > 1`
-  anyway, and the S3 shipper's gauges are per worker with no summing rule that is not a lie.
+  own. It omitted the replication and storage gauges; **C4b closed the replication half** with a
+  summing rule per gauge (C4b §7) now that replication is no longer refused. The S3 shipper's
+  gauges are still omitted: they are per worker with no summing rule that is not a lie.
 - A hopped request body crosses as one `Uint8Array`, so `POST /v1/db/{db}/import` of a very large
   SQLite file is copied once more than it would be on a single-threaded node. `[limits]
   maxImportBytes` still bounds it.
 
 ## 10. C4b — what is left after this
 
-- A `Tenant` proxy over the channel, so `/v1/replication` can be served from the router for a
-  database a worker owns. That lifts every refusal in §5.
+- ~~A `Tenant` proxy over the channel, so `/v1/replication` can be served from the router for a
+  database a worker owns.~~ **Done, and not as a `Tenant` proxy** —
+  `docs/c4b-replication-workers.md`. The router owns the replication *connection* (the socket, the
+  handshake, the frame reader, the queue, the heartbeat, the announcement) and the worker that owns
+  a database owns that database's *stream*. Nothing that touches a tenant is on the channel; the
+  hot path is one `postMessage` per `TXN`, which is what a socket on another thread costs and no
+  more. A proxy would have made `onCommit` and `log.iterate` request/response per record, which is
+  exactly how it would have got slow.
+- **C4c: following an upstream** (`[replication] primary`) with `workers > 1` is still refused. It
+  is C4b mirrored, and `ReplicaClient` is the harder half: the upstream socket, the reconnect and
+  the generation ledger are node-level while `installSnapshot` and `applyRecord` are per shard.
 - The Raft lease consulted from a worker (a push of the lease state down the channel, since the
-  worker must not block on the control plane — design §5.3's whole premise).
+  worker must not block on the control plane — design §5.3's whole premise). Still open, and still
+  why `[cluster] enabled` is refused.
 - `maxOpenTx` is still 1 per database, which is SQLite and does not change here.

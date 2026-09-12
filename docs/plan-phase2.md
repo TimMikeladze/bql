@@ -161,8 +161,23 @@ the router's own `server.publish` — there is no subscriber on a worker, so the
 `BroadcastChannel` to. A WebSocket is relayed through a *virtual* socket on the worker, so
 `src/server/ws.ts` is unchanged.
 
-**28 809 writes/s → 72 817 at six workers, 2.67x, on one port.** `workers > 1` refuses to start with
-replication or the cluster (`WORKERS_UNSUPPORTED`); C4b is the milestone that lifts that.
+**28 809 writes/s → 72 817 at six workers, 2.67x, on one port.**
+
+### C4b — `/v1/replication` on a sharded node — **done (`docs/c4b-replication-workers.md`)**
+
+The **stream** crosses the worker channel, not the tenant: the router owns the replication
+connection (socket, handshake, frame reader, send queue, heartbeat, announcement) and the worker
+that owns a database owns that database's stream, so `tenant.onCommit`, `tenant.log.iterate`,
+`tenant.snapshot()` and `registry.pin` are still called on the thread that holds the writer. One
+`postMessage` per `TXN` is the whole hot path. `[replication] secret` beside `workers > 1` starts.
+
+Serving a replica costs 15% of write throughput on a single-threaded node and 19% on a sharded one;
+six workers with a replica attached do **65 845 writes/s against one worker's 28 236**.
+
+Still refused, each for its own reason: `[replication] primary` (**C4c**, C4b mirrored —
+`ReplicaClient`'s socket, reconnect and generation ledger are node-level while its apply is per
+shard) and `[cluster] enabled` (the Raft lease is consulted on the write path, which is now a
+worker, and a worker must not block on the control plane).
 
 ### C5 — replica apply mechanism A — **done (`docs/c5-apply-pages.md`)**
 

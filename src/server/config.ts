@@ -775,12 +775,20 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
 }
 
 /**
- * What `[server] workers` may be combined with. More than one worker shards databases across
- * threads, and a database's replication stream is served from the `Tenant` itself —
- * `tenant.onCommit`, `tenant.log`, `tenant.snapshot()`, `registry.pin` — which lives on the thread
- * that owns it, not on the router thread that holds the socket. Rather than serve a replica half
- * a log, a node configured for both refuses to start and says which one to drop.
- * `docs/c4-workers.md` §5; C4b is the milestone that lifts this.
+ * What `[server] workers` may be combined with.
+ *
+ * **Serving replicas is allowed as of C4b** (`docs/c4b-replication-workers.md`): the router owns
+ * the replication socket and the worker that owns a database owns that database's stream, so
+ * `tenant.onCommit`, `tenant.log`, `tenant.snapshot()` and `registry.pin` are still called on the
+ * thread that holds the writer and nothing about a `Tenant` crosses the channel.
+ *
+ * Two combinations are still refused, and each for its own reason rather than for this one:
+ *
+ * - **`[replication] primary`** — *following* an upstream is C4b's mirror and is not built. The
+ *   socket, the reconnect and the generation ledger are node-level, and the apply is per shard.
+ * - **`[cluster] enabled`** — the Raft lease is consulted on the write path, which is now a worker,
+ *   and a worker must not block on the control plane (design §5.3). It wants the lease state
+ *   *pushed* down the channel, which is a different milestone.
  */
 function assertWorkers(config: ServerConfig): void {
   const n = config.server.workers
@@ -790,21 +798,27 @@ function assertWorkers(config: ServerConfig): void {
     )
   }
   if (n === 1) return
-  const why =
-    config.cluster.enabled
-      ? "[cluster] enabled"
-      : config.replication.primary
-        ? "[replication] primary (this node follows an upstream)"
-        : config.replication.secret
-          ? "[replication] secret (this node serves /v1/replication)"
-          : null
+  const why = config.cluster.enabled
+    ? {
+        what: "[cluster] enabled",
+        because:
+          "the Raft lease is consulted on the write path, which is now a worker, and a worker " +
+          "must not block on the control plane",
+      }
+    : config.replication.primary
+      ? {
+          what: "[replication] primary (this node follows an upstream)",
+          because:
+            "the upstream socket, the reconnect and the generation ledger are node-level while " +
+            "the apply is per shard, and that half is not built yet",
+        }
+      : null
   if (!why) return
   throw new BunQLError(
     "WORKERS_UNSUPPORTED",
-    `[server] workers = ${n} cannot be combined with ${why}: a database's replication stream is ` +
-      "served from the thread that owns its writer, and with more than one worker that is not the " +
-      "thread holding the socket. Run this node with workers = 1, or without replication. " +
-      "See docs/c4-workers.md §5.",
+    `[server] workers = ${n} cannot be combined with ${why.what}: ${why.because}. Run this node ` +
+      "with workers = 1, or without it. Serving replicas is supported — see " +
+      "docs/c4b-replication-workers.md §6.",
     400,
   )
 }

@@ -15,7 +15,9 @@ import type { ServerConfig } from "../config.ts"
 import { BunQLError, errorResponse } from "../errors.ts"
 import { hranaTarget } from "../hrana/index.ts"
 import type { ServerRuntime } from "../runtime.ts"
+import type { ReplicationMetrics } from "../metrics.ts"
 import type { SocketRouting, WorkerPool } from "./pool.ts"
+import type { ReplicationRouter } from "./replication.ts"
 
 /** A socket the router holds on behalf of a worker. */
 export interface RelaySocketData {
@@ -277,14 +279,33 @@ export function relayHranaUpgrade(
   return new Response("expected a WebSocket upgrade", { status: 426 })
 }
 
-/** `GET /metrics` on a router: every worker's counters, added, rendered as this node's. */
-export async function routerMetrics(runtime: ServerRuntime, pool: WorkerPool): Promise<Response> {
-  const { metrics, registry } = await pool.gather()
+/**
+ * `GET /metrics` on a router: every worker's counters, added, rendered as this node's.
+ *
+ * The replication block is assembled from both halves by the rule in
+ * `docs/c4b-replication-workers.md` §7 — `connected` and `bytes` from the router, which owns every
+ * socket and writes every byte; `records` summed and `lagTxid` maxed across the workers, which own
+ * the streams. The storage gauges are still omitted: that gap is C4's and is unchanged.
+ */
+export async function routerMetrics(
+  runtime: ServerRuntime,
+  pool: WorkerPool,
+  replication: ReplicationRouter | null,
+): Promise<Response> {
+  const { metrics, registry, replication: shards } = await pool.gather()
   // The router answers no database request, but it does answer the node-level ones, so its own
   // counters belong in the total.
   metrics.absorb(runtime.metrics.state())
   registry.tenants = runtime.registry.list().length
-  const body = metrics.render(registry, runtime.node, null, null)
+  const replicationMetrics: ReplicationMetrics | null = replication
+    ? {
+        connected: replication.connections,
+        bytes: replication.bytesSent,
+        lagTxid: shards?.lagTxid ?? 0,
+        records: shards?.records ?? 0,
+      }
+    : null
+  const body = metrics.render(registry, runtime.node, replicationMetrics, null)
   return new Response(body, {
     headers: {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",

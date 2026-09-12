@@ -1,19 +1,21 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-12 at the end of the session that built replica apply mechanism A (C5) and the
-native WAL checksum (P3). Read this, then `docs/c5-apply-pages.md`, then `docs/p3-wal-checksum.md`,
-then `docs/c4-workers.md`, then `docs/performance.md`, then
+Rewritten 2026-09-12 at the end of the session that built C4b — `/v1/replication` on a node with
+workers. Read this, then `docs/c4b-replication-workers.md`, then `docs/c4-workers.md`, then
+`docs/c5-apply-pages.md`, then `docs/p3-wal-checksum.md`, then `docs/performance.md`, then
 `docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the
-cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL), `docs/c5-apply-pages.md`,
+cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL), `docs/c4b-replication-workers.md`,
+`docs/c5-apply-pages.md`,
 `docs/p3-wal-checksum.md`, `docs/c4-workers.md`, `docs/h6-mount.md`, `docs/h8-validated-requests.md`, `docs/p1-pragmas.md` and
 `docs/p2-group-commit.md`.
 
 ## Where things stand
 
 Phases 0 and 1 are complete; phase 2 has its control plane, its failover, its packaging, its
-multi-core story and, now, the apply mechanism its replicas were always meant to use. On `main`,
+multi-core story, the apply mechanism its replicas were always meant to use, and — as of C4b — both
+of those last two at once. On `main`,
 pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree clean).
-`bun test` → **1367 pass, 2 skip, 0 fail** across 110 files, and green again with
+`bun test` → **1381 pass, 2 skip, 0 fail** across 112 files, and green again with
 `BUNQL_WAL_NATIVE=0`.
 `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and
 Linux.** Zero runtime dependencies.
@@ -21,6 +23,20 @@ Linux.** Zero runtime dependencies.
 **A node uses its cores.** `[server] workers = N` (`bunql serve --workers N`) shards databases
 across worker threads behind one port: **28 809 writes/s at one worker, 72 817 at six, 2.67x**, on
 the same eight databases and the same load the ceiling was measured on. `docs/c4-workers.md`.
+
+**And it can serve replicas while it does.** C4b (`docs/c4b-replication-workers.md`) lifted the
+refusal C4 left behind, and **not** with the `Tenant` proxy this file used to call for: **the
+*stream* crosses the worker channel, not the tenant.** The router owns the replication connection —
+the socket, the HMAC handshake, the frame reader, the one send queue and cut-off, the heartbeat and
+the node's announcement — and the worker that owns a database owns that database's stream, so
+`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()` and `registry.pin` are still called on
+the thread that holds the writer. Nothing about a `Tenant` is on the channel; the hot path is one
+`postMessage` per `TXN`. `src/replication/primary.ts` gained a `hosted` flag and four methods and
+**nothing below the connection changed**. A three-worker primary and a real replica, exercised by
+hand across a shard boundary, land on the primary's checksum byte for byte with a zero-byte `-wal`.
+Serving a replica costs **15%** of write throughput on a single-threaded node and **19%** on a
+sharded one — so the channel is about four points of it — and six workers with a replica attached
+still do **65 845 writes/s against one worker's 28 236**.
 
 **A replica reads at full speed.** Apply mechanism A is built and is the default
 (`[replication] apply = "pages"`): the primary's pages go straight into the replica's database file
@@ -70,7 +86,16 @@ writes/s behind one port (`docs/c4-workers.md` §9).
 | group commit | `80ac667` | `[limits] groupCommit`, **opt-in**: 4.7x at 64 concurrent clients, 15% slower at one |
 | snapshot floor + WAL-tail negative result | `179f3a9` | every node now takes a local snapshot, so retention cannot make it unrestorable; and the WAL tail is memory-bound, proven by an allocation-free rewrite that changed nothing |
 
+| landed in this session | what it is |
+|---|---|
+| C4b: `/v1/replication` on a sharded node | `src/server/workers/replication.ts` (`ReplicationRouter`: the connection, the handshake, the frame reader, the queue and the cut-off, the heartbeat and the announcement), `hosted` + `adopt`/`deliver`/`positions`/`sweep`/`setAnnounceHandler` on `ReplicationServer`, four envelopes each way in `workers/protocol.ts`, `VirtualReplicationSocket` in `workers/entry.ts`, `replicationMode` on `ServerRuntime`, `bench/workers.ts --replication`, `test/server/workers-replication.test.ts` and `test/replication/hosted.test.ts`. **`[replication] secret` beside `workers > 1` no longer refuses.** `docs/c4b-replication-workers.md` |
+
 | landed in the session before this one | what it is |
+|---|---|
+| P3: the WAL checksum in C | `scripts/native/walsum.c` compiled into the vendored artefact, `bunql_wal_*` as optional symbols in `src/sqlite/lib.ts`, `src/wal/native.ts` (`checkFrameFast`, `BUNQL_WAL_NATIVE=0` to force the fallback), three call sites in `src/wal/tailer.ts`, `test/wal/native.test.ts`. **Write 28.9 → 24.0 µs, 29 136 → 33 854 writes/s.** `docs/p3-wal-checksum.md` |
+| C5: replica apply mechanism A | `src/wal/shm.ts` (the wal-index header format), `src/wal/shmlock.ts` (the WAL lock set through `xShmLock`, the only FFI in `src/wal/`), the strategy split in `src/wal/applier.ts`, `ApplyBusy`, `[replication] apply` and `applyBusyMs`, `"apply"` on `GET /v1/db/{db}`, `bench/wal.ts` over both mechanisms, `test/wal/shm.test.ts` and `test/wal/apply-pages.test.ts`. **Replica read 47.2 µs → 6.4, apply 196 → 162, end to end 291 → 211.** `docs/c5-apply-pages.md` |
+
+| landed three sessions ago | what it is |
 |---|---|
 | C4: `workers: N` | `src/server/workers/` (shard, protocol, pool, entry, router), `[server] workers`, `--workers`, `WORKERS_UNSUPPORTED`, `Metrics.state/absorb`, `bench/workers.ts`. The main thread is a router owning the listener, every socket, the catalog and the authenticator and no database; N workers each hold a whole `ServerRuntime` over a hash shard. `ws.ts`, `routes.ts`, `runtime.ts` and `tenant/` are untouched. `docs/c4-workers.md` |
 | H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
@@ -80,11 +105,6 @@ writes/s behind one port (`docs/c4-workers.md` §9).
 | `routes:check` reads the registry | it already read the live table; it now also fails when a served route is **not** in the registry, so a hand-added route in `createApp` cannot go undescribed |
 | `CLUSTER_DISABLED` joined `ERROR_STATUS` | `routes.ts` has thrown it since C1 with an explicit 503, but it was absent from the documented vocabulary, so the document build rejected it |
 | `createApp` is async | it resolves the optional GraphQL peers once, at startup, instead of per request. Three call sites |
-
-| landed in this session | what it is |
-|---|---|
-| P3: the WAL checksum in C | `scripts/native/walsum.c` compiled into the vendored artefact, `bunql_wal_*` as optional symbols in `src/sqlite/lib.ts`, `src/wal/native.ts` (`checkFrameFast`, `BUNQL_WAL_NATIVE=0` to force the fallback), three call sites in `src/wal/tailer.ts`, `test/wal/native.test.ts`. **Write 28.9 → 24.0 µs, 29 136 → 33 854 writes/s.** `docs/p3-wal-checksum.md` |
-| C5: replica apply mechanism A | `src/wal/shm.ts` (the wal-index header format), `src/wal/shmlock.ts` (the WAL lock set through `xShmLock`, the only FFI in `src/wal/`), the strategy split in `src/wal/applier.ts`, `ApplyBusy`, `[replication] apply` and `applyBusyMs`, `"apply"` on `GET /v1/db/{db}`, `bench/wal.ts` over both mechanisms, `test/wal/shm.test.ts` and `test/wal/apply-pages.test.ts`. **Replica read 47.2 µs → 6.4, apply 196 → 162, end to end 291 → 211.** `docs/c5-apply-pages.md` |
 
 ## How the work is run (keep doing this)
 
@@ -126,9 +146,12 @@ C1, C2 and C6 are done (see the table above). What remains, in the order it make
 4. ~~**`workers: N`.**~~ **Done (C4).** `docs/c4-workers.md`. The decision the milestone really made:
    a worker owns a **shard of databases**, not a shared listener via `reusePort` — which is dead on
    macOS (measured) and which would turn every per-process singleton into an N-way distributed
-   object. The router keeps them singular instead. What is left is **C4b**: a `Tenant` proxy over
-   the channel so `/v1/replication` can be served for a database a worker owns, which is what
-   `workers > 1` refusing to start beside replication or the cluster is waiting on.
+   object. The router keeps them singular instead.
+4b. ~~**`/v1/replication` from a sharded node.**~~ **Done (C4b).**
+   `docs/c4b-replication-workers.md`. The router owns the replication *connection*, the worker that
+   owns a database owns its *stream*, and no `Tenant` is on the channel. `[replication] secret`
+   beside `workers > 1` starts. Still refused: `[replication] primary` (**C4c**, the mirror) and
+   `[cluster] enabled` (the Raft lease on a worker's write path).
 5. ~~**Replica apply mechanism A (§4.5).**~~ **Done (C5).** `docs/c5-apply-pages.md`. Pages go into
    the database file and the wal-index header is rewritten under SQLite's own WAL lock set, so a
    replica's `-wal` is always zero bytes. **The read leg went 47.2 µs → 6.4.** `[replication] apply
@@ -149,10 +172,13 @@ Added by C4 (2026-09-12), all in reporting rather than in data, and all only wit
   LRU and the router holds none. The rest of the row comes from the catalog and is exact. Fixing it
   means asking every worker, which is a round trip on a route that is otherwise a single catalog
   read.
-- **`GET /metrics` omits the replication and storage gauges.** Every worker's counters are summed
-  (`Metrics.state`/`absorb`) and so are the router's own, but replication is refused with
-  `workers > 1` anyway and the S3 shipper's gauges are per worker with no summing rule that is not
-  a lie.
+- ~~**`GET /metrics` omits the replication and storage gauges.**~~ **Half closed (C4b).** Every
+  worker's counters are summed (`Metrics.state`/`absorb`) and so are the router's own, and the
+  replication gauges are now assembled from both halves by a rule per gauge: `connected` and
+  `bytes` from the router, which owns every socket and writes every byte, `records` summed and
+  `lag_txid` maxed across the workers, which own the streams
+  (`docs/c4b-replication-workers.md` §7). The S3 shipper's gauges are still omitted: they are per
+  worker with no summing rule that is not a lie.
 - **A hopped request body crosses as one `Uint8Array`**, so `POST /v1/db/{db}/import` of a large
   SQLite file is copied once more than on a single-threaded node. `[limits] maxImportBytes` bounds
   it. The response side already streams above 1 MiB.
@@ -287,23 +313,43 @@ What phase 1 added to the list:
 
 ## Start here
 
-**A, B and C are all done.** What is left, biggest first: **C4b** (the `Tenant` proxy over the
-worker channel, so `workers > 1` can serve replication — under A below), **C3** (placement and
-`[cluster]`), **H7** (GraphQL subscriptions), and **capturing pages from SQLite directly**, which is
-what C5 left on the primary side. Each section below is written so it can be started cold.
+**A, B, C and C4b are all done.** What is left, biggest first: **C4c** (following an upstream with
+`workers > 1` — under A below), **C3** (placement and `[cluster]`), **H7** (GraphQL subscriptions),
+and **deferred compression**, which is now the largest single line item on a write. Each section
+below is written so it can be started cold.
 
-### A. ~~`workers: N`~~ **Done (C4).** What it left behind
+### A. ~~`workers: N`~~ **Done (C4).** ~~And C4b~~ **Done too.** What is left
 
 `docs/c4-workers.md` is the decision, the measurements that forced it and the as-built §9.
-**28 809 → 72 817 writes/s at six workers, one port.** The follow-on, **C4b**, is the one thing it
-could not do: `src/replication/primary.ts` serves a replica from the `Tenant` itself —
-`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()`, `tenant.epoch`, `registry.pin` — and
-one replication socket follows databases across every shard while the socket is on the router,
-which owns no tenant. So `loadConfig` refuses `workers > 1` beside `[replication] secret`,
-`[replication] primary` or `[cluster] enabled`, with `WORKERS_UNSUPPORTED` naming which. Lifting it
-is a `Tenant` proxy over the channel, and it is the most interesting remaining piece of C4.
+**28 809 → 72 817 writes/s at six workers, one port.**
 
-Three smaller things C4 left, all in reporting rather than in data, listed under "Known gaps".
+**C4b is built** (`docs/c4b-replication-workers.md`): a sharded node serves replicas. It is not the
+`Tenant` proxy this file used to call for, and rejecting that shape is the milestone's decision:
+**the *stream* crosses the channel, not the tenant.** The router owns the replication *connection*
+— the socket, the HMAC handshake, the frame reader, the one send queue and cut-off, the heartbeat
+and the node's announcement — and the worker that owns a database owns that database's *stream*, so
+`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()`, `tenant.epoch` and `registry.pin` are
+all still called on the thread that holds the writer. Nothing about a `Tenant` is on the channel;
+the hot path is one `postMessage` per `TXN`, which is what a socket on another thread costs and no
+more. A proxy would have turned `onCommit` and `log.iterate` into request/response per record,
+which is exactly how it would have got slow.
+
+What is left of C4 is two things, each for its own reason rather than for the one C4 stated:
+
+- **C4c — following an upstream.** `[replication] primary` with `workers > 1` is still refused. It
+  is C4b mirrored and `ReplicaClient` is the harder half: the upstream socket, the reconnect and
+  the generation ledger (`generations.json`, one file, one writer) are node-level, while
+  `installSnapshot`, `applyRecord` and the deferred-retry queue are per shard. The channel
+  plumbing C4b built — `repl.adopt`/`repl.frame`/`repl.gone`, the virtual replication socket, the
+  position gather — is the shape to mirror.
+- **The Raft lease from a worker.** `[cluster] enabled` with `workers > 1` is still refused,
+  because the lease is consulted on the write path, which is now a worker, and a worker must not
+  block on the control plane (design §5.3). It wants the lease state *pushed* down the channel.
+  Until then a fenced database on a worker demotes — it stops taking writes, which is the half that
+  matters — but cannot auto-follow the node that took it, and says so in the log.
+
+Two smaller things C4 left are still open, both in reporting rather than in data, listed under
+"Known gaps". The third, the missing replication gauges, **C4b closed**.
 
 ### B. ~~Replica apply mechanism A~~ **Done (C5).** What it measured, and what it left
 

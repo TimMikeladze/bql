@@ -1,6 +1,11 @@
 // What `[server] workers` is worth (`docs/c4-workers.md`, phase-2 milestone 4).
 //
 //   bun run bench/workers.ts [--workers 1,2,4] [--dbs 8] [--concurrent 64] [--seconds 5]
+//                            [--replication]
+//
+// `--replication` (C4b) attaches a real replica to every node on the ladder before the load starts,
+// so the figure is what a node does while it is also serving its replicas — each commit crossing
+// the worker channel as one frame on its way to the socket the router holds.
 //
 // The shape is exactly the one `docs/performance.md` §5 measured across processes: N databases,
 // single-row writes, many concurrent clients. There it was one process against four; here it is
@@ -27,6 +32,9 @@ const LADDER = flag("workers", "1,2,4")
 const DBS = Number(flag("dbs", "8"))
 const CONCURRENT = Number(flag("concurrent", "64"))
 const SECONDS = Number(flag("seconds", "5"))
+/** C4b: run the ladder with a real replica attached to each node. */
+const REPLICATION = Bun.argv.includes("--replication")
+const SECRET = "bench-cluster-secret-0123456789"
 const ADMIN = "bench-admin-key"
 const NAMES = Array.from({ length: DBS }, (_, i) => `bench${i}`)
 
@@ -39,6 +47,7 @@ for (const workers of LADDER) {
 const base = results[0]?.rate ?? 0
 console.log(
   `bunql workers bench · ${DBS} databases · ${CONCURRENT} sockets · ${SECONDS}s · ` +
+    `${REPLICATION ? "one replica attached · " : "no replication · "}` +
     `Bun ${Bun.version} · ${process.platform}/${process.arch} · ${os.cpus().length} cores\n`,
 )
 console.log("workers    writes/s    speedup")
@@ -82,6 +91,7 @@ async function run(workers: number): Promise<number> {
       "127.0.0.1",
       "--workers",
       String(workers),
+      ...(REPLICATION ? ["--cluster-secret", SECRET] : []),
     ],
     {
       stdout: "ignore",
@@ -89,6 +99,8 @@ async function run(workers: number): Promise<number> {
       env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
     },
   )
+  let replica: Bun.Subprocess | null = null
+  let replicaRoot: string | null = null
   try {
     const url = `http://127.0.0.1:${port}`
     await waitFor(url)
@@ -97,6 +109,38 @@ async function run(workers: number): Promise<number> {
       await post(url, `/v1/db/${name}/query`, {
         sql: "create table t(id integer primary key, v text)",
       })
+    }
+    if (REPLICATION) {
+      replicaRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-workers-${workers}-replica-`))
+      const replicaPort = port + 100
+      replica = Bun.spawn(
+        [
+          process.execPath,
+          "run",
+          path.join(import.meta.dir, "..", "src", "cli.ts"),
+          "serve",
+          "--dir",
+          replicaRoot,
+          "--port",
+          String(replicaPort),
+          "--host",
+          "127.0.0.1",
+          "--cluster-secret",
+          SECRET,
+          "--replica-of",
+          `ws://127.0.0.1:${port}/v1/replication`,
+        ],
+        {
+          stdout: "ignore",
+          stderr: "inherit",
+          env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+        },
+      )
+      const replicaUrl = `http://127.0.0.1:${replicaPort}`
+      await waitFor(replicaUrl)
+      // Every database bootstrapped before the load starts, so the figure measures streaming
+      // rather than a snapshot racing the first write.
+      await untilFollowing(replicaUrl)
     }
     const client = Bun.spawn(
       [
@@ -122,9 +166,29 @@ async function run(workers: number): Promise<number> {
     if (!report || typeof report.rate !== "number") throw new Error("the load client printed no rate")
     return report.rate
   } finally {
+    if (replica) {
+      replica.kill()
+      await replica.exited
+    }
     server.kill()
     await server.exited
     fs.rmSync(root, { recursive: true, force: true })
+    if (replicaRoot) fs.rmSync(replicaRoot, { recursive: true, force: true })
+  }
+}
+
+/** Waits until the replica holds every one of the benchmark's databases. */
+async function untilFollowing(replicaUrl: string): Promise<void> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const response = await fetch(`${replicaUrl}/v1/db`, {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    })
+    const body = (await response.json()) as { databases?: { name: string }[] }
+    const held = new Set((body.databases ?? []).map((one) => one.name))
+    if (NAMES.every((name) => held.has(name))) return
+    if (Date.now() > deadline) throw new Error("the replica never picked up every database")
+    await Bun.sleep(50)
   }
 }
 

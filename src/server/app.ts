@@ -42,6 +42,7 @@ import {
   type RelaySocketData,
 } from "./workers/router.ts"
 import { WorkerPool } from "./workers/pool.ts"
+import { ReplicationRouter } from "./workers/replication.ts"
 import { resolveWorkers } from "./workers/shard.ts"
 import {
   busPublisher,
@@ -205,6 +206,11 @@ export interface App {
     server: unknown,
   ) => Response | Promise<Response | undefined> | undefined
   websocket: Record<string, unknown>
+  /**
+   * C4b: the router's half of `/v1/replication` on a `workers > 1` node, or null everywhere else.
+   * The workers hold the streams; this holds the sockets. `docs/c4b-replication-workers.md`.
+   */
+  replication: ReplicationRouter | null
 }
 
 /**
@@ -230,6 +236,28 @@ export interface App {
  */
 export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Promise<App> {
   const options = (request: Request) => preflight(runtime.config, request)
+  // C4b: with workers, `runtime.replication` is null on this thread (`replicationMode: "none"`)
+  // and each worker holds a hosted `ReplicationServer` instead. This owns the sockets and routes
+  // each frame to the shard that owns the stream it names.
+  const replRouter =
+    pool && runtime.config.replication.secret
+      ? new ReplicationRouter({
+          runtime,
+          pool,
+          node: runtime.node,
+          secret: runtime.config.replication.secret,
+          heartbeatMs: runtime.config.replication.heartbeatMs,
+          slowReplicaMs: runtime.config.replication.slowReplicaMs,
+          onError: (err) => runtime.report(err),
+        })
+      : null
+  if (pool && replRouter) {
+    pool.setReplicationHost({
+      out: (conn, bytes) => replRouter.out(conn, bytes),
+      shut: (conn, code, reason) => replRouter.shut(conn, code, reason),
+      announce: () => replRouter.announce(),
+    })
+  }
   const surfaces = new Surfaces(runtime)
   const registry = serverRegistry(surfaces, {
     api: runtime.config.api.enabled,
@@ -252,7 +280,7 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
         : pool && operation.id === "createDatabase"
           ? forwardByBody(runtime, pool)
           : pool && operation.id === "metrics"
-            ? () => routerMetrics(runtime, pool)
+            ? () => routerMetrics(runtime, pool, replRouter)
             : wrap(runtime, asHandler(operation, http))
     mountOperation(routes, operation, handler)
   }
@@ -266,6 +294,7 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
   return {
     routes,
     surfaces,
+    replication: replRouter,
     fetch(request: Request, server: unknown) {
       const url = new URL(request.url)
       if (url.pathname === "/v1/ws") {
@@ -275,7 +304,9 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
       }
       // Node-to-node, on its own path and with its own handshake: the cluster secret is proved
       // in-band over the socket (design §8), so nothing here looks at `Authorization`.
-      if (url.pathname === "/v1/replication") return upgradeReplication(runtime, request, server)
+      if (url.pathname === "/v1/replication") {
+        return upgradeReplication(runtime, replRouter, request, server)
+      }
       // The control plane's own socket, authenticated the same way with the same secret (C1).
       if (url.pathname === RAFT_PATH) return upgradeCluster(runtime, request, server)
       if (isHranaUpgrade(request, url)) {
@@ -318,7 +349,9 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
-          runtime.replication?.open(ws as unknown as ReplicationSocket)
+          // C4b: with workers the router holds the connection and the shards hold the streams.
+          if (replRouter) replRouter.open(ws as unknown as ReplicationSocket)
+          else runtime.replication?.open(ws as unknown as ReplicationSocket)
           return
         }
         if (isHranaSocket(ws.data)) {
@@ -339,7 +372,9 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
-          runtime.replication?.message(ws as unknown as ReplicationSocket, message as Uint8Array)
+          const bytes = message as Uint8Array
+          if (replRouter) replRouter.message(ws as unknown as ReplicationSocket, bytes)
+          else runtime.replication?.message(ws as unknown as ReplicationSocket, bytes)
           return
         }
         if (isHranaSocket(ws.data)) {
@@ -355,7 +390,8 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
         }
         if (isCluster(ws.data as AppSocketData)) return
         if (isReplication(ws.data as AppSocketData)) {
-          runtime.replication?.drain(ws as unknown as ReplicationSocket)
+          if (replRouter) replRouter.drain(ws as unknown as ReplicationSocket)
+          else runtime.replication?.drain(ws as unknown as ReplicationSocket)
           return
         }
         if (isHranaSocket(ws.data)) return
@@ -373,7 +409,8 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
-          runtime.replication?.close(ws as unknown as ReplicationSocket)
+          if (replRouter) replRouter.close(ws as unknown as ReplicationSocket)
+          else runtime.replication?.close(ws as unknown as ReplicationSocket)
           return
         }
         if (isHranaSocket(ws.data)) {
@@ -488,10 +525,11 @@ interface UpgradeHost {
  */
 function upgradeReplication(
   runtime: ServerRuntime,
+  replRouter: ReplicationRouter | null,
   request: Request,
   server: unknown,
 ): Response | undefined {
-  if (!runtime.replication) {
+  if (!runtime.replication && !replRouter) {
     return errorResponse(
       new BunQLError(
         "REPLICATION_DISABLED",
@@ -605,7 +643,10 @@ export interface RuntimeBundle {
  */
 export async function createRuntime(
   config: ServerConfig,
-  options: Pick<StartOptions, "registry" | "onError" | "onTenantOpen"> = {},
+  options: Pick<StartOptions, "registry" | "onError" | "onTenantOpen"> & {
+    /** C4b: which half of `/v1/replication` this runtime holds. `ServerRuntime`'s own default. */
+    replicationMode?: "own" | "none" | "hosted"
+  } = {},
 ): Promise<RuntimeBundle> {
   const resolved = await resolveAuth(config)
   // The runtime opens the registry, and the catalog inside it is the revocation list, so the
@@ -626,6 +667,7 @@ export async function createRuntime(
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(options.onTenantOpen ? { onTenantOpen: options.onTenantOpen } : {}),
+    ...(options.replicationMode ? { replicationMode: options.replicationMode } : {}),
   })
   catalog = runtime.registry.catalog
   return {
@@ -654,8 +696,16 @@ export async function startServer(
   options: StartOptions = {},
 ): Promise<ServerHandle> {
   const owned = options.runtime === undefined
+  // `docs/c4-workers.md`: more than one worker turns this process into a router — it keeps the
+  // listener, the sockets, the catalog and the authenticator, and owns no tenant. Resolved before
+  // the runtime is built, because a router's runtime holds no `ReplicationServer` at all: with
+  // C4b the streams live on the workers and `ReplicationRouter` holds the sockets instead.
+  const workers = owned ? resolveWorkers(config.server.workers) : 1
   const resolved: RuntimeBundle = owned
-    ? await createRuntime(config, options)
+    ? await createRuntime(config, {
+        ...options,
+        ...(workers > 1 ? ({ replicationMode: "none" } as const) : {}),
+      })
     : {
         runtime: options.runtime as ServerRuntime,
         adminKey: options.adminKey ?? null,
@@ -664,11 +714,8 @@ export async function startServer(
       }
   const runtime = resolved.runtime
 
-  // `docs/c4-workers.md`: more than one worker turns this process into a router — it keeps the
-  // listener, the sockets, the catalog and the authenticator, and owns no tenant. The pool is
-  // started before the listener so a worker that cannot build its runtime fails `startServer`
-  // rather than leaving a node that answers `DB_NOT_FOUND` for a shard of its databases.
-  const workers = owned ? resolveWorkers(config.server.workers) : 1
+  // The pool is started before the listener so a worker that cannot build its runtime fails
+  // `startServer` rather than leaving a node that answers `DB_NOT_FOUND` for a shard.
   const pool =
     workers > 1
       ? await WorkerPool.start(config, options.onError ?? ((err) => console.error("bunql:", err)))
@@ -724,9 +771,13 @@ export async function startServer(
     async close(): Promise<void> {
       runtime.setPublisher(null)
       runtime.setMovedHandler(null)
+      // Every replica socket is closed before the workers go, so a stream is ended by a `1001` the
+      // replica reconnects from rather than by a channel that stops answering under it.
+      app.replication?.stop()
       await server.stop(true)
       if (pool) {
         pool.setHost(null)
+        pool.setReplicationHost(null)
         await pool.close()
       }
       // Everything committed before the listener stopped belongs in the bucket, so the shippers
