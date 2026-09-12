@@ -5,6 +5,11 @@
 //
 // Handlers return a `Response`; the four `BunQL-*` headers, CORS and the metrics tick are added
 // once by the wrapper in `app.ts`, so nothing below repeats them.
+//
+// Second invariant: a route that mutates the database set or the bytes of a database runs on a
+// primary only. `requirePrimary` is that gate, and it sits after the admin check so a request
+// without the key learns nothing about the node's role. Reads, token minting and the node-local
+// maintenance routes (`snapshot`, `checkpoint`) deliberately stay open on a replica.
 
 import path from "node:path"
 import {
@@ -102,6 +107,28 @@ function requireAdmin(principal: Principal): void {
   if (principal.kind !== "admin") {
     throw BunQLError.notAuthorized("this route needs the admin key")
   }
+}
+
+/**
+ * Refuses an admin write on a replica. The lifecycle routes act on this node's own files, and on
+ * a replica those files are a copy the primary owns: a create here is a database the cluster
+ * never hears about, and a delete here removes the copy the applier needs — the replica then
+ * stops following that database for good, because it does not re-bootstrap and later commits on
+ * the primary have nowhere to land.
+ *
+ * Refusing rather than forwarding is deliberate. A forwarded create would still have to come back
+ * over the replication stream to exist here, so the round trip buys nothing the operator cannot
+ * get by addressing the primary; and a delete has no safe forwarding story at all while promotion
+ * does not exist. The shape is the one statement writes already answer with when forwarding is
+ * off — `503 NOT_PRIMARY` plus `BunQL-Primary` — so a client that follows that header already
+ * knows what to do with this.
+ *
+ * Node-local maintenance (`snapshot`, `checkpoint`) and every read route stay open: they act on
+ * the replica's copy on purpose.
+ */
+function requirePrimary(ctx: RouteContext): void {
+  if (ctx.runtime.role !== "replica") return
+  throw BunQLError.notPrimary(ctx.runtime.primaryUrl ?? undefined)
 }
 
 /** Database name from the path, or from the first `Host` label when `tenantFromHost` is on. */
@@ -577,6 +604,7 @@ function txidAtTime(tenant: Tenant, ms: number): bigint {
 
 export const createDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
+  requirePrimary(ctx)
   const body = await readJson<CreateBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   if (typeof body.name !== "string") throw BunQLError.badRequest("create needs a name")
   assertValidName(body.name)
@@ -659,6 +687,7 @@ export const statDb: Handler = async (ctx) => {
 
 export const deleteDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
+  requirePrimary(ctx)
   const name = dbName(ctx)
   if (!ctx.runtime.registry.has(name)) throw BunQLError.dbNotFound(name)
   ctx.runtime.evict(name)
@@ -707,6 +736,7 @@ interface RestoreBody {
  */
 export const restoreDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
+  requirePrimary(ctx)
   const name = dbName(ctx)
   const body = await readJson<RestoreBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   if (body.from === "s3") return await restoreFromS3(ctx, name, body)
@@ -949,6 +979,7 @@ export const dumpDb: Handler = async (ctx) => {
 /** Takes a raw SQLite file as the body and files it as a new database (design §6.5). */
 export const importDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
+  requirePrimary(ctx)
   const name = dbName(ctx)
   assertValidName(name)
   const runtime = ctx.runtime

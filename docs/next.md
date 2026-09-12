@@ -6,8 +6,8 @@ Written 2026-09-12 at the end of the session that built phase 1. Read this, then
 ## Where things stand
 
 Phases 0 and 1 are complete on `main`, pushed to **https://github.com/TimMikeladze/bunql**
-(private; `origin/main` is current), working tree clean. `bun test` → 861 pass, 2 skip, 0 fail
-across 62 files. `bun run typecheck` clean. `bun run bench` meets every design §10 budget but one
+(private; `origin/main` is current), working tree clean. `bun test` → 867 pass, 2 skip, 0 fail
+across 63 files. `bun run typecheck` clean. `bun run bench` meets every design §10 budget but one
 (WebSocket mixed throughput, below). Zero runtime dependencies.
 
 | area | module | state |
@@ -101,12 +101,6 @@ What phase 1 added to the list:
 
 - **A replica cannot be promoted.** Recovery from a lost primary today is a new node pointed at
   the bucket. This is the headline gap and it is phase-2 milestone 2.
-- **Admin routes on a replica act locally instead of forwarding.** `POST /v1/db` on a replica
-  creates a local primary-role database the cluster never hears about, and `DELETE /v1/db/{db}`
-  removes the replica's copy while the primary keeps it. The replica then stops following that
-  database for good: it does not re-bootstrap, and later commits on the primary never reach it
-  (verified by hand — the database is simply gone from `GET /v1/db` on the replica). Statement writes forward; admin writes should either forward too or be refused with
-  `NOT_PRIMARY`. Refusing is the smaller change and probably the right one.
 - **The Hrana surface does not forward writes.** A write to `/v2/pipeline` on a replica is
   `NOT_PRIMARY`. Forwarding it means deciding what a baton opened on a replica means, which is why
   R4 left it.
@@ -131,11 +125,19 @@ What phase 1 added to the list:
 Two things are cheap and should land before the control plane, because they are bugs rather than
 features:
 
-1. **Admin routes on a replica act locally** (see the gap list above). `POST /v1/db` on a replica
-   creates a database the cluster never hears about, and `DELETE /v1/db/{db}` silently stops that
-   replica following it forever. Refuse both with `NOT_PRIMARY` and a `BunQL-Primary` header, the
-   way statement writes already behave when forwarding is off.
+1. ~~**Admin routes on a replica act locally.**~~ Landed: `POST /v1/db`, `DELETE /v1/db/{db}`,
+   `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import` answer `503 NOT_PRIMARY` with
+   `BunQL-Primary` on a replica. The gate is `requirePrimary` in `src/server/routes.ts`, at the
+   HTTP layer only — the replication client still creates and deletes tenants through the
+   registry, which is how a bootstrap works at all. **Promotion (milestone 2) has to flip
+   `runtime.role`, not just the catalog row**, or a promoted node will keep refusing its own
+   lifecycle routes.
 2. **Nothing sweeps `<dataDir>/trash/`.** Give it the retention the log already has.
+
+Found along the way and still open: **a delete on the primary does not remove the replica's copy.**
+`DELETE /v1/db/{db}` tombstones the catalog row on the primary and announces the new database list,
+but a replica that has already bootstrapped the database keeps it and simply stops receiving
+records for it. `test/server/replica.test.ts` documents the behaviour rather than asserting it away.
 
 ## House rules for this repo
 

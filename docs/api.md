@@ -156,7 +156,7 @@ write arrives under the primary's own code and status — a constraint violation
 | `PAYLOAD_TOO_LARGE` | 413 | body over `[limits] maxBodyBytes` or `maxImportBytes` |
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
 | `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, a snapshot in progress, or too many forwards in flight |
-| `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it; carries `BunQL-Primary` |
+| `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it, or an admin write reached one at all; carries `BunQL-Primary` |
 | `NO_REPLICAS` | 503 | `ack: "replica"`/`"quorum"` on a node with no replica attached |
 | `ACK_TIMEOUT` | 503 | committed and locally durable, but not enough replica acks in time |
 | `FORWARD_TIMEOUT` | 504 | the primary never answered a write a replica forwarded to it |
@@ -404,6 +404,13 @@ DELETE /v1/db/acme  → { "name": "acme", "deleted": true, "trash": "<dataDir>/t
 `DELETE` moves the directory to `trash/` and tombstones the catalog row; nothing sweeps the trash
 in phase 0.
 
+**On a replica, `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore` and
+`POST /v1/db/:db/import` answer `503 NOT_PRIMARY` with `BunQL-Primary`**, the same shape a
+statement write gets when it cannot be forwarded. A replica's files are the primary's, and acting
+on them locally would create a database the cluster never hears about or delete the copy the
+applier needs. Reads, `POST /v1/tokens`, and the node-local `snapshot` and `checkpoint` routes work
+on a replica as normal.
+
 ```http
 POST /v1/db/acme/snapshot   {}
 → { "snapshotId": "00000000000000004812.db", "txid": 4812, "bytes": 81920,
@@ -562,6 +569,9 @@ reach that txid, so the caller's next read *on that node* sees its own write wit
   `BunQL-Primary`. A replica that cannot reach its primary answers the same way.
 - In flight forwards are capped by `[replication] maxForwards` (`503 BUSY` past it) and bounded by
   `[replication] forwardTimeoutMs` (`504 FORWARD_TIMEOUT`).
+- **Only statement writes forward.** The lifecycle routes act on a node's own files rather than on
+  a database's contents, so on a replica they are refused with `NOT_PRIMARY` instead — see
+  "Replica limitations" below.
 
 #### Realtime on a replica (phase-1 limitation)
 
@@ -591,7 +601,7 @@ Everything a replica cannot do in phase 1, in one place.
 | interactive transactions | forwarded whole; the baton is the primary's |
 | the change feed | txid-only events, `changes: []` |
 | live queries | full, re-run on every applied transaction |
-| `POST /v1/db` and `DELETE /v1/db/:db` | **act locally and are not forwarded** — a database created on a replica is a local primary the cluster never hears about, and a delete removes the replica's copy and stops it following that database for good — later commits on the primary never reach it. Do both on the primary; this is a known gap |
+| `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore`, `POST /v1/db/:db/import` | `503 NOT_PRIMARY` with `BunQL-Primary`. They are refused rather than forwarded: a create would have to come back over the replication stream to exist here anyway, and a delete has no safe forwarding story while promotion does not exist. Address the primary |
 | `POST /v1/db/:db/checkpoint` with `TRUNCATE` | `503 NOT_PRIMARY`. Every other mode runs locally |
 | `POST /v1/db/:db/snapshot` | works: a replica has the file and a snapshot of it is a valid restore source |
 | S3 shipping | off. A replica authors nothing, so it ships nothing; `restore` from a bucket still works |
@@ -1269,3 +1279,7 @@ really send) and `docs/r5-orm.md` (the two adapters).
   snapshot newer than the txid it is filed under.
 - **`DELETE /v1/db/{db}` moves, never removes.** The directory goes to `<dataDir>/trash/<name>-<ms>`
   and nothing sweeps it in phase 0.
+- **Admin writes are refused on a replica, not forwarded.** `POST /v1/db`, `DELETE /v1/db/{db}`,
+  `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import` answer `503 NOT_PRIMARY`. Design §5.2's
+  "forward writes to the primary" is about statement writes; the lifecycle routes act on a node's
+  own files, and a replica does not own its copy.
