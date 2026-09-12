@@ -179,7 +179,55 @@ batches. Ten thousand databases, on the other hand, scale with cores and nodes; 
 - **zstd level 1 instead of 3.** Same 4.3x ratio, 1 µs cheaper. Not worth a format decision — if
   compression is to be changed, change *when* it runs, not how hard it tries (C).
 
-## 7. Reproducing
+## 7. SQLite's own settings — what BunQL sets, and what it inherits
+
+Read off a live tenant through the registry's `onConnection` hook, so these are the connections
+BunQL actually serves from rather than a fresh one opened beside them.
+
+**Set deliberately**
+
+| setting | value | where | why |
+|---|---|---|---|
+| `journal_mode` | `wal` | `tenant.ts` (writer), and every other open path | the whole design: readers never block the writer, and the `-wal` is what the tailer ships |
+| `synchronous` | `1` (NORMAL) | writer | a commit does not fsync; `ack: "fsync"` and above do it explicitly (`#syncDurable`) |
+| `wal_autocheckpoint` | `0` | writer, and the replica applier | **BunQL owns checkpoints.** SQLite checkpointing on its own could move frames out of the WAL before the tailer recorded them |
+| `SQLITE_FCNTL_PERSIST_WAL` | on | writer | keeps the `-wal` across the last close, so a crash reconcile still has its frames |
+| `page_size` | 4096, `[data] pageSize` | at creation only | a page is the unit of replication |
+| `max_page_count` | from `quotaBytes` | writer | the per-tenant storage quota |
+| `busy_timeout` | 5000 ms | every connection | `[data] busyTimeoutMs` |
+| `query_only` | `1` on readers | `ServerRuntime.#adopt` | pinned once per connection so the request path never pays the pragma |
+| `SQLITE_LIMIT_*` | 5 of them | every connection | SQL length, expression depth, compound selects, variables, `ATTACH` disabled |
+
+The reader's `wal_autocheckpoint` is still SQLite's default 1000, and that is safe **only** because
+`query_only` is pinned on it: a connection that cannot commit can never autocheckpoint. The "we own
+checkpoints" invariant rests on that pin, not on the autocheckpoint value.
+
+**Inherited from SQLite, never set:** `cache_size` (-2000), `mmap_size` (0), `temp_store` (0),
+`foreign_keys` (**0**), `auto_vacuum` (0), `secure_delete` (0), `journal_size_limit` (-1),
+`trusted_schema` (1), `cell_size_check` (0), `defensive` (off), `recursive_triggers` (0),
+`threads` (0), `analysis_limit` (0). There is also no `ANALYZE` and no `PRAGMA optimize` anywhere
+in `src/`, so no database ever collects planner statistics.
+
+Which of those are worth changing, measured:
+
+- **`foreign_keys` is off, so a declared foreign key is enforced on nothing.** Not a performance
+  matter — a correctness one, already recorded in `docs/next.md`. It is per connection and would
+  change the meaning of existing schemas, so it belongs behind a per-database setting.
+- **`cache_size` and `mmap_size` are the two real levers**, and §4E has the numbers.
+- **Hardening is off, and `POST /v1/db/{db}/import` accepts a SQLite file.** The import is
+  admin-only, size-capped and header-checked, but the file it accepts is then opened by the same
+  process that serves every other tenant. `defensive`, `trusted_schema = 0` and `cell_size_check`
+  are SQLite's own recommendations for a file you did not write, and none is set. The driver has
+  no `sqlite3_db_config` binding at all, so `defensive` is not currently reachable.
+- **`temp_store = memory` is not a win here.** A 24 MB sort: 48.3 ms with the default file-backed
+  temp store, **56.7 ms** in memory. The OS page cache already makes the file memory, and the
+  allocation is not free. Left alone.
+- **`ANALYZE` changed nothing on the shape tried** — a skewed 60k-row join, identical query plan
+  before and after, and the query is too fast to separate. It costs 3 ms per database to collect.
+  Not a priority, but it is the standard remedy if a tenant ever reports a bad plan, and
+  `PRAGMA optimize` at checkpoint time is where it would go.
+
+## 8. Reproducing
 
 ```sh
 bun run bench/profile.ts [rounds]   # §1, §2's auth row, §4's group-commit table
