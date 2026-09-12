@@ -729,3 +729,32 @@ first-hand checks.
 9. **Default `ack`**: `local` (fast) vs `replica` when replicas exist.
 10. **Multi-db WebSocket** (one socket, many dbs): yes (recommended) / one socket per db.
 11. **Cluster control plane**: built-in Raft (recommended, phase 2) vs external (etcd/Postgres) vs static topology only.
+
+**Settled 2026-09-12.** Tim took the recommendation on every one of the eleven. The two that were
+still open at the end of phase 1 are now closed and phase 2 is designed on them:
+
+- **#9 — default `ack` stays `local`.** Durability above `local` is opt-in per write. A node whose
+  only replica is restarting must not begin failing writes with `NO_REPLICAS`.
+- **#11 — built-in Raft**, control plane only: membership, placement and per-database leases in a
+  small Raft group in TypeScript over Bun WebSockets. The data path never waits on it — a write
+  checks a lease it already holds, in memory, on a monotonic clock. `docs/plan-phase2.md` is the
+  plan that implements it.
+
+## 14. Surfaces — HTTP, OpenAPI and GraphQL from one operation model
+
+Added 2026-09-12 at Tim's request ("a bun graphql and a bun http and a bun open api… same core").
+Designed in full in `docs/plan-surfaces.md`; the shape in three lines:
+
+One declarative `Operation` — path, parameters, request and response schemas, auth, errors —
+is the only description of an API call that exists. `src/http/` executes it, `src/openapi/` emits
+an OpenAPI 3.1 document from it, and `src/graphql/` generates a GraphQL schema *from that
+document* using [`openapi-x-graphql`](https://github.com/TimMikeladze/openapi-x-graphql) with its
+`fetch` hook pointed at this process's own dispatcher, so a GraphQL field costs one in-process
+call rather than a real HTTP round trip. `graphql` and `openapi-x-graphql` are optional peers,
+the arrangement `kysely` and `drizzle-orm` already have, so the zero-dependency rule holds.
+
+On top of that, `src/dataapi/` turns a tenant's own tables into operations by introspection, so a
+database gets a REST resource API, an OpenAPI document and a GraphQL schema without anyone writing
+one. Every statement it runs still goes through `src/server/exec.ts`, which is what makes the
+token's table ACLs, deadlines, quotas, txids, ack levels and the change feed apply to all three
+surfaces without being re-implemented in any of them.
