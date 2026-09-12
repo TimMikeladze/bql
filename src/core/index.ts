@@ -20,6 +20,7 @@ export {
   isSchema,
   type JsonSchemaNode,
   type JsonSchemaType,
+  keyword,
   type NumberSchema,
   type ObjectSchema,
   type OptionalSchema,

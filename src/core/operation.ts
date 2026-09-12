@@ -17,7 +17,7 @@
 // mistake in this design, and it turns into a handler reading `undefined` rather than into a
 // failure anyone notices. It is cheaper to make it impossible to register.
 
-import type { Schema } from "./schema.ts"
+import { keyword, type Schema } from "./schema.ts"
 
 /** The methods `src/http/` compiles into a `Bun.serve` routes table. */
 export type HttpMethod = "get" | "post" | "put" | "patch" | "delete"
@@ -194,12 +194,12 @@ function checkPathParams(operation: Operation<any, any, any>, name: string): voi
       `${name}: the path binds :${bound.join(", :")}, which params.path does not declare`,
     )
   }
-  if (schema.type !== "object" || !Object.hasOwn(schema, "properties")) {
+  const properties = keyword<Record<string, Schema>>(schema, "properties")
+  if (keyword(schema, "type") !== "object" || !properties) {
     throw new Error(`${name}: params.path must be an object schema`)
   }
-  const properties = schema.properties as Record<string, Schema>
   const declared = Object.keys(properties)
-  const required = Array.isArray(schema.required) ? (schema.required as string[]) : []
+  const required = keyword<string[]>(schema, "required") ?? []
   for (const parameter of bound) {
     if (!declared.includes(parameter)) {
       throw new Error(

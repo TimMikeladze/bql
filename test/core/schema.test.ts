@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test"
 import {
   collectNamed,
   isOptional,
+  keyword,
   ref,
   s,
   toJsonSchema,
@@ -211,5 +212,91 @@ describe("the node is the document", () => {
       properties: { id: { type: "integer" }, name: { type: "string" } },
       required: ["id"],
     })
+  })
+})
+
+// The nine keyword names that are also builder method names are the trap this section guards.
+// A walker that asks `node.minLength !== undefined` or `"minLength" in node` gets `true` for
+// every string schema and emits a document that is wrong in a way a happy-path test misses.
+const COLLIDING = [
+  "minLength",
+  "maxLength",
+  "pattern",
+  "format",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+  "multipleOf",
+  "deprecated",
+] as const
+
+/** Every object reachable from `value` through plain objects and arrays, the root included. */
+function reachableObjects(value: unknown, out: object[] = []): object[] {
+  if (Array.isArray(value)) {
+    for (const item of value) reachableObjects(item, out)
+    return out
+  }
+  if (typeof value !== "object" || value === null) return out
+  out.push(value)
+  for (const key of Object.keys(value)) {
+    reachableObjects((value as Record<string, unknown>)[key], out)
+  }
+  return out
+}
+
+describe("reading a keyword off a live node", () => {
+  test("property access and `in` lie about an absent keyword; keyword() does not", () => {
+    const node = s.string()
+    for (const name of COLLIDING) {
+      // The trap, stated as an expectation so it cannot quietly change.
+      expect(typeof (node as Record<string, unknown>)[name]).toBe("function")
+      expect(name in node).toBe(true)
+      // The two correct answers.
+      expect(Object.hasOwn(node, name)).toBe(false)
+      expect(keyword(node, name)).toBeUndefined()
+    }
+  })
+
+  test("keyword() reads a keyword the node does carry", () => {
+    const node = s.string().minLength(3).format("email")
+    expect(keyword<number>(node, "minLength")).toBe(3)
+    expect(keyword<string>(node, "format")).toBe("email")
+    expect(keyword(node, "maxLength")).toBeUndefined()
+    expect(keyword<boolean>(s.int().deprecated(), "deprecated")).toBe(true)
+    expect(keyword<boolean>(s.array(s.int()).uniqueItems(), "uniqueItems")).toBe(true)
+  })
+
+  test("Object.keys and toJsonSchema agree about what a node carries", () => {
+    for (const node of [s.string(), s.string().minLength(2).pattern("^a"), s.int().multipleOf(2)]) {
+      expect(Object.keys(toJsonSchema(node)).sort()).toEqual(Object.keys(node).sort())
+    }
+  })
+
+  test("no builder method is reachable anywhere in toJsonSchema output", () => {
+    const nested = s.object({
+      id: s.int64(),
+      name: s.string().minLength(1),
+      tags: s.array(s.string().maxLength(8)).uniqueItems(),
+      either: s.union([s.string().format("uuid"), s.int()]),
+      bag: s.record(s.blob()),
+      child: s.object({ deep: s.array(s.object({ deeper: s.string() })) }),
+    })
+    const document = toJsonSchema(nested)
+    const objects = reachableObjects(document)
+    expect(objects.length).toBeGreaterThan(12)
+    for (const object of objects) {
+      expect(Object.getPrototypeOf(object)).toBe(Object.prototype)
+      for (const name of COLLIDING) {
+        expect((object as Record<string, unknown>)[name]).not.toBeFunction()
+      }
+    }
+    // Spot-check the shape, so the walk above is over the tree a reader expects.
+    const tags = document.properties?.tags as JsonSchemaNode
+    expect(keyword<boolean>(tags, "uniqueItems")).toBe(true)
+    expect(keyword<number>(tags.items as JsonSchemaNode, "maxLength")).toBe(8)
+    expect(keyword(tags.items as JsonSchemaNode, "minLength")).toBeUndefined()
+    expect(
+      keyword<string>((document.properties?.either as JsonSchemaNode).anyOf?.[0] as JsonSchemaNode, "format"),
+    ).toBe("uuid")
   })
 })

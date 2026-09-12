@@ -10,10 +10,33 @@
 // are never own properties, so `JSON.stringify(node)` emits the JSON Schema keywords and nothing
 // else.
 //
-// The cost of that trick, and the reason `toJsonSchema()` copies rather than returns its
-// argument: on a live node, a keyword the node does *not* carry resolves to the builder method of
-// the same name, so `node.minLength` is a function rather than `undefined`. Read keywords off the
-// result of `toJsonSchema()`, or guard every read by type as this module and `validate.ts` do.
+// ── Reading a keyword off a live node ─────────────────────────────────────────────────────────
+//
+// That is the cost of the trick, and it is sharp. Nine keyword names are also builder method
+// names, so on a live node a keyword the node does *not* carry resolves to the method instead of
+// to `undefined`:
+//
+//   s.string().minLength          // function minLength(n) {...}  — NOT undefined
+//   "minLength" in s.string()     // true                         — NOT false
+//   Object.hasOwn(s.string(), "minLength")   // false             — correct
+//   Object.keys / spread / JSON.stringify / toJsonSchema()        // correct
+//
+// So `node.minLength !== undefined` and `"minLength" in node` are both always true, for every
+// string schema, and a walker written that way emits a document that is subtly wrong and passes
+// its happy-path test.
+//
+// **`keyword(node, name)` is the only supported way to read a keyword off a live node.** It is
+// `Object.hasOwn`-based and answers `undefined` for an absent keyword. The alternative is to call
+// `toJsonSchema()` first, which returns a tree of plain objects — no prototype, no methods
+// reachable at any depth — and then inspect it freely. This module, `validate.ts` and
+// `operation.ts` all read through `keyword()`; so should `src/openapi/`, `src/dataapi/` and
+// `src/graphql/`.
+//
+// The nine names are `minLength`, `maxLength`, `pattern`, `format`, `minItems`, `maxItems`,
+// `uniqueItems`, `multipleOf` and `deprecated`. A reader tempted to rename a builder to clear the
+// collision should know it cannot be cleared: `docs/plan-surfaces.md` fixes those method names,
+// and a property cannot be both a `number` and a `(n) => Schema`. The guard rail is the answer,
+// not a rename.
 //
 // Two things ride on symbol keys, which `JSON.stringify`, `Object.keys` and any copy of a
 // published document ignore, so they cost the document nothing:
@@ -290,7 +313,7 @@ const proto = {
     return derive(this, { description: text })
   },
   example(this: JsonSchemaNode, value: unknown) {
-    const had = Object.hasOwn(this, "examples") ? (this.examples as unknown[]) : []
+    const had = keyword<unknown[]>(this, "examples") ?? []
     return derive(this, { examples: Object.freeze([...had, value]) })
   },
   deprecated(this: JsonSchemaNode) {
@@ -322,10 +345,18 @@ function derive(from: JsonSchemaNode, patch: Record<string, unknown>): JsonSchem
   return node(next)
 }
 
+/**
+ * One keyword of a node, or `undefined` when the node does not carry it. The only supported way
+ * to read a keyword off a live node: nine keyword names are also builder method names, so plain
+ * property access answers a function and `in` answers `true` for a keyword that is not there.
+ * See the module header for the reproduction.
+ */
+export function keyword<T = unknown>(schema: JsonSchemaNode, name: string): T | undefined {
+  return Object.hasOwn(schema, name) ? (schema[name] as T) : undefined
+}
+
 function ownProperties(from: JsonSchemaNode): Record<string, JsonSchemaNode> | undefined {
-  return Object.hasOwn(from, "properties")
-    ? (from.properties as Record<string, JsonSchemaNode>)
-    : undefined
+  return keyword<Record<string, JsonSchemaNode>>(from, "properties")
 }
 
 function markOptional(from: JsonSchemaNode): JsonSchemaNode {
@@ -507,10 +538,10 @@ function visit(
 ): void {
   if (seen.has(from)) return
   seen.add(from)
-  const id = from.$id
+  const id = keyword<string>(from, "$id")
   if (typeof id === "string" && !out.has(id)) out.set(id, from as Schema)
   for (const key of CHILD_MAP_KEYS) {
-    const map = from[key]
+    const map = keyword(from, key)
     if (!isPlainObject(map)) continue
     for (const name of Object.keys(map)) {
       const child = map[name]
@@ -518,15 +549,15 @@ function visit(
     }
   }
   for (const key of CHILD_LIST_KEYS) {
-    const list = from[key]
+    const list = keyword(from, key)
     if (!Array.isArray(list)) continue
     for (const child of list) if (isPlainObject(child)) visit(child as JsonSchemaNode, out, seen)
   }
   for (const key of CHILD_KEYS) {
-    const child = Object.hasOwn(from, key) ? from[key] : undefined
+    const child = keyword(from, key)
     if (isPlainObject(child)) visit(child as JsonSchemaNode, out, seen)
   }
-  const additional = from.additionalProperties
+  const additional = keyword(from, "additionalProperties")
   if (isPlainObject(additional)) visit(additional as JsonSchemaNode, out, seen)
 }
 
@@ -546,8 +577,13 @@ export function collectNamed(schema: Schema<any>): Map<string, Schema> {
 
 /**
  * The node as plain JSON Schema: the identity function but for dropping the builder prototype and
- * the symbol marks. Emitters should read keywords off this, never off a live node, where an
- * absent keyword resolves to the method of the same name.
+ * the symbol marks.
+ *
+ * Every object in the result — the root and every nested node, however deep, through
+ * `properties`, `items`, `anyOf`, `additionalProperties` and the rest — is a fresh object literal
+ * over `Object.prototype`, so no builder method is reachable anywhere in the tree and an absent
+ * keyword reads as `undefined`. That is the guarantee that makes "call `toJsonSchema()` first,
+ * then inspect freely" safe; on a live node, use `keyword()`.
  */
 export function toJsonSchema(schema: Schema<any>): JsonSchemaNode {
   return plain(schema) as JsonSchemaNode

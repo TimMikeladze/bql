@@ -32,6 +32,7 @@ import {
   codecOf,
   collectNamed,
   cloneValue,
+  keyword,
   type Infer,
   type JsonSchemaNode,
   type JsonSchemaType,
@@ -102,7 +103,7 @@ export function validate<S extends Schema>(
 }
 
 function walk(schema: JsonSchemaNode, value: unknown, path: string, run: Run): Outcome {
-  const reference = schema.$ref
+  const reference = keyword<string>(schema, "$ref")
   if (typeof reference === "string") {
     const target = run.resolve(reference)
     if (!target) return run.fail(path, `refers to the unknown schema "${reference}"`)
@@ -124,12 +125,13 @@ function walk(schema: JsonSchemaNode, value: unknown, path: string, run: Run): O
   if (Object.hasOwn(schema, "const") && !sameValue(schema.const, coerced)) {
     return run.fail(path, `must be ${JSON.stringify(schema.const)}`)
   }
-  const members = schema.enum
+  const members = keyword<unknown[]>(schema, "enum")
   if (Array.isArray(members) && !members.some((m) => sameValue(m, coerced))) {
     return run.fail(path, `must be one of ${members.map((m) => JSON.stringify(m)).join(", ")}`)
   }
 
-  const branches = schema.anyOf ?? schema.oneOf
+  const branches =
+    keyword<JsonSchemaNode[]>(schema, "anyOf") ?? keyword<JsonSchemaNode[]>(schema, "oneOf")
   if (Array.isArray(branches)) {
     const picked = firstMatch(branches, coerced, path, run)
     if (picked === INVALID) {
@@ -138,9 +140,10 @@ function walk(schema: JsonSchemaNode, value: unknown, path: string, run: Run): O
     return picked
   }
 
-  if (Array.isArray(schema.allOf)) {
+  const every = keyword<JsonSchemaNode[]>(schema, "allOf")
+  if (Array.isArray(every)) {
     let threaded: unknown = coerced
-    for (const member of schema.allOf) {
+    for (const member of every) {
       const next = walk(member, threaded, path, run)
       if (next === INVALID) return INVALID
       threaded = next
@@ -148,9 +151,10 @@ function walk(schema: JsonSchemaNode, value: unknown, path: string, run: Run): O
     return threaded
   }
 
-  if (Object.hasOwn(schema, "not")) {
+  const excluded = keyword<JsonSchemaNode>(schema, "not")
+  if (excluded) {
     const scratch = new Run(run.root, run.coerce, 1)
-    if (walk(schema.not as JsonSchemaNode, coerced, path, scratch) !== INVALID) {
+    if (walk(excluded, coerced, path, scratch) !== INVALID) {
       return run.fail(path, "matches a shape this schema excludes")
     }
   }
@@ -185,11 +189,9 @@ function walkObject(
   path: string,
   run: Run,
 ): Outcome {
-  const props = Object.hasOwn(schema, "properties")
-    ? (schema.properties as Record<string, JsonSchemaNode>)
-    : undefined
-  const required = Array.isArray(schema.required) ? (schema.required as string[]) : undefined
-  const additional = schema.additionalProperties
+  const props = keyword<Record<string, JsonSchemaNode>>(schema, "properties")
+  const required = keyword<string[]>(schema, "required")
+  const additional = keyword(schema, "additionalProperties")
   const out: Record<string, unknown> = {}
   let bad = false
 
@@ -254,7 +256,7 @@ function walkArray(schema: JsonSchemaNode, value: unknown[], path: string, run: 
     run.fail(path, `must have at most ${max} item${max === 1 ? "" : "s"}`)
     bad = true
   }
-  if (schema.uniqueItems === true) {
+  if (keyword(schema, "uniqueItems") === true) {
     const seen = new Set<string>()
     for (const item of value) {
       const key = JSON.stringify(item) ?? "undefined"
@@ -266,7 +268,7 @@ function walkArray(schema: JsonSchemaNode, value: unknown[], path: string, run: 
       seen.add(key)
     }
   }
-  const items = Object.hasOwn(schema, "items") ? (schema.items as JsonSchemaNode) : undefined
+  const items = keyword<JsonSchemaNode>(schema, "items")
   if (!items) return bad ? INVALID : [...value]
   const out: unknown[] = new Array(value.length)
   for (let i = 0; i < value.length; i++) {
@@ -290,7 +292,7 @@ function checkString(schema: JsonSchemaNode, value: string, path: string, run: R
     run.fail(path, `must be at most ${max} character${max === 1 ? "" : "s"}`)
     bad = true
   }
-  const source = schema.pattern
+  const source = keyword<string>(schema, "pattern")
   if (typeof source === "string" && !regexp(source).test(value)) {
     run.fail(path, `must match ${source}`)
     bad = true
@@ -306,22 +308,22 @@ function checkNumber(
 ): Outcome {
   let bad = false
   const n = typeof value === "bigint" ? Number(value) : value
-  const minimum = schema.minimum
+  const minimum = keyword<number>(schema, "minimum")
   if (typeof minimum === "number" && n < minimum) {
     run.fail(path, `must be at least ${minimum}`)
     bad = true
   }
-  const maximum = schema.maximum
+  const maximum = keyword<number>(schema, "maximum")
   if (typeof maximum === "number" && n > maximum) {
     run.fail(path, `must be at most ${maximum}`)
     bad = true
   }
-  const exclusiveMinimum = schema.exclusiveMinimum
+  const exclusiveMinimum = keyword<number>(schema, "exclusiveMinimum")
   if (typeof exclusiveMinimum === "number" && n <= exclusiveMinimum) {
     run.fail(path, `must be greater than ${exclusiveMinimum}`)
     bad = true
   }
-  const exclusiveMaximum = schema.exclusiveMaximum
+  const exclusiveMaximum = keyword<number>(schema, "exclusiveMaximum")
   if (typeof exclusiveMaximum === "number" && n >= exclusiveMaximum) {
     run.fail(path, `must be less than ${exclusiveMaximum}`)
     bad = true
@@ -431,7 +433,7 @@ function fromBase64(text: string): Uint8Array | undefined {
 // ── coercion and type checking ─────────────────────────────────────────────────────────────────
 
 function typeList(schema: JsonSchemaNode): JsonSchemaType[] {
-  const type = schema.type
+  const type = keyword<JsonSchemaType | JsonSchemaType[]>(schema, "type")
   if (typeof type === "string") return [type]
   if (Array.isArray(type)) return type as JsonSchemaType[]
   return []
@@ -519,8 +521,8 @@ function sameValue(a: unknown, b: unknown): boolean {
   return false
 }
 
-function numberKeyword(schema: JsonSchemaNode, keyword: string): number | undefined {
-  const value = Object.hasOwn(schema, keyword) ? schema[keyword] : undefined
+function numberKeyword(schema: JsonSchemaNode, name: string): number | undefined {
+  const value = keyword(schema, name)
   return typeof value === "number" ? value : undefined
 }
 
