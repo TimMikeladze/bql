@@ -15,6 +15,28 @@ adds, in build order, with the wire protocol decided up front so every milestone
 
 R5 and R4 do not touch replication and can run beside R1. R2 must follow R1.
 
+### Findings that belong to R2
+
+**A new database waits for a heartbeat.** Verified by hand after R1: a database created on the
+primary while a wildcard replica is already connected does not start streaming until the next
+`HEARTBEAT` carries the new database list, up to `heartbeatMs` (5 s) later. The primary must
+announce a database the moment it is created, by pushing the database list on creation rather
+than only on the heartbeat tick. A replica must reach a new database in the same millisecond
+range as a new record.
+
+**A latent checksum trap in `restore()`.** R1 found that `computeFull` counts the header page
+SQLite writes when a file is first opened in WAL mode, while a tenant at txid 0 stands at zero
+pages and checksum zero, so seeding an applier from a file's computed checksum fails
+`ChecksumMismatch` on the first record. The bootstrap path now sends the tenant's own position;
+`restore()` in `src/wal/snapshot.ts` still seeds from `SnapshotRef.checksum` and has the same bug
+waiting. Fix it at the source.
+
+**Replica realtime is not wired.** Live queries and the change feed are driven by the writer's
+hooks, which a replica does not have. A replica must invalidate live queries and emit change
+events from `applyRecord`. Phase 1 may emit `txid`-only change events (`changes: []`) on a
+replica, since the record carries pages rather than rows, but live queries must re-run and
+converge — that is what makes a replica useful for reads.
+
 ### A finding from R5 that belongs to R2
 
 A tenant has one writer, so `limits.maxOpenTx` is 1 and a second interactive transaction is
