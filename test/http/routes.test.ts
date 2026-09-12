@@ -214,7 +214,7 @@ describe("a handler that returns a Response", () => {
     expect(response.status).toBe(200)
     expect(response.headers.get("content-type")).toBe("application/octet-stream")
     expect(response.headers.get("x-dump")).toBe("ann")
-    expect(await response.text()).toBe("SQLite format 3 ")
+    expect(await response.text()).toBe("SQLite format 3\0")
     expect(calls).toEqual(["dumpRows"])
   })
 })
