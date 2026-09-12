@@ -40,7 +40,7 @@ Phase 1 turns the single node into a primary with replicas, on the log that alre
 - `ack: "replica"` and `"quorum"` — semi-synchronous durability, which today is a `400`;
 - the S3 shipper and restore-from-S3;
 - the Hrana compatibility layer, which buys the whole libsql/Turso client ecosystem;
-- Kysely and Drizzle adapters;
+- Kysely and Drizzle adapters — built, see "Use it with your ORM" below;
 - replica apply through mechanism A, removing the wal-index rebuild the current one forces.
 
 Phase 2 is the cluster: a Raft control plane, placement, leases, failover and the `moved` event.
@@ -138,6 +138,64 @@ await bq.serve({ port: 4321 })                         // the same engine, now o
 
 `db` is the interface above, so code written against the client runs against the embedded engine
 unchanged; `db.sync` is the escape hatch for hot loops.
+
+### Use it with your ORM
+
+`bunql/kysely` is a Kysely dialect and `bunql/drizzle` is a Drizzle driver. Both take a client
+`Db`, an embedded `Db`, or `{url, token, db}` to build a client from; `kysely` and `drizzle-orm`
+are optional peers, so neither is installed unless you use it.
+
+```ts
+import { Kysely, type Generated } from "kysely"
+import { BunQLDialect } from "bunql/kysely"
+
+interface Database {
+  todos: { id: Generated<number>; title: string; done: Generated<number> }
+}
+
+const db = new Kysely<Database>({
+  dialect: new BunQLDialect({ url: "http://localhost:4321", token, db: "acme" }),
+})
+
+const written = await db
+  .insertInto("todos")
+  .values({ title: "write it" })
+  .returningAll()
+  .executeTakeFirstOrThrow()
+
+await db.transaction().execute(async (trx) => {          // one BunQL transaction, not a loose begin
+  await trx.insertInto("todos").values({ title: "ship it" }).execute()
+  await trx.updateTable("todos").set({ done: 1 }).where("id", "=", written.id).execute()
+})
+
+await db.selectFrom("todos").selectAll().where("done", "=", 0).orderBy("id").execute()
+```
+
+```ts
+import { eq } from "drizzle-orm"
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
+import { drizzle } from "bunql/drizzle"
+
+const todos = sqliteTable("todos", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  done: integer("done").notNull().default(0),
+})
+
+const db = drizzle({ url: "http://localhost:4321", token, db: "acme" }, { schema: { todos } })
+
+const [written] = await db.insert(todos).values({ title: "write it" }).returning()
+await db.transaction(async (tx) => {
+  await tx.insert(todos).values({ title: "ship it" })
+  await tx.update(todos).set({ done: 1 }).where(eq(todos.id, written.id))
+})
+const [open] = await db.batch([db.select().from(todos).where(eq(todos.done, 0))])
+```
+
+Transactions, savepoints, `db.batch()` and both migrators are real, on BunQL's own transaction and
+batch routes rather than on `begin`/`commit` sent as loose statements. Streaming is not: BunQL
+answers with whole result sets, so Kysely's `.stream()` says so. [docs/r5-orm.md](docs/r5-orm.md)
+has both examples in full, the mapping, and every limitation.
 
 ### The CLI
 

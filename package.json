@@ -10,6 +10,8 @@
   "exports": {
     ".": "./src/embedded.ts",
     "./client": "./src/client/index.ts",
+    "./kysely": "./src/kysely.ts",
+    "./drizzle": "./src/drizzle.ts",
     "./protocol": "./src/client/protocol.ts",
     "./server": "./src/server/index.ts",
     "./tenant": "./src/tenant/index.ts",
@@ -38,8 +40,22 @@
   "engines": {
     "bun": ">=1.4.0"
   },
+  "peerDependencies": {
+    "drizzle-orm": ">=0.44",
+    "kysely": ">=0.28"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": true
+    },
+    "kysely": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "bun-types": "^1.4.2",
+    "drizzle-orm": "^0.45.2",
+    "kysely": "^0.29.5",
     "typescript": "^7.0.2"
   }
 }
