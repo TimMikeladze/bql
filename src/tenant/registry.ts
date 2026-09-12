@@ -51,6 +51,8 @@ export interface RegistryOptions {
   logFsync?: "never" | "each" | "interval"
   /** Compress record bodies with zstd. Default true; see `TenantOptions.compressLog`. */
   compressLog?: boolean
+  /** Most statements one group commit folds; see `TenantOptions.maxGroupCommit`. */
+  maxGroupCommit?: number
   /** Per-connection pragmas for every tenant this registry opens (`docs/p1-pragmas.md`). */
   sqlite?: SqlitePragmas
   /** How often idle tenants are checked for a TRUNCATE checkpoint. Default 250 ms. */
@@ -515,6 +517,9 @@ export class TenantRegistry {
       ...(this.#options.sqlite !== undefined ? { sqlite: this.#options.sqlite } : {}),
       ...(this.#options.compressLog !== undefined
         ? { compressLog: this.#options.compressLog }
+        : {}),
+      ...(this.#options.maxGroupCommit !== undefined
+        ? { maxGroupCommit: this.#options.maxGroupCommit }
         : {}),
       ...(this.#options.onError !== undefined ? { onError: this.#options.onError } : {}),
       ...(this.#options.onConnection !== undefined

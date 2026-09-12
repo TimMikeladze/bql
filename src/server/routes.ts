@@ -57,6 +57,7 @@ import {
   executeBatch,
   executeInTx,
   executeStatement,
+  executeStatementQueued,
   resolveOptions,
 } from "./exec.ts"
 import { type ReplicationMetrics, type StorageMetrics } from "./metrics.ts"
@@ -201,7 +202,7 @@ export const query: Handler = async (ctx) => {
       ctx.txid = forwarded.txid
       return json(forwarded)
     }
-    const { result, kind } = executeStatement(runtime, tenant, principal, body, options)
+    const { result, kind } = await executeStatementQueued(runtime, tenant, principal, body, options)
     ctx.txid = result.txid
     if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     return json(result)

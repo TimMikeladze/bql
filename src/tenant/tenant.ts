@@ -134,6 +134,12 @@ export interface TenantOptions {
   segmentBytes?: number
   logFsync?: "never" | "each" | "interval"
   /**
+   * Most statements folded into one group commit by `writeQueued`. Default 64. The per-row cost is
+   * already flat by fifty (`docs/performance.md` §4B), and the cap bounds how long one transaction
+   * holds the writer.
+   */
+  maxGroupCommit?: number
+  /**
    * Compress record bodies with zstd. Default true. It is a third of a single-row write
    * (`docs/performance.md` §1) against 4.3x on disk and on every replica's socket, so it is a
    * deployment choice rather than a constant. Per record and in the header: turning it off leaves
@@ -217,6 +223,24 @@ export interface ReadOptions {
 export interface WriteResult<T> {
   result: T
   txid: bigint
+}
+
+/** One `writeQueued` caller, waiting to be folded into the next transaction. */
+interface QueuedWrite {
+  run: (db: Database) => unknown
+  ack: AckLevel
+  resolve: (value: WriteResult<unknown>) => void
+  reject: (err: unknown) => void
+}
+
+/** Strictest first. `replica` and `quorum` are waited for above the tenant and cost an fsync here. */
+const ACK_ORDER: Record<AckLevel, number> = { local: 0, fsync: 1, replica: 2, quorum: 3 }
+
+/** The level a fold is answered at: nobody may be answered weaker than they asked. */
+export function strictestAck(acks: readonly AckLevel[]): AckLevel {
+  let best: AckLevel = "local"
+  for (const ack of acks) if (ACK_ORDER[ack] > ACK_ORDER[best]) best = ack
+  return best
 }
 
 /** A failure that is the tenant's own, not SQLite's and not the client's. */
@@ -312,6 +336,8 @@ export class Tenant {
   readonly pageSize: number
   readonly quotaBytes: number
   readonly maxReaders: number
+  /** Most statements one group commit folds; see `writeQueued`. */
+  readonly maxGroupCommit: number
   readonly checkpointWalBytes: number
   readonly idleCheckpointMs: number
   readonly defaultAck: AckLevel
@@ -324,6 +350,10 @@ export class Tenant {
   #openReaders = 0
   #leased = 0
   #listeners = new Set<CommitListener>()
+  /** Writes waiting to be folded into one transaction; see `writeQueued`. */
+  #queue: QueuedWrite[] = []
+  #draining = false
+  #drainScheduled = false
   #waiters: Waiter[] = []
   #walFd: number | null = null
   #writing = false
@@ -366,6 +396,7 @@ export class Tenant {
     this.pageSize = pageSize
     this.quotaBytes = options.quotaBytes ?? 0
     this.maxReaders = options.readers ?? 2
+    this.maxGroupCommit = Math.max(1, options.maxGroupCommit ?? 64)
     this.checkpointWalBytes = options.checkpointWalBytes ?? 4_000_000
     this.idleCheckpointMs = options.idleCheckpointMs ?? 1000
     this.defaultAck = options.defaultAck ?? "local"
@@ -523,6 +554,146 @@ export class Tenant {
   // ── write path (design §4.3) ─────────────────────────────────────────────────────────────────
 
   /**
+   * `write`, but folded with whatever else is waiting (design note: `docs/p2-group-commit.md`).
+   *
+   * Every fixed cost of the write path — the commit, the WAL tail, the page checksums, the record
+   * encode, the segment append — is paid **per transaction**, not per statement, so a transaction
+   * per statement pays them all every time: 29.04 µs a row at one row, 0.96 µs at fifty
+   * (`docs/performance.md` §4B). This queue turns concurrency into batch size. A caller that
+   * arrives while the writer is idle runs alone on the next microtask and pays nothing extra; one
+   * that arrives while a fold is running joins the next one.
+   *
+   * Three things make the fold invisible to a caller:
+   *
+   *  - **Its own result.** Each entry's `fn` runs in order and its return value resolves its own
+   *    promise, so a statement still gets its own `lastInsertRowid` and row count.
+   *  - **Its own failure.** A throw rolls back the whole transaction, including its neighbours —
+   *    so the drain re-runs the batch one at a time, and only the entry that threw is rejected.
+   *    Nothing persisted from the rolled-back attempt, so the re-run is a first attempt.
+   *  - **The strictest durability asked for.** A fold of `local` and `fsync` is answered as
+   *    `fsync`. Nobody is answered at a weaker level than they asked for.
+   *
+   * What a caller does see: **the txid is shared**, because one transaction is one txid. It stays
+   * monotonic and it is the txid the write really landed in, which is what read-your-writes needs.
+   */
+  writeQueued<T>(fn: (db: Database) => T, options: WriteOptions = {}): Promise<WriteResult<T>> {
+    this.#assertOpen()
+    this.#assertPrimary()
+    if (this.#exclusive) return Promise.reject(BunQLError.busy(`${this.name} is taking a snapshot`))
+    // A baton transaction holds the writer for as long as its client likes, so a plain write is
+    // refused rather than parked behind it — exactly as `write` does. Queuing here would turn a
+    // 409 into a wait of up to `txIdleTimeoutMs`, which is a worse answer, not a better one.
+    if (this.#txOpen) return Promise.reject(txBusy(this.name))
+    return new Promise<WriteResult<T>>((resolve, reject) => {
+      this.#queue.push({
+        run: fn as (db: Database) => unknown,
+        ack: options.ack ?? this.defaultAck,
+        resolve: resolve as (value: WriteResult<unknown>) => void,
+        reject,
+      })
+      this.#scheduleDrain()
+    })
+  }
+
+  /**
+   * One drain per turn, scheduled with `setImmediate` — and the choice matters more than it looks.
+   *
+   * `queueMicrotask` runs as soon as the stack empties, which is the moment the *first* request
+   * handler awaits. Every later message is a separate I/O callback that has not run yet, so a
+   * microtask drain folds exactly one write and buys nothing; measured, it was 26 700 writes/s
+   * against 26 180 without the queue at all. `setImmediate` runs after the I/O callbacks already
+   * pending in this loop iteration, so the batch is everything the socket had waiting.
+   *
+   * It costs a lone write 0.42 µs against the microtask's 0.13 — and rather more than that in
+   * practice, because a single socket's messages arrive one per loop iteration, so a client with
+   * no company pays a whole iteration per write: 22 827 writes/s against 26 941 with the queue
+   * off. That is the trade, and it is the right way round for a server — four concurrent clients
+   * already make it 2.2x and sixty-four make it 4.7x (`docs/p2-group-commit.md`). A deployment
+   * that really does have one writer at a time sets `[limits] groupCommit = false`.
+   *
+   * `setTimeout(fn, 0)` is 1.26 ms in Bun and would be a catastrophe here.
+   *
+   * An adaptive version — inline when the last drain folded nothing — was tried and does not
+   * work: the inline path never folds anything, so it never leaves inline mode.
+   */
+  #scheduleDrain(): void {
+    if (this.#draining || this.#drainScheduled) return
+    this.#drainScheduled = true
+    setImmediate(() => {
+      this.#drainScheduled = false
+      this.#drain()
+    })
+  }
+
+  /**
+   * Takes everything queued and runs it as one transaction. A baton transaction or an in-flight
+   * synchronous write owns the writer, so the drain waits for it rather than failing the callers —
+   * `write` and `beginTx` both end by scheduling one.
+   */
+  #drain(): void {
+    if (this.#draining || this.#queue.length === 0) return
+    if (this.#closed) {
+      const closed = new TenantError("CLOSED", `database ${this.name} is closed`)
+      for (const entry of this.#queue.splice(0)) entry.reject(closed)
+      return
+    }
+    // A transaction opened after these were queued: refuse them the way `write` would have, so
+    // the answer does not depend on which of the two arrived first.
+    if (this.#txOpen) {
+      for (const entry of this.#queue.splice(0)) entry.reject(txBusy(this.name))
+      return
+    }
+    // A synchronous write or a snapshot holds the writer for a bounded moment; both schedule
+    // another drain when they let go.
+    if (this.#writing || this.#exclusive) return
+
+    const batch = this.#queue.splice(0, this.maxGroupCommit)
+    if (this.#queue.length > 0) this.#scheduleDrain()
+    this.#draining = true
+    try {
+      // `fsync` beats `local`; `replica` and `quorum` are waited for a layer up and cost an fsync
+      // here, so the strictest level in the batch is what the whole transaction is answered at.
+      const ack = strictestAck(batch.map((entry) => entry.ack))
+      const results: unknown[] = new Array(batch.length)
+      let failed = -1
+      let failure: unknown = null
+      try {
+        const written = this.write((db) => {
+          for (let i = 0; i < batch.length; i++) {
+            results[i] = (batch[i] as QueuedWrite).run(db)
+          }
+          return results
+        }, { ack })
+        for (let i = 0; i < batch.length; i++) {
+          ;(batch[i] as QueuedWrite).resolve({ result: results[i], txid: written.txid })
+        }
+        return
+      } catch (err) {
+        failure = err
+        failed = batch.length === 1 ? 0 : -1
+      }
+      // One statement rolled the batch back. Nothing committed, so running them again is running
+      // them for the first time — and one at a time, each failure lands on its own caller.
+      if (batch.length === 1) {
+        ;(batch[0] as QueuedWrite).reject(failure)
+        return
+      }
+      void failed
+      for (const entry of batch) {
+        try {
+          const written = this.write(entry.run, { ack: entry.ack })
+          entry.resolve({ result: written.result, txid: written.txid })
+        } catch (err) {
+          entry.reject(err)
+        }
+      }
+    } finally {
+      this.#draining = false
+      if (this.#queue.length > 0) this.#scheduleDrain()
+    }
+  }
+
+  /**
    * Runs `fn` inside `BEGIN IMMEDIATE` … `COMMIT` on the single writer, turns the committed WAL
    * frames into a record, appends it to the log and saves the position. The txid returned is the
    * one the transaction was assigned, or the tenant's current txid when it wrote nothing.
@@ -554,6 +725,9 @@ export class Tenant {
     } finally {
       this.#writing = false
       this.#lastActivityMs = Date.now()
+      // Anything that queued while this held the writer is now this turn's next drain, so a
+      // `writeQueued` caller never waits on a timer for a writer that is already free.
+      if (!this.#draining && this.#queue.length > 0) this.#scheduleDrain()
     }
   }
 
@@ -670,6 +844,8 @@ export class Tenant {
     this.#txOpen = false
     this.#txOnExpire = null
     this.#lastActivityMs = Date.now()
+    // A baton held the writer; whatever queued behind it drains on the next turn.
+    if (this.#queue.length > 0) this.#scheduleDrain()
   }
 
   /**
@@ -1130,6 +1306,9 @@ export class Tenant {
       waiter.reject(new TenantError("CLOSED", `${this.name} was abandoned while waiting`))
     }
     this.#waiters = []
+    for (const entry of this.#queue.splice(0)) {
+      entry.reject(new TenantError("CLOSED", `database ${this.name} is closed`))
+    }
     this.#clearTxTimer()
     this.#txOpen = false
     this.#txOnExpire = null

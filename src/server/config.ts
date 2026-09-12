@@ -140,6 +140,20 @@ export interface LimitsSection {
   maxBodyBytes: number
   /** Largest SQLite file `POST /v1/db/{db}/import` accepts, in bytes. */
   maxImportBytes: number
+  /**
+   * Fold writes that arrive together into one transaction (`docs/p2-group-commit.md`). Every fixed
+   * cost of the write path is per transaction, so this turns concurrency into batch size: measured
+   * 4.7x at 64 concurrent clients, 2.2x at four, and 15% *slower* for a single client with nobody
+   * to fold with.
+   *
+   * **Off by default, because it changes what a client sees**: folded writes share one txid and
+   * the change feed emits one event for the fold. Each statement still gets its own result and its
+   * own failure. Per the rule in `docs/c6-packaging.md`, a setting that changes meaning does not
+   * take a new default.
+   */
+  groupCommit: boolean
+  /** Most statements one group commit folds. Default 64. */
+  groupCommitMax: number
 }
 
 /** Which half of a primary/replica pair this node is (design §5.2). */
@@ -324,6 +338,8 @@ export const DEFAULT_CONFIG: ServerConfig = {
     txWaitMs: 5000,
     maxBodyBytes: 8 * 1024 * 1024,
     maxImportBytes: 1024 * 1024 * 1024,
+    groupCommit: false,
+    groupCommitMax: 64,
   },
   auth: {
     adminKey: null,

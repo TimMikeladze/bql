@@ -268,6 +268,59 @@ export function executeStatement(
 }
 
 /**
+ * `executeStatement`, with the write folded into the tenant's group commit (`[limits] groupCommit`).
+ *
+ * A read takes exactly the path it always did and returns without awaiting anything — reads are
+ * most of the traffic and none of the contention. A write is queued instead of run, so writes that
+ * arrive in the same turn become one transaction and pay the WAL tail, the checksums, the encode
+ * and the segment append once between them rather than each (`docs/performance.md` §4B).
+ *
+ * The synchronous `executeStatement` stays: `db.sync` in the embedded API promises no promise, and
+ * a forwarded write is already inside the primary's own turn.
+ */
+export async function executeStatementQueued(
+  runtime: ServerRuntime,
+  tenant: Tenant,
+  principal: Principal,
+  request: StatementRequest,
+  options: ResolvedOptions,
+): Promise<Executed> {
+  if (!runtime.config.limits.groupCommit) {
+    return executeStatement(runtime, tenant, principal, request, options)
+  }
+  const startedNs = Bun.nanoseconds()
+  const read = runtime.withReader(tenant, principal, (db) => {
+    if (!db.prepare(request.sql).readonly) return null
+    return step(db, request, options.readTimeoutMs, options.maxRows)
+  })
+  if (read) {
+    const result = toResult(read, options.rows, tenant.txid, startedNs)
+    runtime.metrics.statement("read", result.vmSteps)
+    return { result, kind: "read" }
+  }
+
+  requireScope(principal, tenant.name, "rw")
+  runtime.assertWritable(tenant.name)
+  runtime.assertAckAvailable(tenant.name, options.ack)
+  const written = await tenant.writeQueued(
+    (db) => {
+      // Per statement, inside the shared transaction: each folded write is authorised as its own
+      // caller, so two principals in one transaction never borrow each other's rights.
+      const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
+      try {
+        return step(db, request, options.writeTimeoutMs, options.maxRows)
+      } finally {
+        handle.release()
+      }
+    },
+    { ack: options.ack },
+  )
+  const result = toResult(written.result, options.rows, written.txid, startedNs)
+  runtime.metrics.statement("write", result.vmSteps)
+  return { result, kind: "write" }
+}
+
+/**
  * Design §6.2. `atomic` (the default) is one `tenant.write`, so any failure rolls the whole batch
  * back and one txid covers all of it; a non-atomic batch runs each statement on its own and stops
  * at the first failure. Either way `failedIndex` names the statement that failed.

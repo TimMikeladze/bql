@@ -67,8 +67,8 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
 
 ## 3. The bottlenecks, ranked
 
-1. **One transaction per statement.** Every fixed cost above — commit, tail, checksum, encode,
-   append — is paid per row. At 50 rows per transaction the per-row cost is 0.96 µs instead of
+1. ~~**One transaction per statement.**~~ **Addressed by `[limits] groupCommit` (§4B), opt-in.**
+   Every fixed cost above — commit, tail, checksum, encode, append — is paid per row. At 50 rows per transaction the per-row cost is 0.96 µs instead of
    29.04 µs, a **30x** difference. This is the ceiling behind the 25–30k writes/s figure and behind
    the one missed budget in `docs/benchmarks.md` (130k against a 150k WebSocket target, which that
    file already attributes to writes serialising).
@@ -90,8 +90,20 @@ request, since that is a set lookup and is the only part that can change between
 size, so a flood of distinct tokens cannot grow it. This is the cheapest large win in the list and
 it touches one file (`src/server/auth.ts`).
 
-**B. Group commit.** Coalesce writes that arrive while the writer is busy into one SQLite
-transaction. Measured headroom, per row:
+**B. Group commit.** ✅ **Built, opt-in** — `[limits] groupCommit`, off by default because folded
+writes share a txid (`docs/p2-group-commit.md`). Measured over real sockets, writes/s:
+
+| concurrent clients | off | on | mean fold |
+|---|---|---|---|
+| 1 | 26 941 | 22 827 | 1.0 |
+| 4 | 26 827 | 60 192 | 3.8 |
+| 16 | 29 159 | 96 046 | 15.2 |
+| 64 | 30 130 | **141 507** | 40.0 |
+| 256 | 29 971 | 129 674 | 47.4 |
+
+Without it write throughput is flat at ~30k however many clients there are — the single writer.
+With it the ceiling is 140k, at the cost of 15% for a client that has nobody to fold with. The
+headroom that predicted this:
 
 | rows/txn | µs/row | implied rows/s |
 |---|---|---|

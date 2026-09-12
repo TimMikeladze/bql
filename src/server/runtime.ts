@@ -188,6 +188,7 @@ export class ServerRuntime {
         defaultAck: options.config.durability.defaultAck,
         segmentBytes: options.config.durability.segmentBytes,
         compressLog: options.config.durability.compress,
+        maxGroupCommit: options.config.limits.groupCommitMax,
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
         onChange: (event) => this.#databasesChanged(event),

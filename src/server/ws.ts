@@ -39,6 +39,7 @@ import {
   executeBatch,
   executeInTx,
   executeStatement,
+  executeStatementQueued,
   failedIndexOf,
   resolveOptions,
 } from "./exec.ts"
@@ -406,7 +407,7 @@ async function statement(ws: Socket, message: WsAny, db: string): Promise<void> 
       send(ws, { id, ok: true, result: await runtime.forwarder.query(tenant, principal, body, options) })
       return
     }
-    const { result, kind } = executeStatement(runtime, tenant, principal, body, options)
+    const { result, kind } = await executeStatementQueued(runtime, tenant, principal, body, options)
     if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     send(ws, { id, ok: true, result })
   } catch (err) {

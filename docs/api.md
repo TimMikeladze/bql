@@ -1359,6 +1359,8 @@ the canonical one wins when both are set.
 | `[limits] txWaitMs` | `5000` | `BUNQL_LIMITS_TX_WAIT_MS` | `BUNQL_TX_WAIT_MS` |
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
+| `[limits] groupCommit` | `false` | `BUNQL_LIMITS_GROUP_COMMIT` | — |
+| `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |
 | `[auth] verifyCacheSize` | `1024` (`0` disables) | `BUNQL_AUTH_VERIFY_CACHE_SIZE` | — |
 | `[auth] adminKey` | generated on first start | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
 | `[auth] jwtKey` | generated on first start | `BUNQL_AUTH_JWT_KEY` | `BUNQL_JWT_ED25519` |
