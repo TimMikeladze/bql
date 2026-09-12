@@ -9,6 +9,34 @@ eyes most. Section 2 is what was actually proven on real bits before writing any
 
 ---
 
+## 0. Status — phase 0 is built (2026-09-12)
+
+Everything in §11 phase 0 exists, is tested, and runs: `bun test` → 494 pass, 0 fail across 36
+files; `bun run typecheck` clean; ~17.6k lines in `src/`. The as-built API reference is
+`docs/api.md` (every route, WS op, SSE event, SDK/embedded/CLI surface, config keys, and a
+"differences from the design" list); measured numbers are in `docs/benchmarks.md`; each
+milestone's deviations are in `docs/m3-wal.md` … `docs/m8-e2e.md`.
+
+| path | budget (§10) | measured | verdict |
+|---|---|---|---|
+| point read, in process | ≤ 1.2 µs | 0.78 µs | pass |
+| point read over HTTP keep-alive | ≤ 60 µs | 47.8 µs | pass |
+| point read over WebSocket | ≤ 35 µs | 28.8 µs | pass |
+| single-row write, `ack: local`, incl. tail + log | ≤ 40 µs | 27.0 µs | pass |
+| write visible on a replica (applier fed from the log) | ≤ 1 ms | 291 µs | pass |
+| live-query invalidation → socket | ≤ 200 µs | 19.1 µs | pass |
+| tenants open per process | 10k | 10k | pass |
+| mixed 90/10 throughput, HTTP, one core | ≥ 50k req/s | 52k | pass |
+| mixed 90/10 throughput, WebSocket | ≥ 150k msg/s | 129k | warn (writes serialise on the single writer) |
+
+Not built yet (phase 1): replica streaming over the WS replication protocol (§8), `ack:
+replica|quorum`, S3 shipper, Hrana compat (§6.7), Kysely/Drizzle adapters, `promote`. Phase 2:
+cluster (§5.3). Notable as-built differences: replica apply ships mechanism B (§4.5); the change
+ring is in memory, so `Last-Event-ID` resumes gaplessly across a dropped connection but returns
+`reset` across a server restart; `schema` events reach WebSocket subscribers only; SQLite's
+`sqlite3_wal_checkpoint_v2` counters are not a reliable no-op tell, so checkpoints verify by WAL
+size; `lastInsertRowid` is null unless the statement moved it.
+
 ## 1. Goals / non-goals
 
 **Goals**
