@@ -144,11 +144,20 @@ SDK retries the request against the new primary once, transparently.
 Failover picks the replica with the highest acked txid, which the state machine already tracks.
 With `ack: "local"` that can still lose the tail; `docs/api.md` says so plainly.
 
-### C3 — placement and redirect
+### C3 — placement and redirect — **C3a done (`docs/c3-placement.md`)**
 
-Consistent hashing with zone awareness picks a database's home node and its `rf-1` replicas. A
-client that lands on the wrong node is told where to go (`307` + `BunQL-Primary`) instead of being
-served slowly through a forward. Replica set membership drives which node subscribes to which.
+Rendezvous hashing with zone awareness picks a database's home node and its `rf-1` replicas — not a
+ring: no virtual nodes, no structure to keep in step, and a pure function of the replicated
+membership, which is what lets a create be gated **without a quorum**. A client that lands on the
+wrong node is told where to go (`307` + `BunQL-Primary`) instead of being answered `404`.
+
+**The two-`acme` hole is closed**: only the node the function names may create a database, and every
+node computes the same answer. **Nothing is recorded** — the intended replica set is computed where
+it is needed, because `DbState.replicas` means "nodes that have told the cluster they hold a copy"
+and `#failover` reads it as exactly that.
+
+C3b, still open: replica set membership driving which node subscribes to which, which needs
+`runtime.replica` to become one client per upstream node rather than one per node.
 
 ### C4 — `workers: N` ✅ **Built.** `docs/c4-workers.md`
 

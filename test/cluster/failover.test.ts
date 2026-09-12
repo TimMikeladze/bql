@@ -6,12 +6,17 @@
 // over), that the replica with the best copy takes it, and that a client following `BunQL-Primary`
 // reaches the node that took it.
 //
-// C2 has no placement — that is C3 — so a database gets its second copy the phase-1 way, with the
-// other nodes following the owner over `/v1/replication` while sharing its Raft group.
+// A database gets its second copy the phase-1 way, with the other nodes following the owner over
+// `/v1/replication` while sharing its Raft group — C3's placement decides *where* a database is
+// created, not who streams it, which is C3b.
+//
+// The name is chosen by `nameOn` rather than written as `db`, because C3's create gate means
+// only the node the placement function names may create it, and these tests need the database on
+// the node the others follow. The subject here is the failover, not the name.
 
 import { afterEach, describe, expect, test } from "bun:test"
 import { createClient } from "../../src/client/index.ts"
-import { type ClusterServer, startCluster, stopAll, waitFor } from "./servers.ts"
+import { type ClusterServer, nameOn, startCluster, stopAll, untilMembership, waitFor } from "./servers.ts"
 
 afterEach(async () => {
   await stopAll()
@@ -71,23 +76,25 @@ describe("a cluster", () => {
     async () => {
       const servers = await startCluster(3)
       await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
+      await untilMembership(servers)
 
       const owner = servers[0] as ClusterServer
-      await createDb(owner, "acme", "create table t (v text)")
-      expect(await holderOf(servers, "acme")).toBe(owner.id)
+      const db = nameOn(servers, owner.id)
+      await createDb(owner, db, "create table t (v text)")
+      expect(await holderOf(servers, db)).toBe(owner.id)
 
-      await query(owner, "acme", "insert into t (v) values ('one')")
+      await query(owner, db, "insert into t (v) values ('one')")
 
       const view = (await owner.json("/v1/cluster")) as {
         dbs: { db: string; leaseHeldHere: boolean; primary: string | null; generation: string | null }[]
       }
-      const entry = view.dbs.find((one) => one.db === "acme")
+      const entry = view.dbs.find((one) => one.db === db)
       expect(entry?.primary).toBe(owner.id)
       expect(entry?.leaseHeldHere).toBe(true)
       // The primary states the database's identity, so a promotion can be refused against it.
       expect(entry?.generation).toMatch(/^[0-9a-f]{16}$/)
       for (const other of servers.slice(1)) {
-        expect(other.handle.runtime.cluster?.holdsLease("acme")).toBe(false)
+        expect(other.handle.runtime.cluster?.holdsLease(db)).toBe(false)
       }
     },
     20_000,
@@ -98,24 +105,26 @@ describe("a cluster", () => {
     async () => {
       const servers = await startCluster(3, { followFirst: true })
       await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
+      await untilMembership(servers)
 
       const owner = servers[0] as ClusterServer
       const followers = servers.slice(1)
-      await createDb(owner, "acme", "create table t (v text)")
-      await query(owner, "acme", "insert into t (v) values ('before')")
-      expect(await holderOf(servers, "acme")).toBe(owner.id)
+      const db = nameOn(servers, owner.id)
+      await createDb(owner, db, "create table t (v text)")
+      await query(owner, db, "insert into t (v) values ('before')")
+      expect(await holderOf(servers, db)).toBe(owner.id)
 
       // The followers bootstrap the database and register themselves in its placement.
       await waitFor("both followers to hold a copy", () =>
-        followers.every((node) => node.handle.runtime.registry.has("acme")),
+        followers.every((node) => node.handle.runtime.registry.has(db)),
       )
       await waitFor("the placement to name both followers", () => {
-        const entry = dbView(owner, "acme")
+        const entry = dbView(owner, db)
         return followers.every((node) => entry?.replicas.includes(node.id) ?? false)
       })
       // …and to report how far they have applied, which is what the failover picks on.
       await waitFor("both followers to ack", () => {
-        const acked = dbView(owner, "acme")?.acked ?? {}
+        const acked = dbView(owner, db)?.acked ?? {}
         return followers.every((node) => Number(acked[node.id] ?? "0") > 0)
       })
 
@@ -127,14 +136,14 @@ describe("a cluster", () => {
         () => {
           const leader = followers.find((s) => s.handle.runtime.cluster?.isLeader())
           if (!leader) return false
-          const lease = dbView(leader, "acme")?.lease
+          const lease = dbView(leader, db)?.lease
           return lease !== null && lease !== undefined && lease.node !== owner.id
         },
         15_000,
       )
 
       const leader = followers.find((s) => s.handle.runtime.cluster?.isLeader()) as ClusterServer
-      const entry = dbView(leader, "acme")
+      const entry = dbView(leader, db)
       const winner = followers.find((s) => s.id === entry?.lease?.node) as ClusterServer
       expect(winner).toBeDefined()
       // The epoch moved: the lease changed hands, and that is the fencing token the old primary no
@@ -142,12 +151,12 @@ describe("a cluster", () => {
       expect(entry?.epoch).toBeGreaterThan(0)
 
       // The winner promoted itself for real: its live role, its lease, and a write that lands.
-      await waitFor("the winner to promote itself", () => winner.handle.runtime.roleFor("acme") === "primary")
-      expect(winner.handle.runtime.cluster?.holdsLease("acme")).toBe(true)
-      expect(winner.handle.runtime.replica?.detached).toContain("acme")
-      const written = await query(winner, "acme", "insert into t (v) values ('after')")
+      await waitFor("the winner to promote itself", () => winner.handle.runtime.roleFor(db) === "primary")
+      expect(winner.handle.runtime.cluster?.holdsLease(db)).toBe(true)
+      expect(winner.handle.runtime.replica?.detached).toContain(db)
+      const written = await query(winner, db, "insert into t (v) values ('after')")
       expect(written.txid).toBeGreaterThan(1)
-      expect((await query(winner, "acme", "select v from t order by rowid")).rows).toEqual([
+      expect((await query(winner, db, "select v from t order by rowid")).rows).toEqual([
         ["before"],
         ["after"],
       ])
@@ -155,10 +164,10 @@ describe("a cluster", () => {
       // The other survivor is not a primary for it, says where it went, and its SDK gets there.
       const bystander = followers.find((s) => s.id !== winner.id) as ClusterServer
       await waitFor(
-        "the bystander to learn where acme went",
-        () => bystander.handle.runtime.primaryUrlFor("acme") === winner.url,
+        `the bystander to learn where ${db} went`,
+        () => bystander.handle.runtime.primaryUrlFor(db) === winner.url,
       )
-      const refused = await bystander.fetch("/v1/db/acme/query", {
+      const refused = await bystander.fetch(`/v1/db/${db}/query`, {
         method: "POST",
         body: JSON.stringify({ sql: "insert into t (v) values ('nope')" }),
       })
@@ -169,14 +178,14 @@ describe("a cluster", () => {
       })
 
       // The SDK's one transparent replay, against the node the header names.
-      const client = createClient({ url: bystander.url, token: bystander.adminKey, db: "acme" })
+      const client = createClient({ url: bystander.url, token: bystander.adminKey, db: db })
       try {
         const rows = await client.db().unsafe("insert into t (v) values ('via sdk') returning v")
         expect(rows.length).toBe(1)
       } finally {
         client.close()
       }
-      expect((await query(winner, "acme", "select count(*) as n from t")).rows).toEqual([[3]])
+      expect((await query(winner, db, "select count(*) as n from t")).rows).toEqual([[3]])
     },
     30_000,
   )
@@ -188,12 +197,14 @@ describe("a cluster", () => {
         overrides: { cluster: { leaseTtlMs: 600, leaseGuardMs: 250, leaseRenewMs: 150 } },
       })
       await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
+      await untilMembership(servers)
       const owner = servers[0] as ClusterServer
-      await createDb(owner, "acme", "create table t (v text)")
-      await holderOf(servers, "acme")
+      const db = nameOn(servers, owner.id)
+      await createDb(owner, db, "create table t (v text)")
+      await holderOf(servers, db)
 
       const cluster = owner.handle.runtime.cluster as NonNullable<typeof owner.handle.runtime.cluster>
-      const handle = cluster.leaseFor("acme")
+      const handle = cluster.leaseFor(db)
       expect(handle?.node).toBe(owner.id)
       // The holder's deadline is on its own monotonic clock and is strictly inside the lease:
       // `ttl - guard` from the moment it asked. That difference is the margin that makes two
@@ -201,9 +212,9 @@ describe("a cluster", () => {
       const remaining = (handle?.validUntilLocalMs ?? 0) - performance.now()
       expect(remaining).toBeGreaterThan(0)
       expect(remaining).toBeLessThanOrEqual(600 - 250)
-      expect(cluster.holdsLease("acme")).toBe(true)
+      expect(cluster.holdsLease(db)).toBe(true)
       // And the same object is handed back every time: the write path allocates nothing to read it.
-      expect(cluster.leaseFor("acme")).toBe(handle)
+      expect(cluster.leaseFor(db)).toBe(handle)
     },
     20_000,
   )
@@ -213,26 +224,28 @@ describe("a cluster", () => {
     async () => {
       const servers = await startCluster(2, { followFirst: true })
       await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
+      await untilMembership(servers)
       const owner = servers[0] as ClusterServer
       const follower = servers[1] as ClusterServer
+      const db = nameOn(servers, owner.id)
 
-      await createDb(owner, "acme", "create table t (v text)")
-      await query(owner, "acme", "insert into t (v) values ('one')")
-      await waitFor("the follower to hold a copy", () => follower.handle.runtime.registry.has("acme"))
-      await holderOf(servers, "acme")
+      await createDb(owner, db, "create table t (v text)")
+      await query(owner, db, "insert into t (v) values ('one')")
+      await waitFor("the follower to hold a copy", () => follower.handle.runtime.registry.has(db))
+      await holderOf(servers, db)
 
-      // The cluster now records a generation for `acme`. Pretend the follower's copy is an older
+      // The cluster now records a generation for the database. Pretend the follower's copy is an older
       // one of the same name — which is exactly what a delete and a re-create leaves behind on a
       // replica that was disconnected across both (`docs/r7-unfollow.md`).
       const decision = (
         await import("../../src/cluster/promotion.ts")
       ).decidePromotion({
-        db: "acme",
+        db: db,
         node: follower.id,
         hasCopy: true,
         isPrimaryLocally: false,
         localGeneration: "0123456789abcdef",
-        placedGeneration: dbView(owner, "acme")?.generation ?? null,
+        placedGeneration: dbView(owner, db)?.generation ?? null,
         applied: "2",
         localEpoch: 0,
         streamLive: true,
@@ -250,7 +263,7 @@ describe("a cluster", () => {
 
       // And end to end: the follower's real copy has the *right* generation, so what stops it is
       // the live lease, not the identity.
-      const refused = await follower.fetch("/v1/db/acme/promote", {
+      const refused = await follower.fetch(`/v1/db/${db}/promote`, {
         method: "POST",
         body: JSON.stringify({}),
       })
@@ -258,7 +271,7 @@ describe("a cluster", () => {
       expect((await refused.json()) as { error: { code: string } }).toMatchObject({
         error: { code: "LEASE_HELD" },
       })
-      expect(follower.handle.runtime.roleFor("acme")).toBe("replica")
+      expect(follower.handle.runtime.roleFor(db)).toBe("replica")
     },
     20_000,
   )

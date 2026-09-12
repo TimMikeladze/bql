@@ -697,7 +697,18 @@ export class ServerRuntime {
   /** The tenant, or 404. Also refreshes its place in the LRU. */
   tenant(name: string): Tenant {
     if (this.#closed) throw new BunQLError("INTERNAL", "server is closing", 503)
-    return this.registry.open(name)
+    try {
+      return this.registry.open(name)
+    } catch (err) {
+      // C3: a database this node holds no copy of, that the cluster *does* know and places
+      // elsewhere, is a direction rather than a `404` — the `NOT_PRIMARY` + `BunQL-Primary` C2
+      // already built, which `wrap()` turns into a same-origin `307`.
+      //
+      // On the miss path only, so the happy path is untouched: this costs nothing at all until a
+      // request has already failed to find its database.
+      if (err instanceof BunQLError && err.code === "DB_NOT_FOUND") this.promoter.assertPlacedHere(name)
+      throw err
+    }
   }
 
   /** The authorizer hub for a connection this runtime opened. */

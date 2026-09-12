@@ -14,6 +14,12 @@ export {
   type RaftHandlers,
 } from "./node.ts"
 export {
+  homeOf,
+  place,
+  type Placement,
+  type PlacementNode,
+} from "./placement.ts"
+export {
   decodeEntry,
   encodeEntry,
   type DecodedEntry,

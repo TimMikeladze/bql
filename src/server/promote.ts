@@ -20,6 +20,10 @@
 import {
   type ClusterLink,
   decidePromotion,
+  homeOf,
+  place,
+  type Placement,
+  type PlacementNode,
   type PromotionOutcome,
   type PromotionRequest,
 } from "../cluster/index.ts"
@@ -152,6 +156,84 @@ export class Promoter {
       return { node: null, url: configured, http: httpBase(configured) }
     }
     return { node: null, url: null, http: null }
+  }
+
+  // ── placement (C3) ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The cluster's membership as the placement function takes it, or an empty list when this node
+   * is not in a cluster. Read from the replicated state, so every node computes the same answer
+   * from the same input — which is what lets the create gate be a local function rather than a
+   * quorum.
+   */
+  #members(): PlacementNode[] {
+    const cluster = this.runtime.cluster
+    if (!cluster) return []
+    const nodes: PlacementNode[] = []
+    for (const [id, info] of Object.entries(cluster.state.nodes)) nodes.push({ id, zone: info.zone })
+    return nodes
+  }
+
+  /** Where `db` should live, by the placement function. Null when this node is not in a cluster. */
+  placementFor(db: string): Placement | null {
+    const nodes = this.#members()
+    if (nodes.length === 0) return null
+    return place(db, nodes, this.runtime.config.cluster.rf)
+  }
+
+  /**
+   * Whether this node may create `db` (`docs/c3-placement.md` §3.2).
+   *
+   * Both guards here are the difference between a safe gate and an unusable one:
+   *
+   * - **A node not yet in the committed membership does not gate.** `addNode` has not committed at
+   *   startup, and a node that refused every create until it had would make a cold cluster unable
+   *   to create its first database.
+   * - **A database that already exists locally is not re-gated.** The gate is on creating, never
+   *   on serving: a database placed here before a node joined and changed the answer keeps working
+   *   (§2.3 — a recorded primary is never moved by a recomputation).
+   */
+  assertMayCreate(db: string): void {
+    const cluster = this.runtime.cluster
+    if (!cluster) return
+    if (this.runtime.registry.has(db)) return
+    const nodes = this.#members()
+    if (!nodes.some((one) => one.id === cluster.id)) return
+    // Already placed somewhere: that record wins over what the function would say now.
+    const placed = cluster.primaryOf(db)
+    const home = placed ?? homeOf(db, nodes)
+    if (home === null || home === cluster.id) return
+    const http = httpBase(cluster.advertiseOf(home))
+    throw new BunQLError(
+      "NOT_PRIMARY",
+      `${db}: this cluster places it on ${home}, so it is created there`,
+      503,
+      { ...(http ? { primary: http } : {}) },
+    )
+  }
+
+  /**
+   * Whether this node should serve a request naming `db` at all, or say where it is.
+   *
+   * The case this exists for: a node holding **no copy** of a database the cluster **does** know
+   * and places elsewhere. It used to fall through `roleFor`'s node-level fallback, run the route,
+   * and answer `DB_NOT_FOUND` — while the control plane knew exactly which node had it. Now it is
+   * the `NOT_PRIMARY` + `BunQL-Primary` C2 already built, which `wrap()` turns into a same-origin
+   * `307`.
+   *
+   * A name the cluster has never heard of is still `DB_NOT_FOUND`: there is nowhere to send the
+   * client. A node that holds a replica copy still serves its reads, exactly as before.
+   */
+  assertPlacedHere(db: string): void {
+    const cluster = this.runtime.cluster
+    if (!cluster) return
+    if (this.runtime.registry.has(db)) return
+    const holder = cluster.primaryOf(db)
+    if (holder === null || holder === cluster.id) return
+    const http = httpBase(cluster.advertiseOf(holder))
+    throw new BunQLError("NOT_PRIMARY", `${db}: this cluster places it on ${holder}`, 503, {
+      ...(http ? { primary: http } : {}) },
+    )
   }
 
   // ── the write path ───────────────────────────────────────────────────────────────────────────

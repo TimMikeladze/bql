@@ -10,6 +10,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { homeOf, type PlacementNode } from "../../src/cluster/index.ts"
 import { startServer, type ServerHandle } from "../../src/server/app.ts"
 import { loadConfig, type ServerConfigInput } from "../../src/server/config.ts"
 
@@ -196,6 +197,48 @@ export async function waitFor(
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+}
+
+/**
+ * The node C3's placement function names as `db`'s home, which is the only node that may create it
+ * (`docs/c3-placement.md` §3.2). Every node computes the same answer from the same replicated
+ * membership, so this is the same choice the cluster itself makes — not a guess the test is making
+ * about it.
+ */
+export function homeServer(servers: ClusterServer[], db: string): ClusterServer {
+  const home = homeOf(db, membersOf(servers))
+  const found = servers.find((one) => one.id === home)
+  if (!found) throw new Error(`no server for the home of ${db} (${String(home)})`)
+  return found
+}
+
+/**
+ * A database name the placement function puts on `id`. The inverse of `homeServer`, for a test
+ * whose subject is something else — a failover, a promotion — and which needs the database to be
+ * on a particular node for reasons of its own (usually that the others follow it).
+ */
+export function nameOn(servers: ClusterServer[], id: string, prefix = "acme"): string {
+  const members = membersOf(servers)
+  for (let i = 0; i < 5000; i++) {
+    const name = i === 0 ? prefix : `${prefix}${i}`
+    if (homeOf(name, members) === id) return name
+  }
+  throw new Error(`no name placed on ${id}`)
+}
+
+function membersOf(servers: ClusterServer[]): PlacementNode[] {
+  const state = servers[0]?.handle.runtime.cluster?.state
+  if (!state) return servers.map((one) => ({ id: one.id, zone: "" }))
+  return Object.entries(state.nodes).map(([id, info]) => ({ id, zone: info.zone }))
+}
+
+/** Waits until every node's control plane knows every node, so `homeServer` is stable. */
+export async function untilMembership(servers: ClusterServer[]): Promise<void> {
+  await waitFor("every node to know every node", () =>
+    servers.every(
+      (one) => Object.keys(one.handle.runtime.cluster?.state.nodes ?? {}).length === servers.length,
+    ),
+  )
 }
 
 /** The node that currently leads the Raft group, or undefined. */

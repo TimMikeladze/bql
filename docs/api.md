@@ -1469,6 +1469,23 @@ down, converted into the worker's own monotonic clock, because each worker threa
 `Map.get` and `performance.now()` it is on one thread and costs no message at all.
 `bun run bench/workers.ts --cluster`.
 
+### Placement, in a cluster
+
+With `[cluster] enabled`, a database has a **home node**, picked by rendezvous hashing over the
+cluster's membership with `[cluster] zone` spreading its `[cluster] rf` copies across racks. Every
+node computes the same home from the same replicated membership, so:
+
+- `POST /v1/db` on a node that is **not** the home answers `503 NOT_PRIMARY` with `BunQL-Primary`
+  naming the node that is. That is what stops two nodes creating the same database; the SDK retries
+  against the named node, and a same-origin deployment gets a `307` instead.
+- A request naming a database this node holds **no copy** of, which the cluster knows and places
+  elsewhere, answers the same way rather than `404`. A name nothing has heard of is still `404`.
+- A database that already exists on a node keeps working there whatever the function would say now.
+  A placement never moves a live database: only a failover or `POST /v1/db/{db}/promote` does.
+
+`[cluster] enabled = false` places nothing — every node creates whatever it is asked for, which is
+the standalone product. `docs/c3-placement.md`.
+
 ## Configuration
 
 `bunql.toml` in the working directory, then `BUNQL_*` in the environment, which wins.

@@ -15,7 +15,13 @@ import {
   untilSynced,
   type Node,
 } from "../replication/harness.ts"
-import { startCluster, stopAll as stopCluster, waitFor } from "../cluster/servers.ts"
+import {
+  homeServer,
+  startCluster,
+  stopAll as stopCluster,
+  untilMembership,
+  waitFor,
+} from "../cluster/servers.ts"
 
 const CLI = path.join(import.meta.dir, "..", "..", "src", "cli.ts")
 
@@ -105,7 +111,10 @@ describe("bunql cluster", () => {
   test("reports membership, the term and where each database lives", async () => {
     const servers = await startCluster(3)
     await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
-    const owner = servers[0] as (typeof servers)[number]
+    await untilMembership(servers)
+    // C3's create gate: only the node the placement function names may create it, so the test asks
+    // the same function the cluster does rather than assuming the first node.
+    const owner = homeServer(servers, "acme")
     const created = await bunql(owner.url, owner.adminKey, "db", "create", "acme")
     expect(created.code).toBe(0)
 

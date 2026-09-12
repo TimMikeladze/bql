@@ -647,6 +647,11 @@ export const createDb: Handler = async (ctx) => {
   const body = await readJson<CreateBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   if (typeof body.name !== "string") throw BunQLError.badRequest("create needs a name")
   assertValidName(body.name)
+  // C3: in a cluster, the placement function names the node a database is created on, and every
+  // node computes the same answer from the same replicated membership — so two nodes cannot both
+  // create `acme`, and the one that may not is told which node may. No quorum on the create path:
+  // it is a hash per member and a loop. `docs/c3-placement.md` §3.2.
+  ctx.runtime.promoter.assertMayCreate(body.name)
   try {
     const tenant = await ctx.runtime.registry.create(body.name, {
       ...(body.pageSize !== undefined ? { pageSize: body.pageSize } : {}),

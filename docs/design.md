@@ -383,9 +383,18 @@ fenced on reconnect.
 ### 5.3 Cluster (rf ≥ 2, automatic failover) — phase 3
 - Membership + placement + leases live in a small built-in Raft group (control plane only;
   a few KB of state, elections in TS over Bun WS — the data plane never waits on it).
-- Each database has a lease holder (primary) and `rf-1` replicas chosen by consistent hashing
-  with rack/zone awareness. Lease TTL 3 s, renewed every 1 s; a primary refuses writes without
-  a valid lease; every TxnRecord carries the epoch; replicas reject stale epochs.
+- Each database has a lease holder (primary) and `rf-1` replicas chosen by **rendezvous** hashing
+  with rack/zone awareness (C3, `docs/c3-placement.md` — a ring was rejected: virtual nodes are a
+  tuning parameter nobody tunes and a structure every node has to keep identical). Lease TTL 3 s,
+  renewed every 1 s; a primary refuses writes without a valid lease; every TxnRecord carries the
+  epoch; replicas reject stale epochs.
+- **Only the node the placement function names may create a database**, and every node computes the
+  same answer from the same replicated membership, so the create gate costs no quorum — that is
+  what stops two nodes both creating `acme`. A node holding no copy of a database the cluster does
+  know answers `NOT_PRIMARY` + `BunQL-Primary` (a same-origin `307`) rather than `404`.
+- The placement is **not recorded**. `DbState.replicas` means "nodes that have told the cluster they
+  hold a copy", which is what `pickFailover` reads, and an intended set written into the same field
+  would let a lapsed lease be granted to a node with no data.
 - Failover: lease expires → Raft leader picks the replica with the highest acked txid →
   new epoch → clients are redirected (`307` with `BunQL-Primary` header, or WS `moved` frame).
 - Alternative adapters (`coordination: "etcd" | "postgres"`) are possible but not planned.
