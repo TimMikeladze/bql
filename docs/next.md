@@ -10,7 +10,7 @@ record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, Open
 
 Phases 0 and 1 are complete; phase 2 has its control plane, its failover and its packaging. On
 `main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree
-clean). `bun test` → **1318 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
+clean). `bun test` → **1319 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
 `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and Linux.** Zero runtime
 dependencies.
 
@@ -50,6 +50,7 @@ That is the case for `workers: N` below, measured rather than assumed.
 |---|---|
 | H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
 | H8: `NOT_FOUND: 404` | the data API's `/{pk}` routes answer 404 rather than 200-with-null; GraphQL still answers `null`, through `nullOnNotFound` |
+| H8: `problems` published end to end | `errorBodySchema` declares it, `ErrorInfo` names it, `BunQLClientError.problems` carries it |
 | H6: the surfaces mounted | `src/server/registry.ts` (every `/v1` route as an `Operation`), `src/server/surfaces.ts` (the data API cache, the per-tenant dispatcher, the GraphQL handler), `[api]` and `[graphql]` config, `docs/h6-mount.md` |
 | `routes:check` reads the registry | it already read the live table; it now also fails when a served route is **not** in the registry, so a hand-added route in `createApp` cannot go undescribed |
 | `CLUSTER_DISABLED` joined `ERROR_STATUS` | `routes.ts` has thrown it since C1 with an explicit 503, but it was absent from the documented vocabulary, so the document build rejected it |
