@@ -5,7 +5,8 @@ Written 2026-09-12 at the end of the session that built phase 1. Read this, then
 
 ## Where things stand
 
-Phases 0 and 1 are complete on `main`, working tree clean. `bun test` → 861 pass, 2 skip, 0 fail
+Phases 0 and 1 are complete on `main`, pushed to **https://github.com/TimMikeladze/bunql**
+(private; `origin/main` is current), working tree clean. `bun test` → 861 pass, 2 skip, 0 fail
 across 62 files. `bun run typecheck` clean. `bun run bench` meets every design §10 budget but one
 (WebSocket mixed throughput, below). Zero runtime dependencies.
 
@@ -124,6 +125,17 @@ What phase 1 added to the list:
 - **The S3 shipper re-uploads an open segment as it grows.** Cheap here (633 bytes a record on the
   bench), but a workload with large transactions pays for the same bytes more than once. Ship
   closed segments only, or upload ranges.
+
+## Start here, before milestone 1
+
+Two things are cheap and should land before the control plane, because they are bugs rather than
+features:
+
+1. **Admin routes on a replica act locally** (see the gap list above). `POST /v1/db` on a replica
+   creates a database the cluster never hears about, and `DELETE /v1/db/{db}` silently stops that
+   replica following it forever. Refuse both with `NOT_PRIMARY` and a `BunQL-Primary` header, the
+   way statement writes already behave when forwarding is off.
+2. **Nothing sweeps `<dataDir>/trash/`.** Give it the retention the log already has.
 
 ## House rules for this repo
 
