@@ -9,7 +9,7 @@ of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, O
 
 Phases 0 and 1 are complete; phase 2 has its control plane, its failover and its packaging. On
 `main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree
-clean). `bun test` → **1311 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
+clean). `bun test` → **1312 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
 `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and Linux.** Zero runtime
 dependencies.
 

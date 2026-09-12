@@ -153,6 +153,12 @@ interface Spec {
   security: "bearer" | "admin" | "none"
   query?: Schema
   body?: Schema
+  /**
+   * Whether the body may be left out. Default false: most of these read a required field out of
+   * it. The handlers accept an empty body and default it, so this is the document telling the
+   * truth about what a *useful* request carries, not a gate (see the module header).
+   */
+  bodyOptional?: boolean
   /** Default 200. */
   status?: number
   response: Schema
@@ -178,7 +184,7 @@ function define(spec: Spec): ServerOperation {
       ...(bound ? { path: pathSchemaFor(spec.path) } : {}),
       ...(spec.query ? { query: spec.query } : {}),
     },
-    ...(spec.body ? { body: { schema: spec.body, required: false } } : {}),
+    ...(spec.body ? { body: { schema: spec.body, required: spec.bodyOptional !== true } } : {}),
     response: {
       ...(spec.status !== undefined ? { status: spec.status } : {}),
       schema: spec.response,
@@ -234,6 +240,7 @@ const SPECS: Spec[] = [
   },
   {
     id: "txBegin",
+    bodyOptional: true,
     method: "post",
     path: "/v1/db/:db/tx",
     summary: "Open an interactive transaction",
@@ -442,6 +449,7 @@ const SPECS: Spec[] = [
   },
   {
     id: "restoreDatabase",
+    bodyOptional: true,
     method: "post",
     path: "/v1/db/:db/restore",
     summary: "Point-in-time restore, into a new database",
@@ -465,6 +473,7 @@ const SPECS: Spec[] = [
   },
   {
     id: "checkpointDatabase",
+    bodyOptional: true,
     method: "post",
     path: "/v1/db/:db/checkpoint",
     summary: "Checkpoint the WAL",
@@ -495,6 +504,7 @@ const SPECS: Spec[] = [
   },
   {
     id: "promoteDatabase",
+    bodyOptional: true,
     method: "post",
     path: "/v1/db/:db/promote",
     summary: "Make this node the primary for one database",
@@ -541,6 +551,7 @@ const SPECS: Spec[] = [
   },
   {
     id: "backupVerify",
+    bodyOptional: true,
     method: "post",
     path: "/v1/db/:db/backup/verify",
     summary: "Is the bucket restorable to a point? Writes nothing",

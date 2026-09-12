@@ -27,7 +27,7 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | — | one operation model rendered as REST + OpenAPI + GraphQL (`bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1311 tests across 105 files, green on macOS (arm64) and Linux (x64).
+1312 tests across 105 files, green on macOS (arm64) and Linux (x64).
 
 ## Quickstart
 

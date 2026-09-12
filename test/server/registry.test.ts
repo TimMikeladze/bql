@@ -109,6 +109,23 @@ describe("the document", () => {
     expect(Object.keys(query.responses)).toContain("409")
   })
 
+  test("says which bodies are required, and which the handler defaults", async () => {
+    const document = (await server.json("/v1/openapi.json", { token: null })) as {
+      paths: Record<string, Record<string, { requestBody?: { required?: boolean } }>>
+    }
+    const required = (path: string, method: string) =>
+      document.paths[path]?.[method]?.requestBody?.required ?? false
+    // `sql` and `name` are not optional, and a document that shrugged at that would generate a
+    // client that lets you send nothing.
+    expect(required("/v1/db/{db}/query", "post")).toBe(true)
+    expect(required("/v1/db", "post")).toBe(true)
+    expect(required("/v1/tokens", "post")).toBe(true)
+    // These read an all-optional body and default it, so an empty one is a real request.
+    expect(required("/v1/db/{db}/checkpoint", "post")).toBe(false)
+    expect(required("/v1/db/{db}/promote", "post")).toBe(false)
+    expect(required("/v1/db/{db}/tx", "post")).toBe(false)
+  })
+
   test("is open, because it names no database", async () => {
     const response = await server.fetch("/v1/openapi.json", { token: null })
     expect(response.status).toBe(200)
