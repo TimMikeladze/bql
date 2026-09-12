@@ -55,6 +55,10 @@ jobs:
       - name: report the library under test
         run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
 
+      # A raw control byte in source is invisible to git past its 8000-byte binary sniff, so a
+      # byte scan is the only thing that finds one. See scripts/bytes.ts.
+      - run: bun run scripts/bytes.ts --check
+
       - run: bun run typecheck
 
       - run: bun test

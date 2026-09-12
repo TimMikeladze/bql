@@ -292,7 +292,7 @@ export class LiveQueryRegistry {
       rows = rows.slice(0, sub.maxRows)
       truncated = true
     }
-    const hash = Bun.hash.xxHash3(`${result.columns.join(" ")}${JSON.stringify(rows)}`)
+    const hash = Bun.hash.xxHash3(`${result.columns.join("\0")}\x01${JSON.stringify(rows)}`)
     if (sub.started && sub.hash === hash) return null
     sub.hash = hash
     const first = !sub.started

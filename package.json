@@ -28,6 +28,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "bytes": "bun run scripts/bytes.ts --check",
     "sqlite:build": "bun run scripts/sqlite.ts",
     "routes:check": "bun run scripts/routes.ts --check",
     "start": "bun run src/server/main.ts",
