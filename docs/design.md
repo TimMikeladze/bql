@@ -278,10 +278,11 @@ point. Phase 3 candidate: maintain the wal-index hash tables ourselves (format i
 - **Change feed**: `preupdate_hook` is the source (it also covers `WITHOUT ROWID` tables, which
   `update_hook` silently skips) and gives old and new values when the tenant has
   `changes.includeRows` on; `update_hook` is the fallback engine mode. DDL is observed through
-  the authorizer (`CREATE/ALTER/DROP`) and emitted as `schema` events. While a table has
-  subscribers, the authorizer answers `SQLITE_IGNORE` to `SQLITE_DELETE`, which makes SQLite
-  disable the truncate optimisation so `DELETE FROM t` still reports every row. Buffered per
-  transaction, published once with the txid after the record is durable. Cost ≈ 50 ns/row.
+  the authorizer (`CREATE/ALTER/DROP`) and emitted as `schema` events. A registered preupdate
+  hook by itself disables SQLite's truncate optimisation, so `DELETE FROM t` reports every row
+  (verified in `test/sqlite/hooks.test.ts`); in the update-hook fallback mode the authorizer
+  answers `SQLITE_IGNORE` to `SQLITE_DELETE` to get the same effect. Buffered per transaction,
+  published once with the txid after the record is durable. Cost ≈ 50 ns/row.
 - **Live queries**: on subscribe, prepare the statement with the authorizer capturing every
   `SQLITE_READ (table, column)` → exact read-set, column-precise, no parsing. Each commit's
   write-set (tables, and changed columns when preupdate is on) is intersected with read-sets;
