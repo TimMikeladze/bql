@@ -135,10 +135,25 @@ export async function executeStmt(
 
   try {
     if (verb?.kind === "begin") {
-      if (stream.tx) {
+      if (stream.tx || stream.remoteTx) {
         throw new BunQLError("BAD_REQUEST", "cannot start a transaction within a transaction", 400)
       }
       requireScope(stream.principal, stream.db, verb.readonly ? "ro" : "rw")
+      // R4b: a writable transaction on a replica lives on the *primary*, and the stream holds a
+      // `RemoteTx` where it would otherwise hold a `TxSession`. The baton is unchanged — it still
+      // names this local stream — because what changes is what hangs off the stream, not what the
+      // baton means. `docs/r4b-hrana-forward.md` §2.
+      //
+      // A read-only transaction is **not** forwarded, and on a replica it is refused rather than
+      // served: `Tenant.txBegin` takes the tenant's *writer* whatever the mode, and a replica's
+      // writer belongs to the applier — a client holding it would stall the replication stream for
+      // as long as the transaction lasted. §2.2 says what a consistent multi-statement read on a
+      // replica uses instead.
+      if (!verb.readonly && runtime.forwarder.enabledFor(stream.db)) {
+        const opened = await runtime.forwarder.txBegin(tenant, stream.principal, {}, stream.owner)
+        stream.remoteTx = runtime.forwarder.remoteTx(opened.tx) ?? null
+        return emptyResult(tenant.txid, startedNs)
+      }
       // `beginTxQueued` on an HTTP stream, not `beginTx`: `@libsql/client` has a concurrency
       // window of 20 and any ORM over it runs request handlers in parallel, so two
       // `client.transaction()` calls overlap routinely. R5 found the same thing on the native
@@ -153,6 +168,12 @@ export async function executeStmt(
       return emptyResult(tenant.txid, startedNs)
     }
     if (verb?.kind === "commit" || verb?.kind === "rollback") {
+      const remote = stream.remoteTx
+      if (remote) {
+        stream.remoteTx = null
+        const ended = await runtime.forwarder.txEnd(remote, stream.principal, verb.kind)
+        return emptyResult(BigInt(ended.txid), startedNs)
+      }
       const tx = stream.tx
       if (!tx) throw noTransaction(verb.kind)
       stream.tx = null
@@ -165,9 +186,20 @@ export async function executeStmt(
     const args = argsOf(stmt)
     const request = { sql, ...(args !== undefined ? { args } : {}) }
     const options = service.options()
+    // R4b §2.1: once a transaction is remote, *every* statement in it is remote, reads included.
+    // A transaction that read locally and wrote remotely would not show a client its own
+    // uncommitted writes — the local file is a snapshot that does not contain them.
+    if (stream.remoteTx) {
+      const result = await runtime.forwarder.txExec(stream.remoteTx, stream.principal, request)
+      return toStmtResult(result, wantRows)
+    }
     const result: QueryResult = stream.tx
       ? await executeInTx(runtime, tenant, stream.principal, request, options)
-      : (await executeStatement(runtime, tenant, stream.principal, request, options)).result
+      : // R4b §2.3: outside a transaction a write is one round trip and a read never leaves this
+        // node, classified by `sqlite3_stmt_readonly` exactly as `routes.query` classifies it.
+        runtime.forwarder.needsPrimary(tenant, stream.principal, [sql])
+        ? await runtime.forwarder.query(tenant, stream.principal, request, options)
+        : (await executeStatement(runtime, tenant, stream.principal, request, options)).result
     return toStmtResult(result, wantRows)
   } catch (err) {
     throw mapTenantError(err, runtime.primaryUrl)

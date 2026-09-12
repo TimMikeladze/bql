@@ -327,11 +327,14 @@ export class ServerRuntime {
   }
 
   /**
-   * The lease check, on the write path. One `Map.get` and one `performance.now()` on a clustered
-   * node; one null check on every other node.
+   * May this node write to this database at all? On the write path, and the only thing on it that
+   * asks anything outside the tenant.
+   *
+   * Two questions, in cost order: is this a replica copy (one `Set.has`), and does this node hold
+   * the database's lease (one `Map.get` and one `performance.now()` on a clustered node, one null
+   * check everywhere else).
    */
   assertWritable(db: string): void {
-    if (this.cluster === null) return
     this.promoter.assertWritable(db)
   }
 

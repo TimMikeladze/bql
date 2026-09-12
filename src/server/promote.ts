@@ -248,6 +248,23 @@ export class Promoter {
    * `acme`" hole properly — is C3.
    */
   assertWritable(db: string): void {
+    // A replica does not write to its own copy, ever. This is only reached when the write was not
+    // forwarded — `[replication] forwardWrites` off, or no upstream configured — because a
+    // forwarded one runs on the primary and never comes back through here.
+    //
+    // Without it, `forwardWrites = false` (the switch an operator sets to make a replica *visibly*
+    // read-only) did the opposite: the write landed in the local file, was acknowledged, and then
+    // diverged the copy from the primary — so the next applied record failed the checksum chain
+    // and the replica re-snapshotted, silently discarding a write a client had been told was done.
+    if (this.roleFor(db) === "replica") {
+      const where = this.primaryFor(db)
+      throw new BunQLError(
+        "NOT_PRIMARY",
+        `${db}: this node holds a replica copy and does not write to it`,
+        503,
+        { ...(where.url ? { primary: where.url } : {}) },
+      )
+    }
     const cluster = this.runtime.cluster
     if (cluster === null) return
     if (cluster.holdsLease(db)) return

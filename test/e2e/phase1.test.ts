@@ -285,14 +285,25 @@ describe("a primary, two replicas, a bucket and a libsql client", () => {
     expectedRows += 2
     expect(await converged("the client's transaction to reach both replicas")).toBe(expectedRows)
 
-    // Hrana on a replica is a read surface in phase 1: a write there is refused rather than
-    // forwarded, and `docs/api.md` says so.
-    const refused = await hranaReplica
-      .execute("insert into orders (who, n) values (901, 1)")
-      .then(() => null)
-      .catch((err: Error) => err)
-    expect(refused).toBeInstanceOf(Error)
-    expect(String(refused)).toContain("NOT_PRIMARY")
+    // R4b: Hrana on a replica forwards a write, exactly as the native surface has since R2. It
+    // was a read-only surface until then, and `docs/r4b-hrana-forward.md` is why it is not.
+    await hranaReplica.execute("insert into orders (who, n) values (901, 1)")
+    expectedRows += 1
+    expect(await converged("the write forwarded off the replica to reach both replicas")).toBe(
+      expectedRows,
+    )
+
+    // …and a transaction opened on the replica runs on the primary, with a read inside it seeing
+    // its own uncommitted write — which is the whole of §2.1.
+    const remote = await hranaReplica.transaction("write")
+    await remote.execute("insert into orders (who, n) values (902, 1)")
+    const inside = await remote.execute("select count(*) as n from orders where who = 902")
+    expect(Number(inside.rows[0]?.n)).toBe(1)
+    await remote.commit()
+    expectedRows += 1
+    expect(await converged("the replica's forwarded transaction to reach both replicas")).toBe(
+      expectedRows,
+    )
   }, 25_000)
 
   test("the bucket has everything, and restores into a database that matches", async () => {

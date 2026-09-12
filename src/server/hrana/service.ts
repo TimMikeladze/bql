@@ -17,6 +17,7 @@ import { requireScope, type Principal } from "../auth.ts"
 import { BunQLError } from "../errors.ts"
 import { resolveOptions, type ResolvedOptions } from "../exec.ts"
 import type { ServerRuntime, TxSession } from "../runtime.ts"
+import type { RemoteTx } from "../forward.ts"
 import { BatonSigner } from "./baton.ts"
 
 /** Streams a node keeps at once, across every socket and every baton. */
@@ -47,6 +48,11 @@ export class HranaStream {
   /** Responses issued so far. A baton naming any other number is stale. */
   seq = 0
   tx: TxSession | null = null
+  /**
+   * R4b: the transaction this stream opened **on the primary**, when it is a writable one on a
+   * replica. Exactly one of `tx` and `remoteTx` is ever set. `docs/r4b-hrana-forward.md` §2.
+   */
+  remoteTx: RemoteTx | null = null
   /** Set when the open transaction began as `BEGIN TRANSACTION READONLY`, so writes are refused. */
   txReadonly = false
   closed = false
@@ -199,6 +205,15 @@ export class HranaService {
       } catch (err) {
         this.runtime.report(err)
       }
+    }
+    // R4b: a stream that idled out holding a transaction on the *primary* rolls it back there too,
+    // rather than leaving the primary's writer pinned until its own idle timer notices.
+    const remote = stream.remoteTx
+    stream.remoteTx = null
+    if (remote) {
+      void this.runtime.forwarder
+        .txEnd(remote, stream.principal, "rollback")
+        .catch((err: unknown) => this.runtime.report(err))
     }
   }
 

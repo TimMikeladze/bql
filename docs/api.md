@@ -1470,6 +1470,21 @@ down, converted into the worker's own monotonic clock, because each worker threa
 `Map.get` and `performance.now()` it is on one thread and costs no message at all.
 `bun run bench/workers.ts --cluster`.
 
+### Writes on a replica
+
+A replica **forwards** a write to its primary and serves reads locally, on both surfaces: the
+native `/v1/db/{db}/query` and `batch` (R2) and the libsql-compatible `/v2/pipeline` (R4b). A
+transaction opened on a replica runs on the primary, and every statement in it — reads included —
+goes there, so a read inside the transaction sees the transaction's own uncommitted writes.
+
+`BEGIN TRANSACTION READONLY` on a replica is refused. A tenant transaction takes the database's
+single writer whatever its mode, and a replica's writer belongs to the applier — a client holding it
+would stall replication. Every statement on a replica is already a snapshot read, and
+`BunQL-Min-Txid` pins which snapshot.
+
+With `[replication] forwardWrites = false` a replica is read-only and a write is refused with
+`503 NOT_PRIMARY` and `BunQL-Primary`.
+
 ### Per-database settings
 
 `PATCH /v1/db/{db}` changes settings that belong to one database rather than to the node.
