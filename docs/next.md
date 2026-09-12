@@ -236,9 +236,9 @@ What phase 1 added to the list:
 
 ## Start here — A or B, since C is done
 
-A and B do not overlap in files, so they can run in parallel. Each is written so it can be started
-cold, with the evidence for why it is worth doing. C was this session's; what it left behind is
-under it.
+**A and B are untouched and are the two biggest levers left.** They do not overlap in files, so
+they can run in parallel. Each is written so it can be started cold, with the evidence for why it
+is worth doing. C was H6's, and H8 closed everything C left behind except H7 — see under it.
 
 ### A. `workers: N` (phase 2, C4) — the biggest throughput lever left
 
@@ -274,10 +274,10 @@ locks, LiteFS-style, instead of appending frames and letting the next reader reb
 diverges must fail loudly, and `test/wal/replication.test.ts` plus the two e2e scenarios are what
 must keep passing unchanged.
 
-### C. ~~H6~~ **Done this session.** What replaces it
+### C. ~~H6~~ and ~~H8~~ **Done.** What is left of them
 
-The largest built-but-dark surface is lit: `docs/h6-mount.md`. Three things it opened up, in
-rough order of value:
+The largest built-but-dark surface is lit (`docs/h6-mount.md`) and the two things it left behind
+are closed (`docs/h8-validated-requests.md`). One item remains:
 
 - **H7, GraphQL subscriptions over the change feed.** `src/realtime/` already has the ring, the
   live-query engine and the SSE/WS transports; `src/graphql/` already has the schema cache and the
