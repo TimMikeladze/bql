@@ -352,9 +352,19 @@ What phase 1 added to the list:
 **A, B, C, C4b, C4c and C4d are all done, and C4 is finished: there is no combination
 `[server] workers > 1` refuses any more.** What is left, biggest first: **C3** (placement and
 `[cluster]`), **H7** (GraphQL subscriptions), **deferred compression** (now the largest single line
-item on a write), and **the router's accept-and-hop loop**, which is the ceiling a sharded node's
-HTTP reads flatten against and which nobody has profiled. Each section below is written so it can
-be started cold.
+item on a write), and — no longer — the router's accept-and-hop loop, which is now
+profiled (`docs/p4-router-hop.md`) and is **not** where the loss is. Each section below is written
+so it can be started cold.
+
+**What the hop profile found**, because it overturns what this file used to say. A sharded node's
+HTTP reads do stop scaling (1.56x for four times the workers, two load-client processes), but the
+channel is not the constraint: it does 239 000 round trips/s at four workers while the node does
+49 000 reads/s, five times the headroom. A do-nothing `Bun.serve` measured with the same client
+does **at least 152 000/s**, so roughly 14 µs per request is ours and it is on the router's single
+thread — which is what caps the ladder. Ruled out along the way, each with a measurement: batching
+(2.9x at one worker, *nothing* from two up), idle attached threads (free), and in-flight depth (no
+effect). Also: one load-client process tops out near 75 000/s, which is most of the 40% run-to-run
+variance this file's earlier "collapse at six workers" was reading as signal.
 
 ### A. ~~`workers: N`~~ **Done (C4).** ~~C4b~~, ~~C4c~~ and ~~C4d~~ **Done too.** What is left
 

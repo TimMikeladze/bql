@@ -458,9 +458,13 @@ function asHandler(
  */
 function forwardByPath(runtime: ServerRuntime, pool: WorkerPool) {
   return async (request: Request): Promise<Response> => {
-    const url = new URL(request.url)
-    const db = routingName(runtime.config, request, url)
-    if (db === null) {
+    // Bun's router has already matched `/v1/db/:db/…` and put the segment in `params`, so the
+    // common case needs neither a `new URL` nor a split. It is ~10% of the router's per-request
+    // cost on a read, which is the whole of what a sharded node's HTTP reads are capped by
+    // (`docs/p4-router-hop.md`).
+    const named = (request as Request & { params?: Record<string, string> }).params?.db
+    const db = named ?? routingName(runtime.config, request, new URL(request.url))
+    if (db === null || db === undefined) {
       return errorResponse(new BunQLError("BAD_REQUEST", "no database in the request", 400))
     }
     return pool.fetch(pool.shardOf(db), request)
@@ -487,9 +491,9 @@ function forwardHrana(
   options: (request: Request) => Response,
 ): Record<string, unknown> {
   const forward = async (request: Request): Promise<Response> => {
-    const url = new URL(request.url)
-    const db = routingName(runtime.config, request, url)
-    return pool.fetch(db === null ? 0 : pool.shardOf(db), request)
+    const named = (request as Request & { params?: Record<string, string> }).params?.db
+    const db = named ?? routingName(runtime.config, request, new URL(request.url))
+    return pool.fetch(db === null || db === undefined ? 0 : pool.shardOf(db), request)
   }
   const table: Record<string, unknown> = {}
   for (const [path, entry] of Object.entries(hranaRoutes(runtime))) {

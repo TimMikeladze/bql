@@ -364,6 +364,18 @@ where it did 28 809, and more than the 39 734 four separate processes did in §5
   rule is still the rule, and this is the one case where the body is megabytes and the sharp edge
   of a detached buffer has nothing to cut. `[limits] maxImportBytes` still bounds it.
 
+### Why HTTP reads stop scaling — profiled (P4)
+
+`docs/p4-router-hop.md`. Short version: **the hop is not where the loss is.** The channel does
+239 000 round trips/s at four workers against the node's 49 000 reads/s, and a do-nothing
+`Bun.serve` does at least 152 000/s with the same client — so about 14 µs per request is this
+router's own, on one thread, and that is the cap. Batching the channel is worth 2.9x at one worker
+and nothing from two upwards; idle attached threads are free; in-flight depth changes nothing.
+
+`workers: N` is therefore a **write** lever on the HTTP surface. Writes go 28 809 to 86 754/s
+because the hop is 4 µs against a 28 µs write; reads go 1.56x and stop, because a read is a few
+microseconds of SQLite behind a router that costs four times that.
+
 ### The reporting gaps, closed (C4e)
 
 Two facts a router does not itself hold, and used to answer from what it *did* hold:
