@@ -8,8 +8,10 @@
         "@libsql/client": "^0.18.0",
         "bun-types": "^1.4.2",
         "drizzle-orm": "^0.45.2",
+        "graphql": "^17.0.2",
         "kysely": "^0.29.5",
         "kysely-libsql": "^0.7.1",
+        "openapi-x-graphql": "^1.0.0",
         "typescript": "^7.0.2",
       },
       "peerDependencies": {
@@ -109,6 +111,8 @@
 
     "formdata-polyfill": ["formdata-polyfill@4.0.10", "", { "dependencies": { "fetch-blob": "^3.1.2" } }, "sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g=="],
 
+    "graphql": ["graphql@17.0.2", "", {}, "sha512-FRWbddMxfkjiB7z+aQDWIR+E34xo9I8c9mtK2RPv8PmMzKRvrdsreHL/Ui/TmwHJfhHChEtsFPyMHKI+xuarQQ=="],
+
     "js-base64": ["js-base64@3.9.3", "", {}, "sha512-uwYQp+VJ38FVvtim6qNbit6e9uT6dwWQ4Y1+H9TxhW5hcHjpHwoxlR0nMpqUmIFOmu4VqMxwdJA88gIVuZJQ/g=="],
 
     "kysely": ["kysely@0.29.5", "", {}, "sha512-ooa+eSbBNPTo3MycPEuW5jdrxQdQwdtB3LC3h43FiXQbIry5tR0C5lDG7eealK0E4D7XjrnOP5DIUg/LyjRMYQ=="],
@@ -120,6 +124,8 @@
     "node-domexception": ["node-domexception@1.0.0", "", {}, "sha512-/jKZoMpw0F8GRwl4/eLROPA3cfcXtLApP0QzLmUT/HuPCZWyB7IY9ZrMeKw2O/nFIqPQB3PVM9aYm0F312AXDQ=="],
 
     "node-fetch": ["node-fetch@3.3.2", "", { "dependencies": { "data-uri-to-buffer": "^4.0.0", "fetch-blob": "^3.1.4", "formdata-polyfill": "^4.0.10" } }, "sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA=="],
+
+    "openapi-x-graphql": ["openapi-x-graphql@1.0.0", "", { "dependencies": { "graphql": "^17.0.2" }, "peerDependencies": { "typescript": ">=4.5.0", "yaml": ">=2.0.0" }, "optionalPeers": ["typescript", "yaml"], "bin": { "openapi-x-graphql": "dist/cli.js" } }, "sha512-/iux2NCugRkLsqkyyoKJr6ZtR46SRz4WsNZx2a5WzSlZwjhK3yalkkW/bq44tYALjSvX/FY4OxHVUx6mTYjGcA=="],
 
     "promise-limit": ["promise-limit@2.7.0", "", {}, "sha512-7nJ6v5lnJsXwGprnGXga4wx6d1POjvi5Qmf1ivTRxTjH4Z/9Czja/UCMLVmB9N93GeWOU93XaFaEt6jbuoagNw=="],
 

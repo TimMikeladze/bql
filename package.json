@@ -47,7 +47,9 @@
   },
   "peerDependencies": {
     "drizzle-orm": ">=0.44",
-    "kysely": ">=0.28"
+    "kysely": ">=0.28",
+    "graphql": ">=16",
+    "openapi-x-graphql": ">=1"
   },
   "peerDependenciesMeta": {
     "drizzle-orm": {
@@ -55,14 +57,22 @@
     },
     "kysely": {
       "optional": true
+    },
+    "graphql": {
+      "optional": true
+    },
+    "openapi-x-graphql": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@libsql/client": "^0.18.0",
     "bun-types": "^1.4.2",
     "drizzle-orm": "^0.45.2",
+    "graphql": "^17.0.2",
     "kysely": "^0.29.5",
     "kysely-libsql": "^0.7.1",
+    "openapi-x-graphql": "^1.0.0",
     "typescript": "^7.0.2"
   }
 }
