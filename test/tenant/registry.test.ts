@@ -34,16 +34,19 @@ describe("tenant registry", () => {
     expect(reg.stats().open).toBe(2)
 
     tenant.write((db) => db.exec("create table t(v integer)"))
+    const segments = tenant.log.segmentPaths.map((one) => path.basename(one))
+    expect(segments.length).toBeGreaterThan(0)
+
     const trash = reg.delete("acme")
     expect(reg.has("acme")).toBe(false)
     expect(fs.existsSync(tenant.dir)).toBe(false)
-    // Design §6.5: a deleted database keeps its log and snapshots; nothing is removed.
+    // Design §6.5: a deleted database keeps its log and snapshots; nothing is removed. The
+    // invariant is that every segment the log held is still there under `trash/`, not how many
+    // files the directory has — the log also writes a sidecar index beside each segment.
     expect(trash.startsWith(path.join(dir, "trash"))).toBe(true)
     expect(fs.existsSync(path.join(trash, "main.db"))).toBe(true)
-    // One segment, plus the sidecar index R3 writes beside it.
-    expect(
-      fs.readdirSync(path.join(trash, "log")).filter((name) => name.endsWith(".seg")).length,
-    ).toBe(1)
+    const kept = fs.readdirSync(path.join(trash, "log"))
+    for (const segment of segments) expect(kept).toContain(segment)
     expect(reg.list().map((row) => row.name)).toEqual(["beta"])
 
     // The name is free again after a delete.
