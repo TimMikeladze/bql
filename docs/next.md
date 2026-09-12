@@ -1,14 +1,35 @@
 # Resume here — state of BunQL and what to do next
 
-Written 2026-09-12 at the end of the session that built phase 1. Read this, then `docs/design.md`
-§0 and §11, then `docs/api.md`.
+Written 2026-09-12 at the end of the session that built C1, C2, C6 and the H1-H5 surfaces. Read
+this, then `docs/design.md` §0, §11 and §14, then `docs/api.md`. The plans of record are
+`docs/plan-phase2.md` (the cluster) and `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL).
 
 ## Where things stand
 
-Phases 0 and 1 are complete on `main`, pushed to **https://github.com/TimMikeladze/bunql**
-(private; `origin/main` is current), working tree clean. `bun test` → 874 pass, 2 skip, 0 fail
-across 65 files. `bun run typecheck` clean. `bun run bench` meets every design §10 budget but one
-(WebSocket mixed throughput, below). Zero runtime dependencies.
+Phases 0 and 1 are complete, and phase 2 has its control plane, its failover and its packaging.
+On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current,
+tree clean). `bun test` → **1233 pass, 2 skip, 0 fail** across 96 files. `bun run typecheck` clean.
+`bun run bytes` clean. **CI green on macOS and Linux.** A single-row write is still **28.2 µs** —
+the control plane cost the write path nothing, which was its defining constraint. Zero runtime
+dependencies, verified by deleting `graphql` and `openapi-x-graphql` from `node_modules` and
+starting the server.
+
+**Both open §13 decisions are settled** (see §13's footer): **#11 built-in Raft**, control plane
+only; **#9 default `ack` stays `local`**.
+
+| landed this session | commit | what it is |
+|---|---|---|
+| C1 control plane | `de51dbe` | Raft as a **pure** `step(input, now) -> Action[]`; pre-vote, own-term commit rule, single-server membership. A seeded simulator asserts all five safety properties after every step (9.4M assertions). Leases with a guard that makes two holders impossible |
+| C2 promotion and failover | `444b269` `a18cb8c` `82afcd9` | `POST /v1/db/{db}/promote`, `bunql promote`, per-database live role, `307` + `BunQL-Primary`, the old primary fenced and **demoted durably** |
+| C6 Linux packaging + CI | `868d548` | `scripts/sqlite.ts` builds 3.53.4 from a hash-pinned amalgamation; `.github/workflows/ci.yml` on both platforms |
+| H1-H5 surfaces | `fe17b6a` `54ce79f` `a64af2a` `53d07ea` `766a01c` | one `Operation` rendered three ways: `src/http/` runs it, `src/openapi/` describes it, `src/graphql/` is generated from that document. `src/dataapi/` turns a tenant's own tables into all three |
+| R6 retention | `49db1c4` | `retain()`/`removeSnapshot()` were dead code; now behind a floor over PITR, replicas and the shipper |
+| R7 stale generations | `082f651` | a replica no longer serves a deleted database's rows |
+
+**What phase 2 still owes:** placement and the `[cluster]` section (C3), `workers: N` (C4), replica
+apply mechanism A (C5). The surfaces still owe H6 (port the existing `/v1` routes onto the
+operation model, so `/v1/openapi.json` covers the whole server) and H7 (GraphQL subscriptions over
+the existing change feed).
 
 | area | module | state |
 |---|---|---|
@@ -21,6 +42,9 @@ across 65 files. `bun run typecheck` clean. `bun run bench` meets every design �
 | server | `src/server/` | HTTP + WebSocket + SSE per design §6/§7, EdDSA tokens with table ACLs, write forwarding, ack levels, a fair transaction queue, TOML/env config, metrics |
 | libsql compatibility | `src/server/hrana/` | `/v2/pipeline`, `/v3/pipeline`, `/v3/cursor`, `hrana3`/`hrana2` sockets, batons, cursors, over the same `exec.ts` as the native routes |
 | client / embedded / ORMs / CLI | `src/client/`, `src/embedded.ts`, `src/kysely.ts`, `src/drizzle.ts`, `src/cli.ts` | Bun.SQL-shaped SDK (no Bun/Node imports), in-process API with `.sync`, Kysely dialect and Drizzle driver as optional peers, `bunql` CLI |
+| cluster control plane | `src/cluster/` | Raft as a pure state machine, its own framed log, a WebSocket transport, per-database leases and the epoch that fences a replaced primary. Never on the data path |
+| surfaces core | `src/core/`, `src/http/`, `src/openapi/` | a schema that **is** a JSON Schema, the `Operation`/`Registry` model, a router that composes with `app.ts`, an in-process dispatcher, and an OpenAPI 3.1 emitter |
+| generated APIs | `src/dataapi/`, `src/graphql/` | a tenant's tables introspected into REST + OpenAPI + GraphQL, every statement through `exec.ts`. `graphql` and `openapi-x-graphql` are optional peers |
 | tests / benches / docs | `test/`, `bench/`, `docs/` | two e2e scenarios (single node, cluster), `bun run bench` against design §10 plus a phase-1 table, `docs/api.md` as-built reference, `docs/benchmarks.md` |
 
 Per-milestone deviations live in `docs/m3-wal.md` … `docs/m8-e2e.md` (phase 0) and
@@ -55,19 +79,16 @@ Two now matter:
   `docs/api.md`; the reason to leave it is that `NO_REPLICAS` would then fire on a node whose
   replica is restarting.
 
-## Phase 2 — the next milestones
+## Phase 2 — what is left
 
-Build in this order. The first is the gate for everything after it.
+C1, C2 and C6 are done (see the table above). What remains, in the order it makes sense to build:
 
-1. **Control plane (§5.3).** Pick the answer to §13 #11 and build it: cluster membership, a term
-   or lease per database, and the fencing token the write path already carries as `epoch`. Nothing
-   on the data path. `GET /v1/cluster` as the observable surface.
-2. **Promotion and failover.** `POST /v1/db/{db}/promote` and `bunql promote`: a replica that has
-   applied everything it can, bumped its epoch, and been accepted by the control plane becomes a
-   primary — with the old primary fenced by the epoch it no longer holds. The record header
-   already carries the epoch; `docs/r1-replication.md` explains what a stale epoch does today
-   (`EPOCH_AHEAD`, socket closed). Then `moved` on the client, and `BunQL-Primary` following the
-   new one.
+1. ~~**Control plane (§5.3).**~~ **Done (C1).** `src/cluster/`, `GET /v1/cluster`, `bunql cluster`.
+2. ~~**Promotion and failover.**~~ **Done (C2).** `docs/c2-promotion.md`. Verified by hand on real
+   nodes, including the case that matters most: an old primary restarted with **no `--replica-of`
+   at all** still reads `BunQL-Role: replica` and refuses a write with `NOT_PRIMARY`, because the
+   demotion is persisted rather than held in memory. No split brain in the one scenario where a
+   node has every reason to believe it is still in charge.
 3. **Placement and the `[cluster]` config section**, so a database has a home node and a client
    that lands on the wrong one is told where to go rather than answered slowly.
 4. **`workers: N`.** One process owns every writer today. The design's answer is one worker per
@@ -76,7 +97,13 @@ Build in this order. The first is the gate for everything after it.
 5. **Replica apply mechanism A (§4.5).** Write pages into the DB file and rewrite the shm header
    under the WAL locks, LiteFS-style. Mechanism B works but rescans the WAL per apply, which is
    the 48 µs "replica read" leg in `bench/wal.ts`.
-6. **Linux packaging and CI**, which phase 1 did not get to and which every deployment needs.
+6. ~~**Linux packaging and CI**~~ **Done (C6).** See `docs/c6-packaging.md`.
+
+Then the surfaces: **H6** ports the existing `/v1` routes onto the operation model so
+`/v1/openapi.json` describes the whole server rather than only the generated data API, and
+`scripts/routes.ts --check` can read the registry instead of comparing against prose. **H7** adds
+GraphQL subscriptions over the change feed `src/realtime/` already has. `docs/plan-surfaces.md`
+has both.
 
 ## Known gaps worth fixing along the way
 
