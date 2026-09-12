@@ -9,6 +9,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
+import { type ApplyMechanism, DEFAULT_APPLY_BUSY_MS } from "../wal/index.ts"
 import { AuthKeys, type Ed25519Jwk, KeyRing } from "./auth.ts"
 import { BunQLError } from "./errors.ts"
 
@@ -186,6 +187,21 @@ export interface ReplicationSection {
   secret: string
   /** Databases a replica follows. `["*"]` is every database the primary announces. */
   follow: string[]
+  /**
+   * C5: which of design §4.5's two replica-apply mechanisms to prefer. `"pages"` writes the
+   * primary's pages into the database file and rewrites the wal-index header under SQLite's own
+   * WAL locks, so the replica's `-wal` stays empty and a reader never rescans it. `"wal"` is the
+   * phase-0 mechanism — append frames, zero the header, let the next reader rebuild the index —
+   * kept as the back-out and as the automatic fallback where `xShmLock` is unreachable.
+   * `docs/c5-apply-pages.md`.
+   */
+  apply: ApplyMechanism
+  /**
+   * C5: how long a `"pages"` apply waits for the WAL lock set before answering `ApplyBusy`. A
+   * local reader holding a read transaction is what makes it wait; the record is retried, never
+   * applied under the reader. Default 5000, the same figure as `busy_timeout`.
+   */
+  applyBusyMs: number
   /** R2: how long a write waits for replica acks before it gives up. */
   ackTimeoutMs: number
   /**
@@ -410,6 +426,8 @@ export const DEFAULT_CONFIG: ServerConfig = {
     primary: "",
     secret: "",
     follow: ["*"],
+    apply: "pages",
+    applyBusyMs: DEFAULT_APPLY_BUSY_MS,
     ackTimeoutMs: 2000,
     ackWithoutReplicas: "error",
     heartbeatMs: 5000,
@@ -659,6 +677,17 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   if (ack !== "local" && ack !== "fsync" && ack !== "replica" && ack !== "quorum") {
     throw BunQLError.badRequest(
       `[durability] defaultAck must be "local", "fsync", "replica" or "quorum", got ${JSON.stringify(ack)}`,
+    )
+  }
+  const apply = config.replication.apply
+  if (apply !== "pages" && apply !== "wal") {
+    throw BunQLError.badRequest(
+      `[replication] apply must be "pages" or "wal", got ${JSON.stringify(apply)}`,
+    )
+  }
+  if (!(config.replication.applyBusyMs >= 0)) {
+    throw BunQLError.badRequest(
+      `[replication] applyBusyMs must be a non-negative number, got ${JSON.stringify(config.replication.applyBusyMs)}`,
     )
   }
   const without = config.replication.ackWithoutReplicas

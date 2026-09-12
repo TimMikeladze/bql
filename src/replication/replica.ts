@@ -2,9 +2,10 @@
 // primary, one stream per database this node follows.
 //
 // Invariant: a record is acked only after it is applied *and* the position is persisted. The
-// applier writes the frames, fdatasyncs them and rewrites `meta.json` before `applyRecord`
-// returns, so an `ACK` this client sends is a promise the replica can keep across a crash — which
-// is exactly what R2's `ack: "replica"` will be built on.
+// applier makes the transaction durable — pages into the database file under the WAL locks, or
+// frames into the replica's own `-wal` — and rewrites `meta.json` before `applyRecord` returns, so
+// an `ACK` this client sends is a promise the replica can keep across a crash, which is exactly
+// what R2's `ack: "replica"` is built on.
 //
 // Second invariant: the client never holds a position it cannot prove. A snapshot is written to a
 // temp file, hashed, and only then moved into place; an apply that fails verification leaves the
@@ -24,7 +25,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { Tenant, TenantRegistry } from "../tenant/index.ts"
-import { decode, type TxnRecord } from "../wal/index.ts"
+import { ApplyBusy, decode, type TxnRecord } from "../wal/index.ts"
 import {
   ACK_FSYNCED,
   decodeJson,
@@ -1159,8 +1160,10 @@ export class ReplicaClient {
       tenant.applyRecord(record, bytes)
     } catch (err) {
       const code = (err as { code?: string }).code
-      if (code === "BUSY") {
-        // The tenant is snapshotting. Keep the record and retry rather than forcing a re-bootstrap.
+      if (code === "BUSY" || err instanceof ApplyBusy) {
+        // The tenant is snapshotting, or a local reader held a read transaction against a page
+        // apply for longer than `applyBusyMs`. Both mean the same thing — nothing was written and
+        // the position has not moved — so keep the record and retry rather than re-bootstrapping.
         stream.deferred.push({ record, bytes })
         this.#scheduleRetry2(stream)
         return

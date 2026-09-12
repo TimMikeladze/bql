@@ -14,19 +14,24 @@ later on a socket. Both ceilings are ours to move.
 One row per transaction, because that is the shape of `/v1/db/:db/query` — every statement is its
 own transaction, so a transaction's fixed cost is paid per row.
 
-| stage | p50 µs | share |
-|---|---|---|
-| `BEGIN IMMEDIATE` + insert + `COMMIT` | 8.21 | 29% |
-| `recorder.poll` — tail the WAL, checksum the pages | 8.04 | 28% |
-| `encode` — frame the record, **zstd level 3** | 10.21 | 36% |
-| `log.appendEncoded` — write the segment | 1.96 | 7% |
-| **total** | **28.42** | |
+| stage | p50 µs | share | was, before P3 |
+|---|---|---|---|
+| `BEGIN IMMEDIATE` + insert + `COMMIT` | 7.88 | 34% | 8.21 |
+| `recorder.poll` — tail the WAL, checksum the pages | **3.17** | 14% | 8.04 |
+| `encode` — frame the record, **zstd level 3** | 10.00 | 44% | 10.21 |
+| `log.appendEncoded` — write the segment | 1.83 | 8% | 1.96 |
+| **total** | **22.88** | | **28.42** |
 
-That total reproduces the 28.2 µs `bench/tenant.ts` reports for the whole write path, so the four
-stages are the whole write.
+That total reproduces what `bench/tenant.ts` reports for the whole write path (24.0 µs,
+`ack: local`), so the four stages are the whole write.
 
-**Compression is the single largest line item in a write**, and it is unconditional —
-`FLAG_ZSTD` is always set in `src/wal/record.ts`.
+The tail halved in P3 (§4G): the WAL frame checksum now runs in C, from
+`scripts/native/walsum.c` compiled into the vendored libsqlite3. A node on a system library keeps
+the JavaScript, pays the 8.04 µs, and says so at startup. **Every number in this document is the
+vendored build unless it says otherwise.**
+
+**Compression is now comfortably the largest line item in a write** — 44% of it — and it is a
+setting rather than a constant (§4C).
 
 | body of a single-row transaction | time | size | ratio |
 |---|---|---|---|
@@ -81,18 +86,25 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
    to 72 817 writes/s. §5.
 5. **HTTP framing** — 35 µs before any query runs. Nothing to fix in BunQL; it is a reason to
    prefer the socket, and a reason the Data API (§H4) should be reachable over the socket too.
-6. **`recorder.poll` at 8 µs** — and it is **memory-bound, not overhead-bound**, which was worth
-   finding out before optimising it. Split: the tailer is 7.25 µs and folding the pages into the
-   database checksum is 0.38. Inside the tailer, `checkFrame` is 5.16 µs — SQLite's WAL checksum
-   over a 4 KiB page that has just been read. Rewriting that path to allocate nothing (a cached
-   `DataView` over the scratch buffer, a reused frame header, a checksum advanced in place instead
-   of a tuple per frame) moved it from 7.25 µs to 7.21: **no change**. The same loop over a hot
-   buffer in isolation is 1.0 µs, so the extra four are cache misses on a page fresh from the page
-   cache, not JavaScript.
-   The write path touches each page about four times — read from the WAL, WAL checksum, xxHash3 for
-   the database checksum, zstd — so the lever is to stop re-reading the page, not to make the loop
-   tighter. That is what apply mechanism A and capturing pages from SQLite directly would change.
-   The allocation-free version was reverted: unmeasured complexity is what this codebase avoids.
+6. ~~**`recorder.poll` at 8 µs**~~ **Addressed by `scripts/native/walsum.c` (P3), and the diagnosis
+   this entry used to carry was wrong.** It said the 5.16 µs `checkFrame` was "cache misses on a
+   page fresh from the page cache, not JavaScript", and pointed at capturing pages from SQLite
+   directly. It is not cache misses: `Bun.hash.xxHash3` reads every one of the same 4096 bytes,
+   immediately after the same `fs.readSync`, in **0.15 µs**. It is 1024 bounds-checked scalar loads
+   in JavaScript against a few dozen vector loads in C.
+   The evidence is an ablation rather than a microbenchmark — the real `poll()` with the checksum
+   and without it, alternating: **6.77 µs against 1.98**. Four JavaScript rewrites were measured
+   against the same harness (`Uint32Array` words, a literal endianness instead of a parameter, the
+   prefix and the page split so neither call site sees two trip counts, and the earlier
+   allocation-free version) and **none of them moved it at all**. The same checksum in C takes
+   `poll()` to 2.29 µs. `docs/p3-wal-checksum.md` has the numbers and the warning about how easy
+   this one is to mismeasure.
+   The write path still touches each page about four times — read from the WAL, WAL checksum,
+   xxHash3 for the database checksum, zstd — but three of those are now native and only the read is
+   BunQL's. Apply mechanism A (C5, `docs/c5-apply-pages.md`) removed the WAL frame checksum from
+   the *replica* by writing no frames at all; P3 made the *primary's* cost native. **Capturing
+   pages from SQLite directly is no longer on this list**: it would save the remaining `readSync`,
+   0.38 µs, for a VFS shim built out of `JSCallback`s on every write.
 
 ## 4. What to do about it, in order of measured win per unit of risk
 
@@ -164,8 +176,41 @@ to 3.30 µs and a 100-row scan from 15.8 µs to 10.5 µs. Bigger caches buy noth
 mmap caveat is that an I/O error becomes SIGBUS rather than `SQLITE_IOERR`, which is why it belongs
 on readers and behind a key.
 
-**F. Replica apply mechanism A.** Already on the roadmap (phase 2, milestone 5). It removes the
-48 µs "replica read sees the row" leg, which is a WAL rescan forced by mechanism B.
+**F. Replica apply mechanism A.** ✅ **Built, and it is the default** — `[replication] apply`,
+`"pages"` against `"wal"` (`docs/c5-apply-pages.md`). It removes the 48 µs "replica read sees the
+row" leg, which was a wal-index rebuild forced by mechanism B. Same `bench/wal.ts`, both
+mechanisms:
+
+| leg | B (`"wal"`) | A (`"pages"`) |
+|---|---|---|
+| replica apply, incl. `fdatasync` | 196.1 µs | **161.8 µs** |
+| replica read sees the row | 47.2 µs | **6.4 µs** |
+| end to end | 290.8 µs | **210.8 µs** |
+
+**7.4x off the read leg and 27% off the whole path.** A writes the primary's pages into the
+database file and rewrites the 136-byte wal-index header under SQLite's own WAL lock set, so the
+replica's `-wal` is always zero bytes and a reader takes `WAL_READ_LOCK(0)` and reads the file
+directly. The lock choreography measures 0.54 µs and the header rewrite 1.13; the apply leg fell
+anyway, because A computes no WAL frame checksums at all. What it costs is a wider crash window
+than B — detected by the same checksum chain, and usually resumed rather than re-snapshotted.
+
+**G. Checksum WAL frames in C.** ✅ **Built** — `scripts/native/walsum.c`, compiled into the
+vendored libsqlite3 and resolved as an optional symbol exactly as `sqlite3_snapshot_*` is, so a
+node on a system library keeps the JavaScript and says so at startup (`docs/p3-wal-checksum.md`).
+Measured with the helper and again with `BUNQL_WAL_NATIVE=0`:
+
+| | JavaScript | C |
+|---|---|---|
+| `recorder.poll` | 7.67 µs | **3.17 µs** |
+| a single-row write, end to end | 27.21 µs | **22.88 µs** |
+| `bench/tenant.ts`, write `ack: local` | 28.9 µs | **24.0 µs** |
+| writes/s over sockets, one worker | 29 136 | **33 854** |
+| writes/s over sockets, four workers | 78 393 | **86 006** |
+
+**17% off a write and 16% more write throughput**, and the checksum is still computed — the
+alternative of trusting the wal-index's `mxFrame` and skipping it was rejected, because it is the
+only thing on the live path that would catch a bit that changed between SQLite writing a page and
+BunQL reading it back. §3.1 of that document says why the replica cannot stand in for it.
 
 ## 5. How this scales
 
@@ -195,7 +240,11 @@ server and load client in separate processes):
 | 8 | 66 502 | 2.44x |
 
 The one-worker baseline is §3's own "8 databases in one process" figure — 28.8k — so this ladder is
-measured against exactly the ceiling it was meant to lift. It peaks at six on 18 cores: the router
+measured against exactly the ceiling it was meant to lift.
+
+**P3 (§4G) moved the whole ladder up**, since every write on every worker pays 4.5 µs less:
+**33 854 writes/s at one worker and 86 006 at four**, against 29 136 and 78 393 with the checksum
+back in JavaScript. The shape is unchanged; the floor is higher. It peaks at six on 18 cores: the router
 is one thread, and eight databases over eight shards is a lumpy split.
 
 What is *not* lifted: one database still has one writer, and `workers > 1` refuses to start

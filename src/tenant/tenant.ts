@@ -51,6 +51,7 @@ import {
   type TxnRecordInput,
   TxnRecorder,
   WAL_HEADER_SIZE,
+  type ApplyMechanism,
   WalApplier,
   WalError,
   WalFormatError,
@@ -146,6 +147,12 @@ export interface TenantOptions {
    * everything already written readable.
    */
   compressLog?: boolean
+  /**
+   * Replica only: which of design §4.5's two apply mechanisms to prefer, and how long a page apply
+   * waits for the WAL lock set. Defaults `"pages"` and 5000. `docs/c5-apply-pages.md`.
+   */
+  applyMechanism?: ApplyMechanism
+  applyBusyMs?: number
   /** `sqlite3_limit` overrides; the defaults below are applied first. */
   limits?: Partial<Record<LimitName, number>>
   /**
@@ -1680,7 +1687,13 @@ function openApplier(options: TenantOptions, dbPath: string): RecorderOpen {
       const row = options.catalog.getTenant(options.name, { includeDeleted: true })
       return row ? positionOf(row) : null
     })()
-  const applier = new WalApplier({ dbPath, dir: options.dir, fsync: "each" })
+  const applier = new WalApplier({
+    dbPath,
+    dir: options.dir,
+    fsync: "each",
+    ...(options.applyMechanism ? { mechanism: options.applyMechanism } : {}),
+    ...(options.applyBusyMs !== undefined ? { busyMs: options.applyBusyMs } : {}),
+  })
   const local = applier.position
   // With no `meta.json` the applier has inferred its state from the file, and the file is not the
   // position: a database SQLite has only ever opened holds a header page that belongs to no
@@ -1852,7 +1865,13 @@ function applyLastRecord(
   pages: number,
   epoch: number,
 ): TxnRecorder {
-  const applier = new WalApplier({ dbPath, dir: options.dir, fsync: "each" })
+  const applier = new WalApplier({
+    dbPath,
+    dir: options.dir,
+    fsync: "each",
+    ...(options.applyMechanism ? { mechanism: options.applyMechanism } : {}),
+    ...(options.applyBusyMs !== undefined ? { busyMs: options.applyBusyMs } : {}),
+  })
   try {
     applier.seed({
       txid: record.prevTxid,

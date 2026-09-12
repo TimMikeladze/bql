@@ -164,11 +164,18 @@ the router's own `server.publish` — there is no subscriber on a worker, so the
 **28 809 writes/s → 72 817 at six workers, 2.67x, on one port.** `workers > 1` refuses to start with
 replication or the cluster (`WORKERS_UNSUPPORTED`); C4b is the milestone that lifts that.
 
-### C5 — replica apply mechanism A
+### C5 — replica apply mechanism A — **done (`docs/c5-apply-pages.md`)**
 
 Write pages into the DB file and rewrite the shm header under the WAL locks, LiteFS-style (§4.5).
 Mechanism B works but rescans the WAL per apply, which is the 48 µs "replica read" leg in
 `bench/wal.ts`. Keep B behind a config switch so a bad apply can be backed out in production.
+
+**As built.** `[replication] apply` chooses: `"pages"` (A) is the default, `"wal"` (B) is the
+back-out and the automatic fallback where `xShmLock` is unreachable. The read leg went **47.2 µs to
+6.4** and the apply leg 196 to 162, because A computes no WAL frame checksums either. The locks are
+all eight wal-index slots taken in one `xShmLock` call through the connection's own
+`sqlite3_file`, so an in-process reader mid-transaction makes the apply wait and then answer
+`ApplyBusy` — retryable, nothing written — rather than writing underneath it.
 
 ### C6 — Linux packaging and CI
 

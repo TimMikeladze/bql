@@ -2,6 +2,8 @@
 // into records, keep them in a segment log, and apply them to a replica. Design §4.3–§4.5.
 
 export {
+  type ApplyMechanism,
+  DEFAULT_APPLY_BUSY_MS,
   type MetaFsyncPolicy,
   type ReplicaPosition,
   WalApplier,
@@ -39,6 +41,7 @@ export {
   ZERO_CHECKSUM,
 } from "./codec.ts"
 export {
+  ApplyBusy,
   ChecksumMismatch,
   EpochRegression,
   LogGap,
@@ -83,6 +86,25 @@ export {
   type TxnRecordHeader,
   type TxnRecordInput,
 } from "./record.ts"
+export {
+  encodeCkptInfo,
+  encodeWalIndexHeader,
+  NATIVE_LITTLE_ENDIAN,
+  READMARK_NOT_USED,
+  readWalIndexHeader,
+  SHM_NLOCK,
+  WAL_NREADER,
+  WALINDEX_CKPT_OFFSET,
+  WALINDEX_HDR_COPY_SIZE,
+  WALINDEX_HDR_SIZE,
+  WALINDEX_LOCK_OFFSET,
+  WALINDEX_LOCK_SIZE,
+  WALINDEX_MAX_VERSION,
+  type WalIndexHeader,
+  walIndexChecksum,
+  walIndexHeaderValid,
+} from "./shm.ts"
+export { WalLocks, type WalLocksProbe, type WalLocksUnavailable } from "./shmlock.ts"
 export {
   listSnapshots,
   planSnapshotPrune,

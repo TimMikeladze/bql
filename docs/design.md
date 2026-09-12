@@ -293,11 +293,14 @@ in LiteFS.
   segments to txid/timestamp. `bunql restore acme --at 2026-09-11T10:00Z --into acme-recovered`.
 - **Fork/branch** = snapshot reflink + new tenant + fresh log. O(1). `POST /v1/db {from:{db,at}}`.
 
-### 4.5 Replica apply
+### 4.5 Replica apply — **A is built and is the default (C5, 2026-09-12)**
 
-Two mechanisms, both keeping SQLite's own readers correct:
+Two mechanisms, both keeping SQLite's own readers correct. `[replication] apply` chooses:
+`"pages"` is A and is the default, `"wal"` is B and is the back-out. `docs/c5-apply-pages.md` is
+the decision, the measurements and the as-built. Measured: the replica read leg went **47.2 µs to
+6.4**, and the apply leg 196 µs to 162 because A computes no WAL frame checksums.
 
-**A. Page apply (target, what LiteFS does).** Replica keeps `main.db` with an empty `-wal`.
+**A. Page apply (what LiteFS does).** Replica keeps `main.db` with an empty `-wal`.
 Per TxnRecord: verify `prevTxid == local txid` and `epoch ≥ local epoch` (fencing); take the
 WAL lock set (WRITE, CKPT, RECOVER, READ0..4) through SQLite's own VFS —
 `file_control(SQLITE_FCNTL_FILE_POINTER)` gives the `sqlite3_file*`, and its `xShmLock` is the
@@ -313,8 +316,9 @@ readers arriving during apply get `SQLITE_BUSY` and retry through the busy handl
 frames to the replica's own `-wal` with local salts and recomputed checksums, fsync, zero the
 `-shm` header; the next reader runs SQLite's recovery and rebuilds the index. Simpler, no lock
 choreography, but every apply costs a WAL rescan and resets `nBackfill`, so it needs
-replica-side checkpoints. Phase 0 ships B (it is validated), phase 1 switches to A behind the
-same interface and keeps B as the fallback for filesystems where `xShmLock` misbehaves.
+replica-side checkpoints. Phase 0 shipped B; **phase 2 (C5) switched to A behind the same
+interface** and keeps B both as the configured back-out and as the automatic fallback for a VFS
+where `xShmLock` is unreachable — `GET /v1/db/{db}` reports which one is live.
 
 Either way replica readers never see a torn state: SQLite's own WAL protocol guarantees they
 see either the old or the new header.
@@ -322,10 +326,11 @@ see either the old or the new header.
 Bootstrap: `SUBSCRIBE {fromTxid}`; primary answers with frames if `fromTxid` is still in the
 log, else `SNAPSHOT` (streamed file, zstd) + frames from the snapshot's txid.
 
-Reader coordination: both mechanisms need the exclusive WAL locks for a moment, so the applier
-never runs while a local reader has an open read transaction (streamed results are chunked per
-event-loop tick and bounded by `streamTimeoutMs`); it queues and applies at the next quiet
-point. Phase 3 candidate: maintain the wal-index hash tables ourselves (format is documented in
+Reader coordination: A takes the exclusive WAL lock set itself and therefore cannot run while a
+local reader has an open read transaction — `xShmLock` answers `SQLITE_BUSY`, the applier backs
+off for `[replication] applyBusyMs` and then raises `ApplyBusy`, which the replication client
+treats as backpressure and retries. Nothing is written in the meantime. (Streamed results are
+chunked per event-loop tick and bounded by `streamTimeoutMs`, which is what bounds the wait.) Phase 3 candidate: maintain the wal-index hash tables ourselves (format is documented in
 `walformat.html`), which removes the exclusive lock from mechanism B entirely.
 
 ### 4.6 Realtime engine (hooks, not triggers, not SQL parsing)

@@ -80,3 +80,22 @@ export class LogGap extends WalError {
     this.earliest = earliest
   }
 }
+
+/**
+ * Mechanism A could not take the WAL lock set before `applyBusyMs` ran out, because a local reader
+ * held a read transaction the whole time. **Nothing was written and the position has not moved**:
+ * this is backpressure, not divergence, and the right answer is to offer the same record again.
+ * It is the one `WalError` a replica must *not* treat as "send me a snapshot".
+ */
+export class ApplyBusy extends WalError {
+  readonly txid: bigint
+  readonly waitedMs: number
+
+  constructor(txid: bigint, waitedMs: number) {
+    super(
+      `could not take the WAL locks to apply txid ${txid} within ${waitedMs} ms; a reader holds a transaction`,
+    )
+    this.txid = txid
+    this.waitedMs = waitedMs
+  }
+}

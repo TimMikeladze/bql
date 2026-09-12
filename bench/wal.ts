@@ -10,6 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { Database } from "../src/sqlite/index.ts"
 import {
+  type ApplyMechanism,
   computeFull,
   decode,
   encode,
@@ -25,6 +26,11 @@ const ROWS_PER_TXN = 5
 // "each" fsyncs the replica position file after every transaction; "rename" relies on the atomic
 // rename alone. Pass an argument to compare.
 const META_FSYNC = (Bun.argv[2] as "each" | "rename" | undefined) ?? "each"
+// Design §4.5's two replica-apply mechanisms. "pages" (the default) writes into the database file
+// under the WAL locks and leaves the replica's own WAL empty; "wal" appends frames and lets the
+// next reader rebuild the wal-index, which is what the "replica read" leg below measures the cost
+// of. `docs/c5-apply-pages.md`.
+const MECHANISM = (Bun.argv[3] as ApplyMechanism | undefined) ?? "pages"
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-wal-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
@@ -46,7 +52,12 @@ fs.copyFileSync(dbPath, replicaPath)
 const base = computeFull(replicaPath, { includeWal: false })
 const recorder = TxnRecorder.open({ dbPath, epoch: 1 })
 const log = TxnLog.open({ dir: primaryDir, fsync: "never" })
-const applier = new WalApplier({ dbPath: replicaPath, dir: replicaDir, fsync: META_FSYNC })
+const applier = new WalApplier({
+  dbPath: replicaPath,
+  dir: replicaDir,
+  fsync: META_FSYNC,
+  mechanism: MECHANISM,
+})
 applier.seed({
   txid: 0n,
   epoch: 1,
@@ -137,7 +148,7 @@ function percentile(samples: number[], p: number): number {
 
 console.log(
   `\nWAL shipping: ${ROUNDS} transactions of ${ROWS_PER_TXN} rows, primary -> replica, same process` +
-    `\nreplica position fsync: ${META_FSYNC}\n`,
+    `\nreplica position fsync: ${META_FSYNC} · apply mechanism: ${applier.mechanism}\n`,
 )
 console.log("leg                         p50 µs    p90 µs    p99 µs     max µs")
 console.log("-".repeat(66))
@@ -170,6 +181,7 @@ emit({
     rounds: ROUNDS,
     rowsPerTxn: ROWS_PER_TXN,
     metaFsync: META_FSYNC,
+    mechanism: applier.mechanism,
     compression: Number((bytesPlain / bytesEncoded).toFixed(2)),
   },
   legs: Object.fromEntries(

@@ -131,20 +131,27 @@ measured separately), which the connection's statement cache pays once per SQL t
 500 transactions of 5 rows, primary and replica in one process with no transport between them,
 replica position fsynced on every transaction. µs.
 
-| leg | p50 | p90 | p99 |
-|---|---|---|---|
-| primary commit | 12.0 | 20.2 | 50.4 |
-| tail + checksum chain | 9.6 | 17.5 | 42.0 |
-| encode, zstd level 3 | 11.7 | 16.2 | 34.5 |
-| log append | 2.8 | 6.7 | 11.8 |
-| decode | 5.5 | 8.7 | 17.6 |
-| replica apply, incl. `fdatasync` | 196.8 | 232.8 | 313.7 |
-| replica read sees the row | 48.2 | 73.8 | 85.1 |
-| **end to end** | **291.6** | **353.7** | **496.2** |
+Both of design §4.5's apply mechanisms, since C5 made `"pages"` (A) the default and kept `"wal"`
+(B) behind `[replication] apply`. `bun run bench/wal.ts each pages` and `… each wal`. The tail leg
+is the P3 figure — the frame checksum in C (`docs/p3-wal-checksum.md`); with
+`BUNQL_WAL_NATIVE=0` it is 10.3 µs rather than 5.3.
+
+| leg | A p50 | A p90 | A p99 | B p50 | B p90 | B p99 |
+|---|---|---|---|---|---|---|
+| primary commit | 11.8 | 17.3 | 45.8 | 12.0 | 18.4 | 49.5 |
+| tail + checksum chain | 5.3 | 11.8 | 43.0 | 10.3 | 17.9 | 54.0 |
+| encode, zstd level 3 | 11.7 | 16.7 | 35.8 | 11.8 | 16.2 | 41.8 |
+| log append | 2.8 | 5.8 | 11.9 | 3.0 | 6.5 | 11.2 |
+| decode | 5.3 | 8.8 | 16.2 | 5.5 | 8.1 | 15.1 |
+| replica apply, incl. `fdatasync` | **161.8** | 205.2 | 266.5 | 196.1 | 251.3 | 319.8 |
+| replica read sees the row | **6.4** | 8.8 | 12.5 | 47.2 | 74.3 | 82.5 |
+| **end to end** | **210.8** | **270.5** | **413.8** | 290.8 | 364.6 | 489.0 |
 
 Records compress 4.8x: 923 bytes on the wire for 4 440 bytes of pages. Everything BunQL controls
-costs about 40 µs a transaction; the rest is the fsync and the wal-index rebuild that apply
-mechanism B forces on the next replica reader.
+costs about 40 µs a transaction; the rest is the fsync, and — under mechanism B — the wal-index
+rebuild it forces on the next replica reader. **Mechanism A takes that read leg from 47.2 µs to
+6.4, a 7.4x cut**, and takes 34 µs off the apply because there are no WAL frames to checksum.
+`docs/c5-apply-pages.md`.
 
 ## Replication over a socket — `bench/replication.ts`
 
@@ -189,15 +196,19 @@ long segment would push more than it retains.
 2 000 rounds of one-row transactions through the tenant owner — the whole design §4.3 write path,
 `BEGIN IMMEDIATE` → `COMMIT` → tail → record → log append → position save. µs.
 
-| leg | p50 | p90 | p99 |
-|---|---|---|---|
-| `write`, `ack: "local"` | 28.2 | 34.3 | 64.9 |
-| `write`, `ack: "fsync"` | 61.6 | 77.1 | 104.5 |
-| the `BEGIN IMMEDIATE`…`COMMIT` alone | 6.7 | 7.8 | 12.5 |
-| `readSync`, point read by primary key | 0.9 | 1.1 | 3.2 |
-| `read`, the same through a promise | 0.9 | 1.3 | 2.8 |
+| leg | p50 | p90 | p99 | with `BUNQL_WAL_NATIVE=0` |
+|---|---|---|---|---|
+| `write`, `ack: "local"` | **24.0** | 29.9 | 50.8 | 28.9 |
+| `write`, `ack: "fsync"` | 63.5 | 78.2 | 109.3 | 66.1 |
+| the `BEGIN IMMEDIATE`…`COMMIT` alone | 7.7 | 8.7 | 11.5 | 7.7 |
+| `readSync`, point read by primary key | 0.9 | 1.1 | 3.7 | 0.9 |
+| `read`, the same through a promise | 1.0 | 1.4 | 3.1 | 1.0 |
 
 An awaited read costs the same as the synchronous one, so the server layer can use either.
+
+The last column is the same benchmark with the WAL frame checksum back in JavaScript, which is what
+a node on a system libsqlite3 gets. **17% of a write** is the difference, and it is all in the tail:
+`docs/p3-wal-checksum.md`.
 
 Cold open (an LRU miss) is **298 µs** p50 with 6 000 records in the log, and close is 118 µs. In
 phase 0 that open was 2 517 µs, almost all of it `TxnLog.open` walking every record header; R3's

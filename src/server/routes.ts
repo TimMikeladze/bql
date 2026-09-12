@@ -715,6 +715,9 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
     liveQueries: realtime?.live.size ?? 0,
     subscribers: realtime?.subscriberCount ?? 0,
     lastSnapshotTxid: stats.lastSnapshotTxid === null ? null : Number(stats.lastSnapshotTxid),
+    // Replicas only: which of design §4.5's two apply mechanisms is live, which is not always the
+    // one configured — `docs/c5-apply-pages.md` §4.6.
+    ...(tenant.applier ? { apply: tenant.applier.mechanism } : {}),
     // `GET /v1/db/:db/replication` is where a replica list belongs; this stays for compatibility.
     replicas: (runtime.replication?.replicasOf(tenant.name) ?? []).map((replica) => ({
       node: replica.node,

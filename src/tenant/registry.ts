@@ -15,7 +15,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { BunQLError } from "../server/errors.ts"
 import { Database } from "../sqlite/index.ts"
-import { computeFull } from "../wal/index.ts"
+import { type ApplyMechanism, computeFull } from "../wal/index.ts"
 import { Catalog, positionOf, type TenantRole, type TenantRow } from "./catalog.ts"
 import {
   type AckLevel,
@@ -53,6 +53,9 @@ export interface RegistryOptions {
   compressLog?: boolean
   /** Most statements one group commit folds; see `TenantOptions.maxGroupCommit`. */
   maxGroupCommit?: number
+  /** Replica apply mechanism and its lock wait; see `TenantOptions.applyMechanism`. */
+  applyMechanism?: ApplyMechanism
+  applyBusyMs?: number
   /** Per-connection pragmas for every tenant this registry opens (`docs/p1-pragmas.md`). */
   sqlite?: SqlitePragmas
   /** How often idle tenants are checked for a TRUNCATE checkpoint. Default 250 ms. */
@@ -520,6 +523,12 @@ export class TenantRegistry {
         : {}),
       ...(this.#options.maxGroupCommit !== undefined
         ? { maxGroupCommit: this.#options.maxGroupCommit }
+        : {}),
+      ...(this.#options.applyMechanism !== undefined
+        ? { applyMechanism: this.#options.applyMechanism }
+        : {}),
+      ...(this.#options.applyBusyMs !== undefined
+        ? { applyBusyMs: this.#options.applyBusyMs }
         : {}),
       ...(this.#options.onError !== undefined ? { onError: this.#options.onError } : {}),
       ...(this.#options.onConnection !== undefined

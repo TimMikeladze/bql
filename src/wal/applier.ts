@@ -1,17 +1,30 @@
-// Replica apply, mechanism B of design §4.5: append the primary's pages to the replica's *own*
-// `-wal` with local salts and a recomputed checksum chain, fdatasync, then zero the first 136
-// bytes of the `-shm` so the next reader rebuilds the wal-index from the WAL file itself. Proven
-// in `experiments/walproto.ts`. Mechanism A (page apply under SQLite's own WAL locks) will
-// implement this same class later; nothing outside `apply`, `position` and `checkpoint` leaks.
+// Replica apply, design §4.5, in both of the mechanisms that section names.
+// `docs/c5-apply-pages.md` is the decision; this is the code.
+//
+//   "pages" (A, the default) writes the primary's pages straight into the replica's database file
+//   and rewrites the wal-index header under SQLite's own WAL locks, so the replica's `-wal` is
+//   always zero bytes and a reader never rescans anything.
+//
+//   "wal" (B) appends the pages to the replica's *own* `-wal` with local salts and a recomputed
+//   checksum chain, then zeroes the first 136 bytes of the `-shm` so the next reader rebuilds the
+//   wal-index from the WAL file itself. Proven in `experiments/walproto.ts`; kept as the back-out
+//   and as the fallback for a VFS that cannot offer `xShmLock`.
+//
+// Both produce the same database and are proved by the same checksum chain. Nothing outside
+// `apply`, `position`, `seed`, `checkpoint` and `verify` leaks which one ran.
 //
 // Invariant: verify before writing. The rolling checksum the record claims is reproduced from the
 // replica's own pre-images first; if it disagrees, nothing is written and the replica is exactly
 // as it was. Design §4.5 describes verifying after the apply — doing it first is strictly safer
-// and observationally identical to a caller.
+// and observationally identical to a caller. The crash-resume path of `docs/c5-apply-pages.md`
+// §4.4 does not weaken it: it writes nothing either. It only *adopts* a record whose pages the
+// database file already holds byte for byte, and only once `computeFull` has proved the whole
+// database against that record's `postChecksum`.
 //
-// Caller's responsibility (design §4.5, "reader coordination"): `checkpoint()` takes the
-// exclusive WAL locks, so it must not be called while a local reader holds an open read
-// transaction. The applier documents this and does not police it.
+// Caller's responsibility (design §4.5, "reader coordination"): under `"wal"`, `checkpoint()`
+// takes the exclusive WAL locks, so it must not be called while a local reader holds an open read
+// transaction. Under `"pages"` the applier takes those locks itself and answers `ApplyBusy` rather
+// than writing under a reader.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -36,14 +49,32 @@ import {
   type WalHeader,
   walFrameSize,
 } from "./codec.ts"
-import { ChecksumMismatch, EpochRegression, PositionMismatch, WalFormatError } from "./errors.ts"
 import {
+  ApplyBusy,
+  ChecksumMismatch,
+  EpochRegression,
+  PositionMismatch,
+  WalFormatError,
+} from "./errors.ts"
+import {
+  computeFull,
   foldTransaction,
   LivePageSource,
   pageHash,
   RollingChecksum,
+  type TransactionFold,
   type TxnRecord,
 } from "./record.ts"
+import {
+  encodeCkptInfo,
+  encodeWalIndexHeader,
+  readWalIndexHeader,
+  WALINDEX_CKPT_OFFSET,
+  WALINDEX_HDR_COPY_SIZE,
+  WALINDEX_HDR_SIZE,
+  WALINDEX_LOCK_OFFSET,
+} from "./shm.ts"
+import { WalLocks, type WalLocksUnavailable } from "./shmlock.ts"
 
 /** Everything a replica needs to prove where it stands. `(txid, postChecksum)` is the position. */
 export interface ReplicaPosition {
@@ -55,6 +86,15 @@ export interface ReplicaPosition {
 }
 
 const META_VERSION = 1
+
+/** Which of design §4.5's two mechanisms an applier uses. */
+export type ApplyMechanism = "pages" | "wal"
+
+/** Default for `[replication] applyBusyMs`, and the `busy_timeout` every connection already has. */
+export const DEFAULT_APPLY_BUSY_MS = 5000
+
+const BACKOFF_START_MS = 1
+const BACKOFF_MAX_MS = 32
 
 /**
  * How hard `meta.json` is pushed to disk after each apply. `"each"` fsyncs the temp file and the
@@ -72,12 +112,25 @@ export interface WalApplierOptions {
   dir: string
   /** Durability of the position file. Default `"each"`. */
   fsync?: MetaFsyncPolicy
+  /**
+   * Which mechanism to prefer. Default `"pages"`. `"pages"` degrades to `"wal"` when the VFS
+   * cannot offer `xShmLock`; `mechanism` reports what is actually running.
+   */
+  mechanism?: ApplyMechanism
+  /** How long an apply waits for the WAL lock set before `ApplyBusy`. Default 5000. */
+  busyMs?: number
+  /** Where the one-line notice about falling back to mechanism B goes. Default `console.warn`. */
+  warn?: (message: string) => void
 }
 
 export class WalApplier {
   readonly dbPath: string
   readonly dir: string
   readonly fsyncPolicy: MetaFsyncPolicy
+  /** What was asked for, before any fallback. */
+  readonly requestedMechanism: ApplyMechanism
+  readonly busyMs: number
+  readonly #warn: (message: string) => void
 
   #txid = 0n
   #epoch = 0
@@ -93,11 +146,37 @@ export class WalApplier {
   #db: Database | null = null
   #closed = false
 
+  // ── mechanism A state ────────────────────────────────────────────────────
+  #mechanism: ApplyMechanism
+  #fallback: WalLocksUnavailable | null = null
+  #locks: WalLocks | null = null
+  #dbFd: number | null = null
+  #shmFd: number | null = null
+  #shmTailZeroed = false
+  #pagesReady = false
+  /** A clean apply since this applier was opened rules the crash-resume path out. */
+  #appliedSinceOpen = false
+  #resumeAttempted = false
+
   constructor(options: WalApplierOptions) {
     this.dbPath = options.dbPath
     this.dir = options.dir
     this.fsyncPolicy = options.fsync ?? "each"
+    this.requestedMechanism = options.mechanism ?? "pages"
+    this.busyMs = options.busyMs ?? DEFAULT_APPLY_BUSY_MS
+    this.#warn = options.warn ?? ((message) => console.warn(message))
+    this.#mechanism = this.requestedMechanism
     this.#load()
+  }
+
+  /** The mechanism actually in use, after any fallback. */
+  get mechanism(): ApplyMechanism {
+    return this.#mechanism
+  }
+
+  /** Why `"pages"` degraded to `"wal"`, or null when it did not. */
+  get fallbackReason(): WalLocksUnavailable | null {
+    return this.#fallback
   }
 
   get position(): ReplicaPosition {
@@ -142,9 +221,10 @@ export class WalApplier {
 
   /**
    * Applies one transaction record. Throws `PositionMismatch` when the record does not follow the
-   * replica's current txid, `EpochRegression` for a record from a deposed primary, and
-   * `ChecksumMismatch` when the replica's own pre-images do not reproduce the record's
-   * checksums — in every case having written nothing.
+   * replica's current txid, `EpochRegression` for a record from a deposed primary, `ApplyBusy`
+   * when a local reader held a read transaction for longer than `busyMs`, and `ChecksumMismatch`
+   * when the replica's own pre-images do not reproduce the record's checksums — in every case
+   * having written nothing.
    */
   apply(record: TxnRecord): void {
     this.#assertOpen()
@@ -162,25 +242,47 @@ export class WalApplier {
     }
 
     const source = this.#ensureSource()
-    this.#ensureWal()
+    // Mechanism B's page source overlays the frames its own WAL holds, so the WAL has to be
+    // reconciled before any pre-image is read. Mechanism A keeps that WAL empty and the file
+    // authoritative, so it reconciles nothing and reads straight through.
+    if (this.#mechanism === "wal") this.#ensureWal()
+    else this.#preparePages(record.txid)
 
-    if (record.preChecksum !== this.#checksum.value) {
-      throw new ChecksumMismatch(record.txid, "pre", record.preChecksum, this.#checksum.value)
+    let fold: TransactionFold | null = null
+    let phase: "pre" | "post" = "pre"
+    let actual = this.#checksum.value
+    if (record.preChecksum === this.#checksum.value) {
+      fold = foldTransaction(this.#checksum, source, {
+        pages: record.pages,
+        commitSizePages: record.commitSizePages,
+      })
+      phase = "post"
+      actual = fold.checksum
     }
-    const fold = foldTransaction(this.#checksum, source, {
-      pages: record.pages,
-      commitSizePages: record.commitSizePages,
-    })
-    if (fold.checksum !== record.postChecksum) {
-      throw new ChecksumMismatch(record.txid, "post", record.postChecksum, fold.checksum)
+    if (fold === null || fold.checksum !== record.postChecksum) {
+      if (this.#canResume(record)) {
+        this.#resume(record, source)
+        return
+      }
+      throw new ChecksumMismatch(
+        record.txid,
+        phase,
+        phase === "pre" ? record.preChecksum : record.postChecksum,
+        actual,
+      )
     }
 
-    this.#writeFrames(record)
-    this.#invalidateShm()
+    if (this.#mechanism === "pages") {
+      this.#writeUnderLocks(record)
+    } else {
+      this.#writeFrames(record)
+      this.#invalidateShm()
+    }
 
     fold.commit()
     this.#txid = record.txid
     this.#epoch = record.epoch
+    this.#appliedSinceOpen = true
     this.#persist()
   }
 
@@ -188,36 +290,51 @@ export class WalApplier {
    * Checkpoints the replica through a driver connection. Mechanism B grows the WAL on every
    * apply and resets `nBackfill`, so a replica must checkpoint or its readers pay a full WAL
    * rescan forever. Must not run while a local reader holds an open read transaction.
+   *
+   * Under mechanism A the WAL is empty by construction, so this is a truthful no-op rather than a
+   * refusal — `tenant.ts`'s idle sweep and close path can call it without knowing which mechanism
+   * is live.
    */
   checkpoint(mode: CheckpointMode = "TRUNCATE"): CheckpointResult {
     this.#assertOpen()
+    if (this.#mechanism === "pages" && this.#walBytes() === 0) {
+      return { busy: false, log: 0, checkpointed: 0 }
+    }
     const db = this.#connection()
     const result = db.walCheckpoint(mode)
     // The checkpoint may have emptied the WAL underneath us; re-derive rather than assume.
     this.#walHeader = null
-    this.#ensureWal()
+    if (this.#mechanism === "wal") this.#ensureWal()
     return result
   }
 
-  /** Recomputes the position's checksum from the replica's files, for an integrity check. */
+  /**
+   * Recomputes the position's checksum from the replica's own files, for an integrity check. This
+   * is the oracle: it reads every page rather than trusting the page source's overlay, so it
+   * catches a replica that diverged in a page no recent record touched.
+   */
   verify(): boolean {
     this.#assertOpen()
-    const source = this.#ensureSource()
-    const rolling = new RollingChecksum()
-    for (let pgno = 1; pgno <= source.sizePages; pgno++) {
-      const hash = source.hash(pgno)
-      if (hash === null) return false
-      rolling.applyHash(pgno, 0n, hash)
-    }
-    return rolling.value === this.#checksum.value
+    const full = computeFull(this.dbPath, { includeWal: this.#mechanism === "wal" })
+    return full.checksum === this.#checksum.value
   }
 
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    this.#locks?.unlock()
+    this.#locks = null
     if (this.#walFd !== null) {
       fs.closeSync(this.#walFd)
       this.#walFd = null
+    }
+    if (this.#dbFd !== null) {
+      fs.closeSync(this.#dbFd)
+      this.#dbFd = null
+    }
+    if (this.#shmFd !== null) {
+      fs.closeSync(this.#shmFd)
+      this.#shmFd = null
     }
     this.#source?.close()
     this.#source = null
@@ -238,7 +355,8 @@ export class WalApplier {
       db.exec("pragma wal_autocheckpoint = 0")
       // A pager only opens the WAL once the connection takes a read lock, and
       // `sqlite3_wal_checkpoint_v2` on a connection that has never read is a silent no-op that
-      // still returns SQLITE_OK. One trivial read makes the checkpoint real.
+      // still returns SQLITE_OK. One trivial read makes the checkpoint real — and, for mechanism
+      // A, is what maps the wal-index so `xShmLock` has something to lock.
       db.exec("select count(*) from sqlite_schema")
       this.#db = db
     }
@@ -353,6 +471,210 @@ export class WalApplier {
       return 0
     }
   }
+
+  #walBytes(): number {
+    try {
+      return fs.statSync(this.walPath).size
+    } catch {
+      return 0
+    }
+  }
+
+  // ── mechanism A ──────────────────────────────────────────────────────────
+
+  /**
+   * Brings the replica into the state mechanism A requires — an empty `-wal`, a connection whose
+   * wal-index is mapped, and a resolved `xShmLock` — or falls back to mechanism B and says why.
+   * Runs once per applier.
+   */
+  #preparePages(txid: bigint): void {
+    if (this.#pagesReady) return
+
+    const connection = this.#connection()
+    // A replica that ran mechanism B until the config changed has frames in its own WAL. Fold
+    // them into the database file, which is where A expects every page to be.
+    if (this.#walBytes() > WAL_HEADER_SIZE) {
+      connection.walCheckpoint("TRUNCATE")
+      if (this.#walBytes() > WAL_HEADER_SIZE) {
+        // A reader held the WAL against the checkpoint. Nothing of the record has been written;
+        // the caller retries, exactly as it does for a busy lock.
+        throw new ApplyBusy(txid, 0)
+      }
+    }
+
+    const { locks, probe } = WalLocks.open(connection)
+    if (!locks) {
+      this.#mechanism = "wal"
+      this.#fallback = probe.reason
+      this.#warn(
+        `bunql: ${this.dbPath}: this VFS cannot offer xShmLock (${probe.reason}); ` +
+          "replica apply falls back to mechanism B, which rebuilds the wal-index on every read. " +
+          "docs/c5-apply-pages.md §4.6",
+      )
+      this.#ensureWal()
+      return
+    }
+    this.#locks = locks
+    // The database file is authoritative under A: whatever the overlay held belonged to a WAL
+    // that has just been folded away.
+    this.#source?.resetOverlay()
+    this.#walHeader = null
+    this.#walOffset = WAL_HEADER_SIZE
+    this.#walRunning = [0, 0]
+    this.#pagesReady = true
+  }
+
+  #dbDescriptor(): number {
+    if (this.#dbFd === null) this.#dbFd = fs.openSync(this.dbPath, "r+")
+    return this.#dbFd
+  }
+
+  #shmDescriptor(): number | null {
+    if (this.#shmFd !== null) return this.#shmFd
+    try {
+      this.#shmFd = fs.openSync(`${this.dbPath}-shm`, "r+")
+    } catch {
+      return null
+    }
+    return this.#shmFd
+  }
+
+  /**
+   * Takes the WAL lock set, writes the record's pages into the database file, publishes a
+   * wal-index header that says "the WAL is empty, the file is the database", and releases.
+   * `docs/c5-apply-pages.md` §4.3.
+   */
+  #writeUnderLocks(record: TxnRecord): void {
+    const locks = this.#locks
+    if (!locks) throw new WalFormatError("mechanism A has no WAL locks")
+    this.#acquire(locks, record.txid)
+    try {
+      this.#writePages(record)
+      this.#writeWalIndexHeader(record.commitSizePages)
+    } finally {
+      locks.unlock()
+    }
+  }
+
+  /**
+   * Spins for the lock set with a bounded backoff. `SQLITE_BUSY` here means a local reader is
+   * mid-transaction, which is expected rather than exceptional; `ApplyBusy` is raised only when it
+   * outlasts `busyMs`, and it is raised before a single byte has been written.
+   */
+  #acquire(locks: WalLocks, txid: bigint): void {
+    if (locks.tryLock()) return
+    const deadline = Date.now() + this.busyMs
+    let wait = BACKOFF_START_MS
+    while (Date.now() < deadline) {
+      Bun.sleepSync(wait + Math.random() * wait)
+      if (locks.tryLock()) return
+      wait = Math.min(wait * 2, BACKOFF_MAX_MS)
+    }
+    throw new ApplyBusy(txid, this.busyMs)
+  }
+
+  /** `pwrite` every page, shrink the file when the transaction did, and make it durable. */
+  #writePages(record: TxnRecord): void {
+    const fd = this.#dbDescriptor()
+    const pgnos = [...record.pages.keys()].sort((a, b) => a - b)
+    for (const pgno of pgnos) {
+      const page = record.pages.get(pgno) as Uint8Array
+      fs.writeSync(fd, page, 0, this.#pageSize, (pgno - 1) * this.#pageSize)
+    }
+    const bytes = record.commitSizePages * this.#pageSize
+    if (fs.fstatSync(fd).size > bytes) fs.ftruncateSync(fd, bytes)
+    fs.fdatasyncSync(fd)
+  }
+
+  /**
+   * Publishes a wal-index header describing an empty WAL over a database of `nPage` pages, so the
+   * next reader takes `WAL_READ_LOCK(0)` and reads the file directly — no recovery, no rescan.
+   * Copy 1 and the `WalCkptInfo` go first as one contiguous write, then copy 0, which is the order
+   * `walIndexWriteHdr` uses so that a reader catching a half-written header sees the two copies
+   * disagree and retries.
+   */
+  #writeWalIndexHeader(nPage: number): void {
+    const fd = this.#shmDescriptor()
+    // No `-shm` means nobody has the database open, and the first reader will build the index
+    // from the (empty) WAL anyway.
+    if (fd === null) return
+
+    const current = new Uint8Array(WALINDEX_HDR_COPY_SIZE)
+    const read = fs.readSync(fd, current, 0, WALINDEX_HDR_COPY_SIZE, 0)
+    const previous = read === WALINDEX_HDR_COPY_SIZE ? readWalIndexHeader(current) : null
+    const header = encodeWalIndexHeader({
+      iChange: ((previous?.iChange ?? 0) + 1) >>> 0,
+      pageSize: this.#pageSize,
+      mxFrame: 0,
+      nPage,
+    })
+
+    const second = new Uint8Array(WALINDEX_LOCK_OFFSET - WALINDEX_HDR_COPY_SIZE)
+    second.set(header, 0)
+    second.set(encodeCkptInfo(0), WALINDEX_CKPT_OFFSET - WALINDEX_HDR_COPY_SIZE)
+    fs.writeSync(fd, second, 0, second.byteLength, WALINDEX_HDR_COPY_SIZE)
+    fs.writeSync(fd, header, 0, WALINDEX_HDR_COPY_SIZE, 0)
+
+    if (!this.#shmTailZeroed) {
+      // `nBackfillAttempted` and `notUsed0`, past the eight lock bytes at 120 — which are never
+      // written, because the amalgamation says they must not be.
+      const tail = new Uint8Array(WALINDEX_HDR_SIZE - (WALINDEX_LOCK_OFFSET + 8))
+      fs.writeSync(fd, tail, 0, tail.byteLength, WALINDEX_LOCK_OFFSET + 8)
+      this.#shmTailZeroed = true
+    }
+  }
+
+  // ── crash resume (docs/c5-apply-pages.md §4.4) ───────────────────────────
+
+  /**
+   * A checksum check may fail after a crash between the page write and the position write, because
+   * mechanism A's pages are durable before `meta.json` moves. The tell is positive and cheap to
+   * look for: **every page the record carries is already in the database file, byte for byte, and
+   * the file is already `commitSizePages` long.** A record that merely disagrees with the replica
+   * cannot look like that, so this never fires on divergence.
+   *
+   * Allowed once, only before any record has applied cleanly, and only for a record whose position
+   * and epoch already checked out.
+   */
+  #canResume(record: TxnRecord): boolean {
+    if (this.#mechanism !== "pages" || this.#appliedSinceOpen || this.#resumeAttempted) return false
+    const fd = this.#dbDescriptor()
+    if (fs.fstatSync(fd).size !== record.commitSizePages * this.#pageSize) return false
+    const buf = new Uint8Array(this.#pageSize)
+    for (const [pgno, page] of record.pages) {
+      if (pgno > record.commitSizePages) return false
+      const read = fs.readSync(fd, buf, 0, this.#pageSize, (pgno - 1) * this.#pageSize)
+      if (read !== this.#pageSize) return false
+      for (let i = 0; i < this.#pageSize; i++) {
+        if (buf[i] !== page[i]) return false
+      }
+    }
+    return true
+  }
+
+  /**
+   * Adopts a record the database file already holds, after proving the **whole database** against
+   * its `postChecksum` with `computeFull`. **Writes nothing** — not one page, not the wal-index
+   * header — so the applier's "verify before writing" invariant survives the crash path intact. A
+   * replica that diverged fails the same check and raises `ChecksumMismatch`, which is the signal
+   * to re-snapshot.
+   */
+  #resume(record: TxnRecord, source: LivePageSource): void {
+    this.#resumeAttempted = true
+    const full = computeFull(this.dbPath, { includeWal: false })
+    if (full.checksum !== record.postChecksum) {
+      throw new ChecksumMismatch(record.txid, "post", record.postChecksum, full.checksum)
+    }
+    this.#checksum.set(record.postChecksum)
+    source.resetOverlay()
+    source.sizePages = record.commitSizePages
+    this.#txid = record.txid
+    this.#epoch = record.epoch
+    this.#appliedSinceOpen = true
+    this.#persist()
+  }
+
+  // ── mechanism B ──────────────────────────────────────────────────────────
 
   #walDescriptor(): number {
     if (this.#walFd !== null) return this.#walFd

@@ -87,6 +87,14 @@ const DbStats = s
     liveQueries: s.int(),
     subscribers: s.int(),
     lastSnapshotTxid: s.union([s.int(), s.null()]),
+    apply: s
+      .string()
+      .describe(
+        'Replicas only: the apply mechanism actually running, `"pages"` or `"wal"`. It differs ' +
+          "from `[replication] apply` when this VFS cannot offer `xShmLock`. " +
+          "`docs/c5-apply-pages.md`.",
+      )
+      .optional(),
     replicas: s.array(
       s.object({ node: s.string(), txid: s.int(), lag: s.int() }),
     ),

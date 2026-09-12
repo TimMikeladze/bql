@@ -191,6 +191,8 @@ export class ServerRuntime {
         segmentBytes: options.config.durability.segmentBytes,
         compressLog: options.config.durability.compress,
         maxGroupCommit: options.config.limits.groupCommitMax,
+        applyMechanism: options.config.replication.apply,
+        applyBusyMs: options.config.replication.applyBusyMs,
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
         onChange: (event) => this.#databasesChanged(event),

@@ -1,22 +1,42 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-12 at the end of the session that built `workers: N` (C4). Read this,
-then `docs/c4-workers.md`, then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then
-`docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP,
-OpenAPI, GraphQL), `docs/c4-workers.md`, `docs/h6-mount.md`, `docs/h8-validated-requests.md`,
-`docs/p1-pragmas.md` and `docs/p2-group-commit.md`.
+Rewritten 2026-09-12 at the end of the session that built replica apply mechanism A (C5) and the
+native WAL checksum (P3). Read this, then `docs/c5-apply-pages.md`, then `docs/p3-wal-checksum.md`,
+then `docs/c4-workers.md`, then `docs/performance.md`, then
+`docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the
+cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL), `docs/c5-apply-pages.md`,
+`docs/p3-wal-checksum.md`, `docs/c4-workers.md`, `docs/h6-mount.md`, `docs/h8-validated-requests.md`, `docs/p1-pragmas.md` and
+`docs/p2-group-commit.md`.
 
 ## Where things stand
 
-Phases 0 and 1 are complete; phase 2 has its control plane, its failover, its packaging and now its
-multi-core story. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private;
-`origin/main` current, tree clean). `bun test` → **1346 pass, 2 skip, 0 fail** across 107 files.
+Phases 0 and 1 are complete; phase 2 has its control plane, its failover, its packaging, its
+multi-core story and, now, the apply mechanism its replicas were always meant to use. On `main`,
+pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree clean).
+`bun test` → **1367 pass, 2 skip, 0 fail** across 110 files, and green again with
+`BUNQL_WAL_NATIVE=0`.
 `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and
 Linux.** Zero runtime dependencies.
 
 **A node uses its cores.** `[server] workers = N` (`bunql serve --workers N`) shards databases
 across worker threads behind one port: **28 809 writes/s at one worker, 72 817 at six, 2.67x**, on
 the same eight databases and the same load the ceiling was measured on. `docs/c4-workers.md`.
+
+**A replica reads at full speed.** Apply mechanism A is built and is the default
+(`[replication] apply = "pages"`): the primary's pages go straight into the replica's database file
+and the 136-byte wal-index header is rewritten under SQLite's own WAL lock set, so a replica's
+`-wal` is **always zero bytes** and a reader never rebuilds an index. **The replica read leg went
+47.2 µs → 6.4, and the apply leg 196 → 162**, end to end 291 → 211. Mechanism B is still there,
+behind the same switch, as the back-out and as the automatic fallback where `xShmLock` is
+unreachable. `docs/c5-apply-pages.md`.
+
+**A write is 17% cheaper.** The WAL frame checksum runs in C — `scripts/native/walsum.c`, compiled
+into the vendored libsqlite3 and resolved as an optional symbol, so a node on a system library
+keeps the JavaScript and says so at startup. `recorder.poll` **7.67 µs → 3.17**, a single-row write
+**28.9 → 24.0**, write throughput over sockets **29 136 → 33 854/s at one worker and 78 393 →
+86 006 at four**. It also corrects `docs/performance.md` §3.6, which had blamed cache misses:
+four JavaScript rewrites were measured against the real tailer and none of them moved it at all.
+`docs/p3-wal-checksum.md`.
 
 **The surfaces are no longer dark.** `GET|POST|PATCH|DELETE /v1/db/{db}/api/*`,
 `GET /v1/db/{db}/openapi.json`, `POST /v1/db/{db}/graphql` (GraphiQL on `GET`) and
@@ -50,7 +70,7 @@ writes/s behind one port (`docs/c4-workers.md` §9).
 | group commit | `80ac667` | `[limits] groupCommit`, **opt-in**: 4.7x at 64 concurrent clients, 15% slower at one |
 | snapshot floor + WAL-tail negative result | `179f3a9` | every node now takes a local snapshot, so retention cannot make it unrestorable; and the WAL tail is memory-bound, proven by an allocation-free rewrite that changed nothing |
 
-| landed in this session | what it is |
+| landed in the session before this one | what it is |
 |---|---|
 | C4: `workers: N` | `src/server/workers/` (shard, protocol, pool, entry, router), `[server] workers`, `--workers`, `WORKERS_UNSUPPORTED`, `Metrics.state/absorb`, `bench/workers.ts`. The main thread is a router owning the listener, every socket, the catalog and the authenticator and no database; N workers each hold a whole `ServerRuntime` over a hash shard. `ws.ts`, `routes.ts`, `runtime.ts` and `tenant/` are untouched. `docs/c4-workers.md` |
 | H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
@@ -60,6 +80,11 @@ writes/s behind one port (`docs/c4-workers.md` §9).
 | `routes:check` reads the registry | it already read the live table; it now also fails when a served route is **not** in the registry, so a hand-added route in `createApp` cannot go undescribed |
 | `CLUSTER_DISABLED` joined `ERROR_STATUS` | `routes.ts` has thrown it since C1 with an explicit 503, but it was absent from the documented vocabulary, so the document build rejected it |
 | `createApp` is async | it resolves the optional GraphQL peers once, at startup, instead of per request. Three call sites |
+
+| landed in this session | what it is |
+|---|---|
+| P3: the WAL checksum in C | `scripts/native/walsum.c` compiled into the vendored artefact, `bunql_wal_*` as optional symbols in `src/sqlite/lib.ts`, `src/wal/native.ts` (`checkFrameFast`, `BUNQL_WAL_NATIVE=0` to force the fallback), three call sites in `src/wal/tailer.ts`, `test/wal/native.test.ts`. **Write 28.9 → 24.0 µs, 29 136 → 33 854 writes/s.** `docs/p3-wal-checksum.md` |
+| C5: replica apply mechanism A | `src/wal/shm.ts` (the wal-index header format), `src/wal/shmlock.ts` (the WAL lock set through `xShmLock`, the only FFI in `src/wal/`), the strategy split in `src/wal/applier.ts`, `ApplyBusy`, `[replication] apply` and `applyBusyMs`, `"apply"` on `GET /v1/db/{db}`, `bench/wal.ts` over both mechanisms, `test/wal/shm.test.ts` and `test/wal/apply-pages.test.ts`. **Replica read 47.2 µs → 6.4, apply 196 → 162, end to end 291 → 211.** `docs/c5-apply-pages.md` |
 
 ## How the work is run (keep doing this)
 
@@ -104,9 +129,10 @@ C1, C2 and C6 are done (see the table above). What remains, in the order it make
    object. The router keeps them singular instead. What is left is **C4b**: a `Tenant` proxy over
    the channel so `/v1/replication` can be served for a database a worker owns, which is what
    `workers > 1` refusing to start beside replication or the cluster is waiting on.
-5. **Replica apply mechanism A (§4.5).** Write pages into the DB file and rewrite the shm header
-   under the WAL locks, LiteFS-style. Mechanism B works but rescans the WAL per apply, which is
-   the 48 µs "replica read" leg in `bench/wal.ts`.
+5. ~~**Replica apply mechanism A (§4.5).**~~ **Done (C5).** `docs/c5-apply-pages.md`. Pages go into
+   the database file and the wal-index header is rewritten under SQLite's own WAL lock set, so a
+   replica's `-wal` is always zero bytes. **The read leg went 47.2 µs → 6.4.** `[replication] apply
+   = "wal"` is the back-out and the automatic fallback where `xShmLock` cannot be reached.
 6. ~~**Linux packaging and CI**~~ **Done (C6).** See `docs/c6-packaging.md`.
 
 Then the surfaces: ~~**H6**~~ **Done** (`docs/h6-mount.md`) — the `/v1` routes are now declared in
@@ -169,7 +195,9 @@ Carried forward from phase 0, still true:
   `scripts/sqlite.ts` now builds 3.53.4 from a hash-pinned amalgamation, `src/sqlite/lib.ts`
   prefers it, and CI runs the suite on macOS and Linux. The `engine: "builtin"` path over
   `node:sqlite` in design §4.1 is still not built. Evidence: `docs/c6-packaging.md` §1.
-- **Replica apply mechanism A** (design §4.5) — now phase-2 milestone 5 above.
+- ~~**Replica apply mechanism A**~~ **Done (C5, `docs/c5-apply-pages.md`)**, and the primary-side
+  cost it left behind is **done too (P3, `docs/p3-wal-checksum.md`)** — not by capturing pages from
+  SQLite, which turned out not to be the lever, but by computing the frame checksum in C.
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a server restart. Spill
   it to disk or serve old positions from the log.
 - **`schema` events reach WebSocket subscribers only**, not the SSE change feed.
@@ -257,11 +285,12 @@ What phase 1 added to the list:
   bench), but a workload with large transactions pays for the same bytes more than once. Ship
   closed segments only, or upload ranges.
 
-## Start here — A or B, since C is done
+## Start here
 
-**A and B are untouched and are the two biggest levers left.** They do not overlap in files, so
-they can run in parallel. Each is written so it can be started cold, with the evidence for why it
-is worth doing. C was H6's, and H8 closed everything C left behind except H7 — see under it.
+**A, B and C are all done.** What is left, biggest first: **C4b** (the `Tenant` proxy over the
+worker channel, so `workers > 1` can serve replication — under A below), **C3** (placement and
+`[cluster]`), **H7** (GraphQL subscriptions), and **capturing pages from SQLite directly**, which is
+what C5 left on the primary side. Each section below is written so it can be started cold.
 
 ### A. ~~`workers: N`~~ **Done (C4).** What it left behind
 
@@ -276,21 +305,23 @@ is a `Tenant` proxy over the channel, and it is the most interesting remaining p
 
 Three smaller things C4 left, all in reporting rather than in data, listed under "Known gaps".
 
-### B. Replica apply mechanism A (phase 2, C5) — and it pays twice
+### B. ~~Replica apply mechanism A~~ **Done (C5).** What it measured, and what it left
 
-**Why.** Two measurements point at it. The replica read leg is 48 µs because mechanism B rescans
-the WAL per apply (`bench/wal.ts`). And the primary's WAL tail is **7.25 µs of a 28.4 µs write**,
-of which ~5 is SQLite's checksum over a page *just read back from the WAL* — memory-bound, proven
-by an allocation-free rewrite that moved it 7.25 → 7.21 and was reverted. The write path touches
-each page about four times; mechanism A is the change that stops re-reading it.
+`docs/c5-apply-pages.md` is the decision, the probes that were run before any code, and the as-built
+§8. **Replica read 47.2 µs → 6.4 (7.4x), apply 196 → 162, end to end 291 → 211.** The locks are all
+eight wal-index slots taken in one `xShmLock` through the connection's own `sqlite3_file`, so a
+local reader mid-transaction makes the apply wait and then answer `ApplyBusy` — retryable, nothing
+written — instead of writing underneath it. Verified by hand on real nodes, including a replica
+`kill -9`'d mid-stream and one whose database file was scribbled over, which failed loudly and
+re-snapshotted.
 
-**What.** Design §4.5: write pages into the database file and rewrite the shm header under the WAL
-locks, LiteFS-style, instead of appending frames and letting the next reader rebuild the wal-index.
+Two things it deliberately did not do:
 
-**Watch for.** This is the most correctness-sensitive milestone left. The existing checksum chain
-(`computeFull`, the rolling database checksum in every `TxnRecord`) is the oracle — a replica that
-diverges must fail loudly, and `test/wal/replication.test.ts` plus the two e2e scenarios are what
-must keep passing unchanged.
+- **The primary's tailer was unchanged** — and **P3 has since dealt with that** by a different
+  route than §3.6 predicted: `docs/p3-wal-checksum.md`.
+- **Windows is untested.** `winShmLock` takes the same eight slots and the code checks
+  `pMethods->iVersion` before it trusts the table, so the worst case is the mechanism-B fallback
+  with a warning. Nothing here has run on it.
 
 ### C. ~~H6~~ and ~~H8~~ **Done.** What is left of them
 
@@ -307,6 +338,16 @@ are closed (`docs/h8-validated-requests.md`). One item remains:
 
 ### Smaller, if you want something bounded
 
+- ~~**Capture pages from SQLite directly**~~ **Superseded by P3, which found the premise wrong.**
+  The tail was not memory-bound; it was a JavaScript loop, and moving it to C took a write from
+  28.9 µs to 24.0 without touching how pages are read. What capturing pages would still save is the
+  `readSync` — **0.38 µs** — in exchange for a `sqlite3_vfs` built out of `JSCallback`s on every
+  write. Not worth it. `docs/p3-wal-checksum.md` §3.1.
+- **The other 0.75 µs of a poll.** `WalTailer.poll()` is 1.98 µs once the checksum is native, of
+  which two `fstatSync` calls and a separate 32-byte header read are 0.75. One `pread` that takes
+  the header and the first frame together would collapse them. Small, bounded, and the measurement
+  is already in `docs/p3-wal-checksum.md` §2.
+
 - **Deferred compression** (`docs/performance.md` §4C). zstd is 9.5 µs of a 28.4 µs write and is
   *already* a setting; the better version compresses **after** the ack for `ack: "local"`, keeping
   the 4.3x ratio and moving the CPU off the answer path. It decouples the log append from the
@@ -318,7 +359,10 @@ are closed (`docs/h8-validated-requests.md`). One item remains:
   `sqlite3_db_config` is variadic — binding it fixed-arity through bun:ffi ignores the value, never
   writes the out-parameter, and **killed the process with SIGKILL**. The remedy is a non-variadic
   shim compiled by `scripts/sqlite.ts` into `vendor/sqlite/`, declared optional exactly as
-  `sqlite3_snapshot_*` is. `docs/p1-pragmas.md`.
+  `sqlite3_snapshot_*` is. **P3 built exactly that machinery** — `scripts/native/walsum.c` rides
+  the same compile and `src/sqlite/lib.ts` resolves it optionally — so this is now a matter of
+  adding one function to a file that already exists. `docs/p1-pragmas.md`,
+  `docs/p3-wal-checksum.md`.
 - **Hrana write forwarding.** A write to `/v2/pipeline` on a replica is still `NOT_PRIMARY`;
   forwarding means deciding what a baton opened on a replica means (R4 left it).
 
@@ -335,8 +379,10 @@ that registry, never a hand-written line in `createApp`**: the route table and
 module header states its invariant. Tests go in `test/<area>/`, temp dirs under `os.tmpdir()`.
 
 **The SQLite library.** Run `bun run sqlite:build` once: it compiles 3.53.4 from a hash-pinned
-amalgamation into `vendor/sqlite/`, which `src/sqlite/lib.ts` now prefers over anything on the
-system. That is what CI uses on both platforms. Without it the driver still finds Homebrew's build
+amalgamation **plus `scripts/native/walsum.c`** into `vendor/sqlite/`, which `src/sqlite/lib.ts`
+prefers over anything on the system. Without it a node still works, but WAL frames are checksummed
+in JavaScript and every write is about 17% slower — `bunql serve` says so at startup
+(`docs/p3-wal-checksum.md`). That is what CI uses on both platforms. Without it the driver still finds Homebrew's build
 on macOS and a distro one on Linux — contrary to what this file used to say, Debian and Ubuntu
 *do* ship `ENABLE_PREUPDATE_HOOK` and `ENABLE_SESSION` — but no distro ships
 `SQLITE_ENABLE_SNAPSHOT`, and the floor is SQLite 3.37.0 because `sqlite3_changes64` is in the

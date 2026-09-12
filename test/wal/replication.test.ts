@@ -8,6 +8,7 @@ import path from "node:path"
 import { afterAll, describe, expect, test } from "bun:test"
 import { Database } from "../../src/sqlite/index.ts"
 import {
+  type ApplyMechanism,
   ChecksumMismatch,
   computeFull,
   decode,
@@ -36,7 +37,7 @@ interface Rig {
 }
 
 /** A primary with a schema, checkpointed, physically copied to a replica seeded at txid 0. */
-function rig(): Rig {
+function rig(mechanism?: ApplyMechanism): Rig {
   const root = tempDir()
   const primaryDir = path.join(root, "primary")
   const replicaDir = path.join(root, "replica")
@@ -55,7 +56,11 @@ function rig(): Rig {
 
   const recorder = TxnRecorder.open({ dbPath, epoch: 1 })
   const log = TxnLog.open({ dir: primaryDir, fsync: "never" })
-  const applier = new WalApplier({ dbPath: replicaPath, dir: replicaDir })
+  const applier = new WalApplier({
+    dbPath: replicaPath,
+    dir: replicaDir,
+    ...(mechanism ? { mechanism } : {}),
+  })
   applier.seed({
     txid: 0n,
     epoch: 1,
@@ -165,32 +170,39 @@ describe("primary to replica", () => {
     closeRig(r)
   })
 
-  test("a replica checkpoint mid-stream does not break the stream", () => {
-    const r = rig()
-    const insert = r.db.prepare("insert into users(name, score) values (?, ?)")
-    for (let i = 0; i < 15; i++) {
-      r.db.transaction(() => insert.run(`before-${i}`, i))()
-      ship(r)
-    }
-    const walBefore = fs.statSync(`${r.replicaPath}-wal`).size
-    expect(walBefore).toBeGreaterThan(1000)
+  // Both mechanisms of design §4.5, because this is the one test whose setup can see which one
+  // ran: mechanism B grows the replica's own WAL and needs the checkpoint, mechanism A keeps that
+  // WAL at zero bytes and the checkpoint is a truthful no-op. The stream must survive either way.
+  test.each(["wal", "pages"] as const)(
+    "a replica checkpoint mid-stream does not break the stream (%s)",
+    (mechanism) => {
+      const r = rig(mechanism)
+      const insert = r.db.prepare("insert into users(name, score) values (?, ?)")
+      for (let i = 0; i < 15; i++) {
+        r.db.transaction(() => insert.run(`before-${i}`, i))()
+        ship(r)
+      }
+      const walBefore = fs.statSync(`${r.replicaPath}-wal`).size
+      if (mechanism === "wal") expect(walBefore).toBeGreaterThan(1000)
+      else expect(walBefore).toBe(0)
 
-    // The reader holds no open transaction here, which is the caller's half of the contract.
-    const result = r.applier.checkpoint("TRUNCATE")
-    expect(result.busy).toBe(false)
-    expect(fs.statSync(`${r.replicaPath}-wal`).size).toBeLessThan(walBefore)
+      // The reader holds no open transaction here, which is the caller's half of the contract.
+      const result = r.applier.checkpoint("TRUNCATE")
+      expect(result.busy).toBe(false)
+      expect(fs.statSync(`${r.replicaPath}-wal`).size).toBeLessThanOrEqual(walBefore)
 
-    for (let i = 0; i < 10; i++) {
-      r.db.transaction(() => insert.run(`after-${i}`, i))()
-      ship(r)
-    }
+      for (let i = 0; i < 10; i++) {
+        r.db.transaction(() => insert.run(`after-${i}`, i))()
+        ship(r)
+      }
 
-    expect(dump(r.reader)).toBe(dump(r.db))
-    expect(r.reader.prepare("select count(*) c from users").get()?.c).toBe(25)
-    expect(r.applier.verify()).toBe(true)
-    expect(integrityOk(r.replicaPath)).toBe(true)
-    closeRig(r)
-  })
+      expect(dump(r.reader)).toBe(dump(r.db))
+      expect(r.reader.prepare("select count(*) c from users").get()?.c).toBe(25)
+      expect(r.applier.verify()).toBe(true)
+      expect(integrityOk(r.replicaPath)).toBe(true)
+      closeRig(r)
+    },
+  )
 
   test("a primary WAL reset mid-stream loses nothing", () => {
     const r = rig()

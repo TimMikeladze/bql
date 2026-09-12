@@ -449,12 +449,18 @@ GET /v1/db     → { "databases": [ { "name": "acme", "txid": 4812, "epoch": 0, 
                                     "quotaBytes": 0, "createdAtMs": 1789…, "open": true } ] }
 
 GET /v1/db/acme
-→ { "name": "acme", "sizeBytes": 81920, "walBytes": 0, "logBytes": 12043,
+→ { "name": "acme", "role": "primary", "sizeBytes": 81920, "walBytes": 0, "logBytes": 12043,
     "txid": 4812, "epoch": 0, "checksum": "1734…", "openConns": 2,
     "liveQueries": 2, "subscribers": 5, "lastSnapshotTxid": 4800, "replicas": [] }
 
 DELETE /v1/db/acme  → { "name": "acme", "deleted": true, "trash": "<dataDir>/trash/acme-1789…" }
 ```
+
+On a **replica** the same body carries one more field, `"apply"`: which of design §4.5's two
+apply mechanisms is actually running, `"pages"` or `"wal"`. It is normally `[replication] apply`,
+and differs from it when this node's VFS cannot offer `xShmLock` and the applier fell back — which
+is worth seeing, because a replica on mechanism B pays a wal-index rebuild on every read.
+`docs/c5-apply-pages.md`. A primary has no applier and the field is absent.
 
 `DELETE` moves the directory to `trash/` and tombstones the catalog row; the files themselves are
 removed later, by the sweep, once they are older than `[durability] retention` (default `7d`).
@@ -695,6 +701,30 @@ reach that txid, so the caller's next read *on that node* sees its own write wit
   a database's contents, so on a replica they are refused with `NOT_PRIMARY` instead — see
   "Replica limitations" below.
 
+#### How a replica applies (`[replication] apply`)
+
+Design §4.5 has two mechanisms and `[replication] apply` chooses between them. The default is
+**`"pages"`** (mechanism A, C5): the primary's pages are written into the replica's own database
+file and the 136-byte wal-index header is rewritten under SQLite's own WAL lock set, so a
+replica's `-wal` is **always zero bytes** and a reader takes `WAL_READ_LOCK(0)` and reads the
+file. `"wal"` (mechanism B) is the phase-0 behaviour — append frames to the replica's WAL, zero
+the header, let the next reader rebuild the index — and is the back-out.
+
+- Both produce the same database, proved by the rolling checksum in every record; a replica that
+  diverges raises `ChecksumMismatch`, sends `DIVERGED` and re-bootstraps from a snapshot. It never
+  continues quietly.
+- A page apply cannot run while a local reader holds a read transaction: `xShmLock` answers
+  `SQLITE_BUSY`, the applier backs off for `[replication] applyBusyMs` (default 5000) and then
+  defers the record and retries. Nothing is written under a reader, and nothing is lost.
+- `GET /v1/db/{db}` on a replica reports `"apply"`, the mechanism actually running. It differs
+  from the setting only when this VFS cannot offer `xShmLock`, in which case the applier falls
+  back to `"wal"` and logs one line saying so.
+- Switching a running replica from `"wal"` to `"pages"` folds its leftover WAL into the database
+  file with one TRUNCATE checkpoint at the next apply. Switching back needs nothing.
+
+Measured, `bench/wal.ts`: the "replica read sees the row" leg is **6.4 µs under `"pages"` against
+47.2 under `"wal"`**. `docs/c5-apply-pages.md`.
+
 #### Realtime on a replica (phase-1 limitation)
 
 A replica has no preupdate hooks: its transactions arrive as WAL pages, not as rows. Its realtime
@@ -724,7 +754,7 @@ Everything a replica cannot do in phase 1, in one place.
 | the change feed | txid-only events, `changes: []` |
 | live queries | full, re-run on every applied transaction |
 | `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore`, `POST /v1/db/:db/import` | `503 NOT_PRIMARY` with `BunQL-Primary`, or `307` when the new primary is on the same origin. They are refused rather than forwarded: a create would have to come back over the replication stream to exist here anyway, and a delete on a copy the primary still owns removes the applier's own file. The gate is per database, so a promoted node serves them for what it was promoted for. Address the primary, or promote |
-| `POST /v1/db/:db/checkpoint` with `TRUNCATE` | `503 NOT_PRIMARY`. Every other mode runs locally |
+| `POST /v1/db/:db/checkpoint` with `TRUNCATE` | `503 NOT_PRIMARY`. Every other mode runs locally, and under `apply = "pages"` there is nothing in the WAL to checkpoint, so it reports zero |
 | `POST /v1/db/:db/snapshot` | works: a replica has the file and a snapshot of it is a valid restore source |
 | S3 shipping | off. A replica authors nothing, so it ships nothing; `restore` from a bucket still works |
 | `ack: "replica"` / `"quorum"` on a forwarded write | honoured — the level travels with the forwarded body and the primary waits for it |
@@ -1475,6 +1505,8 @@ the canonical one wins when both are set.
 | `[replication] primary` | `""` | `BUNQL_REPLICATION_PRIMARY` | `BUNQL_REPLICA_OF` |
 | `[replication] secret` | `""` (replication off) | `BUNQL_REPLICATION_SECRET` | `BUNQL_CLUSTER_SECRET` |
 | `[replication] follow` | `["*"]` | `BUNQL_REPLICATION_FOLLOW` (comma-separated) | `BUNQL_FOLLOW` |
+| `[replication] apply` | `"pages"` (or `"wal"`) | `BUNQL_REPLICATION_APPLY` | — |
+| `[replication] applyBusyMs` | `5000` | `BUNQL_REPLICATION_APPLY_BUSY_MS` | — |
 | `[replication] ackTimeoutMs` | `2000` | `BUNQL_REPLICATION_ACK_TIMEOUT_MS` | — |
 | `[replication] ackWithoutReplicas` | `"error"` (or `"allow"`) | `BUNQL_REPLICATION_ACK_WITHOUT_REPLICAS` | — |
 | `[replication] heartbeatMs` | `5000` | `BUNQL_REPLICATION_HEARTBEAT_MS` | — |

@@ -28,6 +28,22 @@ describe("loadConfig", () => {
     expect(config.durability.defaultAck).toBe("local")
     expect(config.server.tenantFromHost).toBe(false)
     expect(config.server.cors).toBe(true)
+    // C5: mechanism A is the default replica apply (`docs/c5-apply-pages.md`).
+    expect(config.replication.apply).toBe("pages")
+    expect(config.replication.applyBusyMs).toBe(5000)
+  })
+
+  test("[replication] apply takes only the two mechanisms design §4.5 names", () => {
+    expect(loadConfig({ env: { BUNQL_REPLICATION_APPLY: "wal" } }).replication.apply).toBe("wal")
+    expect(() => loadConfig({ env: { BUNQL_REPLICATION_APPLY: "frames" } })).toThrow(
+      /\[replication\] apply must be "pages" or "wal"/,
+    )
+    expect(
+      loadConfig({ env: { BUNQL_REPLICATION_APPLY_BUSY_MS: "250" } }).replication.applyBusyMs,
+    ).toBe(250)
+    expect(() => loadConfig({ env: { BUNQL_REPLICATION_APPLY_BUSY_MS: "-1" } })).toThrow(
+      /applyBusyMs must be a non-negative number/,
+    )
   })
 
   test("a TOML file sets what it names and leaves the rest alone", () => {
