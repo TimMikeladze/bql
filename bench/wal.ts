@@ -18,6 +18,7 @@ import {
   type TxnRecordInput,
   WalApplier,
 } from "../src/wal/index.ts"
+import { distribution, emit } from "./report.ts"
 
 const ROUNDS = 500
 const ROWS_PER_TXN = 5
@@ -162,6 +163,19 @@ console.log(
   `primary checksum ${recorder.position.checksum} · replica ${applier.position.postChecksum}` +
     ` · match ${recorder.position.checksum === applier.position.postChecksum}`,
 )
+
+emit({
+  bench: "wal",
+  info: {
+    rounds: ROUNDS,
+    rowsPerTxn: ROWS_PER_TXN,
+    metaFsync: META_FSYNC,
+    compression: Number((bytesPlain / bytesEncoded).toFixed(2)),
+  },
+  legs: Object.fromEntries(
+    Object.values(legs).map((leg) => [leg.name, distribution(leg.samples)]),
+  ),
+})
 
 reader.close()
 applier.close()

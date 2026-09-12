@@ -18,5 +18,5 @@
   },
   // experiments/ is exploratory FFI code kept as evidence for docs/design.md. It predates the
   // typed symbol tables in src/sqlite/lib.ts and is run directly with `bun <file>`, not built.
-  "include": ["src", "test", "bench"]
+  "include": ["src", "test", "bench", "scripts"]
 }

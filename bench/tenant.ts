@@ -2,15 +2,24 @@
 // IMMEDIATE → COMMIT → tail → record → log append → position save) at both ack levels, and a
 // point read through the reader pool.
 //
-//   bun run bench/tenant.ts [rounds]
+//   bun run bench/tenant.ts [rounds] [--tenants N]
+//
+// `--tenants N` adds the design §10 "tenants open per process" leg: N databases created and then
+// all held open at once, which is fd-bound at three descriptors each.
 
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import type { Database } from "../src/sqlite/index.ts"
-import { TenantRegistry } from "../src/tenant/index.ts"
+import { fileDescriptorLimit, TenantRegistry } from "../src/tenant/index.ts"
+import { distribution, emit } from "./report.ts"
 
-const ROUNDS = Number(Bun.argv[2] ?? 2000)
+const positional = Bun.argv.slice(2).filter((a) => !a.startsWith("--"))
+const ROUNDS = Number(positional[0] ?? 2000)
+const tenantsFlag = Bun.argv.find((a) => a.startsWith("--tenants"))
+const TENANT_TARGET = tenantsFlag
+  ? Number(tenantsFlag.includes("=") ? tenantsFlag.split("=")[1] : Bun.argv[Bun.argv.indexOf(tenantsFlag) + 1])
+  : 0
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-tenant-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
@@ -115,5 +124,53 @@ console.log(
   `\nclose p50 ${percentile(closes, 50).toFixed(1)} µs · open p50 ${percentile(opens, 50).toFixed(1)} µs` +
     ` · open p90 ${percentile(opens, 90).toFixed(1)} µs`,
 )
+
+// ── tenants open per process (design §10: 10k, fd-bound at three descriptors each) ─────────────
+//
+// The number that matters is how many tenants can be open *at once*, so eviction is turned off by
+// giving the registry a cap above the target and nothing is released until the count is taken.
+
+let openedTenants = 0
+const openFdLimit = fileDescriptorLimit() ?? 0
+if (TENANT_TARGET > 0) {
+  const manyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-tenants-"))
+  process.on("exit", () => fs.rmSync(manyRoot, { recursive: true, force: true }))
+  const many = TenantRegistry.open({ dir: manyRoot, maxOpen: TENANT_TARGET + 16, readers: 0 })
+  const createdAt = Bun.nanoseconds()
+  try {
+    for (let i = 0; i < TENANT_TARGET; i++) {
+      const t = await many.create(`t${i}`)
+      t.write((db) => db.exec("create table t(id integer primary key)"))
+      openedTenants++
+    }
+  } catch (err) {
+    console.log(`\nstopped at ${openedTenants} tenants: ${String(err)}`)
+  }
+  const elapsedMs = (Bun.nanoseconds() - createdAt) / 1e6
+  console.log(
+    `\n${openedTenants.toLocaleString()} tenants created and held open in ${elapsedMs.toFixed(0)} ms` +
+      ` · ulimit -n ${openFdLimit.toLocaleString()} · registry open ${many.openNames.length.toLocaleString()}`,
+  )
+  many.close()
+}
+
+emit({
+  bench: "tenant",
+  info: { rounds: ROUNDS, fdLimit: openFdLimit },
+  legs: {
+    ...Object.fromEntries(legs.map((leg) => [leg.name, distribution(leg.samples)])),
+    "cold open (LRU miss)": distribution(opens),
+    "tenant close": distribution(closes),
+    ...(TENANT_TARGET > 0
+      ? {
+          "tenants open per process": {
+            p50: openedTenants,
+            value: openedTenants,
+            unit: "count" as const,
+          },
+        }
+      : {}),
+  },
+})
 
 registry.close()

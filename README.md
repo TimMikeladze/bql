@@ -7,16 +7,44 @@ The engine is a `bun:ffi` driver over a shared libsqlite3, which measures about 
 `bun:sqlite` on point reads and exposes the parts of the C API that `bun:sqlite` does not:
 hooks, the authorizer, query cancellation, per-connection limits and session changesets.
 
-The full design, including the replication and realtime protocols, is in
-[docs/design.md](docs/design.md). The build order is in [docs/plan-phase0.md](docs/plan-phase0.md).
+[**docs/api.md**](docs/api.md) is the API as implemented: every route, the WebSocket protocol, the
+SSE formats, the SDKs, the CLI, every config key, and every place the implementation differs from
+the design. [docs/design.md](docs/design.md) is the design it was built from, including the
+replication and cluster protocols that are not here yet; [docs/plan-phase0.md](docs/plan-phase0.md)
+is the build order.
 
-## Status
+## What exists today
 
-Phase 0, milestone 7. The SQLite driver (`src/sqlite`), WAL shipping (`src/wal`), tenancy
-(`src/tenant`), realtime (`src/realtime`), the HTTP/WebSocket/SSE server (`src/server`), the client
-SDK (`src/client`), the embedded API (`src/embedded.ts`) and the `bunql` CLI (`src/cli.ts`) are
-implemented and usable end to end. Replication to a second node and the Hrana compatibility layer
-are phase 1.
+Phase 0 is complete and usable end to end on a single node.
+
+- **Engine** — a `bun:ffi` driver over a shared libsqlite3 (`src/sqlite`), with hooks, the
+  authorizer, query cancellation, per-connection limits and statement counters.
+- **Tenancy** — thousands of databases in one process, LRU-managed, one writer each, per-tenant
+  quotas and checkpoint policy (`src/tenant`).
+- **WAL shipping** — committed transactions tailed out of the `-wal`, turned into self-verifying
+  records, kept in a segment log, and applied to a replica directory (`src/wal`). Snapshots,
+  point-in-time restore and O(1) forks are built on the same log.
+- **Server** — HTTP, WebSocket and SSE over tenants, Ed25519 tokens with database globs and table
+  ACLs, baton transactions, Prometheus metrics (`src/server`).
+- **Realtime** — row-level change feeds and live queries driven by SQLite's own hooks, with a ring
+  buffer behind `Last-Event-ID` (`src/realtime`).
+- **Surfaces** — a `Bun.SQL`-shaped client SDK for browsers, Bun, Node and Workers
+  (`src/client`), the same interface in-process plus a synchronous escape hatch
+  (`src/embedded.ts`), and the `bunql` CLI (`src/cli.ts`).
+
+## What is phase 1, and phase 2
+
+Phase 1 turns the single node into a primary with replicas, on the log that already exists:
+
+- replica streaming over the WebSocket, with bootstrap and write forwarding;
+- `ack: "replica"` and `"quorum"` — semi-synchronous durability, which today is a `400`;
+- the S3 shipper and restore-from-S3;
+- the Hrana compatibility layer, which buys the whole libsql/Turso client ecosystem;
+- Kysely and Drizzle adapters;
+- replica apply through mechanism A, removing the wal-index rebuild the current one forces.
+
+Phase 2 is the cluster: a Raft control plane, placement, leases, failover and the `moved` event.
+Nothing in either phase changes the API above; they add to it.
 
 ## Quickstart
 
@@ -50,8 +78,8 @@ TOKEN=$(curl -sX POST localhost:4321/v1/tokens -H "authorization: Bearer $KEY" \
 curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
 ```
 
-The route table, the WebSocket protocol and every deviation from the design are in
-[docs/m5-server.md](docs/m5-server.md).
+The route table, the WebSocket protocol, the SSE formats and every deviation from the design are in
+[docs/api.md](docs/api.md).
 
 ### The client (browsers, Bun, Node, Workers)
 
@@ -129,11 +157,11 @@ summary line.
 
 ### Configuration
 
-`bunql.toml` in the working directory, then `BUNQL_*` in the environment. Every key of
-[design.md](docs/design.md) §9.4 has an override named after its section and its key —
-`BUNQL_DATA_DIR`, `BUNQL_SERVER_PORT`, `BUNQL_LIMITS_QUERY_TIMEOUT_MS`, `BUNQL_AUTH_ADMIN_KEY` —
-and the short forms `BUNQL_DIR`, `BUNQL_PORT`, `BUNQL_ADMIN_KEY`, `BUNQL_NODE` and the rest still
-work. The full list is in [docs/m5-server.md](docs/m5-server.md) and in `src/server/config.ts`.
+`bunql.toml` in the working directory, then `BUNQL_*` in the environment. Every key has an override
+named after its section and its key — `BUNQL_DATA_DIR`, `BUNQL_SERVER_PORT`,
+`BUNQL_LIMITS_QUERY_TIMEOUT_MS`, `BUNQL_AUTH_ADMIN_KEY` — and the short forms `BUNQL_DIR`,
+`BUNQL_PORT`, `BUNQL_ADMIN_KEY`, `BUNQL_NODE` and the rest still work. Every key, its default and
+both spellings are in [docs/api.md](docs/api.md#configuration).
 
 ## The driver
 
@@ -202,7 +230,7 @@ Design notes and byte layouts are in [docs/m3-wal.md](docs/m3-wal.md).
 
 ## Measured
 
-`bun run bench` on an M-series Mac, Homebrew SQLite 3.53.4, 100k-row table:
+`bun run bench:driver` on an M-series Mac, Homebrew SQLite 3.53.4, 100k-row table:
 
 | op | bunql | bun:sqlite |
 |---|---|---|
@@ -234,10 +262,16 @@ names as the reason to move to mechanism A in phase 1.
 ## Tests
 
 ```sh
-bun test
+bun test              # 496 tests, including test/e2e/ — the whole product in one scenario
 bun run typecheck
-bun run bench         # driver against bun:sqlite
-bun run bench:wal     # primary -> replica shipping latency
+bun run bench         # all four, then one table against the design §10 budget
+bun run bench --quick # the same, with fewer rounds
+
+bun run bench:driver  # the driver against bun:sqlite
+bun run bench:wal     # primary -> replica shipping latency, leg by leg
 bun run bench:tenant  # the write path through the tenant owner
-bun run bench:http    # point reads and writes over HTTP and WebSocket
+bun run bench:http    # HTTP and WebSocket, with the load client in its own process
 ```
+
+The last recorded numbers, and the machine they came from, are in
+[docs/benchmarks.md](docs/benchmarks.md).

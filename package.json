@@ -17,13 +17,20 @@
     "./sqlite": "./src/sqlite/index.ts",
     "./wal": "./src/wal/index.ts"
   },
+  "files": [
+    "src",
+    "docs/design.md",
+    "docs/api.md",
+    "README.md"
+  ],
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "start": "bun run src/server/main.ts",
     "dev": "bun run --watch src/server/main.ts",
     "cli": "bun run src/cli.ts",
-    "bench": "bun run bench/driver.ts",
+    "bench": "bun run bench/run.ts",
+    "bench:driver": "bun run bench/driver.ts",
     "bench:wal": "bun run bench/wal.ts",
     "bench:tenant": "bun run bench/tenant.ts",
     "bench:http": "bun run bench/http.ts"

@@ -8,6 +8,7 @@ import os from "node:os"
 import path from "node:path"
 import { Database as BunDatabase } from "bun:sqlite"
 import { Database, sqlite } from "../src/sqlite/index.ts"
+import { emit } from "./report.ts"
 
 const ROWS = 100_000
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-bench-"))
@@ -138,6 +139,14 @@ console.log(
   `\npoint read target ≤ ${TARGET.toFixed(2)} µs: ${pointRead.toFixed(2)} µs ` +
     `${pointRead <= TARGET ? "PASS" : "FAIL"}`,
 )
+
+emit({
+  bench: "driver",
+  info: { sqlite: lib.version, sqliteLib: lib.path, bun: Bun.version, rows: ROWS },
+  legs: Object.fromEntries(
+    results.map((r) => [r.op, { p50: r.ours, value: r.ours, unit: "us" as const }]),
+  ),
+})
 
 db.close()
 reference.close()
