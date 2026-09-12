@@ -425,9 +425,10 @@ export const s = {
   enum<const V extends readonly EnumMember[]>(values: V): SchemaNode<V[number]> {
     const list = Object.freeze([...values])
     const kinds = new Set(list.map((v) => (v === null ? "null" : typeof v)))
-    const source: Record<string, unknown> = { enum: list }
     const only = kinds.size === 1 ? [...kinds][0] : undefined
+    const source: Record<string, unknown> = {}
     if (only === "string" || only === "number" || only === "boolean") source.type = only
+    source.enum = list
     return node(source) as SchemaNode<V[number]>
   },
   array<S extends Schema<any>>(items: S): ArraySchema<Infer<S>> {
