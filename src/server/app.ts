@@ -7,6 +7,15 @@
 
 import { HEADERS, WS_PROTOCOL } from "../client/protocol.ts"
 import type { ReplicationSocket } from "../replication/index.ts"
+import {
+  hranaRoutes,
+  hranaUpgrade,
+  hranaWsClose,
+  hranaWsMessage,
+  hranaWsOpen,
+  isHranaSocket,
+  isHranaUpgrade,
+} from "./hrana/index.ts"
 import { Catalog, type Tenant, TenantRegistry } from "../tenant/index.ts"
 import { Authenticator, type RevocationList } from "./auth.ts"
 import { loadConfig, resolveAuth, type ServerConfig, type ServerConfigInput } from "./config.ts"
@@ -166,6 +175,8 @@ export function createApp(runtime: ServerRuntime): App {
     "/metrics": { GET: on(handlers.metrics), OPTIONS: options },
   }
 
+  Object.assign(routes, hranaRoutes(runtime))
+
   return {
     routes,
     fetch(request: Request, server: unknown) {
@@ -174,6 +185,7 @@ export function createApp(runtime: ServerRuntime): App {
       // Node-to-node, on its own path and with its own handshake: the cluster secret is proved
       // in-band over the socket (design §8), so nothing here looks at `Authorization`.
       if (url.pathname === "/v1/replication") return upgradeReplication(runtime, request, server)
+      if (isHranaUpgrade(request, url)) return hranaUpgrade(runtime, request, server, url)
       if (request.method === "OPTIONS") return preflight(runtime.config, request)
       const headers = new Headers({ "content-type": "application/json; charset=utf-8" })
       applyCors(runtime.config, request, headers)
@@ -196,12 +208,20 @@ export function createApp(runtime: ServerRuntime): App {
           runtime.replication?.open(ws as unknown as ReplicationSocket)
           return
         }
+        if (isHranaSocket(ws.data)) {
+          hranaWsOpen(ws as never)
+          return
+        }
         runtime.metrics.wsOpened()
         if (ws.data.principal) greet(ws, runtime.node)
       },
       message(ws: Socket, message: string | Buffer) {
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.message(ws as unknown as ReplicationSocket, message as Uint8Array)
+          return
+        }
+        if (isHranaSocket(ws.data)) {
+          hranaWsMessage(ws as never, message)
           return
         }
         void handleMessage(ws, message)
@@ -211,11 +231,16 @@ export function createApp(runtime: ServerRuntime): App {
           runtime.replication?.drain(ws as unknown as ReplicationSocket)
           return
         }
+        if (isHranaSocket(ws.data)) return
         drain(ws)
       },
       close(ws: Socket) {
         if (isReplication(ws.data as AppSocketData)) {
           runtime.replication?.close(ws as unknown as ReplicationSocket)
+          return
+        }
+        if (isHranaSocket(ws.data)) {
+          hranaWsClose(ws as never)
           return
         }
         closeSocket(ws)
