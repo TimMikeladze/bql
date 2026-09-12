@@ -109,6 +109,28 @@ Carried forward from phase 0, still true:
   `BUNQL_TEST_S3_ENDPOINT`.
 - Nothing is published to npm; `package.json` has `exports`, `bin`, `engines` but no release flow.
 
+What the surfaces work (H1-H5) added to the list:
+
+- **`PRAGMA foreign_keys` is never turned on**, so a foreign key declared in a schema is not
+  enforced on any connection BunQL opens. A generated insert can reference a row that does not
+  exist, and so can a hand-written one through `/v1/db/{db}/query`. Found by H4 while generating
+  the data API, which declares `SQLITE_CONSTRAINT_FOREIGNKEY` on its write operations and records
+  the current behaviour in a test rather than asserting the constraint fires. SQLite defaults the
+  pragma off for backwards compatibility and it is per-connection, so it belongs wherever the
+  reader and writer connections are configured, probably behind a per-database setting since
+  turning it on changes the meaning of existing schemas.
+- **There is no error code for "no such row".** `ERROR_STATUS` in `src/server/errors.ts` has
+  `DB_NOT_FOUND` and `TX_NOT_FOUND` and nothing meaning a row, and `statusForCode` throws on a code
+  it does not know — so inventing one locally yields either an undocumented status or a document
+  that will not build. The data API's `/{pk}` routes therefore answer `200` with `null`, published
+  honestly as `anyOf: [Row, null]`. Adding `NOT_FOUND: 404` is one line there and one line per
+  operation.
+- **`PRAGMA table_xinfo` and `PRAGMA index_info` are not on the token pragma allow-list**
+  (`PRAGMA_SUBJECT`, `src/server/auth.ts`). Harmless today because introspection runs with server
+  rights and its result is cached and shared — but it is the reason introspection must **not** be
+  wired to the request's principal, and `table_xinfo` is not optional: `table_info` omits
+  generated columns entirely.
+
 What phase 1 added to the list:
 
 - **A standalone node never takes a snapshot, so retention can make it unrestorable.** Found by R6
