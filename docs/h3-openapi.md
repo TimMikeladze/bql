@@ -106,12 +106,48 @@ JSON number is the precision loss design §6.1 calls out in rqlite and D1, and i
 every generated client. The `CODEC` symbol core hangs off those nodes is invisible to
 `Object.keys`, so it costs the document nothing and is simply dropped.
 
-## Reading a keyword off a live core node
+## Reading a keyword off a live core node — the trap, for H4 and H5 too
 
-`src/core/schema.ts` hangs nine builder methods (`minLength`, `format`, `deprecated`, …) off the
-node prototype, so `node.format !== undefined` is true for *every* string schema. This module never
-reads a keyword that way: it iterates **own** keys (`Object.keys`, which sees only real keywords)
-and reads single keywords through core's `keyword()` guard rail.
+`src/core/schema.ts` keeps its builders on the node's prototype, so nine JSON Schema keywords are
+**methods when absent and values when present**:
+
+```
+minLength  maxLength  pattern  format  minItems  maxItems  uniqueItems  multipleOf  deprecated
+```
+
+```js
+s.string().minLength                     // function minLength(n) {…}   — NOT undefined
+"minLength" in s.string()                // true                        — NOT false
+Object.hasOwn(s.string(), "minLength")   // false                       — correct
+Object.keys(s.string())                  // ["type"]                    — correct
+```
+
+So `node.minLength !== undefined` and `"minLength" in node` are **both always true**, for every
+string schema, set or not. An emitter written that way puts a *function* under the keyword;
+`JSON.stringify` drops it, so it vanishes from the published file and comes back as a missing
+constraint or a stray `parameters` entry depending on how the object was built — and every
+happy-path assertion still passes, because the happy path is the one where the keyword *is* set.
+
+The worst instance in this module is `deprecated`: a bare probe in `decorate()` would have stamped
+`deprecated: true` on **every** parameter in the document.
+
+The rules this module follows, and the ones `src/dataapi/` and `src/graphql/` should follow when
+they walk the same nodes:
+
+- **Read one keyword with core's `keyword(node, name)`** (landed in `7c7c357`; core itself reads
+  through it at ~20 call sites). Never `node.x`, never `"x" in node`.
+- **Enumerate with `Object.keys` / spread**, which see own keywords and no prototype method. That
+  is how `Components.#node` copies a schema and how `forEachChild` walks one — by enumeration,
+  never by probing a name.
+- **Or walk `toJsonSchema()`'s output**, which is now *guaranteed* to be fresh literals over
+  `Object.prototype` at every depth, root and nested.
+
+`test/openapi/document.test.ts` pins this with the assertion that catches the class — what a schema
+*without* a keyword does **not** emit: an unconstrained `s.string()` emits exactly `{"type":
+"string"}`, an unconstrained `s.array()` exactly `{"type": "array", "items": …}`, a parameter whose
+schema never called `.deprecated()` has no `deprecated` key, and no value anywhere in the document
+is a function. Reintroducing the trap in either `document.ts` or `schemas.ts` fails all four (and
+three of the existing tests besides) — checked, not assumed.
 
 ## What the generator made of it
 

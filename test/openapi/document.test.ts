@@ -308,6 +308,110 @@ describe("the value encoding", () => {
   })
 })
 
+// Nine JSON Schema keywords are *builder methods* on a core node when absent and *values* when
+// present, so `node.minLength !== undefined` and `"minLength" in node` are both always true, for
+// every string schema. An emitter written that way puts a function under the keyword; JSON drops
+// it, so it vanishes from the document and reappears as a missing constraint — and every
+// happy-path assertion still passes. These are the tests that catch that class: they assert what
+// a schema *without* a keyword does **not** emit.
+describe("a keyword nothing set is not emitted", () => {
+  const KEYWORDS = [
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "multipleOf",
+    "deprecated",
+  ] as const
+
+  function shaped(): Registry {
+    const r = new Registry({ title: "t", version: "1" })
+    r.add<any, any>({
+      id: "one",
+      method: "get",
+      path: "/one",
+      params: {
+        query: s.object({
+          quiet: s.boolean().optional(),
+          flagged: s.boolean().optional().deprecated(),
+        }),
+      },
+      response: {
+        schema: s
+          .object({
+            plain: s.string(),
+            constrained: s.string().minLength(2).maxLength(8).pattern("^a").format("email"),
+            bare: s.array(s.string()),
+            bounded: s.array(s.string()).minItems(1).maxItems(3).uniqueItems(),
+          })
+          .id("Shaped"),
+      },
+      handler: ok,
+    })
+    return r
+  }
+
+  test("an unconstrained string emits exactly {type: string}", () => {
+    const properties = buildDocument(shaped()).components?.schemas?.Shaped?.properties ?? {}
+    expect(Object.keys(properties.plain ?? {})).toEqual(["type"])
+    expect(Object.keys(properties.bare ?? {})).toEqual(["type", "items"])
+    for (const name of KEYWORDS) {
+      expect(Object.hasOwn(properties.plain ?? {}, name)).toBe(false)
+      expect(Object.hasOwn(properties.bare ?? {}, name)).toBe(false)
+    }
+  })
+
+  test("a constrained one emits every keyword it really carries", () => {
+    const properties = buildDocument(shaped()).components?.schemas?.Shaped?.properties ?? {}
+    expect(properties.constrained).toEqual({
+      type: "string",
+      minLength: 2,
+      maxLength: 8,
+      pattern: "^a",
+      format: "email",
+    })
+    expect(properties.bounded).toEqual({
+      type: "array",
+      items: { type: "string" },
+      minItems: 1,
+      maxItems: 3,
+      uniqueItems: true,
+    })
+  })
+
+  test("deprecated reaches a parameter only when the schema set it", () => {
+    const parameters = buildDocument(shaped()).paths["/one"]?.get?.parameters ?? []
+    const quiet = parameters.find((one) => one.name === "quiet") as Record<string, unknown>
+    const flagged = parameters.find((one) => one.name === "flagged")
+    // The trap's worst case: a bare `schema.deprecated` read would stamp this on every parameter.
+    expect(Object.hasOwn(quiet, "deprecated")).toBe(false)
+    expect(flagged?.deprecated).toBe(true)
+  })
+
+  test("no value anywhere in the document is a function", () => {
+    const offenders: string[] = []
+    const walk = (value: unknown, at: string): void => {
+      if (typeof value === "function") {
+        offenders.push(at)
+        return
+      }
+      if (Array.isArray(value)) {
+        for (const [index, item] of value.entries()) walk(item, `${at}/${index}`)
+        return
+      }
+      if (typeof value !== "object" || value === null) return
+      // Own keys only: probing by name is the very thing under test.
+      for (const key of Object.keys(value)) walk((value as Record<string, unknown>)[key], `${at}/${key}`)
+    }
+    walk(build(), "")
+    walk(buildDocument(shaped()), "")
+    expect(offenders).toEqual([])
+  })
+})
+
 describe("errors", () => {
   test("statusForCode asks src/server/errors.ts, including its SQLite half", () => {
     expect(statusForCode("NOT_PRIMARY")).toBe(503)
