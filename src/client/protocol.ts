@@ -141,6 +141,8 @@ export interface LiveRowsEvent {
   columns: string[]
   types: string[]
   rows: ResultRows
+  /** The result hit the subscription's `maxRows` and what follows was dropped. */
+  truncated?: boolean
 }
 
 /** Sent instead of `rows` when the subscription named a `key` column. */
@@ -150,6 +152,8 @@ export interface LiveDiffEvent {
   /** Key values of the rows that left the result. */
   removed: ResultRows
   updated: ResultRows
+  /** The result hit the subscription's `maxRows`, so the diff covers only the rows kept. */
+  truncated?: boolean
 }
 
 /** The change ring could not serve the requested `since`; the client must re-query. */
