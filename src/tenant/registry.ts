@@ -418,6 +418,21 @@ export class TenantRegistry {
   }
 
   /** Closes a tenant without deleting anything. It reopens on the next `open`. */
+  /**
+   * Sets (or clears, with `null`) one database's `PRAGMA foreign_keys` override.
+   *
+   * The pragma is per *connection*, so an open tenant is released: the next open reads the catalog
+   * and applies it. Releasing is what `Promoter.#flip` does for a role change, for the same reason
+   * — a setting written to the catalog under a live connection would not be reached until that
+   * connection happened to be evicted.
+   */
+  setForeignKeys(name: string, value: boolean | null): void {
+    this.#assertOpen()
+    if (!this.catalog.getTenant(name)) throw BunQLError.dbNotFound(name)
+    this.catalog.setForeignKeys(name, value)
+    this.release(name)
+  }
+
   release(name: string): void {
     const tenant = this.#open.get(name)
     this.#pinned.delete(name)
@@ -517,7 +532,16 @@ export class TenantRegistry {
         ? { segmentBytes: this.#options.segmentBytes }
         : {}),
       ...(this.#options.logFsync !== undefined ? { logFsync: this.#options.logFsync } : {}),
-      ...(this.#options.sqlite !== undefined ? { sqlite: this.#options.sqlite } : {}),
+      // The node's pragmas, with this database's own `foreign_keys` on top when it has one. A
+      // null in the catalog means "follow the node", which is not the same fact as "off".
+      ...(this.#options.sqlite !== undefined || row.foreignKeys !== null
+        ? {
+            sqlite: {
+              ...this.#options.sqlite,
+              ...(row.foreignKeys !== null ? { foreignKeys: row.foreignKeys } : {}),
+            },
+          }
+        : {}),
       ...(this.#options.compressLog !== undefined
         ? { compressLog: this.#options.compressLog }
         : {}),

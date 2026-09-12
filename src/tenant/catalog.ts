@@ -40,6 +40,12 @@ export interface TenantRow {
   clean: boolean
   /** `"replica"` for a database this node follows rather than owns. */
   role: TenantRole
+  /**
+   * Per-database `PRAGMA foreign_keys`, or **null to follow `[sqlite] foreignKeys`**. Three states
+   * rather than two: "nobody has said" is not the same fact as "off", and collapsing them would
+   * mean a node that turned the switch on could not reach a database created before it did.
+   */
+  foreignKeys: boolean | null
 }
 
 export interface TenantInit {
@@ -52,6 +58,8 @@ export interface TenantInit {
   /** Starting position, for a tenant forked from another one. */
   position?: Omit<RecorderPosition, "epoch">
   createdAtMs?: number
+  /** Per-database `PRAGMA foreign_keys`; null or absent follows `[sqlite] foreignKeys`. */
+  foreignKeys?: boolean | null
 }
 
 /** A token the node minted, as recorded for revocation and audit. */
@@ -86,7 +94,10 @@ create table if not exists tenants (
   wal_salt2     integer not null default 0,
   wal_frame     integer not null default 0,
   clean         integer not null default 0,
-  role          text    not null default 'primary'
+  role          text    not null default 'primary',
+  -- Nullable on purpose: null is "whatever [sqlite] foreignKeys says", which is not the same fact
+  -- as "off". A database that has never been told keeps following the node.
+  foreign_keys  integer
 ) strict;
 
 create table if not exists tokens (
@@ -121,6 +132,7 @@ interface RawTenant {
   wal_frame: number
   clean: number
   role: string
+  foreign_keys: number | null
 }
 
 function toRow(raw: RawTenant): TenantRow {
@@ -139,6 +151,7 @@ function toRow(raw: RawTenant): TenantRow {
     walFrame: raw.wal_frame,
     clean: raw.clean !== 0,
     role: raw.role === "replica" ? "replica" : "primary",
+    foreignKeys: raw.foreign_keys === null ? null : raw.foreign_keys !== 0,
   }
 }
 
@@ -167,6 +180,11 @@ function migrate(db: Database): void {
   )
   if (!columns.has("role")) {
     db.exec("alter table tenants add column role text not null default 'primary'")
+  }
+  // Nullable and with no default, so every existing row reads as "follow the node", which is what
+  // every database did before there was a per-database setting.
+  if (!columns.has("foreign_keys")) {
+    db.exec("alter table tenants add column foreign_keys integer")
   }
 }
 
@@ -226,19 +244,22 @@ export class Catalog implements RevocationList {
       walFrame: position?.wal.frame ?? 0,
       clean: true,
       role: init.role ?? "primary",
+      // A new database follows the node until something says otherwise, and a revived tombstone
+      // is a new database: its override does not survive the delete.
+      foreignKeys: init.foreignKeys ?? null,
     }
     this.db.run(
       `insert into tenants
          (name, created_at, page_size, quota_bytes, deleted_at, epoch, txid, checksum,
-          db_size_pages, wal_salt1, wal_salt2, wal_frame, clean, role)
-       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+          db_size_pages, wal_salt1, wal_salt2, wal_frame, clean, role, foreign_keys)
+       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
        on conflict(name) do update set
          created_at = excluded.created_at, page_size = excluded.page_size,
          quota_bytes = excluded.quota_bytes, deleted_at = null, epoch = excluded.epoch,
          txid = excluded.txid, checksum = excluded.checksum,
          db_size_pages = excluded.db_size_pages, wal_salt1 = excluded.wal_salt1,
          wal_salt2 = excluded.wal_salt2, wal_frame = excluded.wal_frame, clean = 1,
-         role = excluded.role`,
+         role = excluded.role, foreign_keys = excluded.foreign_keys`,
       [
         row.name,
         row.createdAtMs,
@@ -252,6 +273,7 @@ export class Catalog implements RevocationList {
         row.walSalt2,
         row.walFrame,
         row.role,
+        row.foreignKeys === null ? null : row.foreignKeys ? 1 : 0,
       ],
     )
     return row
@@ -261,6 +283,21 @@ export class Catalog implements RevocationList {
   setRole(name: string, role: TenantRole): void {
     this.#assertOpen()
     this.db.run("update tenants set role = ? where name = ?", [role, name])
+  }
+
+  /**
+   * Per-database `PRAGMA foreign_keys`. `null` clears the override and the database follows
+   * `[sqlite] foreignKeys` again.
+   *
+   * The pragma is per *connection*, so the caller has to release the tenant for the new value to
+   * be reached — `TenantRegistry.setForeignKeys` is the entry point that does both.
+   */
+  setForeignKeys(name: string, value: boolean | null): void {
+    this.#assertOpen()
+    this.db.run("update tenants set foreign_keys = ? where name = ?", [
+      value === null ? null : value ? 1 : 0,
+      name,
+    ])
   }
 
   getTenant(name: string, options: { includeDeleted?: boolean } = {}): TenantRow | null {

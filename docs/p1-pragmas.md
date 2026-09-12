@@ -58,8 +58,19 @@ that succeeds today can start failing with `SQLITE_CONSTRAINT_FOREIGNKEY`. So it
 node-level switch and defaults off.
 
 It belongs per database rather than per node, which needs a catalog column and a lifecycle route;
-that is deliberately not in this milestone. A node that wants enforcement turns it on for every
-database it serves.
+that was deliberately not in this milestone.
+
+**Both are built now.** `tenants.foreign_keys` is a **nullable** integer and `PATCH /v1/db/{db}`
+sets it, with three states rather than two: `true`, `false`, and `null` to clear the override and
+follow `[sqlite] foreignKeys` again. Nullable is the decision — "nobody has said" is not the same
+fact as "off", and collapsing them would mean a node that later turns the node-level switch on
+could not reach a database created before it did. `GET /v1/db/{db}` reports the live value.
+
+The pragma is per *connection*, so setting it releases the tenant and the next open applies it —
+the same thing `Promoter.#flip` does for a role change, and for the same reason: a value written to
+the catalog under a live connection is not reached until that connection happens to be evicted.
+`test/server/settings.test.ts` asks SQLite itself (`pragma foreign_keys`) rather than reading back
+our own record, and checks that an orphan insert is actually refused once it is on.
 
 ## What could not be reached, and now can
 

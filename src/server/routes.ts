@@ -707,9 +707,12 @@ export const listDbs: Handler = async (ctx) => {
 export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, unknown> {
   const stats = tenant.stats()
   const realtime = runtime.realtimeOf(tenant.name)
+  const row = runtime.registry.list().find((one) => one.name === tenant.name)
   return {
     name: stats.name,
     role: stats.role,
+    // null means "follows `[sqlite] foreignKeys`", which is what almost every database does.
+    foreignKeys: row?.foreignKeys ?? null,
     sizeBytes: stats.sizeBytes,
     walBytes: stats.walBytes,
     logBytes: stats.logBytes,
@@ -734,6 +737,38 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
 
 export const statDb: Handler = async (ctx) => {
   const { tenant } = await open(ctx, "ro")
+  return json(statsOf(ctx.runtime, tenant))
+}
+
+/**
+ * Per-database settings (`docs/p1-pragmas.md`). One key so far, and the shape is built for more.
+ *
+ * `foreignKeys` has three states, not two: `true`, `false`, and `null` to clear the override and
+ * follow `[sqlite] foreignKeys` again. "Nobody has said" is not the same fact as "off" — collapsing
+ * them would mean a node that later turns the node-level switch on could not reach a database
+ * created before it did.
+ *
+ * `PRAGMA foreign_keys` is per *connection*, so setting it releases the tenant and the next open
+ * applies it. Any transaction open on it at the time ends the way an eviction ends it.
+ */
+export const updateDb: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const name = dbName(ctx)
+  requirePrimaryFor(ctx, name)
+  const body = await readJson<{ foreignKeys?: boolean | null }>(
+    ctx,
+    ctx.runtime.config.limits.maxBodyBytes,
+  )
+  if (!ctx.runtime.registry.has(name)) throw BunQLError.dbNotFound(name)
+  if (body.foreignKeys !== undefined) {
+    if (body.foreignKeys !== null && typeof body.foreignKeys !== "boolean") {
+      throw BunQLError.badRequest("foreignKeys must be true, false, or null to follow the node")
+    }
+    ctx.runtime.evict(name)
+    ctx.runtime.registry.setForeignKeys(name, body.foreignKeys)
+  }
+  const tenant = ctx.runtime.tenant(name)
+  ctx.txid = Number(tenant.txid)
   return json(statsOf(ctx.runtime, tenant))
 }
 

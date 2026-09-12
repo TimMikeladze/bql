@@ -87,6 +87,11 @@ const DbStats = s
     liveQueries: s.int(),
     subscribers: s.int(),
     lastSnapshotTxid: s.union([s.int(), s.null()]),
+    foreignKeys: s
+      .union([s.boolean(), s.null()])
+      .describe(
+        "This database's own `PRAGMA foreign_keys`, or null when it follows `[sqlite] foreignKeys`.",
+      ),
     apply: s
       .string()
       .describe(
@@ -409,6 +414,22 @@ const SPECS: Spec[] = [
     response: DbStats,
     errors: ON_DB,
     handler: handlers.statDb,
+  },
+  {
+    id: "updateDatabase",
+    method: "patch",
+    path: "/v1/db/:db",
+    summary: "Change one database's settings",
+    description:
+      "`foreignKeys` takes true, false, or null to clear the override and follow " +
+      "`[sqlite] foreignKeys` again. The pragma is per connection, so the database is closed and " +
+      "reopened; anything open on it ends as an eviction ends it.",
+    tags: ["lifecycle"],
+    security: "admin",
+    body: s.object({ foreignKeys: s.union([s.boolean(), s.null()]).optional() }),
+    response: DbStats,
+    errors: [...ON_DB, "NOT_PRIMARY"],
+    handler: handlers.updateDb,
   },
   {
     id: "deleteDatabase",

@@ -223,6 +223,7 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `POST /v1/db` | create or fork | admin |
 | `DELETE /v1/db/:db` | delete | admin |
 | `GET /v1/db/:db` | stats | `ro` |
+| `PATCH /v1/db/:db` | change one database's settings | admin |
 | `POST /v1/db/:db/batch` | many statements | `ro`, `rw` for the ones that write |
 | `GET /v1/db/:db/backup` | S3 shipper position and manifest | admin |
 | `GET /v1/db/:db/backup/generations` | every generation in the bucket | admin |
@@ -1468,6 +1469,24 @@ down, converted into the worker's own monotonic clock, because each worker threa
 **86 573 writes/s against a plain one's 86 754**, because `assertWritable` on a worker is the same
 `Map.get` and `performance.now()` it is on one thread and costs no message at all.
 `bun run bench/workers.ts --cluster`.
+
+### Per-database settings
+
+`PATCH /v1/db/{db}` changes settings that belong to one database rather than to the node.
+
+```json
+{ "foreignKeys": true }
+```
+
+`foreignKeys` has **three** states: `true`, `false`, and `null` to clear the override so the
+database follows `[sqlite] foreignKeys` again. "Nobody has said" is deliberately not the same fact
+as "off" — collapsing them would mean a node that later turns the node-level switch on could not
+reach a database created before it did. `GET /v1/db/{db}` reports the live value, `null` for the
+databases that follow the node, which is almost all of them.
+
+`PRAGMA foreign_keys` is per **connection**, so this closes and reopens the database: anything open
+on it ends the way an eviction ends it. Turning it on can make writes that succeed today start
+failing `SQLITE_CONSTRAINT_FOREIGNKEY`, which is the whole point of it being opt-in.
 
 ### Placement, in a cluster
 
