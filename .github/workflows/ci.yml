@@ -1,0 +1,63 @@
+# Invariant: every leg of this workflow proves the same thing on both platforms — that BunQL
+# builds the libsqlite3 it needs from a pinned source, type-checks, and passes its whole suite.
+# Nothing here needs a secret, and nothing here reaches a network service the tests do not start
+# themselves: the storage tests use the in-process FakeS3 unless BUNQL_TEST_S3_ENDPOINT names a
+# real bucket, and this workflow never sets it.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is arm64, ubuntu-latest is x64, so between them the matrix covers both
+        # architectures as well as both platforms.
+        os: [macos-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # package.json `engines` asks for >=1.4.0; CI pins an exact one so a Bun release cannot
+          # turn a green branch red on its own.
+          bun-version: 1.4.2
+
+      # scripts/sqlite.ts holds both the pinned SQLite version and the flag list, so its hash is
+      # exactly the identity of the artefact. Change either and the cache misses, as it should.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/sqlite
+          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sqlite.ts') }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: build libsqlite3
+        run: bun run sqlite:build
+
+      - name: report the library under test
+        run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
+
+      - run: bun run typecheck
+
+      - run: bun test
+
+      - name: docs/api.md covers every route
+        run: bun run scripts/routes.ts --check

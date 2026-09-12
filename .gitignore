@@ -7,3 +7,6 @@ experiments/*.so
 experiments/big.bin*
 node_modules/
 data/
+
+# the vendored libsqlite3 built by `bun run sqlite:build`
+vendor/

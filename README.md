@@ -335,9 +335,24 @@ db.onUpdate((op, dbName, table, rowid) => console.log(op, table, rowid))
 db.close()
 ```
 
-`libsqlite3` is located from `BUNQL_SQLITE_LIB`, else from the usual Homebrew and Linux paths.
-On macOS install a full build with `brew install sqlite`; Apple's system library is compiled
-without the session and preupdate extensions.
+### The libsqlite3 it runs on
+
+The driver needs a libsqlite3 built with `SQLITE_ENABLE_PREUPDATE_HOOK` and
+`SQLITE_ENABLE_SESSION`, version 3.37.0 or newer. Build the one BunQL wants:
+
+```sh
+bun run sqlite:build     # needs a C compiler; writes vendor/sqlite/libsqlite3.{dylib,so}
+```
+
+It fetches a pinned SQLite amalgamation, checks it against a pinned hash, compiles it with the
+flags the driver resolves symbols against, and verifies the result before leaving it behind.
+Nothing to configure afterwards — it is found automatically.
+
+Failing that, the library is located from `BUNQL_SQLITE_LIB`, else from the usual Homebrew and
+Linux paths. Homebrew's (`brew install sqlite`) qualifies and Debian's and Ubuntu's do; Apple's
+system library does not, being compiled without the session and preupdate extensions. Only the
+vendored build has `sqlite3_snapshot_*`. `bun run scripts/sqlite.ts --explain` prints every flag
+and why it is there, and `docs/c6-packaging.md` has the measurements behind those claims.
 
 ## WAL shipping
 
@@ -419,8 +434,10 @@ against, and the machine it came from are in [docs/benchmarks.md](docs/benchmark
 ## Tests
 
 ```sh
-bun test              # 861 tests, including test/e2e/ — the whole product in two scenarios
+bun run sqlite:build  # the libsqlite3 everything below runs on; once per machine
+bun test              # 936 tests, including test/e2e/ — the whole product in two scenarios
 bun run typecheck
+bun run routes:check  # docs/api.md covers every route
 bun run bench         # every benchmark, then the design §10 table and the phase-1 table
 bun run bench --quick # the same, with fewer rounds
 
@@ -431,6 +448,9 @@ bun run bench:http    # HTTP, WebSocket and Hrana, with the load client in its o
 bun run bench:replication  # two nodes over a real socket: latency, forwarding, ack levels
 bun run bench:storage     # shipping to an in-process S3
 ```
+
+CI runs all of that on `macos-latest` (arm64) and `ubuntu-latest` (x64) for every push and pull
+request to `main` — see `.github/workflows/ci.yml` and [docs/c6-packaging.md](docs/c6-packaging.md).
 
 `test/e2e/scenario.test.ts` is the single-node story end to end; `test/e2e/phase1.test.ts` is the
 cluster one — a primary, two replicas, a bucket and a `@libsql/client`, all at once, over real

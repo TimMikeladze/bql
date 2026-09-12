@@ -439,7 +439,8 @@ describe("library and feature detection", () => {
     const lib = sqlite()
     expect(lib.path.length).toBeGreaterThan(0)
     expect(lib.version).toMatch(/^3\.\d+\.\d+/)
-    expect(lib.versionNumber).toBeGreaterThanOrEqual(3_035_000)
+    // 3.37.0 is the floor `CORE` sets: sqlite3_changes64 does not exist before it.
+    expect(lib.versionNumber).toBeGreaterThanOrEqual(3_037_000)
     expect(lib.compileOptions.length).toBeGreaterThan(0)
   })
 

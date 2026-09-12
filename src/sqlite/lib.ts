@@ -1,15 +1,43 @@
 // Invariant: exactly one libsqlite3 is loaded per process, and every capability beyond the
 // baseline C API is proven present before it is offered — either by a symbol that resolved or
 // by a flag reported in PRAGMA compile_options. Nothing here guesses.
+//
+// The search order is deliberate: an explicit `BUNQL_SQLITE_LIB`, then the library
+// `bun run sqlite:build` vendors into `vendor/sqlite/`, then whatever the system has. The
+// vendored build sits ahead of the system one because it is the only one we know the flags of;
+// a distribution build is a guess that happens to be right most of the time. When nothing loads,
+// or the one that loads is too old for the core API, the error names the library, the reason and
+// the fix — see `MIN_VERSION` and `remedy()`.
 
 import { dlopen, FFIType as T, ptr, CString } from "bun:ffi"
 import { SQLITE_OK, SQLITE_ROW } from "./constants.ts"
+
+/**
+ * The oldest SQLite whose symbols satisfy `CORE`. `sqlite3_changes64` and
+ * `sqlite3_total_changes64` arrived in 3.37.0 and set the floor; a library older than that fails
+ * to `dlopen` at all, which reads as "no library" unless we say otherwise.
+ */
+export const MIN_VERSION = "3.37.0"
+
+/** Where `bun run sqlite:build` puts its artefact, relative to the package root. */
+function vendoredPath(): string | null {
+  const name =
+    process.platform === "darwin"
+      ? "libsqlite3.dylib"
+      : process.platform === "linux"
+        ? "libsqlite3.so"
+        : null
+  if (!name) return null
+  return new URL(`../../vendor/sqlite/${name}`, import.meta.url).pathname
+}
 
 /** Candidate paths tried in order when `BUNQL_SQLITE_LIB` is unset. */
 export function candidatePaths(): string[] {
   const out: string[] = []
   const env = process.env.BUNQL_SQLITE_LIB
   if (env) out.push(env)
+  const vendored = vendoredPath()
+  if (vendored) out.push(vendored)
   out.push(
     "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
     "/usr/local/opt/sqlite/lib/libsqlite3.dylib",
@@ -315,7 +343,7 @@ export function sqlite(): SqliteLibrary {
  * memoizes and uses the real candidate list.
  */
 export function loadFrom(candidates: readonly string[]): SqliteLibrary {
-  const tried: string[] = []
+  const tried: Attempt[] = []
   let core: { symbols: unknown } | null = null
   let path = ""
   for (const candidate of candidates) {
@@ -324,17 +352,10 @@ export function loadFrom(candidates: readonly string[]): SqliteLibrary {
       path = candidate
       break
     } catch (err) {
-      tried.push(`${candidate}: ${(err as Error).message}`)
+      tried.push(describeFailure(candidate, err as Error))
     }
   }
-  if (!core) {
-    throw new Error(
-      "BunQL could not load a libsqlite3 shared library. Set BUNQL_SQLITE_LIB to its full path " +
-        "(on macOS: brew install sqlite, then " +
-        "BUNQL_SQLITE_LIB=/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib).\nTried:\n  " +
-        tried.join("\n  "),
-    )
-  }
+  if (!core) throw noLibraryError(tried)
 
   const wide = dlopen(path, WIDE).symbols as unknown as WideSymbols
   const preupdate = tryOpen<PreupdateSymbols>(path, PREUPDATE)
@@ -368,6 +389,69 @@ export function loadFrom(candidates: readonly string[]): SqliteLibrary {
       threadsafe: threadsafeOpt ? Number(threadsafeOpt.slice("THREADSAFE=".length)) : 1,
     },
   }
+}
+
+/** One candidate that did not work out. The three cases read very differently to a human. */
+interface Attempt {
+  readonly path: string
+  /**
+   * `"absent"`: nothing to open. `"foreign"`: a shared library, but not a libsqlite3.
+   * `"stale"`: a real libsqlite3, missing a symbol `CORE` needs — so older than `MIN_VERSION`.
+   */
+  readonly kind: "absent" | "foreign" | "stale"
+  readonly detail: string
+}
+
+function describeFailure(path: string, err: Error): Attempt {
+  const message = err.message.split("\n")[0] ?? err.message
+  // bun:ffi says `Symbol "x" not found in "lib"` when the file opened but a symbol did not
+  // resolve. That is a library that exists, which is a different problem from one that is not
+  // installed; and within it, a file with no `sqlite3_libversion` at all is not SQLite, while one
+  // that has it but lacks a later addition is SQLite that predates the addition.
+  const symbol = /Symbol "([^"]+)" not found/.exec(message)?.[1]
+  if (symbol === "sqlite3_libversion") {
+    return { path, kind: "foreign", detail: "opened, but it is not a libsqlite3" }
+  }
+  if (symbol) return { path, kind: "stale", detail: `loaded, but has no ${symbol}` }
+  return { path, kind: "absent", detail: message }
+}
+
+function noLibraryError(tried: readonly Attempt[]): Error {
+  const stale = tried.find((a) => a.kind === "stale")
+  const lead = stale
+    ? `BunQL found a libsqlite3 but it is too old: ${stale.path} ${stale.detail}. ` +
+      `The driver's core API needs SQLite ${MIN_VERSION} or newer.`
+    : "BunQL could not load a libsqlite3 shared library."
+  return new Error(
+    `${lead}\n\n${remedy()}\n\nTried:\n  ` +
+      tried.map((a) => `${a.path}: ${a.detail}`).join("\n  "),
+  )
+}
+
+/**
+ * What to actually do about a library that is missing or under-built. One definition, because
+ * every such failure wants the same three sentences and they should not drift apart.
+ */
+export function remedy(): string {
+  const vendored = vendoredPath()
+  return (
+    "Build the library BunQL needs:\n" +
+    "  bun run sqlite:build\n" +
+    (vendored ? `and it will be found at ${vendored}.\n` : "") +
+    "Or point BUNQL_SQLITE_LIB at a libsqlite3 of your own — it must be built with " +
+    "SQLITE_ENABLE_PREUPDATE_HOOK and SQLITE_ENABLE_SESSION. On macOS, Homebrew's " +
+    "(brew install sqlite, /opt/homebrew/opt/sqlite/lib/libsqlite3.dylib) qualifies; Apple's " +
+    "system build does not."
+  )
+}
+
+/**
+ * The message for a library that loaded but cannot do what a caller asked of it. Names the
+ * capability, the file that was actually loaded, and the fix — a bare "built without
+ * SQLITE_ENABLE_SESSION" tells someone what is wrong and nothing about what to do next.
+ */
+export function capabilityDetail(lib: SqliteLibrary, buildFlag: string): string {
+  return `${lib.path} (SQLite ${lib.version}) was built without ${buildFlag}.\n\n${remedy()}`
 }
 
 function tryOpen<S>(path: string, defs: Record<string, unknown>): S | null {
