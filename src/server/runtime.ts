@@ -26,7 +26,7 @@ import {
   AckTracker,
   NoReplicas,
   ReplicaClient,
-  ReplicaOffline,
+  ReplicaNotice,
   type ReplicaView,
   ReplicationServer,
 } from "../replication/index.ts"
@@ -154,9 +154,10 @@ export class ServerRuntime {
     this.#onError =
       options.onError ??
       ((err: unknown) =>
-        // A replica reporting that it cannot reach its primary is operational news, not a fault
-        // in this process; printing its stack would bury the faults that do have one.
-        err instanceof ReplicaOffline
+        // A replica reporting that it cannot reach its primary, or that it has let a database go,
+        // is operational news, not a fault in this process; printing its stack would bury the
+        // faults that do have one. `ReplicaNotice` is the base of every such notice.
+        err instanceof ReplicaNotice
           ? console.error(`bunql: ${err.message}`)
           : console.error("bunql: server runtime", err))
     this.registry =

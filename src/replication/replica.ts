@@ -283,7 +283,7 @@ export class ReplicaClient {
     this.#onError =
       options.onError ??
       ((err: unknown) =>
-        err instanceof ReplicaOffline
+        err instanceof ReplicaNotice
           ? console.error(`bunql: ${err.message}`)
           : console.error("bunql: replica", err))
     this.#factory =
