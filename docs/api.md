@@ -381,12 +381,18 @@ POST /v1/db/acme/snapshot   {}
 POST /v1/db/acme/restore    { "at": 4800, "into": "acme-recovered" }
 → 201 { "name": "acme-recovered", "txid": 4800, "from": "acme", "at": 4800 }
 
+POST /v1/db/acme/restore    { "from": "s3", "at": 4800, "into": "acme-recovered" }
+→ 201 { "name": "acme-recovered", "from": "acme", "source": "s3", "bucket": "backups",
+        "prefix": "bunql/", "generation": "fd4312b8c8655fc7", "txid": 4800,
+        "fromTxid": 4750, "applied": 50, "objects": 2, "bytes": 98304 }
+
 POST /v1/db/acme/checkpoint { "mode": "TRUNCATE" }
 → { "mode": "TRUNCATE", "busy": false, "log": 0, "checkpointed": 0, "walBytes": 0, "txid": 4812 }
 
 GET  /v1/db/acme/replication                                          (on a primary)
 → { "db": "acme", "txid": 4812, "epoch": 0, "checksum": "1734…",
     "lastSnapshot": { "txid": 4800, "bytes": 81920, "at": 1789… },
+    "s3": { "shippedTxid": 4812, "pendingRecords": 0, "behind": false, … },
     "role": "primary",
     "replicas": [ { "node": "repl-1", "stream": 1, "txid": 4812, "lag": 0,
                     "ackedAt": 1789…, "fsynced": true } ] }
@@ -398,8 +404,60 @@ GET  /v1/db/acme/replication                                          (on a repl
 ```
 
 `restore` always builds a **new** database — `into` names it, and without it the name is
-`<db>-restore-<txid>`. Restoring in place would leave the log holding records past the restore
-point that no longer describe the file.
+`<db>-restore-<txid>` (`<db>-restore` for a bucket restore). Restoring in place would leave the
+log holding records past the restore point that no longer describe the file.
+
+`{"from": "s3"}` restores from the backup bucket instead of the local log, so the database being
+restored need not exist on this node at all — which is what makes it a recovery path rather than a
+rewind. `at` is a txid or a timestamp, as above; omitted, it means the newest point the bucket
+holds. `bucket`, `prefix` and `generation` override the node's own `[s3]` settings so one node can
+read another's backup; credentials are always the node's and never travel in the request.
+
+The `s3` block on `GET /v1/db/{db}/replication` is the shipper's state, in full:
+`{bucket, prefix, endpoint, generation, shippedTxid, pendingRecords, pendingBytes, behind,
+lastError, lastShipMs, lastShipAtMs, bytesShipped, errors, snapshots, segments,
+lastSnapshotTxid}`. It is `null` on a node with no bucket configured.
+
+### S3 backup
+
+Continuous backup of every database's log and snapshots to any S3-compatible bucket — AWS S3,
+Cloudflare R2, Tigris, MinIO — over `Bun.S3Client`. Turned on by `[s3] bucket`. The bucket layout
+is a **contract**, specified in full in `docs/r3-storage.md` §1; a restore depends on it and
+nothing else.
+
+```http
+GET  /v1/db/acme/backup
+→ { "db": "acme", "enabled": true, "bucket": "backups", "prefix": "bunql/",
+    "endpoint": "https://…", "retention": "30d",
+    "shipper": { "shippedTxid": 4812, "pendingRecords": 0, "pendingBytes": 0,
+                 "behind": false, "lastError": null, "lastShipMs": 7,
+                 "lastShipAtMs": 1789…, "bytesShipped": 4203913, "errors": 0,
+                 "snapshots": 2, "segments": 31, "lastSnapshotTxid": 4800 },
+    "manifest": { "generation": "fd43…", "shippedTxid": 4812, "snapshots": 2,
+                  "segments": 31, "oldestTxid": 1, "generations": [ … ] },
+    "error": null }
+
+POST /v1/db/acme/backup/verify  { "at": 4800 }
+→ 200 { "ok": true, "db": "acme", "generation": "fd43…", "at": 4800, "latest": 4812,
+        "fromSnapshotTxid": 4750, "segments": 2, "records": 50, "bytes": 98304,
+        "missing": [], "generations": [ … ] }
+→ 409 when an object the manifest names is absent or the wrong size; `missing` says which
+
+GET  /v1/db/acme/backup/generations
+→ { "db": "acme", "bucket": "backups", "prefix": "bunql/", "generations": [ … ] }
+```
+
+All three need the admin key. `verify` downloads nothing and writes nothing: it checks the
+manifest describes a contiguous timeline to `at` and that every object on the path exists at the
+recorded size. A bucket with no manifest is `404 S3_NO_MANIFEST`; a target the inventory cannot
+reach is `400 S3_INCOMPLETE` naming the shortfall; an object whose body does not match its
+recorded hash is `400 S3_CORRUPT`; a node with no bucket is `503 S3_DISABLED`.
+
+Shipping never blocks a commit. A bucket that is slow or unreachable makes `behind` true and
+`bunql_s3_errors_total` climb while writes are answered at their usual latency, and the shipper
+catches up from the local log when the bucket returns. Retention in the bucket (`[s3] retention`,
+default 30 d) removes snapshots past the window and the segments wholly below the oldest snapshot
+that survives — never one a surviving snapshot would need to replay from.
 
 `GET /v1/db/{db}/dump` snapshots the database and streams the file as `application/vnd.sqlite3`
 with a `Content-Disposition` naming `<db>-<txid>.db`. `POST /v1/db/{db}/import` takes a raw SQLite
@@ -441,6 +499,12 @@ Three more counters cover R2's paths: `bunql_forwarded_writes_total` (writes thi
 to its primary), `bunql_ack_timeouts_total` (writes that committed locally and then ran out of
 patience waiting for replica acks) and `bunql_tx_queued_total` (interactive transactions that
 waited for the writer instead of failing `TX_BUSY`).
+
+A node with `[s3] bucket` set adds five: `bunql_s3_shipped_txid` (the highest txid any database
+has in the bucket), `bunql_s3_pending_records` and `bunql_s3_behind` (gauges), and
+`bunql_s3_errors_total` and `bunql_s3_bytes_total` (counters). Alert on `bunql_s3_behind` and on
+`bunql_s3_shipped_txid` not advancing; a node with no bucket omits all five rather than exporting
+zeroes.
 
 ### Node-to-node replication
 
@@ -769,6 +833,7 @@ in-process code with the data directory already open. Tokens start applying agai
 ```
 bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
             [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
+            [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
 bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
 bunql db list
 bunql db stat <name>
@@ -776,6 +841,10 @@ bunql db delete <name>
 bunql db fork <name> --from <db>[@<txid|time>]
 bunql snapshot <db>
 bunql restore <db> --at <txid|time> [--into <name>]
+bunql restore <db> --from s3://bucket/prefix [--at <txid|time>] [--into <name>] [--generation G]
+bunql backup status <db>
+bunql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
+bunql backup generations <db>
 bunql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
 bunql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
 bunql exec <db> --sql "select 1"
@@ -804,6 +873,19 @@ the primary announces. A pair is two commands:
 bunql serve --dir ./p --port 4501 --cluster-secret $SECRET
 bunql serve --dir ./r --port 4502 --cluster-secret $SECRET \
             --replica-of ws://127.0.0.1:4501/v1/replication
+```
+
+`serve --s3 s3://bucket/prefix` turns on continuous backup. Credentials deliberately have **no
+flag** — they belong in `bunql.toml` or the environment (`BUNQL_S3_ACCESS_KEY_ID`,
+`BUNQL_S3_SECRET_ACCESS_KEY`, or Bun's own `AWS_*` / `S3_*`), not in a shell history or a process
+listing. `bunql restore <db> --from s3://…` recovers a database onto a node that has never seen
+it, which is the whole point of the bucket:
+
+```sh
+bunql serve --dir ./node --port 4321 --s3 s3://backups/prod --s3-endpoint https://…
+bunql backup status acme
+bunql backup verify acme --at 2026-09-11T10:00:00Z
+bunql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
 ```
 
 ---
@@ -865,9 +947,29 @@ the canonical one wins when both are set.
 | `[replication] forwardWrites` | `true` | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
 | `[replication] forwardTimeoutMs` | `10000` | `BUNQL_REPLICATION_FORWARD_TIMEOUT_MS` | — |
 | `[replication] maxForwards` | `256` | `BUNQL_REPLICATION_MAX_FORWARDS` | — |
+| `[s3] enabled` | `false`; `true` once `bucket` is set | `BUNQL_S3_ENABLED` | — |
+| `[s3] bucket` | `""` (no shipping); also accepts `s3://bucket/prefix` | `BUNQL_S3_BUCKET` | `BUNQL_S3_URL` |
+| `[s3] region` | `""` (Bun's own resolution) | `BUNQL_S3_REGION` | — |
+| `[s3] endpoint` | `""` (AWS); required for R2, Tigris, MinIO | `BUNQL_S3_ENDPOINT` | — |
+| `[s3] prefix` | `"bunql/"` | `BUNQL_S3_PREFIX` | — |
+| `[s3] accessKeyId` | `""` (Bun's `S3_*` / `AWS_*`) | `BUNQL_S3_ACCESS_KEY_ID` | — |
+| `[s3] secretAccessKey` | `""` (Bun's `S3_*` / `AWS_*`) | `BUNQL_S3_SECRET_ACCESS_KEY` | — |
+| `[s3] sessionToken` | `""` | `BUNQL_S3_SESSION_TOKEN` | — |
+| `[s3] virtualHostedStyle` | `false` | `BUNQL_S3_VIRTUAL_HOSTED_STYLE` | — |
+| `[s3] shipIntervalMs` | `1000` | `BUNQL_S3_SHIP_INTERVAL_MS` | — |
+| `[s3] snapshotIntervalMs` | `3600000` (0 disables) | `BUNQL_S3_SNAPSHOT_INTERVAL_MS` | — |
+| `[s3] snapshotEveryBytes` | `67108864` (0 disables) | `BUNQL_S3_SNAPSHOT_EVERY_BYTES` | — |
+| `[s3] retention` | `"30d"` (`"0"` keeps everything) | `BUNQL_S3_RETENTION` | — |
+| `[s3] concurrency` | `4` | `BUNQL_S3_CONCURRENCY` | — |
+| `[s3] maxPendingBytes` | `67108864` | `BUNQL_S3_MAX_PENDING_BYTES` | — |
+| `[s3] retries` | `4` | `BUNQL_S3_RETRIES` | — |
 
 Setting `[replication] primary` makes the node a replica; `role` need not be set as well. A
 replica with no `primary` is refused at start.
+
+Setting `[s3] bucket` turns shipping on the same way. `enabled = false` keeps the bucket
+configured without shipping to it, which is how a recovery node reads a backup it does not write.
+A `[s3] retention` that is not a duration is refused at start rather than silently ignored.
 
 One more, outside the config file: `BUNQL_SQLITE_LIB` names the `libsqlite3` the driver loads.
 Without it the usual Homebrew and Linux paths are tried.
@@ -891,9 +993,15 @@ document is not edited; this is the list.
 | §5.4 read-your-writes across nodes | R2. `BunQL-Min-Txid` waits on the applier; every response carries `BunQL-Txid` and `BunQL-Role` |
 | §5.2 a new database reaches a wildcard replica at once | R2. The primary announces its database list on create, import and delete |
 | §5.2 replica realtime | R2, in part: live queries converge, the change feed is txid-only. See "Realtime on a replica" above |
+| §4.4 S3 shipper (`Bun.S3Client`, snapshots + segments, retention) | R3. `[s3] bucket` turns it on; see "S3 backup" above |
+| §4.4 restore from a bucket by txid or timestamp | R3. `POST /v1/db/{db}/restore {"from":"s3"}` and `bunql restore --from s3://…` |
+| §6.5 "S3 position" on `GET /v1/db/{db}/replication` | R3, as the `s3` block |
+| §9.4 `[s3]` | R3, with every key taking a `BUNQL_S3_*` override |
+| `next.md`: `src/wal/log.ts` cold open walks every record header | R3. A sidecar segment index; 2.69 ms → 0.36 ms at 6k records |
 
-The as-built notes are `docs/r1-replication.md` (transport) and `docs/r2-durability.md`
-(durability, forwarding, the transaction queue).
+The as-built notes are `docs/r1-replication.md` (transport), `docs/r2-durability.md`
+(durability, forwarding, the transaction queue) and `docs/r3-storage.md` (the bucket layout
+contract, the shipper and restore).
 
 ### Not implemented in phase 0
 

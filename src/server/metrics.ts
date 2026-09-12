@@ -25,6 +25,21 @@ export interface ReplicationMetrics {
   records: number
 }
 
+/**
+ * What `/metrics` reports about the S3 shipper. Absent on a node with no bucket, for the same
+ * reason the replication block is: a zero shipped txid on a node that ships nothing is a lie a
+ * dashboard will alert on. `shippedTxid` is the highest across databases and `pendingRecords` the
+ * sum, because this file is per process and never per database.
+ */
+export interface StorageMetrics {
+  shippedTxid: number
+  pendingRecords: number
+  errors: number
+  bytes: number
+  /** Databases whose bucket is behind their tenant right now. The one to alert on. */
+  behind: number
+}
+
 export interface MetricsSnapshot {
   requests: number
   requestsByClass: Record<string, number>
@@ -185,6 +200,7 @@ export class Metrics {
     registry: { open: number; tenants: number; evictions: number },
     node: string,
     replication?: ReplicationMetrics | null,
+    storage?: StorageMetrics | null,
   ): string {
     const labels = `node="${node.replaceAll('"', "")}"`
     const out: string[] = []
@@ -281,6 +297,30 @@ export class Metrics {
         "Transaction records streamed (primary) or applied (replica).",
         replication.records,
       )
+    }
+
+    if (storage) {
+      gauge(
+        "bunql_s3_shipped_txid",
+        "Highest txid any database has shipped to the bucket.",
+        storage.shippedTxid,
+      )
+      gauge(
+        "bunql_s3_pending_records",
+        "Committed transactions not yet in the bucket, across every database.",
+        storage.pendingRecords,
+      )
+      gauge(
+        "bunql_s3_behind",
+        "Databases whose bucket is behind their local log right now.",
+        storage.behind,
+      )
+      counter(
+        "bunql_s3_errors_total",
+        "Failed bucket operations. A climbing count with a flat shipped txid is an outage.",
+        storage.errors,
+      )
+      counter("bunql_s3_bytes_total", "Bytes uploaded to the bucket.", storage.bytes)
     }
 
     return `${out.join("\n")}\n`

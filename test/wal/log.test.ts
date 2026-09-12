@@ -79,7 +79,11 @@ describe("appending", () => {
     fill(log, 1, 40)
     expect(log.segmentCount).toBeGreaterThan(3)
 
-    const names = fs.readdirSync(path.join(dir, "log")).sort()
+    // Sealed segments carry a sidecar index beside them, so filter to the segments themselves.
+    const names = fs
+      .readdirSync(path.join(dir, "log"))
+      .filter((name) => name.endsWith(".seg"))
+      .sort()
     expect(names[0]).toBe("00000000000000000001.seg")
     expect(names.length).toBe(log.segmentCount)
     expect(log.lastTxid).toBe(40n)

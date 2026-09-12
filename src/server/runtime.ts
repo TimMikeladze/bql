@@ -28,6 +28,7 @@ import {
 } from "../realtime/index.ts"
 import type { Publisher } from "../realtime/index.ts"
 import type { Database } from "../sqlite/index.ts"
+import { parseRetentionMs, S3Store, ShipperPool } from "../storage/index.ts"
 import {
   type AckLevel,
   type ReaderLease,
@@ -107,6 +108,12 @@ export class ServerRuntime {
   readonly acks: AckTracker
   /** R2: the path a write takes off a replica. `enabled` is false everywhere else. */
   readonly forwarder: Forwarder
+  /**
+   * R3: the S3 shipper, one per database, or null when `[s3] bucket` is unset. It attaches through
+   * the registry's `onOpen`, so every database this node opens starts shipping without anything on
+   * a request path knowing it exists.
+   */
+  readonly storage: ShipperPool | null
 
   #hubs = new WeakMap<Database, AuthorizerHub>()
   #realtime = new Map<string, TenantRealtime>()
@@ -119,6 +126,7 @@ export class ServerRuntime {
   /** Transactions waiting for the writer, per database, in arrival order (R5's finding). */
   #txQueue = new Map<string, TxWaiter[]>()
   #publisher: Publisher | null = null
+  #onTenantOpen: ((tenant: Tenant) => void) | null = null
   #onError: (err: unknown) => void
   #closed = false
 
@@ -144,8 +152,10 @@ export class ServerRuntime {
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
         onChange: (event) => this.#databasesChanged(event),
-        ...(options.onTenantOpen ? { onOpen: options.onTenantOpen } : {}),
+        onOpen: (tenant) => this.#tenantOpened(tenant),
       })
+    this.#onTenantOpen = options.onTenantOpen ?? null
+    this.storage = buildShipperPool(options.config, this.registry, this.#onError)
     this.replication = options.config.replication.secret
       ? new ReplicationServer({
           registry: this.registry,
@@ -172,8 +182,56 @@ export class ServerRuntime {
    * attached replica.
    */
   #databasesChanged(event: { kind: "create" | "delete"; name: string }): void {
-    if (event.kind === "delete") this.acks.forget(event.name)
+    if (event.kind === "delete") {
+      this.acks.forget(event.name)
+      // A deleted database keeps whatever is already in the bucket — design §6.5 says the log and
+      // the snapshots are retained per `retention` — but nothing more is shipped for it.
+      void this.storage?.forget(event.name).catch((err) => this.#onError(err))
+    }
     this.replication?.announce()
+  }
+
+  /**
+   * Every tenant the registry opens passes through here: the embedded API's process-wide commit
+   * listener, and the shipper that backs the database up. Both are "for every database this node
+   * has open", which is exactly what `onOpen` is.
+   */
+  #tenantOpened(tenant: Tenant): void {
+    try {
+      this.#onTenantOpen?.(tenant)
+    } catch (err) {
+      this.#onError(err)
+    }
+    try {
+      this.storage?.attach(tenant)
+    } catch (err) {
+      this.#onError(err)
+    }
+  }
+
+  /** Starts the shipper sweep. Called by `startServer`, beside `startReplication`. */
+  startStorage(): void {
+    if (!this.storage) return
+    this.storage.start()
+    // The registry may already hold tenants — a runtime the embedded API built, or a registry
+    // handed in by a test — and they opened before the pool existed.
+    for (const name of this.registry.openNames) {
+      try {
+        this.storage.attach(this.registry.open(name))
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
+  }
+
+  /** Ships everything outstanding and stops the shippers. Awaited by the server handle's close. */
+  async closeStorage(): Promise<void> {
+    if (!this.storage) return
+    try {
+      await this.storage.close()
+    } catch (err) {
+      this.#onError(err)
+    }
   }
 
   // ── durability levels (design §5.4) ──────────────────────────────────────────────────────────
@@ -632,6 +690,9 @@ export class ServerRuntime {
     }
     this.#txQueue.clear()
     this.acks.close()
+    // The awaitable form is `closeStorage()`, which `startServer`'s handle calls first; this is
+    // the backstop for a caller that closes the runtime directly.
+    void this.storage?.close().catch(() => {})
     for (const name of [...this.#realtime.keys()]) this.closeRealtime(name)
     this.#subscribers.clear()
     this.replica?.stop()
@@ -671,6 +732,43 @@ export class ServerRuntime {
         return encodeRows(stmt, stmt.values(...decodeArgs(args)))
       })
   }
+}
+
+/**
+ * The shipper pool for a node with `[s3] bucket` set, or null. Credentials go straight into the
+ * store and are never read back out: `S3Store` keeps them private and reports only the bucket,
+ * the region and the endpoint.
+ */
+function buildShipperPool(
+  config: ServerConfig,
+  registry: TenantRegistry,
+  onError: (err: unknown) => void,
+): ShipperPool | null {
+  const s3 = config.s3
+  if (!s3.enabled || !s3.bucket) return null
+  const store = new S3Store({
+    bucket: s3.bucket,
+    ...(s3.region ? { region: s3.region } : {}),
+    ...(s3.endpoint ? { endpoint: s3.endpoint } : {}),
+    ...(s3.accessKeyId ? { accessKeyId: s3.accessKeyId } : {}),
+    ...(s3.secretAccessKey ? { secretAccessKey: s3.secretAccessKey } : {}),
+    ...(s3.sessionToken ? { sessionToken: s3.sessionToken } : {}),
+    ...(s3.virtualHostedStyle ? { virtualHostedStyle: true } : {}),
+    concurrency: s3.concurrency,
+    retries: s3.retries,
+  })
+  return new ShipperPool({
+    registry,
+    store,
+    prefix: s3.prefix,
+    shipIntervalMs: s3.shipIntervalMs,
+    snapshotIntervalMs: s3.snapshotIntervalMs,
+    snapshotEveryBytes: s3.snapshotEveryBytes,
+    maxPendingBytes: s3.maxPendingBytes,
+    maxBatchBytes: config.durability.segmentBytes,
+    retentionMs: parseRetentionMs(s3.retention),
+    onError,
+  })
 }
 
 /** 128 random bits as hex: a baton nobody can guess and nothing else in the process reuses. */

@@ -23,6 +23,7 @@ const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
 
   bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
               [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
+              [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
   bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
   bunql db list
   bunql db stat <name>
@@ -30,6 +31,10 @@ const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
   bunql db fork <name> --from <db>[@<txid|time>]
   bunql snapshot <db>
   bunql restore <db> --at <txid|time> [--into <name>]
+  bunql restore <db> --from s3://bucket/prefix --at <txid|time> [--into <name>]
+  bunql backup status <db>
+  bunql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
+  bunql backup generations <db>
   bunql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
   bunql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
   bunql exec <db> --sql "select 1"
@@ -228,6 +233,18 @@ async function serve(args: ParsedArgs): Promise<void> {
     }
   }
   if (adminKey !== undefined) overrides.auth = { adminKey }
+  const s3Url = str(args, "s3")
+  const s3Endpoint = str(args, "s3-endpoint")
+  const s3Region = str(args, "s3-region")
+  if (s3Url !== undefined || s3Endpoint !== undefined || s3Region !== undefined) {
+    // Credentials deliberately have no flag: they belong in the environment or the config file,
+    // not in a shell history or a process listing.
+    overrides.s3 = {
+      ...(s3Url !== undefined ? parseS3Url(s3Url) : {}),
+      ...(s3Endpoint !== undefined ? { endpoint: s3Endpoint } : {}),
+      ...(s3Region !== undefined ? { region: s3Region } : {}),
+    }
+  }
   if (replicaOf !== undefined || clusterSecret !== undefined || follow !== undefined) {
     overrides.replication = {
       // `--replica-of` alone is the whole decision; `loadConfig` derives the role from it.
@@ -253,6 +270,10 @@ async function serve(args: ParsedArgs): Promise<void> {
   })
   const handle = await startServer(config)
   serving = true
+  const storage = config.s3.enabled
+    ? `\nbunql: shipping to s3://${config.s3.bucket}/${config.s3.prefix}, retention ` +
+      `${config.s3.retention}`
+    : ""
   const replication =
     config.replication.role === "replica"
       ? `\nbunql: replica of ${config.replication.primary}, following ` +
@@ -263,7 +284,7 @@ async function serve(args: ParsedArgs): Promise<void> {
   console.log(
     `bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
       `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
-      `ack ${config.durability.defaultAck}${replication}`,
+      `ack ${config.durability.defaultAck}${replication}${storage}`,
   )
   let stopping = false
   const stop = (signal: string): void => {
@@ -314,6 +335,13 @@ function envSuppressions(overrides: ServerConfigInput): Record<string, string | 
     cleared.BUNQL_FOLLOW = undefined
     cleared.BUNQL_REPLICATION_FOLLOW = undefined
   }
+  if (overrides.s3?.bucket !== undefined) {
+    cleared.BUNQL_S3_URL = undefined
+    cleared.BUNQL_S3_BUCKET = undefined
+    cleared.BUNQL_S3_PREFIX = undefined
+  }
+  if (overrides.s3?.endpoint !== undefined) cleared.BUNQL_S3_ENDPOINT = undefined
+  if (overrides.s3?.region !== undefined) cleared.BUNQL_S3_REGION = undefined
   return cleared
 }
 
@@ -407,19 +435,164 @@ async function snapshot(args: ParsedArgs, remote: Remote): Promise<void> {
   out(remote, body, `snapshot ${body.snapshotId} at txid ${body.txid} (${body.bytes} B)`)
 }
 
+/** `s3://bucket/prefix` — the spelling design §4.4 writes and the one an operator types. */
+export function parseS3Url(text: string): { bucket: string; prefix?: string } {
+  if (!text.startsWith("s3://")) {
+    throw new CliError(`--from wants s3://bucket/prefix, got ${text}`)
+  }
+  const rest = text.slice("s3://".length)
+  const slash = rest.indexOf("/")
+  const bucket = slash < 0 ? rest : rest.slice(0, slash)
+  if (bucket.length === 0) throw new CliError(`--from names no bucket: ${text}`)
+  const prefix = slash < 0 ? "" : rest.slice(slash + 1)
+  return { bucket, ...(prefix.length > 0 ? { prefix } : {}) }
+}
+
+/** A txid stays a number so the server can tell it from a timestamp; anything else is a string. */
+function atValue(at: string): number | string {
+  return /^\d+$/.test(at) ? Number(at) : at
+}
+
+interface S3RestoreBody {
+  name: string
+  from: string
+  source?: string
+  bucket?: string
+  prefix?: string
+  generation?: string
+  txid: number
+  fromTxid?: number
+  applied?: number
+  objects?: number
+  at?: number
+}
+
 async function restore(args: ParsedArgs, remote: Remote): Promise<void> {
   const name = args.positional[1]
   if (!name) throw new CliError("restore needs a database")
   const at = str(args, "at")
-  if (at === undefined) throw new CliError("restore needs --at <txid|time>")
   const into = str(args, "into")
+  const from = str(args, "from")
+
+  if (from !== undefined) {
+    const target = parseS3Url(from)
+    const body = await api<S3RestoreBody>(remote, "POST", `/v1/db/${name}/restore`, {
+      from: "s3",
+      ...target,
+      ...(at !== undefined ? { at: atValue(at) } : {}),
+      ...(into ? { into } : {}),
+      ...(str(args, "generation") ? { generation: str(args, "generation") } : {}),
+    })
+    out(
+      remote,
+      body,
+      `restored ${body.from} from s3://${body.bucket}/${body.prefix ?? ""} into ${body.name} ` +
+        `at txid ${body.txid} (${body.applied ?? 0} record(s) from ${body.objects ?? 0} object(s))`,
+    )
+    return
+  }
+
+  if (at === undefined) throw new CliError("restore needs --at <txid|time>, or --from s3://…")
   const body = await api<{ name: string; txid: number; from: string; at: number }>(
     remote,
     "POST",
     `/v1/db/${name}/restore`,
-    { at: /^\d+$/.test(at) ? Number(at) : at, ...(into ? { into } : {}) },
+    { at: atValue(at), ...(into ? { into } : {}) },
   )
   out(remote, body, `restored ${body.from}@${body.at} into ${body.name} (txid ${body.txid})`)
+}
+
+interface BackupStatusBody {
+  db: string
+  enabled: boolean
+  bucket: string | null
+  prefix: string | null
+  retention?: string
+  shipper: {
+    shippedTxid: number
+    pendingRecords: number
+    pendingBytes: number
+    behind: boolean
+    lastError: string | null
+    lastShipAtMs: number | null
+    bytesShipped: number
+    errors: number
+    snapshots: number
+    segments: number
+  } | null
+  manifest: { generation: string; shippedTxid: number; snapshots: number; segments: number } | null
+  error: string | null
+}
+
+interface VerifyBody {
+  ok: boolean
+  db: string
+  at: number
+  latest: number
+  generation: string
+  segments: number
+  records: number
+  bytes: number
+  missing: string[]
+}
+
+async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
+  const [, action, name] = args.positional
+  if (!name) throw new CliError(`backup ${action ?? ""} needs a database`)
+  const from = str(args, "from")
+  const target = from === undefined ? {} : parseS3Url(from)
+
+  switch (action) {
+    case "status": {
+      const body = await api<BackupStatusBody>(remote, "GET", `/v1/db/${name}/backup`)
+      if (!body.enabled && !body.bucket) {
+        out(remote, body, `${name}: no [s3] bucket configured on this node`)
+        return
+      }
+      const ship = body.shipper
+      const line = ship
+        ? `${name} → s3://${body.bucket}/${body.prefix ?? ""}  shipped txid ${ship.shippedTxid}  ` +
+          `${ship.pendingRecords} pending  ${ship.behind ? "BEHIND" : "caught up"}  ` +
+          `${ship.snapshots} snapshot(s), ${ship.segments} segment(s), ${ship.errors} error(s)` +
+          (ship.lastError ? `\nlast error: ${ship.lastError}` : "")
+        : `${name} → s3://${body.bucket}/${body.prefix ?? ""}  not shipping` +
+          (body.error ? ` (${body.error})` : "")
+      out(remote, body, line)
+      return
+    }
+    case "verify": {
+      const at = str(args, "at")
+      const body = await api<VerifyBody>(remote, "POST", `/v1/db/${name}/backup/verify`, {
+        ...target,
+        ...(at !== undefined ? { at: atValue(at) } : {}),
+      })
+      out(
+        remote,
+        body,
+        body.ok
+          ? `${name} is restorable to txid ${body.at} (latest ${body.latest}) from ` +
+            `${body.segments} segment(s), ${body.records} record(s), ${body.bytes} B`
+          : `${name} is NOT restorable to txid ${body.at}: missing ${body.missing.join(", ")}`,
+      )
+      return
+    }
+    case "generations": {
+      const body = await api<{ generations: Record<string, unknown>[] }>(
+        remote,
+        "GET",
+        `/v1/db/${name}/backup/generations`,
+      )
+      if (remote.json) {
+        console.log(JSON.stringify(body, null, 2))
+        return
+      }
+      if (body.generations.length === 0) console.log("no generations")
+      else console.log(Bun.inspect.table(body.generations))
+      return
+    }
+    default:
+      throw new CliError(`unknown backup command ${JSON.stringify(action ?? "")}`)
+  }
 }
 
 async function checkpoint(args: ParsedArgs, remote: Remote): Promise<void> {
@@ -564,6 +737,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 0
       case "restore":
         await restore(args, remote)
+        return 0
+      case "backup":
+        await backup(args, remote)
         return 0
       case "checkpoint":
         await checkpoint(args, remote)

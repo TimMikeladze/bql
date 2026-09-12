@@ -38,13 +38,37 @@ Phase 1 turns the single node into a primary with replicas, on the log that alre
 
 - replica streaming over the WebSocket, with bootstrap and write forwarding — built;
 - `ack: "replica"` and `"quorum"` — semi-synchronous durability — built;
-- the S3 shipper and restore-from-S3;
+- the S3 shipper and restore-from-S3 — built, see "Back it up to a bucket" below;
 - the Hrana compatibility layer, which buys the whole libsql/Turso client ecosystem;
 - Kysely and Drizzle adapters — built, see "Use it with your ORM" below;
 - replica apply through mechanism A, removing the wal-index rebuild the current one forces.
 
 Phase 2 is the cluster: a Raft control plane, placement, leases, failover and the `moved` event.
 Nothing in either phase changes the API above; they add to it.
+
+## Back it up to a bucket
+
+Point a node at any S3-compatible bucket — AWS S3, Cloudflare R2, Tigris, MinIO — and every
+database's log and snapshots are shipped to it continuously, over Bun's own `Bun.S3Client` and
+with no dependency. Shipping never blocks a commit: a bucket that is slow or unreachable makes the
+node report `behind` while writes are answered at their usual latency, and it catches up from the
+local log when the bucket returns.
+
+```sh
+export BUNQL_S3_ACCESS_KEY_ID=… BUNQL_S3_SECRET_ACCESS_KEY=…
+bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
+
+bunql backup status acme
+# acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)
+
+bunql backup verify acme --at 2026-09-11T10:00:00Z
+bunql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+```
+
+The restore runs on a node that has never seen the database: it reads the manifest, downloads the
+newest snapshot at or before the target, and replays the segments after it through the same
+verifier a replica uses, so it either reproduces the target txid checksum for checksum or fails
+loudly. The bucket layout is a documented contract — `docs/r3-storage.md`.
 
 ## Quickstart
 

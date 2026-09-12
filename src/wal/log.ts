@@ -7,6 +7,14 @@
 // A crash can only tear the tail of the newest segment. On open every segment is walked record by
 // record; a torn tail is truncated away and named in `repaired`, so the log always reopens as a
 // clean prefix of what was durable.
+//
+// Third invariant: the sidecar index (`<startTxid>.idx`) is a *cache of that walk*, never a second
+// source of truth. It is accepted only when its magic, version, start txid and trailing hash all
+// check out, when it claims no more bytes than the segment file holds, and when the last record it
+// indexes decodes at the offset it gives with the txid it implies. Anything else is a full scan; a
+// pass resumes the scan at the byte the index stops at, so the ordinary crash — an index one flush
+// behind the file — costs a scan of the tail and nothing more. Phase 0 measured 3.1 ms of a 3.6 ms
+// cold open walking 6k record headers; this removes it.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -24,6 +32,17 @@ import {
 /** 16 MB, per design §4.4. */
 export const DEFAULT_SEGMENT_BYTES = 16 * 1024 * 1024
 
+/** `<startTxid>.idx`, the sidecar that makes a cold open cheap. */
+export const SEGMENT_INDEX_SUFFIX = ".idx"
+
+/** "BQLI" read as a little-endian u32. */
+const INDEX_MAGIC = 0x494c5142
+const INDEX_VERSION = 1
+/** magic, version, startTxid, count, segBytes, newestUs — the offsets follow. */
+const INDEX_HEADER_SIZE = 40
+/** The trailing `xxHash3` over everything before it. */
+const INDEX_HASH_SIZE = 8
+
 export type FsyncPolicy = "never" | "each" | "interval"
 
 export interface TxnLogOptions {
@@ -34,6 +53,14 @@ export interface TxnLogOptions {
   /** `"each"` fsyncs every append, `"interval"` at most once per `fsyncIntervalMs`. */
   fsync?: FsyncPolicy
   fsyncIntervalMs?: number
+  /**
+   * How often the open segment's index is rewritten while appending, in milliseconds. Default
+   * 1000. A stale index is never wrong — it only shortens the scan — so this trades index IO
+   * against how much tail a crash makes the next open walk. 0 writes one on every flush.
+   */
+  indexIntervalMs?: number
+  /** Set false to stop writing sidecar indexes at all; opening still reads one that is there. */
+  index?: boolean
 }
 
 export interface RetentionPolicy {
@@ -60,10 +87,25 @@ interface Segment {
   bytes: number
   /** Wall-clock microseconds of the newest record, from the records themselves. */
   newestUs: bigint
+  /** `bytes` as of the last index written for this segment; -1 when none has been. */
+  indexedBytes: number
 }
 
 function segmentName(startTxid: bigint): string {
   return `${startTxid.toString().padStart(20, "0")}.seg`
+}
+
+/** The sidecar beside a segment file: `…/00000000000000000001.idx`. */
+export function segmentIndexPath(segmentPath: string): string {
+  return `${segmentPath.slice(0, -4)}${SEGMENT_INDEX_SUFFIX}`
+}
+
+/** What a readable index gave us: a verified prefix of the walk, to resume from. */
+interface IndexHint {
+  count: number
+  bytes: number
+  offsets: number[]
+  newestUs: bigint
 }
 
 export class TxnLog {
@@ -72,14 +114,19 @@ export class TxnLog {
   readonly segmentBytes: number
   readonly fsyncPolicy: FsyncPolicy
   readonly fsyncIntervalMs: number
+  readonly indexIntervalMs: number
+  readonly writeIndex: boolean
 
   /** Segments whose torn tail was truncated when the log was opened. */
   readonly repaired: string[] = []
+  /** Segments whose sidecar index was unusable and had to be rebuilt by a full scan. */
+  readonly rescanned: string[] = []
 
   #segments: Segment[] = []
   #fd: number | null = null
   #openSegment: Segment | null = null
   #lastFsyncMs = 0
+  #lastIndexMs = 0
   #dirty = false
   #closed = false
 
@@ -89,9 +136,15 @@ export class TxnLog {
     this.segmentBytes = options.segmentBytes ?? DEFAULT_SEGMENT_BYTES
     this.fsyncPolicy = options.fsync ?? "interval"
     this.fsyncIntervalMs = options.fsyncIntervalMs ?? 100
+    this.indexIntervalMs = options.indexIntervalMs ?? 1000
+    this.writeIndex = options.index ?? true
   }
 
-  /** Opens (creating the directory when missing) and rebuilds the index by scanning headers. */
+  /**
+   * Opens (creating the directory when missing) and rebuilds the in-memory offset table, from
+   * each segment's sidecar index where there is a usable one and from a header walk where there
+   * is not.
+   */
   static open(options: TxnLogOptions): TxnLog {
     const log = new TxnLog(options)
     fs.mkdirSync(log.logDir, { recursive: true })
@@ -221,6 +274,41 @@ export class TxnLog {
   }
 
   /**
+   * The same records as `iterate`, still encoded. The S3 shipper wants the bytes exactly as they
+   * are on disk — a segment object is records back to back, which is what a segment file already
+   * is — so decompressing every page image only to re-encode it would be pure waste.
+   */
+  *iterateEncoded(fromTxid: bigint): IterableIterator<{ txid: bigint; bytes: Uint8Array }> {
+    this.#assertOpen()
+    const first = this.firstTxid
+    if (first === null) {
+      if (fromTxid <= 1n) return
+      throw new LogGap(fromTxid, null)
+    }
+    if (fromTxid < first) throw new LogGap(fromTxid, first)
+
+    for (const segment of this.#segments) {
+      if (segment.count === 0) continue
+      const endTxid = segment.startTxid + BigInt(segment.count - 1)
+      if (endTxid < fromTxid) continue
+      const startIndex = fromTxid > segment.startTxid ? Number(fromTxid - segment.startTxid) : 0
+      const from = segment.offsets[startIndex] as number
+      const buf = new Uint8Array(segment.bytes - from)
+      const fd = fs.openSync(segment.path, "r")
+      try {
+        fs.readSync(fd, buf, 0, buf.byteLength, from)
+      } finally {
+        fs.closeSync(fd)
+      }
+      for (let i = startIndex; i < segment.count; i++) {
+        const start = (segment.offsets[i] as number) - from
+        const end = (segment.offsets[i + 1] as number) - from
+        yield { txid: segment.startTxid + BigInt(i), bytes: buf.subarray(start, end) }
+      }
+    }
+  }
+
+  /**
    * Drops whole segments off the front. A segment survives if it holds `keepAfterTxid` or
    * anything after it, and the newest segment is never dropped.
    */
@@ -243,6 +331,9 @@ export class TxnLog {
 
       if (this.#openSegment === segment) this.#closeDescriptor()
       fs.rmSync(segment.path, { force: true })
+      // The sidecar describes a file that no longer exists; leaving it would make the next open
+      // read an index for a segment it cannot find.
+      fs.rmSync(segmentIndexPath(segment.path), { force: true })
       removed.push(segment.path)
       bytesFreed += segment.bytes
       this.#segments.shift()
@@ -256,11 +347,23 @@ export class TxnLog {
     fs.fsyncSync(this.#fd)
     this.#dirty = false
     this.#lastFsyncMs = Date.now()
+    const now = this.#lastFsyncMs
+    if (now - this.#lastIndexMs >= this.indexIntervalMs) {
+      this.#lastIndexMs = now
+      this.#saveIndex(this.#openSegment)
+    }
+  }
+
+  /** Writes every segment's sidecar index out now, whatever the interval says. */
+  saveIndexes(): void {
+    if (this.#closed) return
+    for (const segment of this.#segments) this.#saveIndex(segment)
   }
 
   close(): void {
     if (this.#closed) return
     this.flush()
+    this.#saveIndex(this.#openSegment)
     this.#closeDescriptor()
     this.#closed = true
   }
@@ -285,6 +388,9 @@ export class TxnLog {
     const last = this.#segments.at(-1)
     if (last && last.bytes < this.segmentBytes) return last
     this.flush()
+    // A segment that is being left behind is final, so its index is written once, in full, and
+    // never touched again — which is the case a cold open benefits from most.
+    this.#saveIndex(last ?? null)
     this.#closeDescriptor()
     const segment: Segment = {
       path: path.join(this.logDir, segmentName(header.txid)),
@@ -293,6 +399,7 @@ export class TxnLog {
       offsets: [0],
       bytes: 0,
       newestUs: header.timestampUs,
+      indexedBytes: -1,
     }
     this.#segments.push(segment)
     return segment
@@ -334,11 +441,14 @@ export class TxnLog {
     for (const name of names) {
       const filePath = path.join(this.logDir, name)
       const startTxid = BigInt(name.slice(0, -4))
-      const segment = this.#scan(filePath, startTxid)
+      const hint = this.#readIndex(filePath, startTxid)
+      if (hint === null) this.rescanned.push(filePath)
+      const segment = this.#scan(filePath, startTxid, hint)
       if (segment.count === 0) {
         // An empty or wholly unreadable segment carries nothing; drop it rather than keep a
         // hole that would break the dense-txid invariant.
         fs.rmSync(filePath, { force: true })
+        fs.rmSync(segmentIndexPath(filePath), { force: true })
         this.repaired.push(filePath)
         continue
       }
@@ -346,24 +456,29 @@ export class TxnLog {
     }
   }
 
-  /** Walks a segment's record headers, truncating a torn tail. */
-  #scan(filePath: string, startTxid: bigint): Segment {
+  /**
+   * Walks a segment's record headers, truncating a torn tail. `hint` is a verified index prefix,
+   * so the walk starts where the index stops rather than at byte zero.
+   */
+  #scan(filePath: string, startTxid: bigint, hint: IndexHint | null = null): Segment {
     const size = fs.statSync(filePath).size
     const segment: Segment = {
       path: filePath,
       startTxid,
-      count: 0,
-      offsets: [0],
-      bytes: 0,
-      newestUs: 0n,
+      count: hint?.count ?? 0,
+      offsets: hint ? hint.offsets : [0],
+      bytes: hint?.bytes ?? 0,
+      newestUs: hint?.newestUs ?? 0n,
+      indexedBytes: hint ? hint.bytes : -1,
     }
     if (size === 0) return segment
+    if (hint && hint.bytes === size) return segment
 
     const fd = fs.openSync(filePath, "r")
     try {
       const head = new Uint8Array(RECORD_HEADER_SIZE)
-      let at = 0
-      let expected = startTxid
+      let at = segment.bytes
+      let expected = startTxid + BigInt(segment.count)
       while (at + RECORD_HEADER_SIZE <= size) {
         const read = fs.readSync(fd, head, 0, RECORD_HEADER_SIZE, at)
         if (read < RECORD_HEADER_SIZE) break
@@ -390,7 +505,116 @@ export class TxnLog {
     if (segment.bytes < size) {
       fs.truncateSync(filePath, segment.bytes)
       this.repaired.push(filePath)
+      // The sidecar now describes a file that has been cut back; rewrite it rather than leave an
+      // index whose byte count no longer matches anything.
+      segment.indexedBytes = -1
     }
     return segment
+  }
+
+  // ── the sidecar index ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Reads `<startTxid>.idx` and returns the prefix of the walk it proves, or null when it cannot
+   * be trusted. Five things have to hold: the magic and version, the start txid the file name
+   * already implies, the trailing hash over everything before it, a byte count no larger than the
+   * segment file, and — the one check a hash cannot make — that the last record it indexes really
+   * decodes at the offset it gives, with the txid its position implies.
+   */
+  #readIndex(segmentPath: string, startTxid: bigint): IndexHint | null {
+    const indexPath = segmentIndexPath(segmentPath)
+    let raw: Buffer
+    let segmentSize: number
+    try {
+      segmentSize = fs.statSync(segmentPath).size
+      raw = fs.readFileSync(indexPath)
+    } catch {
+      return null
+    }
+    if (raw.byteLength < INDEX_HEADER_SIZE + 8 + INDEX_HASH_SIZE) return null
+
+    const bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength)
+    if (view.getUint32(0, true) !== INDEX_MAGIC) return null
+    if (view.getUint8(4) !== INDEX_VERSION) return null
+    if (view.getBigUint64(8, true) !== startTxid) return null
+
+    const count = view.getUint32(16, true)
+    const expectedLength = INDEX_HEADER_SIZE + (count + 1) * 8 + INDEX_HASH_SIZE
+    if (count === 0 || raw.byteLength !== expectedLength) return null
+
+    const stored = view.getBigUint64(raw.byteLength - INDEX_HASH_SIZE, true)
+    if (Bun.hash.xxHash3(bytes.subarray(0, raw.byteLength - INDEX_HASH_SIZE)) !== stored) {
+      return null
+    }
+
+    const indexedBytes = Number(view.getBigUint64(24, true))
+    if (!Number.isSafeInteger(indexedBytes) || indexedBytes > segmentSize) return null
+    const newestUs = view.getBigUint64(32, true)
+
+    const offsets: number[] = new Array(count + 1)
+    for (let i = 0; i <= count; i++) {
+      const offset = Number(view.getBigUint64(INDEX_HEADER_SIZE + i * 8, true))
+      if (!Number.isSafeInteger(offset) || offset > indexedBytes) return null
+      offsets[i] = offset
+    }
+    if (offsets[count] !== indexedBytes) return null
+
+    // The hash proves the index is the one that was written; this proves it was written for *this*
+    // segment file. A file replaced under a surviving sidecar fails here.
+    const lastOffset = offsets[count - 1] as number
+    try {
+      const head = new Uint8Array(RECORD_HEADER_SIZE)
+      const fd = fs.openSync(segmentPath, "r")
+      try {
+        if (fs.readSync(fd, head, 0, RECORD_HEADER_SIZE, lastOffset) < RECORD_HEADER_SIZE) {
+          return null
+        }
+      } finally {
+        fs.closeSync(fd)
+      }
+      const decoded = decodeHeader(head)
+      if (!decoded) return null
+      if (decoded.header.txid !== startTxid + BigInt(count - 1)) return null
+      if (lastOffset + decoded.byteLength !== indexedBytes) return null
+      if (decoded.header.timestampUs !== newestUs) return null
+    } catch {
+      return null
+    }
+
+    return { count, bytes: indexedBytes, offsets, newestUs }
+  }
+
+  /** Writes the sidecar through a temp file and a rename, so a torn index is never read. */
+  #saveIndex(segment: Segment | null): void {
+    if (!segment || !this.writeIndex) return
+    if (segment.count === 0 || segment.indexedBytes === segment.bytes) return
+
+    const count = segment.count
+    const length = INDEX_HEADER_SIZE + (count + 1) * 8 + INDEX_HASH_SIZE
+    const out = new Uint8Array(length)
+    const view = new DataView(out.buffer)
+    view.setUint32(0, INDEX_MAGIC, true)
+    view.setUint8(4, INDEX_VERSION)
+    view.setBigUint64(8, segment.startTxid, true)
+    view.setUint32(16, count, true)
+    view.setBigUint64(24, BigInt(segment.bytes), true)
+    view.setBigUint64(32, segment.newestUs, true)
+    for (let i = 0; i <= count; i++) {
+      view.setBigUint64(INDEX_HEADER_SIZE + i * 8, BigInt(segment.offsets[i] as number), true)
+    }
+    view.setBigUint64(length - INDEX_HASH_SIZE, Bun.hash.xxHash3(out.subarray(0, length - INDEX_HASH_SIZE)), true)
+
+    const indexPath = segmentIndexPath(segment.path)
+    const temp = `${indexPath}.${process.pid}.tmp`
+    try {
+      fs.writeFileSync(temp, out)
+      fs.renameSync(temp, indexPath)
+      segment.indexedBytes = segment.bytes
+    } catch {
+      // An index that cannot be written costs a scan on the next open and nothing else, so a full
+      // disk or a read-only directory must not take the log down with it.
+      fs.rmSync(temp, { force: true })
+    }
   }
 }

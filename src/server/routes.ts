@@ -20,6 +20,16 @@ import {
   type TxBeginRequest,
 } from "../client/protocol.ts"
 import type { IncludeLevel, LiveEvent } from "../realtime/index.ts"
+import {
+  listGenerations,
+  readManifest,
+  RestoreError,
+  type RestoreTarget,
+  restoreIntoCatalog,
+  S3Store,
+  type ShipperState,
+  verifyBucket,
+} from "../storage/index.ts"
 import { assertValidName, type Tenant } from "../tenant/index.ts"
 import { listSnapshots } from "../wal/index.ts"
 import {
@@ -38,7 +48,7 @@ import {
   executeStatement,
   resolveOptions,
 } from "./exec.ts"
-import { type ReplicationMetrics } from "./metrics.ts"
+import { type ReplicationMetrics, type StorageMetrics } from "./metrics.ts"
 import { mapTenantError, type ServerRuntime } from "./runtime.ts"
 import { openSse, resumeFrom, type TimeoutHost } from "./sse.ts"
 
@@ -681,18 +691,26 @@ export const snapshotDb: Handler = async (ctx) => {
 interface RestoreBody {
   at?: number | string
   into?: string
+  /** `"s3"` restores from the bucket; anything else (or absent) restores from the local log. */
+  from?: string
+  /** Override the configured bucket and prefix, so one node can restore another node's backup. */
+  bucket?: string
+  prefix?: string
+  generation?: string
 }
 
 /**
- * Point-in-time restore. Always into a *new* database: the log and the snapshots behind this one
- * still describe the timeline it actually had, and rewinding a database in place would leave the
- * log holding records that no longer apply to it. Design §6.5's CLI example restores with
- * `--into` for the same reason.
+ * Point-in-time restore, from the local log or from the bucket. Always into a *new* database: the
+ * log and the snapshots behind this one still describe the timeline it actually had, and rewinding
+ * a database in place would leave the log holding records that no longer apply to it. Design
+ * §6.5's CLI example restores with `--into` for the same reason.
  */
 export const restoreDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const name = dbName(ctx)
   const body = await readJson<RestoreBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+  if (body.from === "s3") return await restoreFromS3(ctx, name, body)
+
   const tenant = ctx.runtime.tenant(name)
   const at = body.at === undefined ? tenant.txid : resolveAt(tenant, body.at)
   if (at <= 0n) throw BunQLError.badRequest("restore needs a positive txid in `at`")
@@ -704,6 +722,206 @@ export const restoreDb: Handler = async (ctx) => {
     return json({ name: into, txid: Number(created.txid), from: name, at: Number(at) }, 201)
   } catch (err) {
     throw mapTenantError(err, ctx.runtime.primaryUrl)
+  }
+}
+
+// ── S3 backup and restore (design §4.4, docs/r3-storage.md) ────────────────────────────────────
+
+/**
+ * The store a backup route talks to: the node's own, or one built for the bucket and prefix the
+ * request named. The credentials are always the node's — a request never carries any — which is
+ * what lets an operator restore a bucket this node does not ship to without handing keys over the
+ * wire.
+ */
+function storeFor(
+  ctx: RouteContext,
+  body: { bucket?: string; prefix?: string },
+): { store: S3Store; prefix: string } {
+  const s3 = ctx.runtime.config.s3
+  const bucket = body.bucket ?? s3.bucket
+  if (!bucket) {
+    throw new BunQLError(
+      "S3_DISABLED",
+      "this node has no [s3] bucket configured, so it has no backups to read",
+      503,
+    )
+  }
+  const existing = ctx.runtime.storage
+  if (existing && bucket === s3.bucket && (body.prefix === undefined || body.prefix === s3.prefix)) {
+    return { store: existing.store, prefix: existing.prefix }
+  }
+  return {
+    store: new S3Store({
+      bucket,
+      ...(s3.region ? { region: s3.region } : {}),
+      ...(s3.endpoint ? { endpoint: s3.endpoint } : {}),
+      ...(s3.accessKeyId ? { accessKeyId: s3.accessKeyId } : {}),
+      ...(s3.secretAccessKey ? { secretAccessKey: s3.secretAccessKey } : {}),
+      ...(s3.sessionToken ? { sessionToken: s3.sessionToken } : {}),
+      ...(s3.virtualHostedStyle ? { virtualHostedStyle: true } : {}),
+      concurrency: s3.concurrency,
+      retries: s3.retries,
+    }),
+    prefix: body.prefix ?? s3.prefix,
+  }
+}
+
+/** `4812`, `"4812"` or an ISO timestamp — the same spellings the local restore takes. */
+function bucketTarget(at: number | string | undefined): RestoreTarget | undefined {
+  if (at === undefined) return undefined
+  if (typeof at === "number") {
+    return Number.isFinite(at) && at < TIMESTAMP_FLOOR
+      ? { txid: BigInt(Math.floor(at)) }
+      : { timestamp: at }
+  }
+  const trimmed = at.trim()
+  if (/^\d+$/.test(trimmed)) {
+    const value = BigInt(trimmed)
+    return value < BigInt(TIMESTAMP_FLOOR) ? { txid: value } : { timestamp: Number(value) }
+  }
+  const ms = Date.parse(trimmed)
+  if (!Number.isFinite(ms)) {
+    throw BunQLError.badRequest(`at must be a txid or a timestamp, got ${JSON.stringify(at)}`)
+  }
+  return { timestamp: ms }
+}
+
+/** Turns a storage failure into the HTTP shape of design §6.6. */
+function mapRestoreError(err: unknown): unknown {
+  if (!(err instanceof RestoreError)) return err
+  switch (err.code) {
+    case "BAD_REQUEST":
+      return BunQLError.badRequest(err.message)
+    case "CONFLICT":
+      return new BunQLError("CONFLICT", err.message, 409)
+    case "S3_NO_MANIFEST":
+      return new BunQLError("S3_NO_MANIFEST", err.message, 404)
+    case "S3_UNREACHABLE":
+      return new BunQLError("S3_UNREACHABLE", err.message, 503)
+    case "BUSY":
+      return BunQLError.busy(err.message)
+    default:
+      // `S3_INCOMPLETE` and `S3_CORRUPT`: the bucket is not restorable to what was asked for, and
+      // the request is what named it, so 400 rather than 500.
+      return new BunQLError(err.code, err.message, 400)
+  }
+}
+
+async function restoreFromS3(
+  ctx: RouteContext,
+  name: string,
+  body: RestoreBody,
+): Promise<Response> {
+  const { store, prefix } = storeFor(ctx, body)
+  const target = bucketTarget(body.at)
+  const into = body.into ?? `${name}-restore`.slice(0, 64)
+  assertValidName(into)
+  try {
+    const result = await restoreIntoCatalog({
+      store,
+      prefix,
+      db: name,
+      ...(target ? { at: target } : {}),
+      ...(body.generation ? { generation: body.generation } : {}),
+      dataDir: ctx.runtime.config.data.dir,
+      catalog: ctx.runtime.registry.catalog,
+      into,
+      quotaBytes: ctx.runtime.config.data.quotaBytes,
+    })
+    const tenant = ctx.runtime.registry.open(into)
+    ctx.txid = Number(tenant.txid)
+    return json(
+      {
+        name: into,
+        from: name,
+        source: "s3",
+        bucket: store.describe().bucket,
+        prefix,
+        generation: result.generation,
+        txid: Number(result.txid),
+        fromTxid: Number(result.fromTxid),
+        applied: result.applied,
+        objects: result.objects,
+        bytes: result.bytes,
+      },
+      201,
+    )
+  } catch (err) {
+    throw mapRestoreError(err)
+  }
+}
+
+/** Shipper state plus what the bucket actually holds. `GET /v1/db/:db/backup`. */
+export const backupStatus: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const name = dbName(ctx)
+  const s3 = ctx.runtime.config.s3
+  const shipper = ctx.runtime.storage?.shipperFor(name) ?? null
+  const state = shipper?.state() ?? null
+  if (!s3.bucket) {
+    return json({ db: name, enabled: false, bucket: null, prefix: null, shipper: null })
+  }
+  const { store, prefix } = storeFor(ctx, {})
+  let manifest: Record<string, unknown> | null = null
+  let error: string | null = null
+  try {
+    const read = await readManifest(store, prefix, name)
+    manifest = {
+      generation: read.generation,
+      shippedTxid: Number(read.shippedTxid),
+      updatedAtMs: read.updatedAtMs,
+      pageSize: read.pageSize,
+      snapshots: read.snapshots.length,
+      segments: read.segments.length,
+      oldestTxid: Number(read.snapshots[0]?.txid ?? read.segments[0]?.startTxid ?? 0),
+      generations: [...read.generations].reverse(),
+    }
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err)
+  }
+  return json({
+    db: name,
+    enabled: s3.enabled,
+    bucket: store.describe().bucket,
+    prefix,
+    endpoint: store.describe().endpoint,
+    retention: s3.retention,
+    shipper: state,
+    manifest,
+    error,
+  })
+}
+
+/** `POST /v1/db/:db/backup/verify` — is the bucket restorable to `at`? Writes nothing. */
+export const backupVerify: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const name = dbName(ctx)
+  const body = await readJson<RestoreBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+  const { store, prefix } = storeFor(ctx, body)
+  const target = bucketTarget(body.at)
+  try {
+    const result = await verifyBucket({
+      store,
+      prefix,
+      db: name,
+      ...(target ? { at: target } : {}),
+      ...(body.generation ? { generation: body.generation } : {}),
+    })
+    return json(result, result.ok ? 200 : 409)
+  } catch (err) {
+    throw mapRestoreError(err)
+  }
+}
+
+/** `GET /v1/db/:db/backup/generations` — the timelines the bucket holds, newest first. */
+export const backupGenerations: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const name = dbName(ctx)
+  const { store, prefix } = storeFor(ctx, {})
+  try {
+    return json({ db: name, bucket: store.describe().bucket, prefix, generations: await listGenerations(store, prefix, name) })
+  } catch (err) {
+    throw mapRestoreError(err)
   }
 }
 
@@ -787,6 +1005,11 @@ export const checkpointDb: Handler = async (ctx) => {
  * lists the replicas attached to it, a replica reports where it is following from and how far
  * behind it is.
  */
+/** The shipper's own view, without touching the bucket. Null on a node that ships nothing. */
+function s3StateOf(runtime: ServerRuntime, db: string): ShipperState | null {
+  return runtime.storage?.shipperFor(db)?.state() ?? null
+}
+
 export const replication: Handler = async (ctx) => {
   const { tenant } = await open(ctx, "ro")
   const snapshots = listSnapshots(tenant.dir)
@@ -799,6 +1022,9 @@ export const replication: Handler = async (ctx) => {
     lastSnapshot: last
       ? { txid: Number(last.txid), bytes: last.bytes, at: last.createdAtMs }
       : null,
+    // Design §6.5 lists "S3 position" beside the replica positions: the bucket is another
+    // follower, and how far behind it is belongs in the same place.
+    s3: s3StateOf(ctx.runtime, tenant.name),
   }
 
   if (tenant.isReplica) {
@@ -913,6 +1139,20 @@ function replicationMetrics(runtime: ServerRuntime): ReplicationMetrics | null {
   }
 }
 
+/** The four `bunql_s3_*` series, or null on a node with no bucket configured. */
+function storageMetrics(runtime: ServerRuntime): StorageMetrics | null {
+  const pool = runtime.storage
+  if (!pool) return null
+  const totals = pool.totals()
+  return {
+    shippedTxid: totals.shippedTxid,
+    pendingRecords: totals.pendingRecords,
+    errors: totals.errors,
+    bytes: totals.bytes,
+    behind: [...pool.shippers.values()].filter((one) => one.behind).length,
+  }
+}
+
 export const healthz: Handler = (ctx) => {
   return json({
     ok: !ctx.runtime.closed,
@@ -946,7 +1186,12 @@ export const readyz: Handler = (ctx) => {
 export const metrics: Handler = async (ctx) => {
   if (ctx.runtime.auth.hasAdminKey) requireAdmin(await principalOf(ctx))
   const stats = ctx.runtime.registry.stats()
-  const body = ctx.runtime.metrics.render(stats, ctx.runtime.node, replicationMetrics(ctx.runtime))
+  const body = ctx.runtime.metrics.render(
+    stats,
+    ctx.runtime.node,
+    replicationMetrics(ctx.runtime),
+    storageMetrics(ctx.runtime),
+  )
   return new Response(body, {
     headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
   })

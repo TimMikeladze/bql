@@ -162,6 +162,12 @@ export function createApp(runtime: ServerRuntime): App {
     "/v1/db/:db/import": { POST: on(handlers.importDb), OPTIONS: options },
     "/v1/db/:db/checkpoint": { POST: on(handlers.checkpointDb), OPTIONS: options },
     "/v1/db/:db/replication": { GET: on(handlers.replication), OPTIONS: options },
+    "/v1/db/:db/backup": { GET: on(handlers.backupStatus), OPTIONS: options },
+    "/v1/db/:db/backup/verify": { POST: on(handlers.backupVerify), OPTIONS: options },
+    "/v1/db/:db/backup/generations": {
+      GET: on(handlers.backupGenerations),
+      OPTIONS: options,
+    },
     "/v1/db/:db": {
       GET: on(handlers.statDb),
       DELETE: on(handlers.deleteDb),
@@ -423,6 +429,10 @@ export async function startServer(
   // A replica starts following only once it is listening: its own `/v1/replication` may be the
   // upstream of a third node, and a chain that opens sockets before it can answer them is racy.
   if (owned) runtime.startReplication()
+  // Shipping starts with the listener for the same reason replication does: a snapshot taken from
+  // a drain can be served over `/v1/db/:db/dump`, and a node that ships before it can answer is
+  // a node whose backup and whose API disagree about what exists.
+  if (owned) runtime.startStorage()
 
   const log = options.log ?? ((message: string) => console.log(message))
   if (resolved.adminKeyGenerated) {
@@ -443,6 +453,9 @@ export async function startServer(
     async close(): Promise<void> {
       runtime.setPublisher(null)
       await server.stop(true)
+      // Everything committed before the listener stopped belongs in the bucket, so the shippers
+      // are drained before the runtime — and before the registry closes the logs they read from.
+      if (owned) await runtime.closeStorage()
       // A runtime that was passed in belongs to its owner — the embedded API keeps serving from it
       // after `serve()` is stopped, and closing it here would take the engine with the listener.
       if (owned) runtime.close()

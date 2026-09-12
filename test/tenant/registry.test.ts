@@ -40,7 +40,10 @@ describe("tenant registry", () => {
     // Design §6.5: a deleted database keeps its log and snapshots; nothing is removed.
     expect(trash.startsWith(path.join(dir, "trash"))).toBe(true)
     expect(fs.existsSync(path.join(trash, "main.db"))).toBe(true)
-    expect(fs.readdirSync(path.join(trash, "log")).length).toBe(1)
+    // One segment, plus the sidecar index R3 writes beside it.
+    expect(
+      fs.readdirSync(path.join(trash, "log")).filter((name) => name.endsWith(".seg")).length,
+    ).toBe(1)
     expect(reg.list().map((row) => row.name)).toEqual(["beta"])
 
     // The name is free again after a delete.

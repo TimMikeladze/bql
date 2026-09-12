@@ -111,6 +111,41 @@ export interface ReplicationSection {
   maxForwards: number
 }
 
+/**
+ * Continuous backup to an S3-compatible bucket (design §4.4, `docs/r3-storage.md`). Everything a
+ * credential falls back to Bun's own `S3_*` / `AWS_*` resolution when it is left empty, so a node
+ * running with an instance role configures nothing but the bucket.
+ */
+export interface S3Section {
+  /** Off by default. Setting `bucket` turns it on; setting this false keeps the bucket for a
+   * restore target without shipping to it. */
+  enabled: boolean
+  bucket: string
+  region: string
+  /** Required for R2, Tigris and MinIO; AWS infers it from the region. */
+  endpoint: string
+  /** Key prefix inside the bucket. `db/<name>/…` hangs off it. */
+  prefix: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken: string
+  virtualHostedStyle: boolean
+  /** Ship an accumulated batch after this long. Design §9.4 says 1000 ms. */
+  shipIntervalMs: number
+  /** Take and ship a snapshot this often. 0 disables the timer. */
+  snapshotIntervalMs: number
+  /** Take and ship a snapshot after this many record bytes. 0 disables it. */
+  snapshotEveryBytes: number
+  /** Delete bucket objects older than this, never one a retained snapshot replays from. */
+  retention: string
+  /** Requests in flight at once, per node. */
+  concurrency: number
+  /** Queue ceiling before the shipper drops its buffer and reads from the log instead. */
+  maxPendingBytes: number
+  /** Attempts past the first for a retryable bucket failure. */
+  retries: number
+}
+
 export interface AuthSection {
   /** Bearer token for the lifecycle routes. Generated and persisted when absent. */
   adminKey: string | null
@@ -133,6 +168,7 @@ export interface ServerConfig {
   limits: LimitsSection
   auth: AuthSection
   replication: ReplicationSection
+  s3: S3Section
 }
 
 /** The same shape with every field optional, which is what a TOML file or a caller supplies. */
@@ -194,6 +230,24 @@ export const DEFAULT_CONFIG: ServerConfig = {
     forwardTimeoutMs: 10_000,
     maxForwards: 256,
   },
+  s3: {
+    enabled: false,
+    bucket: "",
+    region: "",
+    endpoint: "",
+    prefix: "bunql/",
+    accessKeyId: "",
+    secretAccessKey: "",
+    sessionToken: "",
+    virtualHostedStyle: false,
+    shipIntervalMs: 1000,
+    snapshotIntervalMs: 3_600_000,
+    snapshotEveryBytes: 64 * 1024 * 1024,
+    retention: "30d",
+    concurrency: 4,
+    maxPendingBytes: 64 * 1024 * 1024,
+    retries: 4,
+  },
 }
 
 /**
@@ -237,6 +291,9 @@ const ENV_ALIASES: Readonly<Record<string, string>> = {
   BUNQL_REPLICA_OF: "replication.primary",
   BUNQL_CLUSTER_SECRET: "replication.secret",
   BUNQL_FOLLOW: "replication.follow",
+  // The bucket is typed by hand often enough, and `AWS_*` / `S3_*` are Bun's own fallbacks rather
+  // than ours, so only the bucket itself gets a short name.
+  BUNQL_S3_URL: "s3.bucket",
 }
 
 /** `data` + `dir` → `BUNQL_DATA_DIR`; `limits` + `queryTimeoutMs` → `BUNQL_LIMITS_QUERY_TIMEOUT_MS`. */
@@ -341,6 +398,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       ...DEFAULT_CONFIG.replication,
       follow: [...DEFAULT_CONFIG.replication.follow],
     },
+    s3: { ...DEFAULT_CONFIG.s3 },
   }
 
   for (const patch of [fromFile, options.overrides]) {
@@ -353,6 +411,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       limits: mergeSection(config.limits, patch.limits, env),
       auth: mergeSection(config.auth, patch.auth, env),
       replication: mergeSection(config.replication, patch.replication, env),
+      s3: mergeSection(config.s3, patch.s3, env),
     }
   }
 
@@ -398,7 +457,51 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     )
   }
   if (config.replication.follow.length === 0) config.replication.follow = ["*"]
+
+  // `s3://bucket/prefix` in one variable, because that is how an operator writes a bucket.
+  if (config.s3.bucket.startsWith("s3://")) {
+    const rest = config.s3.bucket.slice("s3://".length)
+    const slash = rest.indexOf("/")
+    config.s3.bucket = slash < 0 ? rest : rest.slice(0, slash)
+    if (slash >= 0 && slash + 1 < rest.length) config.s3.prefix = rest.slice(slash + 1)
+  }
+  // A bucket is the whole decision, the same way `--replica-of` is: a node told where its bucket
+  // is, ships to it. `enabled = false` in the file is still honoured, so a configured bucket can
+  // be kept as a restore target without shipping.
+  if (config.s3.bucket && patchSetsEnabled(fromFile, options.overrides, env) === false) {
+    config.s3.enabled = false
+  } else if (config.s3.bucket) {
+    config.s3.enabled = true
+  } else {
+    config.s3.enabled = false
+  }
+  if (config.s3.concurrency < 1) config.s3.concurrency = 1
+  parseRetentionOrThrow(config.s3.retention)
   return config
+}
+
+/** True/false when something actually set `[s3] enabled`, null when nothing did. */
+function patchSetsEnabled(
+  fromFile: ServerConfigInput,
+  overrides: ServerConfigInput | undefined,
+  env: Env,
+): boolean | null {
+  const raw = env.BUNQL_S3_ENABLED
+  if (raw !== undefined && raw !== "") return raw === "1" || raw.toLowerCase() === "true"
+  if (overrides?.s3?.enabled !== undefined) return overrides.s3.enabled
+  if (fromFile.s3?.enabled !== undefined) return fromFile.s3.enabled
+  return null
+}
+
+/** `[s3] retention` has to be a duration this node understands, and a typo must not be silent. */
+function parseRetentionOrThrow(text: string): void {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return
+  if (!/^\d+(?:\.\d+)?\s*(ms|s|m|h|d|w)?$/i.test(trimmed)) {
+    throw BunQLError.badRequest(
+      `[s3] retention must look like 30d, 12h or 3600, got ${JSON.stringify(text)}`,
+    )
+  }
 }
 
 /**

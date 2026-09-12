@@ -74,8 +74,10 @@ Build in this order; the first three are one coherent piece.
   not built.
 - **Replica apply mechanism A** (design §4.5): write pages into the DB file and rewrite the shm
   header under the WAL locks, LiteFS-style. Mechanism B works but rescans the WAL per apply.
-- **`src/wal/log.ts` cold open** walks every record header (~0.5 µs each; 3.1 ms of a 3.6 ms open
-  at 6k records). Persist a segment index.
+- ~~**`src/wal/log.ts` cold open** walks every record header (~0.5 µs each; 3.1 ms of a 3.6 ms open
+  at 6k records). Persist a segment index.~~ Fixed in R3: a sidecar `<startTxid>.idx` takes the
+  cold open of a 6k-record log from 2.69 ms to 0.36 ms, and is a cache the scan falls back to
+  (`docs/r3-storage.md` §5).
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a server restart. Spill
   it to disk or serve old positions from the log.
 - **`schema` events reach WebSocket subscribers only**, not the SSE change feed.
