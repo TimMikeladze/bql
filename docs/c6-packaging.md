@@ -329,9 +329,19 @@ macos-latest   Cache saved with key: sqlite-macOS-ARM64-9f5693067ef9…
 
 Both runners built the library from the pinned amalgamation without a compiler-install step, which
 confirms `ubuntu-latest` and `macos-latest` both ship one — the `build-essential` step the Docker
-legs need is a property of `oven/bun:1.4`, not of CI. The two `vendor/sqlite` caches were cold on
-this first run and saved at the end; the hit path is exercised by the next push that does not touch
-`scripts/sqlite.ts`.
+legs need is a property of `oven/bun:1.4`, not of CI.
+
+The caches were cold on that run and saved at the end. A later push hit them, which is the half
+that matters for run time:
+
+```
+Cache restored from key: sqlite-macOS-ARM64-9f5693067ef9…
+build libsqlite3 › already built (SQLite 3.53.4)
+```
+
+No download, no compile — the stamp matched and the step was a no-op. A third run was
+`cancelled` mid-flight when a newer push landed on `main`, which is the concurrency group doing
+its job.
 
 Nothing in this milestone is now unverified except the npm packages it deliberately does not
 publish (§6).
