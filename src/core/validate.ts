@@ -18,6 +18,14 @@
 // `{"$i": "…"}` is the wire form of an int64 in a JSON body, so a node built by `s.int64()` always
 // yields a `number | bigint` and `s.blob()` always yields a `Uint8Array`.
 //
+// The `CODEC` mark is consulted *after* the nullability check, and that order is load-bearing. A
+// decoder knows only its own tagged form, so handing it the `null` that `.nullable()` published
+// would have it refuse a value the document promises to accept — the document and the validator
+// disagreeing about what the API accepts, which is the one thing this design exists to prevent.
+// A nullable INTEGER or BLOB column is completely ordinary, so the data API meets this on the
+// first row. Nullability is settled against `type` and the `anyOf` branches, the same keywords a
+// client reads, so the two answers come from one object as they must.
+//
 // `format` stays an annotation, as draft 2020-12 specifies. It is published for clients and not
 // enforced here; a half-right email regular expression rejecting real addresses would be worse
 // than the document simply saying what the field means.
@@ -111,9 +119,14 @@ function walk(schema: JsonSchemaNode, value: unknown, path: string, run: Run): O
   }
 
   const codec = codecOf(schema)
-  if (codec === "int64") return decodeInt64(value, path, run)
-  if (codec === "blob") return decodeBlob(value, path, run)
-  if (codec === "sqlite") return decodeSqliteValue(value, path, run)
+  if (codec !== undefined) {
+    // Nullability is settled against the published keywords before the codec is consulted: a
+    // decoder only knows its own tagged form and would refuse the `null` the document promises.
+    if (value === null && admitsNull(schema)) return null
+    if (codec === "int64") return decodeInt64(value, path, run)
+    if (codec === "blob") return decodeBlob(value, path, run)
+    if (codec === "sqlite") return decodeSqliteValue(value, path, run)
+  }
 
   const types = typeList(schema)
   const coerced = run.coerce ? coerceScalar(types, value) : value
@@ -431,6 +444,19 @@ function fromBase64(text: string): Uint8Array | undefined {
 }
 
 // ── coercion and type checking ─────────────────────────────────────────────────────────────────
+
+/**
+ * Whether the node's own published schema admits `null`, read off the keywords a client reads —
+ * `type`, or a branch of `anyOf`/`oneOf` — so the answer cannot differ from the document's.
+ */
+function admitsNull(schema: JsonSchemaNode): boolean {
+  const type = keyword<JsonSchemaType | JsonSchemaType[]>(schema, "type")
+  if (type === "null") return true
+  if (Array.isArray(type) && type.includes("null")) return true
+  const branches =
+    keyword<JsonSchemaNode[]>(schema, "anyOf") ?? keyword<JsonSchemaNode[]>(schema, "oneOf")
+  return Array.isArray(branches) && branches.some(admitsNull)
+}
 
 function typeList(schema: JsonSchemaNode): JsonSchemaType[] {
   const type = keyword<JsonSchemaType | JsonSchemaType[]>(schema, "type")

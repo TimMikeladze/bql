@@ -2,7 +2,16 @@
 // many problems come back at once, and what coercion will and will not guess.
 
 import { describe, expect, test } from "bun:test"
-import { ref, s, validate, type Problem } from "../../src/core/index.ts"
+import {
+  keyword,
+  ref,
+  s,
+  toJsonSchema,
+  validate,
+  type JsonSchemaNode,
+  type Problem,
+  type Schema,
+} from "../../src/core/index.ts"
 
 function problems(result: { ok: boolean; problems?: Problem[] }): string[] {
   return (result.problems ?? []).map((p) => `${p.path}: ${p.message}`)
@@ -180,5 +189,123 @@ describe("the encodings of design §6.1", () => {
     })
     expect(validate(node, { $f: "-inf" })).toEqual({ ok: true, value: -Infinity })
     expect(problems(validate(node, { nope: 1 }))).toEqual([": is not a SQLite value: an object"])
+  })
+})
+
+// A codec node decodes its own tagged form and knows nothing else, so it used to be handed the
+// `null` that `.nullable()` had already published and refuse it — the document and the validator
+// disagreeing about what the API accepts. A nullable INTEGER or BLOB column is ordinary, so the
+// data API met this on the first NULL row.
+
+/** Does the *published* document admit `null`? Read the way a client would read it. */
+function publishedAdmitsNull(schema: JsonSchemaNode): boolean {
+  const type = keyword<string | string[]>(schema, "type")
+  if (type === "null") return true
+  if (Array.isArray(type) && type.includes("null")) return true
+  const members = keyword<unknown[]>(schema, "enum")
+  if (Array.isArray(members) && members.includes(null)) return true
+  const branches =
+    keyword<JsonSchemaNode[]>(schema, "anyOf") ?? keyword<JsonSchemaNode[]>(schema, "oneOf")
+  return Array.isArray(branches) && branches.some(publishedAdmitsNull)
+}
+
+/** Is the node constrained by a type at all? `s.any()` accepts null without saying so. */
+function constrained(schema: JsonSchemaNode): boolean {
+  return keyword(schema, "type") !== undefined || keyword(schema, "anyOf") !== undefined
+}
+
+/** One node per builder on `s`, so a codec added later is covered by the loop below. */
+const BUILDERS: Record<string, Schema<any>> = {
+  string: s.string(),
+  int: s.int(),
+  number: s.number(),
+  boolean: s.boolean(),
+  null: s.null(),
+  any: s.any(),
+  unknown: s.unknown(),
+  literal: s.literal("x"),
+  enum: s.enum(["a", "b"]),
+  array: s.array(s.string()),
+  object: s.object({ a: s.string() }),
+  record: s.record(s.string()),
+  union: s.union([s.string(), s.int()]),
+  int64: s.int64(),
+  blob: s.blob(),
+  sqliteValue: s.sqliteValue(),
+}
+
+describe("null, as published and as validated", () => {
+  test("the loop below covers every builder", () => {
+    expect(Object.keys(BUILDERS).sort()).toEqual(Object.keys(s).sort())
+  })
+
+  test("toJsonSchema and validate agree about null, for every builder", () => {
+    for (const [name, base] of Object.entries(BUILDERS)) {
+      for (const [suffix, node] of [
+        ["", base],
+        [".nullable()", (base as { nullable(): Schema<any> }).nullable()],
+      ] as const) {
+        const published = toJsonSchema(node)
+        const accepts = validate(node, null).ok
+        if (publishedAdmitsNull(published)) {
+          // The bug: the document said null was fine and the validator refused it.
+          expect(`${name}${suffix} accepts null: ${accepts}`).toBe(
+            `${name}${suffix} accepts null: true`,
+          )
+        } else if (constrained(published)) {
+          expect(`${name}${suffix} accepts null: ${accepts}`).toBe(
+            `${name}${suffix} accepts null: false`,
+          )
+        }
+      }
+    }
+  })
+
+  test("a nullable codec node takes null and still refuses a wrong type", () => {
+    expect(validate(s.int64().nullable(), null)).toEqual({ ok: true, value: null })
+    expect(validate(s.int64().nullable(), { $i: "9007199254740993" })).toEqual({
+      ok: true,
+      value: 9007199254740993n,
+    })
+    expect(validate(s.int64().nullable(), true).ok).toBe(false)
+
+    expect(validate(s.blob().nullable(), null)).toEqual({ ok: true, value: null })
+    expect(validate(s.blob().nullable(), 5).ok).toBe(false)
+    const bytes = validate(s.blob().nullable(), { $b: "aGk=" })
+    expect(bytes.ok && [...(bytes.value as Uint8Array)]).toEqual([104, 105])
+
+    expect(validate(s.sqliteValue().nullable(), null)).toEqual({ ok: true, value: null })
+    expect(validate(s.sqliteValue().nullable(), { nope: 1 }).ok).toBe(false)
+  })
+
+  test("a codec node that is not nullable still refuses null", () => {
+    expect(problems(validate(s.int64(), null))).toEqual([
+      ': expected an integer or {"$i": "<decimal>"}, got null',
+    ])
+    expect(problems(validate(s.blob(), null))).toEqual([
+      ': expected {"$b": "<base64>"}, got null',
+    ])
+  })
+
+  test("nullability is settled before the codec in both modes", () => {
+    for (const coerce of [false, true]) {
+      expect(validate(s.int64().nullable(), null, { coerce })).toEqual({ ok: true, value: null })
+      expect(validate(s.blob().nullable(), null, { coerce })).toEqual({ ok: true, value: null })
+    }
+    // Coercion still reaches the decoder for a value that is not null.
+    expect(validate(s.int64().nullable(), "12", { coerce: true })).toEqual({ ok: true, value: 12 })
+    expect(validate(s.int64().nullable(), "12").ok).toBe(false)
+  })
+
+  test("optional on a codec node is absence, not null", () => {
+    const row = s.object({ rowid: s.int64().optional(), data: s.blob().nullable().optional() })
+    expect(validate(row, {})).toEqual({ ok: true, value: {} })
+    expect(validate(row, { rowid: { $i: "7" }, data: null })).toEqual({
+      ok: true,
+      value: { rowid: 7, data: null },
+    })
+    expect(problems(validate(row, { rowid: null }))).toEqual([
+      'rowid: expected an integer or {"$i": "<decimal>"}, got null',
+    ])
   })
 })
