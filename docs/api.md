@@ -62,11 +62,13 @@ Every response carries these four:
 |---|---|
 | `BunQL-Txid` | the database's last txid as this request saw it |
 | `BunQL-Node` | node identity; a hash of the hostname unless `[server] node` sets one |
-| `BunQL-Role` | `primary` (always, on a standalone node) |
+| `BunQL-Role` | `primary`, or `replica` when `[replication] role = "replica"` |
 | `BunQL-Duration-Us` | microseconds spent in the handler |
 
-`BunQL-Primary` appears on a `NOT_PRIMARY` error. While `[server] cors` is on (the default) all
-five are listed in `Access-Control-Expose-Headers`, and `OPTIONS` on any route is a preflight.
+`BunQL-Primary` is on **every** response from a replica, not only on a `NOT_PRIMARY` error: it
+carries `[replication] primary`, so a client that wants the write path never has to provoke an
+error to find it. While `[server] cors` is on (the default) all five are listed in
+`Access-Control-Expose-Headers`, and `OPTIONS` on any route is a preflight.
 
 ### Request options
 
@@ -127,7 +129,8 @@ The same tagging applies to arguments. `args` is a positional array, or an objec
 | `PAYLOAD_TOO_LARGE` | 413 | body over `[limits] maxBodyBytes` or `maxImportBytes` |
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
 | `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, or a snapshot in progress |
-| `NOT_PRIMARY` | 503 | reserved for replicas; carries `BunQL-Primary` |
+| `NOT_PRIMARY` | 503 | a write reached a replica; carries `BunQL-Primary` |
+| `REPLICATION_DISABLED` | 403 | `GET /v1/replication` on a node with no `[replication] secret` |
 | `QUOTA_EXCEEDED` | 507 | `max_page_count` reached, or `SQLITE_FULL` |
 | `INTERNAL` | 500 | a bug; the client is told nothing more, the server logs the rest |
 
@@ -152,8 +155,9 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `GET /v1/db/:db/dump` | stream the SQLite file out | admin |
 | `POST /v1/db/:db/import` | stream a SQLite file in | admin |
 | `GET /v1/db/:db/live` | live query, SSE | `ro` |
+| `GET /v1/replication` | node-to-node stream (WebSocket) | cluster secret, in-band |
 | `POST /v1/db/:db/query` | one statement | `ro`, `rw` when it writes |
-| `GET /v1/db/:db/replication` | txid, epoch, checksum, snapshot | `ro` |
+| `GET /v1/db/:db/replication` | txid, epoch, checksum, snapshot, replicas | `ro` |
 | `POST /v1/db/:db/restore` | point-in-time restore | admin |
 | `POST /v1/db/:db/snapshot` | force a snapshot | admin |
 | `POST /v1/db/:db/tx` | open a baton transaction | `rw` |
@@ -347,10 +351,17 @@ POST /v1/db/acme/restore    { "at": 4800, "into": "acme-recovered" }
 POST /v1/db/acme/checkpoint { "mode": "TRUNCATE" }
 → { "mode": "TRUNCATE", "busy": false, "log": 0, "checkpointed": 0, "walBytes": 0, "txid": 4812 }
 
-GET  /v1/db/acme/replication
+GET  /v1/db/acme/replication                                          (on a primary)
 → { "db": "acme", "txid": 4812, "epoch": 0, "checksum": "1734…",
     "lastSnapshot": { "txid": 4800, "bytes": 81920, "at": 1789… },
-    "role": "primary", "replicas": [] }
+    "role": "primary",
+    "replicas": [ { "node": "repl-1", "stream": 1, "txid": 4812, "lag": 0,
+                    "ackedAt": 1789…, "fsynced": true } ] }
+
+GET  /v1/db/acme/replication                                          (on a replica)
+→ { "db": "acme", "txid": 4812, "epoch": 0, "checksum": "1734…", "lastSnapshot": null,
+    "role": "replica", "primary": "wss://…/v1/replication", "connected": true,
+    "applied": 4812, "lagTxid": 0, "bootstrapping": false, "lastError": null }
 ```
 
 `restore` always builds a **new** database — `into` names it, and without it the name is
@@ -384,7 +395,25 @@ GET /readyz   → { "ready": true, "node": "…", "role": "primary" }          (
 GET /metrics  → Prometheus text 0.0.4; needs the admin key when one is configured
 ```
 
-Metrics are per-process counters only — nothing keyed by database, so cardinality is bounded.
+`readyz` on a replica also reports `connected` and `primary`, and is `503` while the stream is
+down: a replica that cannot reach its primary is serving data that only gets staler.
+
+Metrics are per-process counters only — nothing keyed by database, so cardinality is bounded. A
+node that replicates adds four series: `bunql_replication_lag_txid` and
+`bunql_replication_connected` (gauges) and `bunql_replication_bytes_total` and
+`bunql_replication_records_total` (counters). On a primary they count what was streamed out and
+how far the furthest-behind replica is; on a replica, what was received and applied.
+
+### Node-to-node replication
+
+`GET /v1/replication` upgrades to the binary node-to-node protocol of design §8, opened by a
+replica. It is not a client API: the cluster secret is proved in-band with an HMAC over a nonce
+the primary issues, and `Authorization` is not consulted. A node with `[replication] secret` unset
+answers `403 REPLICATION_DISABLED`. The frame format, the bootstrap rules and the deviations from
+`docs/plan-phase1.md` are in `docs/r1-replication.md`.
+
+Writes on a replica answer `503 NOT_PRIMARY` with `BunQL-Primary`; forwarding them to the primary
+is R2.
 
 ---
 
@@ -667,6 +696,7 @@ in-process code with the data directory already open. Tokens start applying agai
 
 ```
 bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
+            [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
 bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
 bunql db list
 bunql db stat <name>
@@ -693,6 +723,16 @@ writer for it.
 `--ttl` takes `ms`, `s`, `m`, `h`, `d`, `w` suffixes. `--tables` is `name:r,name:rw`. `--from` and
 `--at` take a txid or an ISO-8601 timestamp, so `bunql db fork x --from y@2026-09-11T10:00:00Z`
 works. `shell` is a REPL over the WebSocket protocol; `exec` is the one-shot a script wants.
+
+`serve --replica-of <url>` makes the node a replica of that primary: it needs the same
+`--cluster-secret`, and `--follow a,b` narrows what it tracks from the default of every database
+the primary announces. A pair is two commands:
+
+```sh
+bunql serve --dir ./p --port 4501 --cluster-secret $SECRET
+bunql serve --dir ./r --port 4502 --cluster-secret $SECRET \
+            --replica-of ws://127.0.0.1:4501/v1/replication
+```
 
 ---
 
@@ -721,6 +761,7 @@ the canonical one wins when both are set.
 | `[durability] defaultAck` | `"local"` | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
 | `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
 | `[durability] retention` | `"7d"` | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
+| `[durability] segmentBytes` | `16777216` | `BUNQL_DURABILITY_SEGMENT_BYTES` | — |
 | `[realtime] ringBytes` | `10000000` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
 | `[realtime] ringMaxAgeMs` | `60000` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
 | `[realtime] maxLiveQueries` | `1000` | `BUNQL_REALTIME_MAX_LIVE_QUERIES` | `BUNQL_MAX_LIVE_QUERIES` |
@@ -739,6 +780,18 @@ the canonical one wins when both are set.
 | `[auth] keysFile` | `<dataDir>/keys.json` | `BUNQL_AUTH_KEYS_FILE` | `BUNQL_KEYS_FILE` |
 | `[auth] clockToleranceSec` | `30` | `BUNQL_AUTH_CLOCK_TOLERANCE_SEC` | `BUNQL_CLOCK_TOLERANCE_SEC` |
 | `[auth] defaultTokenTtlMs` | `2592000000` (30 d) | `BUNQL_AUTH_DEFAULT_TOKEN_TTL_MS` | `BUNQL_TOKEN_TTL_MS` |
+| `[replication] role` | `"primary"` | `BUNQL_REPLICATION_ROLE` | — |
+| `[replication] primary` | `""` | `BUNQL_REPLICATION_PRIMARY` | `BUNQL_REPLICA_OF` |
+| `[replication] secret` | `""` (replication off) | `BUNQL_REPLICATION_SECRET` | `BUNQL_CLUSTER_SECRET` |
+| `[replication] follow` | `["*"]` | `BUNQL_REPLICATION_FOLLOW` (comma-separated) | `BUNQL_FOLLOW` |
+| `[replication] ackTimeoutMs` | `2000` (R2) | `BUNQL_REPLICATION_ACK_TIMEOUT_MS` | — |
+| `[replication] heartbeatMs` | `5000` | `BUNQL_REPLICATION_HEARTBEAT_MS` | — |
+| `[replication] slowReplicaMs` | `30000` | `BUNQL_REPLICATION_SLOW_REPLICA_MS` | — |
+| `[replication] reconnectMs` | `250` | `BUNQL_REPLICATION_RECONNECT_MS` | — |
+| `[replication] forwardWrites` | `true` (R2) | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
+
+Setting `[replication] primary` makes the node a replica; `role` need not be set as well. A
+replica with no `primary` is refused at start.
 
 One more, outside the config file: `BUNQL_SQLITE_LIB` names the `libsqlite3` the driver loads.
 Without it the usual Homebrew and Linux paths are tried.
@@ -750,19 +803,29 @@ Without it the usual Homebrew and Linux paths are tried.
 Everything below is a place where the implementation does not match `docs/design.md`. The design
 document is not edited; this is the list.
 
+### Landed in phase 1
+
+| design | status |
+|---|---|
+| §8 replication protocol (`/v1/replication` binary frames) | R1. `GET /v1/db/{db}/replication` is the JSON status route of §6.5; the socket is the protocol |
+| §9.3 `bunql serve --replica-of` | R1, with `--cluster-secret` and `--follow` |
+| §9.4 `[replication]` | R1 |
+| §5.2 replicas serve reads and refuse writes | R1. Forwarding is R2, so a write is `503 NOT_PRIMARY` |
+
+A replica's `live` queries and `changes` feed are **not** driven by its stream in R1: the realtime
+engine is fed by the write path's hooks, and a replica has none. See `docs/r1-replication.md`.
+
 ### Not implemented in phase 0
 
 | design | status |
 |---|---|
 | §6.7 Hrana compatibility (`/v2/pipeline`, `/v3/pipeline`, `hrana3`/`hrana2` sockets) | phase 1 (§11) |
 | §6.5 `POST /v1/db/{db}/promote` | phase 1; nothing to promote to on a standalone node |
-| §8 replication protocol (`/v1/replication` binary frames) | phase 1. `GET /v1/db/{db}/replication` is the JSON status route of §6.5, not this |
-| §5.4 `ack: "replica"` and `"quorum"` | a `400`, not a silent downgrade — there are no replicas to be durable on |
+| §5.4 `ack: "replica"` and `"quorum"` | R2. Still a `400` today, not a silent downgrade |
 | §9.2 `bunql/kysely`, `bunql/drizzle` | phase 1 |
 | §9.2 `BunQL.open({ s3 })` | phase 1; the option would be a promise the node cannot keep |
 | §9.3 `bunql promote`, `bunql cluster` | phase 1 and 2 |
-| §9.3 `bunql serve --replica-of` | phase 1 |
-| §9.4 `[s3]`, `[replication]`, `[cluster]` | phase 1 and 2 |
+| §9.4 `[s3]`, `[cluster]` | R3 and phase 2 |
 
 ### Behaviour that differs
 

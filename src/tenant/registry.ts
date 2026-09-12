@@ -11,7 +11,7 @@ import path from "node:path"
 import { BunQLError } from "../server/errors.ts"
 import { Database } from "../sqlite/index.ts"
 import { computeFull } from "../wal/index.ts"
-import { Catalog, positionOf, type TenantRow } from "./catalog.ts"
+import { Catalog, positionOf, type TenantRole, type TenantRow } from "./catalog.ts"
 import {
   type AckLevel,
   assertValidName,
@@ -61,8 +61,23 @@ export interface RegistryOptions {
 export interface CreateOptions {
   pageSize?: number
   quotaBytes?: number
+  /** `"replica"` creates a database this node follows; see `createReplica`. Default `"primary"`. */
+  role?: TenantRole
+  epoch?: number
   /** Fork of another database (design §4.4, §6.5): O(1) where the filesystem reflinks. */
   from?: { db: string; at?: bigint }
+}
+
+/** Everything the replication client needs to swap a bootstrapped snapshot into place. */
+export interface SnapshotInstall {
+  /** The verified snapshot file. It is *moved*, so the caller must not touch it afterwards. */
+  file: string
+  txid: bigint
+  epoch: number
+  /** Rolling database checksum of the file. */
+  checksum: bigint
+  pages: number
+  pageSize: number
 }
 
 export interface RegistryStats {
@@ -96,8 +111,12 @@ export class TenantRegistry {
   #options: RegistryOptions
   /** Insertion order is recency: the oldest entry is the first eviction candidate. */
   #open = new Map<string, Tenant>()
-  /** Names the LRU may not close: a tenant with a live subscription still has to see commits. */
-  #pinned = new Set<string>()
+  /**
+   * Names the LRU may not close, and who asked. A tenant with a live subscription still has to see
+   * commits, and so does one a replica is streaming from — and neither holder may release the
+   * other's pin, which is why this is keyed by owner rather than being a bare set.
+   */
+  #pinned = new Map<string, Set<string>>()
   #sweeper: ReturnType<typeof setInterval> | null = null
   #evictions = 0
   #closed = false
@@ -175,8 +194,98 @@ export class TenantRegistry {
       name,
       pageSize: options.pageSize ?? this.#options.pageSize ?? 4096,
       quotaBytes: options.quotaBytes ?? this.#options.quotaBytes ?? 0,
+      ...(options.role ? { role: options.role } : {}),
+      ...(options.epoch !== undefined ? { epoch: options.epoch } : {}),
     })
     return this.#openRow(row)
+  }
+
+  // ── replica mode (design §5.2) ───────────────────────────────────────────────────────────────
+
+  /**
+   * Opens a database this node follows. Unlike `open`, it also switches an existing row into
+   * replica mode: a node restarted as a replica of another one must not keep authoring
+   * transactions for a database it used to own.
+   */
+  openReplica(name: string): Tenant {
+    this.#assertOpen()
+    const hit = this.#open.get(name)
+    if (hit && !hit.closed && hit.isReplica) {
+      this.#open.delete(name)
+      this.#open.set(name, hit)
+      return hit
+    }
+    const row = this.catalog.getTenant(name)
+    if (!row) throw BunQLError.dbNotFound(name)
+    if (row.role !== "replica") {
+      this.release(name)
+      this.catalog.setRole(name, "replica")
+    }
+    return this.#openRow({ ...row, role: "replica" })
+  }
+
+  /**
+   * Creates a database in replica mode, for one the primary announced that this node has never
+   * seen. Synchronous, unlike `create`: there is no file to copy, because the stream will either
+   * send a snapshot or start at txid 0 against an empty database.
+   */
+  createReplica(name: string, options: { pageSize?: number; epoch?: number } = {}): Tenant {
+    this.#assertOpen()
+    assertValidName(name)
+    const existing = this.catalog.getTenant(name)
+    if (existing) return this.openReplica(name)
+    fs.mkdirSync(tenantDir(this.dir, name), { recursive: true })
+    const row = this.catalog.createTenant({
+      name,
+      pageSize: options.pageSize ?? this.#options.pageSize ?? 4096,
+      quotaBytes: this.#options.quotaBytes ?? 0,
+      role: "replica",
+      ...(options.epoch !== undefined ? { epoch: options.epoch } : {}),
+    })
+    return this.#openRow(row)
+  }
+
+  /**
+   * Replaces a replica's database with a bootstrapped snapshot and reopens it at the snapshot's
+   * position. Everything derived from the old file goes with it: the applier's `meta.json`, the
+   * `-wal` and `-shm` it wrote, and the local log, whose records no longer connect to anything
+   * (see `docs/r1-replication.md` deviation 7).
+   */
+  installSnapshot(name: string, install: SnapshotInstall): Tenant {
+    this.#assertOpen()
+    const row = this.catalog.getTenant(name)
+    if (!row) throw BunQLError.dbNotFound(name)
+    const pinned = this.#pinned.has(name)
+    this.release(name)
+    const dir = tenantDir(this.dir, name)
+    const dbPath = path.join(dir, "main.db")
+    fs.mkdirSync(dir, { recursive: true })
+    for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(`${dbPath}${suffix}`, { force: true })
+    fs.rmSync(path.join(dir, "meta.json"), { force: true })
+    fs.rmSync(path.join(dir, "log"), { recursive: true, force: true })
+    fs.renameSync(install.file, dbPath)
+    this.catalog.setRole(name, "replica")
+    this.catalog.savePosition(name, {
+      txid: install.txid,
+      epoch: install.epoch,
+      checksum: install.checksum,
+      dbSizePages: install.pages,
+      wal: { salt1: 0, salt2: 0, frame: 0 },
+    })
+    const tenant = this.#openRow({
+      ...row,
+      role: "replica",
+      epoch: install.epoch,
+      txid: install.txid,
+      checksum: install.checksum,
+      dbSizePages: install.pages,
+      pageSize: install.pageSize || row.pageSize,
+      walSalt1: 0,
+      walSalt2: 0,
+      walFrame: 0,
+    })
+    if (pinned) this.pin(name)
+    return tenant
   }
 
   /**
@@ -243,24 +352,31 @@ export class TenantRegistry {
   /**
    * Keeps a tenant out of the eviction sweep. The realtime engine's hooks live on the writer
    * connection, so closing a tenant that somebody is subscribed to would silently stop the feed.
-   * Pins nest; `unpin` removes one.
+   * `owner` separates holders: `unpin` releases one holder's claim, and the tenant stays pinned
+   * while any other holder still has one.
    */
-  pin(name: string): void {
-    this.#pinned.add(name)
+  pin(name: string, owner = "default"): void {
+    const owners = this.#pinned.get(name)
+    if (owners) owners.add(owner)
+    else this.#pinned.set(name, new Set([owner]))
   }
 
-  unpin(name: string): void {
-    this.#pinned.delete(name)
+  unpin(name: string, owner = "default"): void {
+    const owners = this.#pinned.get(name)
+    if (!owners) return
+    owners.delete(owner)
+    if (owners.size === 0) this.#pinned.delete(name)
   }
 
   get pinned(): ReadonlySet<string> {
-    return this.#pinned
+    return new Set(this.#pinned.keys())
   }
 
   /** Closes a tenant without deleting anything. It reopens on the next `open`. */
   release(name: string): void {
     const tenant = this.#open.get(name)
     this.#pinned.delete(name)
+    // Every holder's pin goes with the tenant; a caller that still wants it pinned reopens it.
     if (!tenant) return
     this.#open.delete(name)
     if (!tenant.closed) tenant.close()
@@ -332,6 +448,7 @@ export class TenantRegistry {
   #openRow(row: TenantRow): Tenant {
     const options: TenantOptions = {
       name: row.name,
+      role: row.role,
       dataDir: this.dir,
       dir: tenantDir(this.dir, row.name),
       catalog: this.catalog,

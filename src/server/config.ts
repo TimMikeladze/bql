@@ -39,6 +39,8 @@ export interface DurabilitySection {
   defaultAck: DefaultAck
   checkpointWalBytes: number
   retention: string
+  /** Roll to a new log segment past this many bytes. Design §4.4 says 16 MB. */
+  segmentBytes: number
 }
 
 export interface RealtimeSection {
@@ -67,6 +69,28 @@ export interface LimitsSection {
   maxImportBytes: number
 }
 
+/** Which half of a primary/replica pair this node is (design §5.2). */
+export type NodeRole = "primary" | "replica"
+
+export interface ReplicationSection {
+  role: NodeRole
+  /** `wss://host/v1/replication`. Required when `role = "replica"`. */
+  primary: string
+  /** The cluster secret. Empty disables `/v1/replication` entirely. */
+  secret: string
+  /** Databases a replica follows. `["*"]` is every database the primary announces. */
+  follow: string[]
+  /** R2: how long a write waits for replica acks before it gives up. */
+  ackTimeoutMs: number
+  heartbeatMs: number
+  /** Close a replica socket that has been backpressured this long. */
+  slowReplicaMs: number
+  /** First reconnect backoff step; doubles with jitter to 10 s. */
+  reconnectMs: number
+  /** R2: forward a write that arrives on a replica to the primary instead of refusing it. */
+  forwardWrites: boolean
+}
+
 export interface AuthSection {
   /** Bearer token for the lifecycle routes. Generated and persisted when absent. */
   adminKey: string | null
@@ -88,6 +112,7 @@ export interface ServerConfig {
   realtime: RealtimeSection
   limits: LimitsSection
   auth: AuthSection
+  replication: ReplicationSection
 }
 
 /** The same shape with every field optional, which is what a TOML file or a caller supplies. */
@@ -104,7 +129,12 @@ export const DEFAULT_CONFIG: ServerConfig = {
     cors: true,
   },
   data: { dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },
-  durability: { defaultAck: "local", checkpointWalBytes: 4_000_000, retention: "7d" },
+  durability: {
+    defaultAck: "local",
+    checkpointWalBytes: 4_000_000,
+    retention: "7d",
+    segmentBytes: 16 * 1024 * 1024,
+  },
   realtime: {
     ringBytes: 10_000_000,
     ringMaxAgeMs: 60_000,
@@ -128,6 +158,17 @@ export const DEFAULT_CONFIG: ServerConfig = {
     keysFile: null,
     clockToleranceSec: 30,
     defaultTokenTtlMs: 30 * 24 * 60 * 60 * 1000,
+  },
+  replication: {
+    role: "primary",
+    primary: "",
+    secret: "",
+    follow: ["*"],
+    ackTimeoutMs: 2000,
+    heartbeatMs: 5000,
+    slowReplicaMs: 30_000,
+    reconnectMs: 250,
+    forwardWrites: true,
   },
 }
 
@@ -167,6 +208,10 @@ const ENV_ALIASES: Readonly<Record<string, string>> = {
   BUNQL_KEYS_FILE: "auth.keysFile",
   BUNQL_CLOCK_TOLERANCE_SEC: "auth.clockToleranceSec",
   BUNQL_TOKEN_TTL_MS: "auth.defaultTokenTtlMs",
+  // The three an operator types by hand often enough to want a short name.
+  BUNQL_REPLICA_OF: "replication.primary",
+  BUNQL_CLUSTER_SECRET: "replication.secret",
+  BUNQL_FOLLOW: "replication.follow",
 }
 
 /** `data` + `dir` → `BUNQL_DATA_DIR`; `limits` + `queryTimeoutMs` → `BUNQL_LIMITS_QUERY_TIMEOUT_MS`. */
@@ -267,6 +312,10 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     realtime: { ...DEFAULT_CONFIG.realtime },
     limits: { ...DEFAULT_CONFIG.limits },
     auth: { ...DEFAULT_CONFIG.auth, jwtPublicKeys: [...DEFAULT_CONFIG.auth.jwtPublicKeys] },
+    replication: {
+      ...DEFAULT_CONFIG.replication,
+      follow: [...DEFAULT_CONFIG.replication.follow],
+    },
   }
 
   for (const patch of [fromFile, options.overrides]) {
@@ -278,6 +327,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       realtime: mergeSection(config.realtime, patch.realtime, env),
       limits: mergeSection(config.limits, patch.limits, env),
       auth: mergeSection(config.auth, patch.auth, env),
+      replication: mergeSection(config.replication, patch.replication, env),
     }
   }
 
@@ -295,6 +345,22 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   }
   config.data.dir = path.resolve(config.data.dir)
   if (config.auth.keysFile === null) config.auth.keysFile = path.join(config.data.dir, "keys.json")
+
+  // Validate before deriving, or a typo in `role` would be silently corrected by `primary`.
+  if (config.replication.role !== "primary" && config.replication.role !== "replica") {
+    throw BunQLError.badRequest(
+      `[replication] role must be "primary" or "replica", got ${JSON.stringify(config.replication.role)}`,
+    )
+  }
+  // `--replica-of` is the whole decision: a node that is told where its primary is, is a replica.
+  if (config.replication.primary) config.replication.role = "replica"
+  if (config.replication.role === "replica" && !config.replication.primary) {
+    throw BunQLError.badRequest(
+      'a node with [replication] role = "replica" needs [replication] primary set to the ' +
+        "primary's wss:// URL",
+    )
+  }
+  if (config.replication.follow.length === 0) config.replication.follow = ["*"]
   return config
 }
 

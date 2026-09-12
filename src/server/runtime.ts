@@ -13,6 +13,7 @@
 // re-scoping free, and it is only safe while every borrow goes through the same door.
 
 import type { Args } from "../client/protocol.ts"
+import { ReplicaClient, ReplicationServer } from "../replication/index.ts"
 import {
   AuthorizerHub,
   type IncludeLevel,
@@ -67,6 +68,15 @@ export class ServerRuntime {
   readonly registry: TenantRegistry
   readonly metrics: Metrics
   readonly node: string
+  /** What this node reports in `BunQL-Role` and answers writes with. */
+  readonly role: "primary" | "replica"
+  /**
+   * The primary's `/v1/replication` endpoint, or null when `[replication] secret` is empty —
+   * which is what `403 REPLICATION_DISABLED` is answered from.
+   */
+  readonly replication: ReplicationServer | null
+  /** The replica's client, or null on a primary. Started by `startServer`, stopped by `close`. */
+  replica: ReplicaClient | null = null
 
   #hubs = new WeakMap<Database, AuthorizerHub>()
   #realtime = new Map<string, TenantRealtime>()
@@ -85,6 +95,7 @@ export class ServerRuntime {
     this.auth = options.auth
     this.metrics = options.metrics ?? new Metrics()
     this.node = options.config.server.node
+    this.role = options.config.replication.role
     this.#onError =
       options.onError ?? ((err: unknown) => console.error("bunql: server runtime", err))
     this.registry =
@@ -97,10 +108,48 @@ export class ServerRuntime {
         quotaBytes: options.config.data.quotaBytes,
         checkpointWalBytes: options.config.durability.checkpointWalBytes,
         defaultAck: options.config.durability.defaultAck,
+        segmentBytes: options.config.durability.segmentBytes,
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
         ...(options.onTenantOpen ? { onOpen: options.onTenantOpen } : {}),
       })
+    this.replication = options.config.replication.secret
+      ? new ReplicationServer({
+          registry: this.registry,
+          node: this.node,
+          secret: options.config.replication.secret,
+          heartbeatMs: options.config.replication.heartbeatMs,
+          slowReplicaMs: options.config.replication.slowReplicaMs,
+          onError: this.#onError,
+        })
+      : null
+  }
+
+  /**
+   * Starts following the primary. Called by `startServer` on a replica node; separate from the
+   * constructor so the embedded API can build a runtime without opening a socket.
+   */
+  startReplication(): void {
+    if (this.replica || this.role !== "replica") return
+    const section = this.config.replication
+    this.replica = new ReplicaClient({
+      registry: this.registry,
+      primary: section.primary,
+      secret: section.secret,
+      node: this.node,
+      follow: section.follow,
+      reconnectMs: section.reconnectMs,
+      heartbeatMs: section.heartbeatMs,
+      onError: this.#onError,
+    })
+    this.replica.start()
+  }
+
+  /** Where a client should send a write this node cannot take. */
+  get primaryUrl(): string | null {
+    return this.role === "replica" && this.config.replication.primary
+      ? this.config.replication.primary
+      : null
   }
 
   /**
@@ -382,6 +431,9 @@ export class ServerRuntime {
     this.#txByDb.clear()
     for (const name of [...this.#realtime.keys()]) this.closeRealtime(name)
     this.#subscribers.clear()
+    this.replica?.stop()
+    this.replica = null
+    this.replication?.stop()
     this.registry.close()
   }
 
@@ -428,9 +480,13 @@ export function randomBaton(): string {
 }
 
 /** Turns a tenant failure into the HTTP shape of design §6.6. */
-export function mapTenantError(err: unknown): unknown {
+export function mapTenantError(err: unknown, primary?: string | null): unknown {
   if (!(err instanceof TenantError)) return err
   switch (err.code) {
+    case "NOT_PRIMARY":
+      // R2 replaces this with a `FORWARD` round-trip; the code and the header stay the same, so a
+      // client that already follows `BunQL-Primary` keeps working when it lands.
+      return BunQLError.notPrimary(primary ?? undefined)
     case "DB_EXISTS":
       return new BunQLError("CONFLICT", err.message, 409)
     case "WRITE_IN_PROGRESS":

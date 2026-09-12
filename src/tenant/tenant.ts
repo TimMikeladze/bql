@@ -9,6 +9,11 @@
 // leave the WAL before the tailer has read it, which is what makes the log complete by
 // construction rather than by luck.
 //
+// Third invariant (replica mode, design §5.2): a replica tenant never authors a transaction.
+// Every txid it holds arrived as a record that its `WalApplier` verified against its own
+// pre-images, so `write`, `txBegin`/`txCommit` and an operator TRUNCATE checkpoint are refused
+// with `NOT_PRIMARY` rather than quietly producing a txid no primary knows about.
+//
 // Hook slots: the tenant takes the writer's WAL hook and nothing else. The commit, rollback and
 // authorizer slots belong to `src/realtime` and the route layer (docs/m6-realtime.md), which is
 // why `onCommit` here is a list of listeners this class calls after `log.append` rather than
@@ -27,6 +32,7 @@ import {
 } from "../sqlite/index.ts"
 import {
   computeFull,
+  encode,
   listSnapshots,
   type RecorderPosition,
   restore,
@@ -41,7 +47,7 @@ import {
   WalError,
   WalFormatError,
 } from "../wal/index.ts"
-import { Catalog, positionOf } from "./catalog.ts"
+import { Catalog, positionOf, type TenantRole } from "./catalog.ts"
 
 /** How durable a write has to be before it is acknowledged (design §5.4, minus the replicas). */
 export type AckLevel = "local" | "fsync"
@@ -67,6 +73,11 @@ export type ReconcileOutcome =
 
 export interface TenantOptions {
   name: string
+  /**
+   * `"primary"` (default) owns the write path. `"replica"` opens readers and a `WalApplier`,
+   * takes its transactions from `applyRecord`, and refuses every write verb.
+   */
+  role?: TenantRole
   /** The data root, `<dataDir>`; forks resolve their own directory under it. */
   dataDir: string
   /** This tenant's directory, `<dataDir>/dbs/<hh>/<name>`. */
@@ -124,6 +135,7 @@ const DEFAULT_LIMITS: Partial<Record<LimitName, number>> = {
 
 export interface TenantStats {
   name: string
+  role: TenantRole
   sizeBytes: number
   walBytes: number
   txid: bigint
@@ -208,13 +220,22 @@ export interface ReaderLease {
 
 export class Tenant {
   readonly name: string
+  readonly role: TenantRole
   readonly dataDir: string
   readonly dir: string
   readonly dbPath: string
   readonly catalog: Catalog
+  /**
+   * The tenant's control connection. On a primary it is the single writer; on a replica it is a
+   * `query_only` connection that exists so the realtime engine and the checkpoint verbs have
+   * somewhere to attach — a replica's pages arrive through `applier`, never through SQL.
+   */
   readonly writer: Database
-  readonly log: TxnLog
-  readonly recorder: TxnRecorder
+  log: TxnLog
+  /** Null on a replica: nothing here authors a transaction. */
+  readonly recorder: TxnRecorder | null
+  /** Null on a primary: set on a replica, where it is the only thing that moves the txid. */
+  readonly applier: WalApplier | null
   readonly pageSize: number
   readonly quotaBytes: number
   readonly maxReaders: number
@@ -254,11 +275,14 @@ export class Tenant {
     options: TenantOptions,
     writer: Database,
     log: TxnLog,
-    recorder: TxnRecorder,
+    recorder: TxnRecorder | null,
+    applier: WalApplier | null,
     pageSize: number,
     reconciled: ReconcileOutcome,
   ) {
     this.name = options.name
+    this.role = options.role ?? "primary"
+    this.applier = applier
     this.dataDir = options.dataDir
     this.dir = options.dir
     this.dbPath = path.join(options.dir, "main.db")
@@ -287,6 +311,11 @@ export class Tenant {
   static open(options: TenantOptions): Tenant {
     fs.mkdirSync(options.dir, { recursive: true })
     const dbPath = path.join(options.dir, "main.db")
+    const replica = (options.role ?? "primary") === "replica"
+    // A replica's pages arrive as WAL frames the applier writes by hand, and SQLite ignores a
+    // `-wal` unless the database header says the file is in WAL mode. A database that does not
+    // exist yet therefore has to be created before the first record can land in it.
+    if (replica && !hasPages(dbPath)) createEmptyDatabase(dbPath, options.pageSize ?? 4096)
     const log = TxnLog.open({
       dir: options.dir,
       ...(options.segmentBytes !== undefined ? { segmentBytes: options.segmentBytes } : {}),
@@ -294,16 +323,18 @@ export class Tenant {
     })
 
     try {
-      const { recorder, outcome } = openRecorder(options, dbPath, log)
-      const writer = openConnection(dbPath, options, { writer: true })
+      const { recorder, applier, outcome } = replica
+        ? openApplier(options, dbPath)
+        : openRecorder(options, dbPath, log)
+      const writer = openConnection(dbPath, options, { writer: !replica })
       let pageSize = options.pageSize ?? 4096
       try {
         pageSize = Number(writer.prepare("pragma page_size").get()?.page_size ?? pageSize)
-        applyQuota(writer, options.quotaBytes ?? 0, pageSize)
-        const tenant = new Tenant(options, writer, log, recorder, pageSize, outcome)
+        if (!replica) applyQuota(writer, options.quotaBytes ?? 0, pageSize)
+        const tenant = new Tenant(options, writer, log, recorder, applier, pageSize, outcome)
         // Installing a WAL hook is also what turns SQLite's own autocheckpoint off (design §4.1);
         // `wal_autocheckpoint = 0` above says the same thing twice, on purpose.
-        tenant.trackWal()
+        if (!replica) tenant.trackWal()
         return tenant
       } catch (err) {
         writer.close()
@@ -315,23 +346,49 @@ export class Tenant {
     }
   }
 
+  /** True when this node follows the database rather than owning its write path. */
+  get isReplica(): boolean {
+    return this.role === "replica"
+  }
+
+  /** Throws `NOT_PRIMARY` on a replica; every write verb calls it first. */
+  #assertPrimary(): void {
+    if (this.role !== "replica") return
+    throw new TenantError(
+      "NOT_PRIMARY",
+      `${this.name} is a replica of another node; writes go to the primary`,
+    )
+  }
+
   // ── state ────────────────────────────────────────────────────────────────────────────────────
 
-  /** Last txid this tenant has recorded. */
+  /** Last txid this tenant has recorded (a primary) or applied (a replica). */
   get txid(): bigint {
-    return this.recorder.position.txid
+    return this.position.txid
   }
 
   get epoch(): number {
-    return this.recorder.epoch
+    return this.recorder ? this.recorder.epoch : this.position.epoch
   }
 
   get checksum(): bigint {
-    return this.recorder.position.checksum
+    return this.position.checksum
   }
 
+  /**
+   * A replica has no WAL position of its own worth saving: its `-wal` is written by the applier
+   * with local salts, so the zeroed marker is the honest answer and is also what a reopen wants.
+   */
   get position(): RecorderPosition {
-    return this.recorder.position
+    if (this.recorder) return this.recorder.position
+    const applied = (this.applier as WalApplier).position
+    return {
+      txid: applied.txid,
+      epoch: applied.epoch,
+      checksum: applied.postChecksum,
+      dbSizePages: applied.dbSizePages,
+      wal: { salt1: 0, salt2: 0, frame: 0 },
+    }
   }
 
   get closed(): boolean {
@@ -366,9 +423,10 @@ export class Tenant {
   }
 
   stats(): TenantStats {
-    const position = this.recorder.position
+    const position = this.position
     return {
       name: this.name,
+      role: this.role,
       sizeBytes: this.sizeBytes,
       walBytes: this.walBytes,
       txid: position.txid,
@@ -397,6 +455,7 @@ export class Tenant {
    */
   write<T>(fn: (db: Database) => T, options: WriteOptions = {}): WriteResult<T> {
     this.#assertOpen()
+    this.#assertPrimary()
     if (this.#txOpen) throw txBusy(this.name)
     if (this.#writing) {
       throw new TenantError("WRITE_IN_PROGRESS", `a write is already running on ${this.name}`)
@@ -443,6 +502,7 @@ export class Tenant {
    */
   txBegin(options: TxBeginOptions = {}): void {
     this.#assertOpen()
+    this.#assertPrimary()
     if (this.#txOpen || this.#writing) throw txBusy(this.name)
     if (this.#exclusive) throw BunQLError.busy(`${this.name} is taking a snapshot`)
     const mode = options.mode ?? "immediate"
@@ -481,6 +541,7 @@ export class Tenant {
    */
   txCommit(options: WriteOptions = {}): bigint {
     this.#assertOpen()
+    this.#assertPrimary()
     if (!this.#txOpen) throw noTx(this.name)
     const ack = options.ack ?? this.#txAck
     this.#clearTxTimer()
@@ -626,6 +687,21 @@ export class Tenant {
   /** Manual checkpoint, the `POST /v1/db/{db}/checkpoint` of design §6.5. */
   checkpoint(mode: CheckpointMode = "PASSIVE"): CheckpointResult {
     this.#assertOpen()
+    if (this.isReplica) {
+      // A replica's WAL belongs to the applier, which rewrites its header and its checksum chain
+      // on every apply. An operator TRUNCATE between two applies would leave the applier pointing
+      // at a generation that is gone; the idle sweep in `maintain` does it safely instead.
+      if (mode === "TRUNCATE" || mode === "RESTART") {
+        throw new TenantError(
+          "NOT_PRIMARY",
+          `${this.name} is a replica; its WAL is checkpointed by the applier`,
+        )
+      }
+      if (this.#leased > 0) throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
+      const result = (this.applier as WalApplier).checkpoint(mode)
+      this.#lastActivityMs = Date.now()
+      return result
+    }
     if (mode !== "PASSIVE" && this.#leased > 0) {
       throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
     }
@@ -647,6 +723,12 @@ export class Tenant {
     if (now - this.#lastActivityMs < this.idleCheckpointMs) return
     this.#maintainedAt = this.#lastActivityMs
     if (this.walBytes <= WAL_HEADER_SIZE) return
+    if (this.isReplica) {
+      // Mechanism B (design §4.5) appends to the replica's own WAL on every apply and resets
+      // `nBackfill`, so without this the readers pay a full WAL rescan that only ever grows.
+      ;(this.applier as WalApplier).checkpoint("TRUNCATE")
+      return
+    }
     // Nothing may leave the WAL before it is recorded; draining first is what guarantees it.
     this.drain()
     this.#openWal()
@@ -671,7 +753,7 @@ export class Tenant {
     try {
       this.drain()
       this.#openWal()
-      const txid = this.recorder.position.txid
+      const txid = this.position.txid
       const existing = listSnapshots(this.dir).find((ref) => BigInt(ref.txid) === txid)
       if (existing) return existing
       const ref = await snapshot(
@@ -787,6 +869,70 @@ export class Tenant {
     }
   }
 
+  // ── replica apply (design §4.5, §5.2) ────────────────────────────────────────────────────────
+
+  /**
+   * Applies one record from the primary. The order mirrors the write path's — verify and write,
+   * then log, then save the position, then publish — so a replica that crashes mid-apply comes
+   * back with a position the applier can prove, never one it merely claimed.
+   *
+   * `bytes` is the record exactly as it arrived; passing it avoids re-compressing the pages just
+   * to file the record in this node's own log. Throws `PositionMismatch` for a record that does
+   * not follow, and `ChecksumMismatch` when the replica's own pre-images disagree with the
+   * primary's — both leaving the replica untouched, both meaning "send me a snapshot".
+   */
+  applyRecord(record: TxnRecord, bytes?: Uint8Array): void {
+    this.#assertOpen()
+    if (!this.isReplica) {
+      throw new TenantError("NOT_REPLICA", `${this.name} is a primary; it records its own writes`)
+    }
+    if (this.#exclusive) {
+      throw new TenantError("BUSY", `${this.name} is taking a snapshot`)
+    }
+    const applier = this.applier as WalApplier
+    applier.apply(record)
+    const encoded = bytes ?? encode(record)
+    this.#appendReplicated(encoded, record.txid)
+    // The applier's own `meta.json` is the durable position and is already fsynced by `apply`;
+    // the catalog copy is a fast-start hint, so it is throttled exactly as the primary's is.
+    this.#positionDirty = true
+    this.#savePosition(Date.now())
+    this.#publish({ txid: record.txid, record, bytes: encoded })
+    this.#wake(record.txid)
+    this.#lastActivityMs = Date.now()
+  }
+
+  /**
+   * Files a replicated record in this node's own log, so it can serve a downstream replica and so
+   * `restore --at` works locally. The log is written *after* the applier has persisted its
+   * position, so it can only ever be behind; a gap means the tail was lost to a crash, and a log
+   * with a hole cannot be replayed at all, so it is restarted from this record.
+   */
+  #appendReplicated(bytes: Uint8Array, txid: bigint): void {
+    const last = this.log.lastTxid
+    if (last !== 0n && last + 1n !== txid) this.#resetLog()
+    try {
+      this.log.appendEncoded(bytes)
+    } catch (err) {
+      if (!(err instanceof WalFormatError)) throw err
+      this.#resetLog()
+      this.log.appendEncoded(bytes)
+    }
+  }
+
+  /** Drops every segment and reopens the log empty. The next append starts a fresh segment. */
+  #resetLog(): void {
+    this.log.close()
+    fs.rmSync(path.join(this.dir, "log"), { recursive: true, force: true })
+    this.log = TxnLog.open({
+      dir: this.dir,
+      ...(this.#options.segmentBytes !== undefined
+        ? { segmentBytes: this.#options.segmentBytes }
+        : {}),
+      fsync: this.#options.logFsync ?? "interval",
+    })
+  }
+
   // ── lifecycle ────────────────────────────────────────────────────────────────────────────────
 
   /** Flushes, saves the position and marks the tenant cleanly closed. */
@@ -814,8 +960,12 @@ export class Tenant {
       // over the WAL, so leaving an empty one behind is what keeps a cold open cheap — and the
       // backfill is work SQLite would have had to do later anyway.
       if (this.#leased === 0 && this.walBytes > WAL_HEADER_SIZE) {
-        this.#openWal()
-        this.writer.walCheckpoint("TRUNCATE")
+        if (this.isReplica) {
+          ;(this.applier as WalApplier).checkpoint("TRUNCATE")
+        } else {
+          this.#openWal()
+          this.writer.walCheckpoint("TRUNCATE")
+        }
         this.#walFrames = 0
       }
     } catch {
@@ -824,13 +974,14 @@ export class Tenant {
     }
     this.log.flush()
     if (!this.catalog.closed) {
-      const position = this.recorder.position
+      const position = this.position
       const wal =
         this.walBytes <= WAL_HEADER_SIZE ? { salt1: 0, salt2: 0, frame: 0 } : position.wal
       this.catalog.savePosition(this.name, { ...position, wal }, true)
     }
     this.log.close()
-    this.recorder.close()
+    this.recorder?.close()
+    this.applier?.close()
     for (const reader of this.#free) reader.close()
     this.#free = []
     this.#openReaders = 0
@@ -859,7 +1010,8 @@ export class Tenant {
     this.#txOpen = false
     this.#txOnExpire = null
     this.log.close()
-    this.recorder.close()
+    this.recorder?.close()
+    this.applier?.close()
     for (const reader of this.#free) reader.close()
     this.#free = []
     this.#openReaders = 0
@@ -895,17 +1047,19 @@ export class Tenant {
 
   // -------------------------------------------------------------------------
 
-  /** Steps 2–5 of design §4.3. Returns the tenant's txid afterwards. */
+  /** Steps 2–5 of design §4.3. Returns the tenant's txid afterwards. A replica records nothing. */
   #capture(): bigint {
-    const records = this.recorder.poll()
-    if (records.length === 0) return this.recorder.position.txid
+    const recorder = this.recorder
+    if (!recorder) return this.position.txid
+    const records = recorder.poll()
+    if (records.length === 0) return recorder.position.txid
 
     const events: CommitEvent[] = []
     for (const record of records) {
       const bytes = this.log.append(record)
       events.push({ txid: record.txid, record, bytes })
     }
-    const position = this.recorder.position
+    const position = recorder.position
     this.#positionDirty = true
     this.#savePosition(Date.now())
     for (const event of events) this.#publish(event)
@@ -922,7 +1076,7 @@ export class Tenant {
     if (!this.#positionDirty && !force) return
     if (!force && now - this.#positionSavedMs < this.#positionIntervalMs) return
     if (this.catalog.closed) return
-    this.catalog.savePosition(this.name, this.recorder.position)
+    this.catalog.savePosition(this.name, this.position)
     this.#positionDirty = false
     this.#positionSavedMs = now
   }
@@ -1032,7 +1186,7 @@ export class Tenant {
       this.#savePosition(Date.now(), true)
       return
     }
-    const position = this.recorder.position
+    const position = this.position
     this.catalog.savePosition(this.name, {
       ...position,
       wal: { salt1: 0, salt2: 0, frame: 0 },
@@ -1168,8 +1322,41 @@ function translateWriteError(err: unknown, name: string): unknown {
 }
 
 interface RecorderOpen {
-  recorder: TxnRecorder
+  recorder: TxnRecorder | null
+  applier: WalApplier | null
   outcome: ReconcileOutcome
+}
+
+/**
+ * The replica half of `openRecorder`: no tailer, no reconcile against a WAL this node wrote, just
+ * the applier seeded from the catalog. The applier keeps its own `meta.json` and treats it as
+ * authoritative; the catalog position is passed only so a directory restored from somewhere else
+ * (a snapshot installed by the replication client) starts where that snapshot ended.
+ */
+function openApplier(options: TenantOptions, dbPath: string): RecorderOpen {
+  const saved =
+    options.position ??
+    (() => {
+      const row = options.catalog.getTenant(options.name, { includeDeleted: true })
+      return row ? positionOf(row) : null
+    })()
+  const applier = new WalApplier({ dbPath, dir: options.dir, fsync: "each" })
+  const local = applier.position
+  // With no `meta.json` the applier has inferred its state from the file, and the file is not the
+  // position: a database SQLite has only ever opened holds a header page that belongs to no
+  // transaction, so a fresh replica stands at "0 pages, checksum 0" exactly as a fresh primary
+  // does. The catalog is authoritative in that case, and whenever it is ahead.
+  const fresh = !fs.existsSync(applier.metaPath)
+  if (saved && (fresh || saved.txid > local.txid)) {
+    applier.seed({
+      txid: saved.txid,
+      epoch: options.epoch ?? saved.epoch,
+      postChecksum: saved.checksum,
+      dbSizePages: saved.dbSizePages,
+      ...(options.pageSize ? { pageSize: options.pageSize } : {}),
+    })
+  }
+  return { recorder: null, applier, outcome: "clean" }
 }
 
 /**
@@ -1208,7 +1395,7 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
   }
 
   if (!base || base.txid === 0n) {
-    return { recorder: TxnRecorder.open({ dbPath, epoch }), outcome: "clean" }
+    return { recorder: TxnRecorder.open({ dbPath, epoch }), applier: null, outcome: "clean" }
   }
 
   /** A zeroed WAL position is the marker a TRUNCATE checkpoint leaves: the file is the state. */
@@ -1249,12 +1436,13 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
           checksum: base.checksum,
           dbSizePages: full.pages,
         })
-        return { recorder: rewound, outcome: "clean" }
+        return { recorder: rewound, applier: null, outcome: "clean" }
       }
       if (lastRecord && full.checksum === lastRecord.preChecksum) {
         recorder.close()
         return {
           recorder: applyLastRecord(options, dbPath, lastRecord, full.pages, epoch),
+          applier: null,
           outcome: "applied",
         }
       }
@@ -1268,7 +1456,7 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
       recorder.close()
       throw err
     }
-    if (records.length === 0) return { recorder, outcome: "clean" }
+    if (records.length === 0) return { recorder, applier: null, outcome: "clean" }
 
     // Transactions committed that never reached the log (design §4.3, "DB ahead of log"). They
     // were folded against pre-images from the WAL overlay and the database file; if either was
@@ -1287,7 +1475,7 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
     for (const record of records) log.append(record)
     log.flush()
     options.catalog.savePosition(options.name, recorder.position)
-    return { recorder, outcome: "tailed" }
+    return { recorder, applier: null, outcome: "tailed" }
   }
 
   if (!lastRecord) {
@@ -1307,6 +1495,7 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
   }
   return {
     recorder: applyLastRecord(options, dbPath, lastRecord, full.pages, epoch),
+    applier: null,
     outcome: "applied",
   }
 }

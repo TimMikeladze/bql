@@ -40,6 +40,7 @@ export {
 export {
   createApp,
   createRuntime,
+  type ReplicationSocketData,
   startServer,
   type App,
   type RuntimeBundle,
@@ -59,7 +60,9 @@ export {
   type DurabilitySection,
   type LimitsSection,
   type LoadConfigOptions,
+  type NodeRole,
   type RealtimeSection,
+  type ReplicationSection,
   type ResolvedAuth,
   type ServerConfig,
   type ServerConfigInput,
@@ -95,7 +98,7 @@ export {
   type EncodedRows,
   type RowSource,
 } from "./json.ts"
-export { Metrics, type MetricsSnapshot } from "./metrics.ts"
+export { Metrics, type MetricsSnapshot, type ReplicationMetrics } from "./metrics.ts"
 export { mapTenantError, randomBaton, ServerRuntime, type TxSession } from "./runtime.ts"
 export { openSse, resumeFrom, SSE_HEADERS, SseStream, type SseOptions } from "./sse.ts"
 export { busPublisher, type SocketData } from "./ws.ts"

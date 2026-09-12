@@ -15,6 +15,9 @@ import { Database } from "../sqlite/index.ts"
 import type { RevocationList } from "../server/auth.ts"
 import type { RecorderPosition } from "../wal/index.ts"
 
+/** Whether this node authors this database's transactions or receives them (design §5.2). */
+export type TenantRole = "primary" | "replica"
+
 /** A tenant as the catalog stores it. */
 export interface TenantRow {
   name: string
@@ -35,6 +38,8 @@ export interface TenantRow {
   walFrame: number
   /** True when the tenant was closed cleanly, so a reopen can skip the expensive reconcile. */
   clean: boolean
+  /** `"replica"` for a database this node follows rather than owns. */
+  role: TenantRole
 }
 
 export interface TenantInit {
@@ -42,6 +47,8 @@ export interface TenantInit {
   pageSize: number
   quotaBytes?: number
   epoch?: number
+  /** Default `"primary"`. A replica row is created by the replication client, not by a user. */
+  role?: TenantRole
   /** Starting position, for a tenant forked from another one. */
   position?: Omit<RecorderPosition, "epoch">
   createdAtMs?: number
@@ -78,7 +85,8 @@ create table if not exists tenants (
   wal_salt1     integer not null default 0,
   wal_salt2     integer not null default 0,
   wal_frame     integer not null default 0,
-  clean         integer not null default 0
+  clean         integer not null default 0,
+  role          text    not null default 'primary'
 ) strict;
 
 create table if not exists tokens (
@@ -112,6 +120,7 @@ interface RawTenant {
   wal_salt2: number
   wal_frame: number
   clean: number
+  role: string
 }
 
 function toRow(raw: RawTenant): TenantRow {
@@ -129,6 +138,7 @@ function toRow(raw: RawTenant): TenantRow {
     walSalt2: raw.wal_salt2,
     walFrame: raw.wal_frame,
     clean: raw.clean !== 0,
+    role: raw.role === "replica" ? "replica" : "primary",
   }
 }
 
@@ -140,6 +150,23 @@ export function positionOf(row: TenantRow): RecorderPosition {
     checksum: row.checksum,
     dbSizePages: row.dbSizePages,
     wal: { salt1: row.walSalt1, salt2: row.walSalt2, frame: row.walFrame },
+  }
+}
+
+/**
+ * Columns added after the first release. `create table if not exists` leaves an existing table
+ * alone, so a node that predates the column gets it here, with every existing row defaulted to
+ * `"primary"` — which is what every database on a phase-0 node was.
+ */
+function migrate(db: Database): void {
+  const columns = new Set(
+    db
+      .prepare("select name from pragma_table_info('tenants')")
+      .all()
+      .map((row) => row.name as string),
+  )
+  if (!columns.has("role")) {
+    db.exec("alter table tenants add column role text not null default 'primary'")
   }
 }
 
@@ -164,6 +191,7 @@ export class Catalog implements RevocationList {
     try {
       db.exec("pragma synchronous = normal")
       db.exec(SCHEMA)
+      migrate(db)
     } catch (err) {
       db.close()
       throw err
@@ -197,18 +225,20 @@ export class Catalog implements RevocationList {
       walSalt2: position?.wal.salt2 ?? 0,
       walFrame: position?.wal.frame ?? 0,
       clean: true,
+      role: init.role ?? "primary",
     }
     this.db.run(
       `insert into tenants
          (name, created_at, page_size, quota_bytes, deleted_at, epoch, txid, checksum,
-          db_size_pages, wal_salt1, wal_salt2, wal_frame, clean)
-       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1)
+          db_size_pages, wal_salt1, wal_salt2, wal_frame, clean, role)
+       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?)
        on conflict(name) do update set
          created_at = excluded.created_at, page_size = excluded.page_size,
          quota_bytes = excluded.quota_bytes, deleted_at = null, epoch = excluded.epoch,
          txid = excluded.txid, checksum = excluded.checksum,
          db_size_pages = excluded.db_size_pages, wal_salt1 = excluded.wal_salt1,
-         wal_salt2 = excluded.wal_salt2, wal_frame = excluded.wal_frame, clean = 1`,
+         wal_salt2 = excluded.wal_salt2, wal_frame = excluded.wal_frame, clean = 1,
+         role = excluded.role`,
       [
         row.name,
         row.createdAtMs,
@@ -221,9 +251,16 @@ export class Catalog implements RevocationList {
         row.walSalt1,
         row.walSalt2,
         row.walFrame,
+        row.role,
       ],
     )
     return row
+  }
+
+  /** Switches a database between primary and replica mode, for bootstrap and for promotion. */
+  setRole(name: string, role: TenantRole): void {
+    this.#assertOpen()
+    this.db.run("update tenants set role = ? where name = ?", [role, name])
   }
 
   getTenant(name: string, options: { includeDeleted?: boolean } = {}): TenantRow | null {

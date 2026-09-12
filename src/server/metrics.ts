@@ -10,6 +10,21 @@ const LATENCY_BUCKETS = [
   25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 50_000, 250_000, 1_000_000,
 ] as const
 
+/**
+ * What `/metrics` reports about replication, gathered by the caller from whichever half of it
+ * this node runs. Absent on a standalone node, which is why the four series are omitted rather
+ * than exported as zeroes: a zero lag on a node with no replicas is a lie a dashboard will alert
+ * on sooner or later.
+ */
+export interface ReplicationMetrics {
+  /** Replica sockets attached (primary) or 1/0 for the upstream socket (replica). */
+  connected: number
+  /** Largest per-stream lag in transactions. */
+  lagTxid: number
+  bytes: number
+  records: number
+}
+
 export interface MetricsSnapshot {
   requests: number
   requestsByClass: Record<string, number>
@@ -139,7 +154,11 @@ export class Metrics {
   }
 
   /** Prometheus text exposition format, version 0.0.4. */
-  render(registry: { open: number; tenants: number; evictions: number }, node: string): string {
+  render(
+    registry: { open: number; tenants: number; evictions: number },
+    node: string,
+    replication?: ReplicationMetrics | null,
+  ): string {
     const labels = `node="${node.replaceAll('"', "")}"`
     const out: string[] = []
     const counter = (name: string, help: string, value: number, extra = ""): void => {
@@ -198,6 +217,29 @@ export class Metrics {
     gauge("bunql_live_subscriptions", "Live queries subscribed.", this.#liveSubs)
     gauge("bunql_change_subscriptions", "Change feeds subscribed.", this.#changeSubs)
     gauge("bunql_uptime_seconds", "Seconds since start.", (Date.now() - this.startedAt) / 1000)
+
+    if (replication) {
+      gauge(
+        "bunql_replication_lag_txid",
+        "Largest number of transactions any replica stream is behind by.",
+        replication.lagTxid,
+      )
+      gauge(
+        "bunql_replication_connected",
+        "Replica sockets attached on a primary, or 1 while a replica is following its primary.",
+        replication.connected,
+      )
+      counter(
+        "bunql_replication_bytes_total",
+        "Replication bytes sent (primary) or received (replica).",
+        replication.bytes,
+      )
+      counter(
+        "bunql_replication_records_total",
+        "Transaction records streamed (primary) or applied (replica).",
+        replication.records,
+      )
+    }
 
     return `${out.join("\n")}\n`
   }

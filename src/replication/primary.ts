@@ -1,0 +1,827 @@
+// The primary half of `/v1/replication`: one `ReplicationServer` per node, one `Conn` per replica
+// socket, one `Stream` per database that socket follows.
+//
+// Invariant: send order per stream is strictly ascending txid with no holes. That is why
+// `#startStream` attaches the tenant's commit listener *before* it reads the log — a record that
+// commits during the catch-up read lands in a buffer instead of being missed, and the buffer is
+// flushed with everything at or below the last sent txid skipped. A replica that sees txid n+1
+// after txid n never has to ask what happened in between, because nothing did.
+//
+// Second invariant: a slow replica costs the primary memory, not correctness. `ws.send` returning
+// -1 pauses the sender; frames queue; a socket that stays paused for `slowReplicaMs` is closed
+// with BUSY and resumes from its own position when it reconnects.
+
+import fs from "node:fs"
+import type { Tenant, TenantRegistry } from "../tenant/index.ts"
+import {
+  encode,
+  listSnapshots,
+  type SnapshotRef,
+  type TxnRecordInput,
+} from "../wal/index.ts"
+import {
+  decodeAck,
+  decodeJson,
+  encodeJson,
+  encodeSnapshotChunk,
+  encodeTxn,
+  FRAME,
+  FrameReader,
+  frameName,
+  type HelloBody,
+  makeNonce,
+  ProtocolError,
+  PROTO_VERSION,
+  type ReplicationErrorCode,
+  type SubscribeBody,
+  type UnsubscribeBody,
+  verifyProof,
+} from "./protocol.ts"
+
+/** Who this module pins tenants as, so it never releases the realtime engine's pin. */
+const PIN_OWNER = "replication"
+
+/** 1 MiB of the plain file per `SNAPSHOT_CHUNK`, per `plan-phase1.md`. */
+const CHUNK_BYTES = 1024 * 1024
+
+/** What this module needs from a Bun `ServerWebSocket`. */
+export interface ReplicationSocket {
+  send(data: Uint8Array | string): number
+  close(code?: number, reason?: string): void
+  readonly readyState: number
+  data: unknown
+}
+
+/** One replica's view of one database, as `GET /v1/db/:db/replication` reports it. */
+export interface ReplicaView {
+  node: string
+  stream: number
+  /** Last txid the replica has acked. */
+  txid: number
+  /** How far behind the primary that leaves it. */
+  lag: number
+  ackedAtMs: number
+  /** Whether the replica reported the record fsynced — the input to R2's `ack: "replica"`. */
+  fsynced: boolean
+}
+
+/** Fired for every `ACK` frame. R2's durability levels are a waiter over this. */
+export interface AckEvent {
+  db: string
+  node: string
+  stream: number
+  txid: bigint
+  fsynced: boolean
+}
+
+export interface ReplicationServerOptions {
+  registry: TenantRegistry
+  /** This node's id, sent in `HELLO`. */
+  node: string
+  /** The cluster secret. An empty one means the endpoint is disabled; the caller checks that. */
+  secret: string
+  heartbeatMs?: number
+  /** Close a socket that has been backpressured for this long. */
+  slowReplicaMs?: number
+  onError?: (err: unknown) => void
+}
+
+interface Pending {
+  txid: bigint
+  bytes: Uint8Array
+}
+
+interface Stream {
+  id: number
+  db: string
+  tenant: Tenant
+  /** Last txid written to the socket. */
+  sentTxid: bigint
+  ackedTxid: bigint
+  ackedAtMs: number
+  fsynced: boolean
+  unhook: (() => void) | null
+  /** Records that committed while the catch-up read was still running. */
+  buffer: Pending[]
+  catchingUp: boolean
+  closed: boolean
+}
+
+class Conn {
+  readonly ws: ReplicationSocket
+  readonly reader = new FrameReader()
+  readonly nonce = makeNonce()
+  readonly streams = new Map<number, Stream>()
+  node = "?"
+  authed = false
+  paused = false
+  pausedSinceMs = 0
+  /** Frames the socket refused outright (`send` returned 0), replayed on `drain`. */
+  queue: Uint8Array[] = []
+  closed = false
+
+  constructor(ws: ReplicationSocket) {
+    this.ws = ws
+  }
+}
+
+export class ReplicationServer {
+  readonly registry: TenantRegistry
+  readonly node: string
+  readonly secret: string
+  readonly heartbeatMs: number
+  readonly slowReplicaMs: number
+
+  /** Bytes handed to `ws.send`, for `bunql_replication_bytes_total`. */
+  bytesSent = 0
+  /** `TXN` frames sent, for `bunql_replication_records_total`. */
+  recordsSent = 0
+
+  #conns = new Set<Conn>()
+  #byWs = new WeakMap<object, Conn>()
+  /** One in-flight snapshot per database, so a fan-out of replicas produces one file, not N. */
+  #snapshots = new Map<string, Promise<SnapshotRef>>()
+  #timer: ReturnType<typeof setInterval> | null = null
+  #ackListeners = new Set<(event: AckEvent) => void>()
+  #onError: (err: unknown) => void
+  #closed = false
+
+  constructor(options: ReplicationServerOptions) {
+    this.registry = options.registry
+    this.node = options.node
+    this.secret = options.secret
+    this.heartbeatMs = options.heartbeatMs ?? 5000
+    this.slowReplicaMs = options.slowReplicaMs ?? 30_000
+    this.#onError =
+      options.onError ?? ((err: unknown) => console.error("bunql: replication", err))
+  }
+
+  /** Replica connections currently attached, for `bunql_replication_connected`. */
+  get connections(): number {
+    return this.#conns.size
+  }
+
+  /** Streams open across every connection. */
+  get streamCount(): number {
+    let total = 0
+    for (const conn of this.#conns) total += conn.streams.size
+    return total
+  }
+
+  /** Every replica following `db`, for `GET /v1/db/:db/replication`. */
+  replicasOf(db: string): ReplicaView[] {
+    const out: ReplicaView[] = []
+    for (const conn of this.#conns) {
+      for (const stream of conn.streams.values()) {
+        if (stream.db !== db) continue
+        out.push({
+          node: conn.node,
+          stream: stream.id,
+          txid: Number(stream.ackedTxid),
+          lag: Number(stream.tenant.txid - stream.ackedTxid),
+          ackedAtMs: stream.ackedAtMs,
+          fsynced: stream.fsynced,
+        })
+      }
+    }
+    return out
+  }
+
+  /** The largest lag across every stream, for the metrics gauge. */
+  get maxLagTxid(): number {
+    let worst = 0
+    for (const conn of this.#conns) {
+      for (const stream of conn.streams.values()) {
+        const lag = Number(stream.tenant.txid - stream.ackedTxid)
+        if (lag > worst) worst = lag
+      }
+    }
+    return worst
+  }
+
+  /** R2's seam: every `ACK` frame, with the node and database it came from. */
+  onAck(listener: (event: AckEvent) => void): () => void {
+    this.#ackListeners.add(listener)
+    return () => {
+      this.#ackListeners.delete(listener)
+    }
+  }
+
+  // ── socket lifecycle ─────────────────────────────────────────────────────────────────────────
+
+  /** A replica has connected: challenge it with a fresh nonce. */
+  open(ws: ReplicationSocket): void {
+    if (this.#closed) {
+      ws.close(1001, "shutting down")
+      return
+    }
+    const conn = new Conn(ws)
+    this.#conns.add(conn)
+    this.#byWs.set(ws as object, conn)
+    this.#send(
+      conn,
+      encodeJson(FRAME.HELLO, {
+        proto: PROTO_VERSION,
+        node: this.node,
+        nonce: conn.nonce,
+      } satisfies HelloBody),
+    )
+    this.#startTimer()
+  }
+
+  message(ws: ReplicationSocket, data: string | Uint8Array | ArrayBuffer): void {
+    const conn = this.#byWs.get(ws as object)
+    if (!conn) return
+    let frames
+    try {
+      frames = conn.reader.push(data)
+    } catch (err) {
+      this.#fail(conn, "PROTO", err instanceof Error ? err.message : String(err))
+      return
+    }
+    for (const frame of frames) {
+      try {
+        this.#handle(conn, frame.type, frame.body)
+      } catch (err) {
+        if (err instanceof ProtocolError) {
+          this.#fail(conn, "PROTO", err.message)
+          return
+        }
+        this.#onError(err)
+        this.#error(conn, undefined, "INTERNAL", "the primary could not handle that frame")
+      }
+    }
+  }
+
+  /** Bun calls this when the socket's buffer has room again. */
+  drain(ws: ReplicationSocket): void {
+    const conn = this.#byWs.get(ws as object)
+    if (!conn) return
+    conn.paused = false
+    while (conn.queue.length > 0) {
+      const frame = conn.queue[0] as Uint8Array
+      const sent = conn.ws.send(frame)
+      if (sent === 0) {
+        conn.paused = true
+        return
+      }
+      conn.queue.shift()
+      this.bytesSent += frame.byteLength
+      if (sent === -1) {
+        conn.paused = true
+        conn.pausedSinceMs = Date.now()
+        return
+      }
+    }
+  }
+
+  close(ws: ReplicationSocket): void {
+    const conn = this.#byWs.get(ws as object)
+    if (!conn) return
+    this.#teardown(conn)
+  }
+
+  /** Closes every replica socket and stops the heartbeat. */
+  stop(): void {
+    if (this.#closed) return
+    this.#closed = true
+    if (this.#timer !== null) {
+      clearInterval(this.#timer)
+      this.#timer = null
+    }
+    for (const conn of [...this.#conns]) {
+      try {
+        conn.ws.close(1001, "shutting down")
+      } catch {
+        // The socket may already be gone; the teardown below is what matters.
+      }
+      this.#teardown(conn)
+    }
+  }
+
+  // ── frames ───────────────────────────────────────────────────────────────────────────────────
+
+  #handle(conn: Conn, type: number, body: Uint8Array): void {
+    if (type === FRAME.HELLO) {
+      this.#hello(conn, decodeJson<HelloBody>(type, body))
+      return
+    }
+    if (!conn.authed) {
+      this.#fail(conn, "AUTH_FAILED", `${frameName(type)} arrived before the handshake finished`)
+      return
+    }
+    switch (type) {
+      case FRAME.SUBSCRIBE:
+        void this.#subscribe(conn, decodeJson<SubscribeBody>(type, body))
+        return
+      case FRAME.UNSUBSCRIBE: {
+        const { stream } = decodeJson<UnsubscribeBody>(type, body)
+        const found = conn.streams.get(stream)
+        if (found) this.#endStream(conn, found)
+        return
+      }
+      case FRAME.ACK: {
+        const ack = decodeAck(body)
+        const stream = conn.streams.get(ack.stream)
+        if (!stream) return
+        if (ack.txid > stream.ackedTxid) stream.ackedTxid = ack.txid
+        stream.ackedAtMs = Date.now()
+        stream.fsynced = ack.fsynced
+        const event: AckEvent = {
+          db: stream.db,
+          node: conn.node,
+          stream: stream.id,
+          txid: ack.txid,
+          fsynced: ack.fsynced,
+        }
+        for (const listener of this.#ackListeners) {
+          try {
+            listener(event)
+          } catch (err) {
+            this.#onError(err)
+          }
+        }
+        return
+      }
+      case FRAME.HEARTBEAT:
+        return
+      case FRAME.ERROR:
+        // A replica telling the primary about a stream it could not apply. It re-subscribes from
+        // zero itself; nothing here has to act, but it is worth a line in the log.
+        this.#onError(new Error(`replica ${conn.node}: ${new TextDecoder().decode(body)}`))
+        return
+      case FRAME.FORWARD:
+        // R2. Until it lands, a replica that forwards is talking to a primary that cannot listen,
+        // and saying so is better than dropping the write silently.
+        this.#error(conn, undefined, "PROTO", "write forwarding is not implemented on this node")
+        return
+      default:
+        this.#fail(conn, "PROTO", `unexpected frame ${frameName(type)}`)
+    }
+  }
+
+  #hello(conn: Conn, hello: HelloBody): void {
+    if (conn.authed) return
+    if (hello.proto !== PROTO_VERSION) {
+      this.#fail(conn, "PROTO", `this node speaks replication protocol ${PROTO_VERSION}`)
+      return
+    }
+    if (!verifyProof(this.secret, conn.nonce, hello.proof)) {
+      this.#fail(conn, "AUTH_FAILED", "the cluster secret proof did not verify")
+      return
+    }
+    conn.node = typeof hello.node === "string" && hello.node ? hello.node : "?"
+    conn.authed = true
+    this.#send(
+      conn,
+      encodeJson(FRAME.HELLO, {
+        proto: PROTO_VERSION,
+        node: this.node,
+        ok: true,
+        databases: this.#databases(),
+      } satisfies HelloBody),
+    )
+  }
+
+  #databases(): string[] {
+    try {
+      return this.registry.list().map((row) => row.name)
+    } catch {
+      return []
+    }
+  }
+
+  // ── subscribe and bootstrap ──────────────────────────────────────────────────────────────────
+
+  async #subscribe(conn: Conn, request: SubscribeBody): Promise<void> {
+    const id = request.stream >>> 0
+    if (conn.streams.has(id)) this.#endStream(conn, conn.streams.get(id) as Stream)
+    let tenant: Tenant
+    try {
+      tenant = this.registry.open(request.db)
+    } catch {
+      this.#error(conn, id, "UNKNOWN_DB", `no such database: ${request.db}`)
+      return
+    }
+    // A tenant that is itself a replica may serve a downstream one (chained replication): it
+    // streams what it has applied, from its own log, and is never more current than its stream.
+    const fromTxid = parseBig(request.fromTxid)
+    const epoch = Number(request.epoch) || 0
+    if (epoch > tenant.epoch) {
+      this.#error(
+        conn,
+        id,
+        "EPOCH_AHEAD",
+        `${request.db}: the replica claims epoch ${epoch}, this node holds ${tenant.epoch}`,
+      )
+      return
+    }
+
+    const stream: Stream = {
+      id,
+      db: request.db,
+      tenant,
+      sentTxid: 0n,
+      ackedTxid: fromTxid,
+      ackedAtMs: Date.now(),
+      fsynced: false,
+      unhook: null,
+      buffer: [],
+      catchingUp: true,
+      closed: false,
+    }
+    conn.streams.set(id, stream)
+    // A tenant with a replica attached must not be evicted underneath it: closing it would drop
+    // the commit listener and the stream would silently stop.
+    this.registry.pin(request.db, PIN_OWNER)
+
+    const decision = this.#decide(tenant, fromTxid, parseBig(request.checksum))
+    if (decision.kind === "stream") {
+      this.#send(
+        conn,
+        encodeJson(FRAME.SUBSCRIBED, {
+          stream: id,
+          db: request.db,
+          mode: "stream",
+          txid: fromTxid.toString(),
+          epoch: tenant.epoch,
+          pageSize: tenant.pageSize,
+        }),
+      )
+      stream.sentTxid = fromTxid
+      this.#catchUp(conn, stream, fromTxid)
+      return
+    }
+
+    if (decision.reason) {
+      this.#error(conn, id, decision.reason.code, decision.reason.message)
+    }
+    try {
+      await this.#bootstrap(conn, stream)
+    } catch (err) {
+      this.#onError(err)
+      if (!stream.closed) {
+        this.#error(conn, id, "INTERNAL", "the primary could not produce a snapshot")
+        this.#endStream(conn, stream)
+      }
+    }
+  }
+
+  /**
+   * `plan-phase1.md`'s four-step rule, in order: a replica at zero, a replica outside the log, a
+   * replica whose next record follows it exactly, and everything else.
+   */
+  #decide(
+    tenant: Tenant,
+    fromTxid: bigint,
+    checksum: bigint,
+  ): { kind: "stream" } | { kind: "snapshot"; reason: { code: ReplicationErrorCode; message: string } | null } {
+    if (fromTxid === 0n) return { kind: "snapshot", reason: null }
+
+    // Fully caught up: nothing to compare but the database's own state.
+    if (fromTxid === tenant.txid) {
+      if (checksum === tenant.checksum) return { kind: "stream" }
+      return {
+        kind: "snapshot",
+        reason: {
+          code: "DIVERGED",
+          message: `${tenant.name}: at txid ${fromTxid} the replica holds checksum ${checksum}, this node holds ${tenant.checksum}`,
+        },
+      }
+    }
+
+    if (fromTxid > tenant.txid) {
+      return {
+        kind: "snapshot",
+        reason: {
+          code: "DIVERGED",
+          message: `${tenant.name}: the replica is at txid ${fromTxid}, ahead of this node's ${tenant.txid}`,
+        },
+      }
+    }
+
+    const next = tenant.log.read(fromTxid + 1n)
+    if (!next) {
+      return {
+        kind: "snapshot",
+        reason: {
+          code: "RETENTION",
+          message: `${tenant.name}: txid ${fromTxid + 1n} has aged out of the log`,
+        },
+      }
+    }
+    if (next.prevTxid !== fromTxid || next.preChecksum !== checksum) {
+      return {
+        kind: "snapshot",
+        reason: {
+          code: "DIVERGED",
+          message: `${tenant.name}: record ${next.txid} expects checksum ${next.preChecksum}, the replica reports ${checksum}`,
+        },
+      }
+    }
+    return { kind: "stream" }
+  }
+
+  /**
+   * Bootstrap by snapshot. The newest snapshot the log can still stream from is reused; when
+   * there is none, one is taken. The commit listener is attached *before* the file is read, for
+   * the same reason the catch-up attaches it first: a transaction that commits while the snapshot
+   * is on the wire must not be lost.
+   */
+  async #bootstrap(conn: Conn, stream: Stream): Promise<void> {
+    const tenant = stream.tenant
+    const ref = await this.#snapshotFor(tenant)
+    if (stream.closed) return
+    const txid = BigInt(ref.txid)
+    const pageSize = ref.pageSize || tenant.pageSize
+
+    this.#send(
+      conn,
+      encodeJson(FRAME.SUBSCRIBED, {
+        stream: stream.id,
+        db: stream.db,
+        mode: "snapshot",
+        txid: txid.toString(),
+        epoch: tenant.epoch,
+        pageSize,
+      }),
+    )
+
+    const file = fs.readFileSync(ref.path)
+    const plain = new Uint8Array(file.buffer, file.byteOffset, file.byteLength)
+    // What the replica is seeded with has to be the *tenant's* position at `txid`, which is not
+    // always the file's own page count and XOR. A database nothing has ever written to is the one
+    // that differs: SQLite creates its header page when the file is opened in WAL mode, outside
+    // any transaction, so the tenant stands at "0 pages, checksum 0" while the file holds one
+    // page. Seeding a replica from the file there would make it XOR that page out of its first
+    // apply and diverge on record 1. A snapshot older than the tenant's current txid has no such
+    // shortcut, and for one there is no pristine case to worry about: record 1 rewrites page 1.
+    const current = txid === tenant.txid
+    const position = tenant.position
+    this.#send(
+      conn,
+      encodeJson(FRAME.SNAPSHOT_BEGIN, {
+        stream: stream.id,
+        txid: txid.toString(),
+        epoch: current ? tenant.epoch : ref.epoch,
+        checksum: current ? position.checksum.toString() : ref.checksum,
+        bytes: plain.byteLength,
+        pageSize,
+        pages: current ? position.dbSizePages : ref.pages,
+      }),
+    )
+    for (let at = 0, seq = 0; at < plain.byteLength; at += CHUNK_BYTES, seq++) {
+      const chunk = plain.subarray(at, Math.min(at + CHUNK_BYTES, plain.byteLength))
+      const compressed = new Uint8Array(Bun.zstdCompressSync(chunk, { level: 3 }))
+      this.#send(conn, encodeSnapshotChunk(stream.id, seq, compressed))
+      if (stream.closed) return
+    }
+    this.#send(
+      conn,
+      encodeJson(FRAME.SNAPSHOT_END, {
+        stream: stream.id,
+        txid: txid.toString(),
+        hash: Bun.hash.xxHash3(plain).toString(),
+      }),
+    )
+
+    stream.sentTxid = txid
+    stream.ackedTxid = txid
+    this.#catchUp(conn, stream, txid)
+  }
+
+  async #snapshotFor(tenant: Tenant): Promise<SnapshotRef> {
+    const usable = this.#usableSnapshot(tenant)
+    if (usable) return usable
+    // Two replicas bootstrapping at once must not race for the writer: the first one's snapshot is
+    // the answer for both, and `Tenant.snapshot` refuses a second concurrent call with BUSY.
+    const inflight = this.#snapshots.get(tenant.name)
+    if (inflight) return await inflight
+    const taken = this.#take(tenant)
+    this.#snapshots.set(tenant.name, taken)
+    try {
+      return await taken
+    } finally {
+      if (this.#snapshots.get(tenant.name) === taken) this.#snapshots.delete(tenant.name)
+    }
+  }
+
+  /**
+   * Takes a snapshot, waiting out a writer that holds the tenant. A client write in flight is a
+   * matter of microseconds and is not a reason to refuse a replica its bootstrap.
+   */
+  async #take(tenant: Tenant): Promise<SnapshotRef> {
+    let last: unknown = null
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try {
+        return await tenant.snapshot()
+      } catch (err) {
+        last = err
+        if ((err as { code?: string }).code !== "BUSY") throw err
+        const usable = this.#usableSnapshot(tenant)
+        if (usable) return usable
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
+    throw last
+  }
+
+  /**
+   * A snapshot the replica can be streamed forward from: its txid has to be the tenant's current
+   * one, or the log has to still hold the record right after it.
+   */
+  #usableSnapshot(tenant: Tenant): SnapshotRef | null {
+    const first = tenant.log.firstTxid
+    const usable = listSnapshots(tenant.dir).filter((ref) => {
+      const at = BigInt(ref.txid)
+      if (at > tenant.txid) return false
+      if (at === tenant.txid) return true
+      return first !== null && first <= at + 1n
+    })
+    return usable.at(-1) ?? null
+  }
+
+  // ── catch-up and live streaming ──────────────────────────────────────────────────────────────
+
+  /**
+   * `plan-phase1.md`, "Catch-up without a gap": attach the listener first and buffer, read the log
+   * up to the txid the tenant was at when the listener attached, then flush the buffer skipping
+   * anything already sent.
+   */
+  #catchUp(conn: Conn, stream: Stream, fromTxid: bigint): void {
+    const tenant = stream.tenant
+    stream.catchingUp = true
+    stream.unhook = tenant.onCommit((event) => {
+      if (stream.closed) return
+      if (stream.catchingUp) {
+        stream.buffer.push({ txid: event.txid, bytes: event.bytes })
+        return
+      }
+      this.#emit(conn, stream, event.txid, event.bytes)
+    })
+
+    const attachTxid = tenant.txid
+    try {
+      if (attachTxid > fromTxid) {
+        for (const record of tenant.log.iterate(fromTxid + 1n)) {
+          if (stream.closed) return
+          if (record.txid > attachTxid) break
+          this.#emit(conn, stream, record.txid, encode(record as unknown as TxnRecordInput))
+        }
+      }
+    } catch (err) {
+      // The log aged out underneath the read. Say so and let the replica come back from zero.
+      this.#onError(err)
+      this.#error(conn, stream.id, "RETENTION", `${stream.db}: the log moved while catching up`)
+      this.#endStream(conn, stream)
+      return
+    }
+
+    stream.catchingUp = false
+    const buffered = stream.buffer
+    stream.buffer = []
+    for (const pending of buffered) {
+      if (pending.txid <= stream.sentTxid) continue
+      this.#emit(conn, stream, pending.txid, pending.bytes)
+    }
+  }
+
+  /** Sends one record, or queues it when the socket is backpressured. */
+  #emit(conn: Conn, stream: Stream, txid: bigint, bytes: Uint8Array): void {
+    if (stream.closed || conn.closed) return
+    if (txid <= stream.sentTxid) return
+    stream.sentTxid = txid
+    this.recordsSent += 1
+    this.#send(conn, encodeTxn(stream.id, bytes))
+  }
+
+  // ── sending ──────────────────────────────────────────────────────────────────────────────────
+
+  #send(conn: Conn, frame: Uint8Array): void {
+    if (conn.closed) return
+    if (conn.paused) {
+      conn.queue.push(frame)
+      return
+    }
+    const sent = conn.ws.send(frame)
+    if (sent === 0) {
+      // Refused outright: keep it and replay on `drain`.
+      conn.paused = true
+      conn.pausedSinceMs = Date.now()
+      conn.queue.push(frame)
+      return
+    }
+    this.bytesSent += frame.byteLength
+    if (sent === -1) {
+      conn.paused = true
+      conn.pausedSinceMs = Date.now()
+    }
+  }
+
+  #error(
+    conn: Conn,
+    stream: number | undefined,
+    code: ReplicationErrorCode,
+    message: string,
+  ): void {
+    this.#send(
+      conn,
+      encodeJson(FRAME.ERROR, {
+        ...(stream === undefined ? {} : { stream }),
+        code,
+        message,
+      }),
+    )
+  }
+
+  /** A fatal error: say what happened, then close. */
+  #fail(conn: Conn, code: ReplicationErrorCode, message: string): void {
+    this.#error(conn, undefined, code, message)
+    try {
+      conn.ws.close(code === "AUTH_FAILED" ? 1008 : 1002, code)
+    } catch {
+      // Already gone.
+    }
+    this.#teardown(conn)
+  }
+
+  // ── bookkeeping ──────────────────────────────────────────────────────────────────────────────
+
+  #endStream(conn: Conn, stream: Stream): void {
+    if (stream.closed) return
+    stream.closed = true
+    stream.unhook?.()
+    stream.unhook = null
+    stream.buffer = []
+    conn.streams.delete(stream.id)
+    this.#unpin(stream.db)
+  }
+
+  /** The tenant stays pinned while any stream anywhere still follows it. */
+  #unpin(db: string): void {
+    for (const conn of this.#conns) {
+      for (const stream of conn.streams.values()) {
+        if (stream.db === db) return
+      }
+    }
+    this.registry.unpin(db, PIN_OWNER)
+  }
+
+  #teardown(conn: Conn): void {
+    if (conn.closed) return
+    conn.closed = true
+    for (const stream of [...conn.streams.values()]) this.#endStream(conn, stream)
+    conn.queue = []
+    this.#conns.delete(conn)
+    this.#stopTimerIfIdle()
+  }
+
+  #startTimer(): void {
+    if (this.#timer !== null || this.#closed) return
+    this.#timer = setInterval(() => this.#tick(), this.heartbeatMs)
+    this.#timer.unref?.()
+  }
+
+  #stopTimerIfIdle(): void {
+    if (this.#conns.size > 0 || this.#timer === null) return
+    clearInterval(this.#timer)
+    this.#timer = null
+  }
+
+  /** Heartbeats, and the slow-replica cut-off. */
+  #tick(): void {
+    const now = Date.now()
+    const databases = this.#databases()
+    for (const conn of [...this.#conns]) {
+      if (conn.paused && now - conn.pausedSinceMs > this.slowReplicaMs) {
+        this.#fail(
+          conn,
+          "BUSY",
+          `this socket has been backpressured for ${now - conn.pausedSinceMs}ms`,
+        )
+        continue
+      }
+      if (!conn.authed) continue
+      this.#send(
+        conn,
+        encodeJson(FRAME.HEARTBEAT, {
+          ts: now,
+          streams: [...conn.streams.values()].map((stream) => ({
+            stream: stream.id,
+            txid: stream.tenant.txid.toString(),
+          })),
+          databases,
+        }),
+      )
+    }
+  }
+}
+
+function parseBig(value: string | number | undefined): bigint {
+  if (value === undefined || value === null || value === "") return 0n
+  try {
+    return BigInt(value)
+  } catch {
+    throw new ProtocolError(`${JSON.stringify(value)} is not a txid`)
+  }
+}

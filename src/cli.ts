@@ -22,6 +22,7 @@ let serving = false
 const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
 
   bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
+              [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
   bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
   bunql db list
   bunql db stat <name>
@@ -215,6 +216,9 @@ async function serve(args: ParsedArgs): Promise<void> {
   const host = str(args, "host")
   const node = str(args, "node")
   const adminKey = str(args, "admin-key")
+  const replicaOf = str(args, "replica-of")
+  const clusterSecret = str(args, "cluster-secret")
+  const follow = str(args, "follow")
   if (dir !== undefined) overrides.data = { dir }
   if (port !== undefined || host !== undefined || node !== undefined) {
     overrides.server = {
@@ -224,6 +228,21 @@ async function serve(args: ParsedArgs): Promise<void> {
     }
   }
   if (adminKey !== undefined) overrides.auth = { adminKey }
+  if (replicaOf !== undefined || clusterSecret !== undefined || follow !== undefined) {
+    overrides.replication = {
+      // `--replica-of` alone is the whole decision; `loadConfig` derives the role from it.
+      ...(replicaOf !== undefined ? { primary: replicaOf } : {}),
+      ...(clusterSecret !== undefined ? { secret: clusterSecret } : {}),
+      ...(follow !== undefined
+        ? {
+            follow: follow
+              .split(",")
+              .map((one) => one.trim())
+              .filter((one) => one.length > 0),
+          }
+        : {}),
+    }
+  }
 
   const config = loadConfig({
     file,
@@ -234,10 +253,17 @@ async function serve(args: ParsedArgs): Promise<void> {
   })
   const handle = await startServer(config)
   serving = true
+  const replication =
+    config.replication.role === "replica"
+      ? `\nbunql: replica of ${config.replication.primary}, following ` +
+        `${config.replication.follow.join(", ")}`
+      : config.replication.secret
+        ? "\nbunql: /v1/replication is open to replicas holding the cluster secret"
+        : ""
   console.log(
     `bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
       `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
-      `ack ${config.durability.defaultAck}`,
+      `ack ${config.durability.defaultAck}${replication}`,
   )
   let stopping = false
   const stop = (signal: string): void => {
@@ -275,6 +301,18 @@ function envSuppressions(overrides: ServerConfigInput): Record<string, string | 
   if (overrides.auth?.adminKey !== undefined) {
     cleared.BUNQL_ADMIN_KEY = undefined
     cleared.BUNQL_AUTH_ADMIN_KEY = undefined
+  }
+  if (overrides.replication?.primary !== undefined) {
+    cleared.BUNQL_REPLICA_OF = undefined
+    cleared.BUNQL_REPLICATION_PRIMARY = undefined
+  }
+  if (overrides.replication?.secret !== undefined) {
+    cleared.BUNQL_CLUSTER_SECRET = undefined
+    cleared.BUNQL_REPLICATION_SECRET = undefined
+  }
+  if (overrides.replication?.follow !== undefined) {
+    cleared.BUNQL_FOLLOW = undefined
+    cleared.BUNQL_REPLICATION_FOLLOW = undefined
   }
   return cleared
 }

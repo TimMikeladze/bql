@@ -38,6 +38,7 @@ import {
   executeStatement,
   resolveOptions,
 } from "./exec.ts"
+import { type ReplicationMetrics } from "./metrics.ts"
 import { mapTenantError, type ServerRuntime } from "./runtime.ts"
 import { openSse, resumeFrom, type TimeoutHost } from "./sse.ts"
 
@@ -133,7 +134,7 @@ export const query: Handler = async (ctx) => {
     ctx.txid = result.txid
     return json(result)
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -147,7 +148,7 @@ export const batch: Handler = async (ctx) => {
     ctx.txid = result.txid
     return json(result)
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -161,7 +162,7 @@ export const txBegin: Handler = async (ctx) => {
     })
     return json({ tx: session.baton, expiresInMs: ctx.runtime.config.limits.txIdleTimeoutMs })
   } catch (err) {
-    const mapped = mapTenantError(err)
+    const mapped = mapTenantError(err, ctx.runtime.primaryUrl)
     if (mapped instanceof BunQLError && mapped.code === "TX_BUSY") {
       return json(
         {
@@ -198,7 +199,7 @@ export const txQuery: Handler = async (ctx) => {
     ctx.txid = result.txid
     return json(result)
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -212,7 +213,7 @@ function endTx(how: "commit" | "rollback"): Handler {
       ctx.txid = Number(txid)
       return json({ txid: Number(txid) })
     } catch (err) {
-      throw mapTenantError(err)
+      throw mapTenantError(err, ctx.runtime.primaryUrl)
     }
   }
 }
@@ -525,7 +526,7 @@ export const createDb: Handler = async (ctx) => {
     ctx.txid = Number(tenant.txid)
     return json(statsOf(ctx.runtime, tenant), 201)
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -545,6 +546,7 @@ export const listDbs: Handler = async (ctx) => {
         pageSize: row.pageSize,
         quotaBytes: row.quotaBytes,
         epoch: row.epoch,
+        role: row.role,
         txid: Number(txid),
         open: isOpen,
       }
@@ -558,6 +560,7 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
   const realtime = runtime.realtimeOf(tenant.name)
   return {
     name: stats.name,
+    role: stats.role,
     sizeBytes: stats.sizeBytes,
     walBytes: stats.walBytes,
     logBytes: stats.logBytes,
@@ -568,7 +571,12 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
     liveQueries: realtime?.live.size ?? 0,
     subscribers: realtime?.subscriberCount ?? 0,
     lastSnapshotTxid: stats.lastSnapshotTxid === null ? null : Number(stats.lastSnapshotTxid),
-    replicas: [],
+    // `GET /v1/db/:db/replication` is where a replica list belongs; this stays for compatibility.
+    replicas: (runtime.replication?.replicasOf(tenant.name) ?? []).map((replica) => ({
+      node: replica.node,
+      txid: replica.txid,
+      lag: replica.lag,
+    })),
   }
 }
 
@@ -586,7 +594,7 @@ export const deleteDb: Handler = async (ctx) => {
     const trash = ctx.runtime.registry.delete(name)
     return json({ name, deleted: true, trash })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -604,7 +612,7 @@ export const snapshotDb: Handler = async (ctx) => {
       createdAtMs: ref.createdAtMs,
     })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -633,7 +641,7 @@ export const restoreDb: Handler = async (ctx) => {
     ctx.txid = Number(created.txid)
     return json({ name: into, txid: Number(created.txid), from: name, at: Number(at) }, 201)
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -654,7 +662,7 @@ export const dumpDb: Handler = async (ctx) => {
       },
     })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -684,7 +692,7 @@ export const importDb: Handler = async (ctx) => {
     ctx.txid = Number(tenant.txid)
     return json(statsOf(runtime, tenant), 201)
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
@@ -708,22 +716,55 @@ export const checkpointDb: Handler = async (ctx) => {
     ctx.txid = Number(tenant.txid)
     return json({ mode, ...result, walBytes: tenant.walBytes, txid: Number(tenant.txid) })
   } catch (err) {
-    throw mapTenantError(err)
+    throw mapTenantError(err, ctx.runtime.primaryUrl)
   }
 }
 
+/**
+ * Design §6.5 and `plan-phase1.md`'s observability section. The shape differs by role: a primary
+ * lists the replicas attached to it, a replica reports where it is following from and how far
+ * behind it is.
+ */
 export const replication: Handler = async (ctx) => {
   const { tenant } = await open(ctx, "ro")
   const snapshots = listSnapshots(tenant.dir)
   const last = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null
-  return json({
+  const common = {
     db: tenant.name,
     txid: Number(tenant.txid),
     epoch: tenant.epoch,
     checksum: tenant.checksum.toString(),
-    lastSnapshot: last ? { txid: Number(last.txid), bytes: last.bytes, at: last.createdAtMs } : null,
+    lastSnapshot: last
+      ? { txid: Number(last.txid), bytes: last.bytes, at: last.createdAtMs }
+      : null,
+  }
+
+  if (tenant.isReplica) {
+    const status = ctx.runtime.replica?.status() ?? null
+    const stream = status?.streams.find((one) => one.db === tenant.name) ?? null
+    return json({
+      ...common,
+      role: "replica",
+      primary: ctx.runtime.config.replication.primary,
+      connected: status?.connected ?? false,
+      applied: Number(tenant.txid),
+      lagTxid: stream?.lagTxid ?? 0,
+      bootstrapping: stream?.bootstrapping ?? false,
+      lastError: status?.lastError ?? null,
+    })
+  }
+
+  return json({
+    ...common,
     role: "primary",
-    replicas: [],
+    replicas: (ctx.runtime.replication?.replicasOf(tenant.name) ?? []).map((replica) => ({
+      node: replica.node,
+      stream: replica.stream,
+      txid: replica.txid,
+      lag: replica.lag,
+      ackedAt: replica.ackedAtMs,
+      fsynced: replica.fsynced,
+    })),
   })
 }
 
@@ -789,28 +830,61 @@ export const revokeToken: Handler = async (ctx) => {
 
 // ── operations ─────────────────────────────────────────────────────────────────────────────────
 
+/** The four series of `plan-phase1.md`, from whichever half of replication this node runs. */
+function replicationMetrics(runtime: ServerRuntime): ReplicationMetrics | null {
+  const replica = runtime.replica
+  if (replica) {
+    return {
+      connected: replica.connected ? 1 : 0,
+      lagTxid: replica.maxLagTxid,
+      bytes: replica.bytesReceived,
+      records: replica.recordsApplied,
+    }
+  }
+  const server = runtime.replication
+  if (!server) return null
+  return {
+    connected: server.connections,
+    lagTxid: server.maxLagTxid,
+    bytes: server.bytesSent,
+    records: server.recordsSent,
+  }
+}
+
 export const healthz: Handler = (ctx) => {
   return json({
     ok: !ctx.runtime.closed,
     node: ctx.runtime.node,
-    role: "primary",
+    role: ctx.runtime.role,
     uptimeMs: Date.now() - ctx.runtime.metrics.startedAt,
   })
 }
 
 /**
- * Ready means "this node can serve". On a standalone primary that is the catalog being open;
- * a replica will add "caught up with the primary" here (design §6.5).
+ * Ready means "this node can serve". On a primary that is the catalog being open; on a replica it
+ * also means the stream is up, because a replica that cannot reach its primary is serving data
+ * that only gets staler (design §6.5).
  */
 export const readyz: Handler = (ctx) => {
-  const ready = !ctx.runtime.closed && !ctx.runtime.registry.closed
-  return json({ ready, node: ctx.runtime.node, role: "primary" }, ready ? 200 : 503)
+  const live = !ctx.runtime.closed && !ctx.runtime.registry.closed
+  const replica = ctx.runtime.replica
+  const connected = replica ? replica.connected : true
+  const ready = live && connected
+  return json(
+    {
+      ready,
+      node: ctx.runtime.node,
+      role: ctx.runtime.role,
+      ...(replica ? { connected, primary: ctx.runtime.config.replication.primary } : {}),
+    },
+    ready ? 200 : 503,
+  )
 }
 
 export const metrics: Handler = async (ctx) => {
   if (ctx.runtime.auth.hasAdminKey) requireAdmin(await principalOf(ctx))
   const stats = ctx.runtime.registry.stats()
-  const body = ctx.runtime.metrics.render(stats, ctx.runtime.node)
+  const body = ctx.runtime.metrics.render(stats, ctx.runtime.node, replicationMetrics(ctx.runtime))
   return new Response(body, {
     headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
   })

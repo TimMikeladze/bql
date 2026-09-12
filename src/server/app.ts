@@ -6,10 +6,11 @@
 // before the `fetch` fallback runs, which is what keeps the query path free of URL parsing.
 
 import { HEADERS, WS_PROTOCOL } from "../client/protocol.ts"
+import type { ReplicationSocket } from "../replication/index.ts"
 import { Catalog, type Tenant, TenantRegistry } from "../tenant/index.ts"
 import { Authenticator, type RevocationList } from "./auth.ts"
 import { loadConfig, resolveAuth, type ServerConfig, type ServerConfigInput } from "./config.ts"
-import { errorResponse } from "./errors.ts"
+import { BunQLError, errorResponse } from "./errors.ts"
 import { failedIndexOf } from "./exec.ts"
 import { Metrics } from "./metrics.ts"
 import * as handlers from "./routes.ts"
@@ -93,7 +94,12 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
     const durationUs = Math.round((Bun.nanoseconds() - startedNs) / 1000)
     const headers = response.headers
     headers.set(HEADERS.node, runtime.node)
-    headers.set(HEADERS.role, "primary")
+    headers.set(HEADERS.role, runtime.role)
+    // Every response from a replica says where the primary is, not just the refusals: a client
+    // that wants `consistency: "primary"` should not have to provoke an error to find out.
+    if (runtime.primaryUrl && !headers.has(HEADERS.primary)) {
+      headers.set(HEADERS.primary, runtime.primaryUrl)
+    }
     headers.set(HEADERS.durationUs, String(durationUs))
     if (!headers.has(HEADERS.txid) && ctx.txid !== undefined) {
       headers.set(HEADERS.txid, String(ctx.txid))
@@ -102,6 +108,17 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
     runtime.metrics.request(response.status, durationUs)
     return response
   }
+}
+
+/** A replication socket's `data`, told apart from a client socket's by the marker field. */
+export interface ReplicationSocketData {
+  replication: true
+}
+
+type AppSocketData = SocketData | ReplicationSocketData
+
+function isReplication(data: AppSocketData): data is ReplicationSocketData {
+  return (data as ReplicationSocketData).replication === true
 }
 
 export interface App {
@@ -154,11 +171,14 @@ export function createApp(runtime: ServerRuntime): App {
     fetch(request: Request, server: unknown) {
       const url = new URL(request.url)
       if (url.pathname === "/v1/ws") return upgrade(runtime, request, server, url)
+      // Node-to-node, on its own path and with its own handshake: the cluster secret is proved
+      // in-band over the socket (design §8), so nothing here looks at `Authorization`.
+      if (url.pathname === "/v1/replication") return upgradeReplication(runtime, request, server)
       if (request.method === "OPTIONS") return preflight(runtime.config, request)
       const headers = new Headers({ "content-type": "application/json; charset=utf-8" })
       applyCors(runtime.config, request, headers)
       headers.set(HEADERS.node, runtime.node)
-      headers.set(HEADERS.role, "primary")
+      headers.set(HEADERS.role, runtime.role)
       runtime.metrics.request(404, 0)
       return new Response(
         JSON.stringify({
@@ -172,16 +192,32 @@ export function createApp(runtime: ServerRuntime): App {
       sendPings: true,
       maxPayloadLength: 16 * 1024 * 1024,
       open(ws: Socket) {
+        if (isReplication(ws.data as AppSocketData)) {
+          runtime.replication?.open(ws as unknown as ReplicationSocket)
+          return
+        }
         runtime.metrics.wsOpened()
         if (ws.data.principal) greet(ws, runtime.node)
       },
       message(ws: Socket, message: string | Buffer) {
+        if (isReplication(ws.data as AppSocketData)) {
+          runtime.replication?.message(ws as unknown as ReplicationSocket, message as Uint8Array)
+          return
+        }
         void handleMessage(ws, message)
       },
       drain(ws: Socket) {
+        if (isReplication(ws.data as AppSocketData)) {
+          runtime.replication?.drain(ws as unknown as ReplicationSocket)
+          return
+        }
         drain(ws)
       },
       close(ws: Socket) {
+        if (isReplication(ws.data as AppSocketData)) {
+          runtime.replication?.close(ws as unknown as ReplicationSocket)
+          return
+        }
         closeSocket(ws)
       },
     } as unknown as Record<string, unknown>,
@@ -191,8 +227,31 @@ export function createApp(runtime: ServerRuntime): App {
 interface UpgradeHost {
   upgrade(
     request: Request,
-    options: { data: SocketData; headers?: Record<string, string> },
+    options: { data: AppSocketData; headers?: Record<string, string> },
   ): boolean
+}
+
+/**
+ * The node-to-node handshake of design §8. A node with no cluster secret has no business being
+ * replicated from, and says so plainly rather than opening a socket that will never authenticate.
+ */
+function upgradeReplication(
+  runtime: ServerRuntime,
+  request: Request,
+  server: unknown,
+): Response | undefined {
+  if (!runtime.replication) {
+    return errorResponse(
+      new BunQLError(
+        "REPLICATION_DISABLED",
+        "this node has no cluster secret, so it does not replicate",
+        403,
+      ),
+    )
+  }
+  const ok = (server as UpgradeHost).upgrade(request, { data: { replication: true } })
+  if (ok) return undefined
+  return new Response("expected a WebSocket upgrade", { status: 426 })
 }
 
 /**
@@ -336,6 +395,9 @@ export async function startServer(
     development: false,
   }) as unknown as Bun.Server<SocketData>
   runtime.setPublisher(busPublisher(server))
+  // A replica starts following only once it is listening: its own `/v1/replication` may be the
+  // upstream of a third node, and a chain that opens sockets before it can answer them is racy.
+  if (owned) runtime.startReplication()
 
   const log = options.log ?? ((message: string) => console.log(message))
   if (resolved.adminKeyGenerated) {

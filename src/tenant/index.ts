@@ -6,6 +6,7 @@ export {
   positionOf,
   type SnapshotRow,
   type TenantInit,
+  type TenantRole,
   type TenantRow,
   type TokenRow,
 } from "./catalog.ts"
@@ -14,6 +15,7 @@ export {
   fileDescriptorLimit,
   type RegistryOptions,
   type RegistryStats,
+  type SnapshotInstall,
   TenantRegistry,
   trashDir,
 } from "./registry.ts"

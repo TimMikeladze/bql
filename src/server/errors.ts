@@ -23,6 +23,7 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   TOO_MANY_REQUESTS: 429,
   BUSY: 503,
   NOT_PRIMARY: 503,
+  REPLICATION_DISABLED: 403,
   QUOTA_EXCEEDED: 507,
   INTERNAL: 500,
 }

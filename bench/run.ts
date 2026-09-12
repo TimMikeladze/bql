@@ -2,7 +2,7 @@
 //
 //   bun run bench                 # everything
 //   bun run bench --quick         # fewer rounds, for a laptop on battery
-//   bun run bench --only http     # one of driver | wal | tenant | http
+//   bun run bench --only http     # one of driver | wal | tenant | http | replication
 //   bun run bench --json          # every report as JSON, for docs/benchmarks.md
 //
 // Each benchmark runs as its own process: `bench/driver.ts` loads bun:sqlite, `bench/http.ts`
@@ -35,6 +35,11 @@ const BENCHES: BenchSpec[] = [
   { name: "wal", file: "wal.ts", args: [] },
   { name: "tenant", file: "tenant.ts", args: QUICK ? ["500", "--tenants", "1000"] : ["2000", "--tenants", "10000"] },
   { name: "http", file: "http.ts", args: QUICK ? ["500"] : ["2000"] },
+  {
+    name: "replication",
+    file: "replication.ts",
+    args: QUICK ? ["100", "500"] : ["300", "2000"],
+  },
 ]
 
 /** One row of design §10. `direction` says which side of the budget is good. */
@@ -84,12 +89,21 @@ const BUDGETS: Budget[] = [
   },
   {
     row: "write visible on a replica",
+    bench: "replication",
+    leg: "commit -> replica applied",
+    budget: 1000,
+    direction: "max",
+    unit: "µs",
+    note: "over a loopback WebSocket, so this is the floor of the LAN number",
+  },
+  {
+    row: "write visible on a replica, no transport",
     bench: "wal",
     leg: "end to end",
     budget: 1000,
     direction: "max",
     unit: "µs",
-    note: "same host, so this is the floor of the LAN number",
+    note: "the same path with the socket taken out, for comparison",
   },
   {
     row: "live-query invalidation → event on socket",
