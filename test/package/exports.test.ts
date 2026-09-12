@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+import { VERSION } from "../../src/server/surfaces.ts"
 
 const root = join(import.meta.dir, "..", "..")
 
@@ -47,5 +48,12 @@ describe("package exports", () => {
       }
     }
     expect(missing).toEqual([])
+  })
+
+  // `GET /v1/openapi.json` publishes an `info.version`, and a document that claims a version the
+  // package does not have is a small lie that a generated client carries everywhere.
+  test("the version the OpenAPI documents publish is the package's", () => {
+    const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version as string
+    expect(VERSION).toBe(version)
   })
 })

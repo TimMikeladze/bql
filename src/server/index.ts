@@ -65,6 +65,8 @@ export {
   type ReplicationSection,
   type ResolvedAuth,
   type ServerConfig,
+  type ApiSection,
+  type GraphqlSection,
   type ServerConfigInput,
   type ServerSection,
 } from "./config.ts"
@@ -99,6 +101,8 @@ export {
   type RowSource,
 } from "./json.ts"
 export { Metrics, type MetricsSnapshot, type ReplicationMetrics } from "./metrics.ts"
+export { API_VERSION, serverRegistry, type SurfaceSwitches } from "./registry.ts"
 export { mapTenantError, randomBaton, ServerRuntime, type TxSession } from "./runtime.ts"
 export { openSse, resumeFrom, SSE_HEADERS, SseStream, type SseOptions } from "./sse.ts"
+export { apiPrefixOf, Surfaces, VERSION } from "./surfaces.ts"
 export { busPublisher, type SocketData } from "./ws.ts"

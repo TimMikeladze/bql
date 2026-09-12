@@ -24,10 +24,10 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | 1 | replica streaming and bootstrap, write forwarding, `ack` levels, read-your-writes across nodes, S3 shipper and restore, Hrana, Kysely and Drizzle | built |
 | 2 | Raft control plane, per-database leases, promotion and failover, Linux packaging and CI | built |
 | 2 | placement, `workers: N`, replica apply mechanism A | open |
-| — | one operation model rendered as REST + OpenAPI + GraphQL (`bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built, not mounted |
+| — | one operation model rendered as REST + OpenAPI + GraphQL (`bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1249 tests across 97 files, green on macOS (arm64) and Linux (x64).
+1311 tests across 105 files, green on macOS (arm64) and Linux (x64).
 
 ## Quickstart
 
@@ -351,10 +351,22 @@ deadline, the row cap, the quota, the txid, the ack level and write forwarding a
 peers, loaded through `import()` at the first request that needs a schema.
 
 The package publishes them as `bunql/core`, `bunql/http`, `bunql/openapi`, `bunql/dataapi` and
-`bunql/graphql`. **No server route serves them yet** — that is milestone H6 in
-[docs/plan-surfaces.md](docs/plan-surfaces.md), which ports the existing `/v1` routes onto the
-operation model so `/v1/openapi.json` describes the whole server. GraphQL subscriptions over the
-existing change feed are H7.
+`bunql/graphql`, and the server mounts all three surfaces:
+
+```http
+GET    /v1/db/acme/api/users?name=like.ann*&order=name.asc&limit=20
+POST   /v1/db/acme/api/users          { "name": "ann" }
+GET    /v1/db/acme/openapi.json       that database's OpenAPI 3.1 document
+POST   /v1/db/acme/graphql            { "query": "{ listUsers { id name } }" }
+GET    /v1/openapi.json               this server's own API
+```
+
+`/v1/openapi.json` is emitted from the very list of operations the `Bun.serve` route table is
+built from (`src/server/registry.ts`), so the document and the router cannot drift — `bun run
+routes:check` fails if a route is added outside it. `[api]` and `[graphql]` configure the
+generated surfaces; a surface that is off has no route at all rather than one that refuses.
+`docs/h6-mount.md` is the as-built note. GraphQL subscriptions over the existing change feed are
+H7 in [docs/plan-surfaces.md](docs/plan-surfaces.md).
 
 ## The driver
 

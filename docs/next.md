@@ -1,22 +1,28 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-12 at the end of the session that measured the hot paths and acted on what it
-found. Read this, then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then
-`docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md`
-(HTTP, OpenAPI, GraphQL), `docs/p1-pragmas.md` and `docs/p2-group-commit.md` (this session).
+Rewritten 2026-09-12 at the end of the session that mounted the generated surfaces (H6). Read
+this, then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans
+of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL),
+`docs/h6-mount.md` (this session), `docs/p1-pragmas.md` and `docs/p2-group-commit.md`.
 
 ## Where things stand
 
 Phases 0 and 1 are complete; phase 2 has its control plane, its failover and its packaging. On
 `main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree
-clean). `bun test` → **1283 pass, 2 skip, 0 fail** across 102 files. `bun run typecheck`,
+clean). `bun test` → **1311 pass, 2 skip, 0 fail** across 105 files. `bun run typecheck`,
 `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and Linux.** Zero runtime
 dependencies.
+
+**The surfaces are no longer dark.** `GET|POST|PATCH|DELETE /v1/db/{db}/api/*`,
+`GET /v1/db/{db}/openapi.json`, `POST /v1/db/{db}/graphql` (GraphiQL on `GET`) and
+`GET /v1/openapi.json` all serve, and the `Bun.serve` route table is now *built from* the same
+`Registry` the server document is emitted from (`src/server/registry.ts`) — so a route that no
+document describes cannot exist, and `bun run routes:check` fails on one. `docs/h6-mount.md`.
 
 **Both open §13 decisions are settled:** **#11 built-in Raft**, control plane only; **#9 default
 `ack` stays `local`**.
 
-### What the last session established, and it changes where to look next
+### What the performance session established, and it still shapes where to look
 
 `docs/performance.md` takes both hot paths apart. The headline: **SQLite is not the bottleneck
 anywhere.** A single-row write is 28.4 µs, of which SQLite is 8.2 (29%), the WAL tail and page
@@ -29,7 +35,7 @@ matter how many databases they are spread over. Writes are bound by the process,
 one process with eight databases does 17 214 writes/s, four processes with two each do 39 734.
 That is the case for `workers: N` below, measured rather than assumed.
 
-| landed in that session | commit | what it is |
+| landed in the performance session | commit | what it is |
 |---|---|---|
 | README rewritten from `src/`, surface subpaths exported | `ebf5555` | `bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql` now resolve; `test/package/exports.test.ts` fails if a doc imports a subpath the package does not publish |
 | Apple libsqlite3 correction | `724eb97` | it *has* preupdate/session/snapshot on macOS 26; what differs is its page-cache default, and six tests fail on it. `docs/c6-packaging.md` §1.1 |
@@ -38,6 +44,13 @@ That is the case for `workers: N` below, measured rather than assumed.
 | `[durability] compress` | `ea1f73f` | zstd is 36% of a write; off is 28% faster and 4.4x larger. Per record, so a mixed log still replays |
 | group commit | `80ac667` | `[limits] groupCommit`, **opt-in**: 4.7x at 64 concurrent clients, 15% slower at one |
 | snapshot floor + WAL-tail negative result | `179f3a9` | every node now takes a local snapshot, so retention cannot make it unrestorable; and the WAL tail is memory-bound, proven by an allocation-free rewrite that changed nothing |
+
+| landed in this session | what it is |
+|---|---|
+| H6: the surfaces mounted | `src/server/registry.ts` (every `/v1` route as an `Operation`), `src/server/surfaces.ts` (the data API cache, the per-tenant dispatcher, the GraphQL handler), `[api]` and `[graphql]` config, `docs/h6-mount.md` |
+| `routes:check` reads the registry | it already read the live table; it now also fails when a served route is **not** in the registry, so a hand-added route in `createApp` cannot go undescribed |
+| `CLUSTER_DISABLED` joined `ERROR_STATUS` | `routes.ts` has thrown it since C1 with an explicit 503, but it was absent from the documented vocabulary, so the document build rejected it |
+| `createApp` is async | it resolves the optional GraphQL peers once, at startup, instead of per request. Three call sites |
 
 ## How the work is run (keep doing this)
 
@@ -84,18 +97,27 @@ C1, C2 and C6 are done (see the table above). What remains, in the order it make
    the 48 µs "replica read" leg in `bench/wal.ts`.
 6. ~~**Linux packaging and CI**~~ **Done (C6).** See `docs/c6-packaging.md`.
 
-Then the surfaces: **H6** ports the existing `/v1` routes onto the operation model so
-`/v1/openapi.json` describes the whole server rather than only the generated data API, and
-`scripts/routes.ts --check` can read the registry instead of comparing against prose. **H7** adds
-GraphQL subscriptions over the change feed `src/realtime/` already has. `docs/plan-surfaces.md`
-has both.
+Then the surfaces: ~~**H6**~~ **Done** (`docs/h6-mount.md`) — the `/v1` routes are now declared in
+one `Registry` that builds the route table *and* `GET /v1/openapi.json`, the generated data API,
+the per-database document and GraphQL are mounted, and `scripts/routes.ts --check` fails on a
+served route that is not in the registry. **H7** adds GraphQL subscriptions over the change feed
+`src/realtime/` already has. `docs/plan-surfaces.md` has both.
 
 ## Known gaps worth fixing along the way
 
 Added by the performance session (2026-09-12):
 
-- **The generated REST/OpenAPI/GraphQL surfaces are built and exported but not mounted.** See
-  "Start here" C above.
+- ~~**The generated REST/OpenAPI/GraphQL surfaces are built and exported but not mounted.**~~
+  **Done (H6, `docs/h6-mount.md`).** What it left behind, on purpose: **the hand-written `/v1`
+  handlers are described by the registry but do not run through core's validator.** Each
+  operation's `handler` is the existing `Handler` and parses its own body as before; the operation
+  supplies the routing and the published schema. The obstruction is concrete — `app.ts`'s `wrap()`
+  needs the *error code* a handler refused with to answer C2's same-origin `307`, and
+  `compileOperation` turns that error into a `Response` first. So a published request schema is
+  not enforced; `test/server/registry.test.ts` checks the live answers against the **response**
+  schemas, which is the half that can be checked cheaply. Moving the handlers onto the validated
+  pipeline means giving `compileOperation` a way to hand the error back out — one option, and the
+  smallest — or moving the `307` inside it.
 - **Group commit is off by default** (`[limits] groupCommit`) because folded writes share a txid
   and the change feed emits one event per fold. Two e2e scenarios assert a txid per write and fail
   with it on — which is the honest signal that it is a contract change, not an optimisation. If
@@ -211,10 +233,11 @@ What phase 1 added to the list:
   bench), but a workload with large transactions pays for the same bytes more than once. Ship
   closed segments only, or upload ranges.
 
-## Start here — pick one of these three
+## Start here — A or B, since C is done
 
-They do not overlap in files, so two can run in parallel. Each is written so it can be started
-cold, with the evidence for why it is worth doing.
+A and B do not overlap in files, so they can run in parallel. Each is written so it can be started
+cold, with the evidence for why it is worth doing. C was this session's; what it left behind is
+under it.
 
 ### A. `workers: N` (phase 2, C4) — the biggest throughput lever left
 
@@ -250,20 +273,22 @@ locks, LiteFS-style, instead of appending frames and letting the next reader reb
 diverges must fail loudly, and `test/wal/replication.test.ts` plus the two e2e scenarios are what
 must keep passing unchanged.
 
-### C. H6 — put the existing `/v1` routes on the operation model
+### C. ~~H6~~ **Done this session.** What replaces it
 
-**Why.** `src/core/`, `src/http/`, `src/openapi/`, `src/dataapi/` and `src/graphql/` are built and
-tested but **no route serves them**, so `/v1/openapi.json` describes nothing and the generated data
-API is unreachable. It is the largest built-but-dark surface in the repo.
+The largest built-but-dark surface is lit: `docs/h6-mount.md`. Three things it opened up, in
+rough order of value:
 
-**What.** `docs/plan-surfaces.md` H6: port the hand-written routes in `src/server/routes.ts` onto
-`Operation`/`Registry` so one document covers the whole server, then mount the data API and the
-GraphQL handler (`POST /v1/db/{db}/graphql`, `GET /v1/db/{db}/openapi.json`). H7 adds GraphQL
-subscriptions over the existing change feed.
-
-**Watch for.** `scripts/routes.ts --check` currently compares `docs/api.md` against a hand-kept
-list; once the registry exists it should read the registry instead. Keep `src/server/errors.ts` as
-the one error vocabulary — the surfaces reuse it, they do not define a second.
+- **H7, GraphQL subscriptions over the change feed.** `src/realtime/` already has the ring, the
+  live-query engine and the SSE/WS transports; `src/graphql/` already has the schema cache and the
+  ambient per-request token. A REST document cannot describe a subscription, so this is the one
+  part of the surfaces work that is genuinely new code rather than wiring —
+  `docs/plan-surfaces.md` H7. `graphql-ws` over the socket BunQL already runs.
+- **Put the hand-written handlers on the validated pipeline.** See the known gap above. The
+  blocker is one design question in `src/http/handler.ts`, not thirty handlers.
+- **`NOT_FOUND: 404`.** Still missing from `ERROR_STATUS`, which is why the data API's `/{pk}`
+  routes answer `200` with `null` and publish it honestly as `anyOf: [Row, null]`. Now that the
+  routes are live this is a visible contract rather than a latent one. One line in
+  `src/server/errors.ts`, one line per generated operation.
 
 ### Smaller, if you want something bounded
 
@@ -288,8 +313,11 @@ Bun only, no runtime dependencies (`kysely` and `drizzle-orm` are optional peers
 is a devDependency used by tests and benches only). Never import `bun:sqlite` in `src/` (tests and
 `bench/driver.ts` may, for parity checks). Keep `docs/design.md` as the design of record and
 `docs/api.md` as the as-built reference — update both when an API changes, and
-`bun run scripts/routes.ts --check` fails if the route table falls behind. Every module header
-states its invariant. Tests go in `test/<area>/`, temp dirs under `os.tmpdir()`.
+`bun run scripts/routes.ts --check` fails if the route table falls behind — and, since H6, if a
+route is served that `src/server/registry.ts` does not declare. **A new `/v1` route is an entry in
+that registry, never a hand-written line in `createApp`**: the route table and
+`GET /v1/openapi.json` are both built from it, which is the only reason they cannot drift. Every
+module header states its invariant. Tests go in `test/<area>/`, temp dirs under `os.tmpdir()`.
 
 **The SQLite library.** Run `bun run sqlite:build` once: it compiles 3.53.4 from a hash-pinned
 amalgamation into `vendor/sqlite/`, which `src/sqlite/lib.ts` now prefers over anything on the

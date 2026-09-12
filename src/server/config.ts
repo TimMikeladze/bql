@@ -291,6 +291,38 @@ export interface AuthSection {
   verifyCacheSize: number
 }
 
+/**
+ * The generated data API of `docs/plan-surfaces.md`: a database's own tables as REST, under
+ * `/v1/db/{db}/api`. On by default, and that is not a widening of anyone's authority — a principal
+ * that can reach `/v1/db/{db}/api/users` can already run `SELECT * FROM users` through
+ * `POST /v1/db/{db}/query`, and both end in the same `src/server/exec.ts` with the same authorizer
+ * (`docs/h6-mount.md` decision 6).
+ */
+export interface ApiSection {
+  enabled: boolean
+  /** The segment after `/v1/db/{db}`. */
+  prefix: string
+  /** Rows a list returns when the request does not say. */
+  defaultLimit: number
+  /** The most a request may ask for; asking for more is a 400. */
+  maxLimit: number
+}
+
+/**
+ * The generated GraphQL surface, at `POST /v1/db/{db}/graphql`. `graphql` and `openapi-x-graphql`
+ * are optional peers, so this section is ignored entirely when they do not resolve: the route is
+ * absent rather than answering a 500 about a missing package (`docs/h6-mount.md` decision 4).
+ */
+export interface GraphqlSection {
+  enabled: boolean
+  /** GraphiQL on a browser's `GET`. */
+  graphiql: boolean
+  /** The segment after `/v1/db/{db}`. */
+  path: string
+  maxDepth: number
+  maxComplexity: number
+}
+
 export interface ServerConfig {
   server: ServerSection
   data: DataSection
@@ -302,6 +334,8 @@ export interface ServerConfig {
   replication: ReplicationSection
   cluster: ClusterSection
   s3: S3Section
+  api: ApiSection
+  graphql: GraphqlSection
 }
 
 /** The same shape with every field optional, which is what a TOML file or a caller supplies. */
@@ -409,6 +443,19 @@ export const DEFAULT_CONFIG: ServerConfig = {
     concurrency: 4,
     maxPendingBytes: 64 * 1024 * 1024,
     retries: 4,
+  },
+  api: {
+    enabled: true,
+    prefix: "api",
+    defaultLimit: 100,
+    maxLimit: 1000,
+  },
+  graphql: {
+    enabled: true,
+    graphiql: true,
+    path: "graphql",
+    maxDepth: 12,
+    maxComplexity: 10_000,
   },
 }
 
@@ -564,6 +611,8 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     },
     cluster: { ...DEFAULT_CONFIG.cluster, peers: [...DEFAULT_CONFIG.cluster.peers] },
     s3: { ...DEFAULT_CONFIG.s3 },
+    api: { ...DEFAULT_CONFIG.api },
+    graphql: { ...DEFAULT_CONFIG.graphql },
   }
 
   for (const patch of [fromFile, options.overrides]) {
@@ -579,6 +628,8 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       replication: mergeSection(config.replication, patch.replication, env),
       cluster: mergeSection(config.cluster, patch.cluster, env),
       s3: mergeSection(config.s3, patch.s3, env),
+      api: mergeSection(config.api, patch.api, env),
+      graphql: mergeSection(config.graphql, patch.graphql, env),
     }
   }
 
@@ -674,7 +725,23 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   // The trash sweep is the one thing that reads it, and a typo there would quietly keep every
   // deleted database for ever — the failure this key exists to prevent.
   parseRetentionOrThrow(config.durability.retention, "durability")
+
+  // A prefix is one path segment, and it is concatenated into a route pattern rather than escaped,
+  // so a `/` in it would silently mount the data API somewhere nobody asked for. The same for the
+  // GraphQL path, which has to stay distinguishable from a table name under the API prefix.
+  assertSegment(config.api.prefix, "[api] prefix")
+  assertSegment(config.graphql.path, "[graphql] path")
+  if (config.api.defaultLimit < 1) config.api.defaultLimit = 1
+  if (config.api.maxLimit < config.api.defaultLimit) config.api.maxLimit = config.api.defaultLimit
   return config
+}
+
+/** One path segment: no slash, no `:` (which is Bun's parameter marker), and not empty. */
+function assertSegment(value: string, what: string): void {
+  if (value.length > 0 && !/[/:*?#]/.test(value)) return
+  throw BunQLError.badRequest(
+    `${what} must be a single path segment with no "/", ":", "*", "?" or "#", got ${JSON.stringify(value)}`,
+  )
 }
 
 /** True/false when something actually set `[cluster] enabled`, null when nothing did. */

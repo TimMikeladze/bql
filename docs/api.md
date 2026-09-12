@@ -210,6 +210,14 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `GET /v1/db/:db/dump` | stream the SQLite file out | admin |
 | `POST /v1/db/:db/import` | stream a SQLite file in | admin |
 | `GET /v1/db/:db/live` | live query, SSE | `ro` |
+| `GET /v1/db/:db/api/*` | generated data API, read | `ro` |
+| `POST /v1/db/:db/api/*` | generated data API, insert | `ro` on the route, `rw` on the statement |
+| `PATCH /v1/db/:db/api/*` | generated data API, update | as above |
+| `DELETE /v1/db/:db/api/*` | generated data API, delete | as above |
+| `GET /v1/db/:db/openapi.json` | that database's OpenAPI 3.1 document | `ro` |
+| `POST /v1/db/:db/graphql` | GraphQL over that database | `ro` on the route, per-table on each field |
+| `GET /v1/db/:db/graphql` | GraphiQL, or a query in the URL | as above |
+| `GET /v1/openapi.json` | this server's own OpenAPI 3.1 document | none |
 | `GET /v1/replication` | node-to-node stream (WebSocket) | cluster secret, in-band |
 | `POST /v1/db/:db/query` | one statement | `ro`, `rw` when it writes |
 | `POST /v1/db/:db/promote` | make this node the primary for it | admin |
@@ -499,6 +507,53 @@ The `s3` block on `GET /v1/db/{db}/replication` is the shipper's state, in full:
 `{bucket, prefix, endpoint, generation, shippedTxid, pendingRecords, pendingBytes, behind,
 lastError, lastShipMs, lastShipAtMs, bytesShipped, errors, snapshots, segments,
 lastSnapshotTxid}`. It is `null` on a node with no bucket configured.
+
+### The generated data API, OpenAPI and GraphQL
+
+Every database's own tables are also served as REST, described as an OpenAPI 3.1 document, and
+queryable as GraphQL. All three are generated from one introspection of that database and all
+three execute through the same path `POST /v1/db/{db}/query` does, so they inherit the token's
+per-table ACLs, the deadlines, the row cap, `vmSteps`, the quota, the txid, the ack level,
+`minTxid` and write forwarding rather than reimplementing any of them. `docs/h6-mount.md` is the
+as-built note; `docs/plan-surfaces.md` is the design.
+
+```http
+GET    /v1/db/acme/api/users?name=like.ann*&order=name.asc&limit=20&select=id,name
+GET    /v1/db/acme/api/users/1
+POST   /v1/db/acme/api/users          { "name": "ann", "email": "ann@example.com" }
+PATCH  /v1/db/acme/api/users/1        { "email": "ann@bunql.dev" }
+DELETE /v1/db/acme/api/users/1
+```
+
+Filtering is PostgREST's URL grammar: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`,
+`is`, with `select=` projecting and `order=col.asc|desc` sorting. A write answers with the row it
+wrote, because every write statement carries `RETURNING`. A single-row read, update or delete that
+matches nothing answers `200` with `null` — `src/server/errors.ts` has no "no such row" code and
+inventing one here would be a second error vocabulary.
+
+**Every identifier in the generated SQL comes from introspection and every value is a bound
+parameter.** A filter, a `select=` or an `order=` naming a column the table does not have is a
+`400` and never a query. Views are read-only; a table with neither a primary key nor a rowid gets
+the collection routes and no `/{pk}` routes; generated columns are readable and not writable.
+
+`GET /v1/db/{db}/openapi.json` is that database's document, and `GET /v1/openapi.json` is the
+server's own — the one the route table itself is built from, so it cannot fall behind. The server
+document is open, with no authentication: it names no database and carries no tenant data. The
+per-database one needs `ro`, because it discloses that database's schema.
+
+`POST /v1/db/{db}/graphql` serves a schema **generated from that same OpenAPI document**, so a
+GraphQL field is a REST operation by construction. Fields are named from the tables:
+`listUsers`/`getUser` on `Query`, `createUser`/`updateUser`/`deleteUser` on `Mutation`. Resolvers
+dispatch in this process — no socket per field — and the caller's token is ambient per request
+rather than captured, so one caller's rights never reach another's. `GET` with `Accept: text/html`
+renders GraphiQL. Both `graphql` and `openapi-x-graphql` are optional peer dependencies: when they
+do not resolve the route is simply absent, and the answer is an ordinary `404`.
+
+Introspection, the compiled routes and the GraphQL schema are all cached per database on `PRAGMA
+schema_version`, so a `CREATE TABLE`, an `ALTER TABLE` or a `DROP` rebuilds them by itself. A
+database that is *deleted* drops its entries outright, since a new database of the same name
+starts that counter over. Subscriptions are not generated — a REST document cannot describe one —
+and are milestone H7.
 
 ### S3 backup
 
@@ -1409,6 +1464,15 @@ the canonical one wins when both are set.
 | `[s3] concurrency` | `4` | `BUNQL_S3_CONCURRENCY` | — |
 | `[s3] maxPendingBytes` | `67108864` | `BUNQL_S3_MAX_PENDING_BYTES` | — |
 | `[s3] retries` | `4` | `BUNQL_S3_RETRIES` | — |
+| `[api] enabled` | `true` | `BUNQL_API_ENABLED` | — |
+| `[api] prefix` | `"api"` (one path segment) | `BUNQL_API_PREFIX` | — |
+| `[api] defaultLimit` | `100` | `BUNQL_API_DEFAULT_LIMIT` | — |
+| `[api] maxLimit` | `1000` | `BUNQL_API_MAX_LIMIT` | — |
+| `[graphql] enabled` | `true`, ignored without the optional peers | `BUNQL_GRAPHQL_ENABLED` | — |
+| `[graphql] graphiql` | `true` | `BUNQL_GRAPHQL_GRAPHIQL` | — |
+| `[graphql] path` | `"graphql"` (one path segment) | `BUNQL_GRAPHQL_PATH` | — |
+| `[graphql] maxDepth` | `12` | `BUNQL_GRAPHQL_MAX_DEPTH` | — |
+| `[graphql] maxComplexity` | `10000` | `BUNQL_GRAPHQL_MAX_COMPLEXITY` | — |
 
 Setting `[replication] primary` makes the node a replica; `role` need not be set as well. A
 replica with no `primary` is refused at start.

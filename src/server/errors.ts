@@ -30,6 +30,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   /** The primary never answered a forwarded write. */
   FORWARD_TIMEOUT: 504,
   REPLICATION_DISABLED: 403,
+  /** `GET /v1/cluster` on a node with no `[cluster]` section enabled. */
+  CLUSTER_DISABLED: 503,
   QUOTA_EXCEEDED: 507,
   INTERNAL: 500,
 }

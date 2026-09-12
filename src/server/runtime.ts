@@ -152,6 +152,8 @@ export class ServerRuntime {
   #publisher: Publisher | null = null
   #onMoved: ((db: string, primary: string) => void) | null = null
   #onTenantOpen: ((tenant: Tenant) => void) | null = null
+  /** Told when a database leaves this node; see `onEvict`. */
+  #onEvict: ((name: string) => void)[] = []
   #onError: (err: unknown) => void
   #closed = false
   /** The trash and per-database retention sweep. Null when `retention` or the interval turns it off. */
@@ -921,8 +923,32 @@ export class ServerRuntime {
 
   // ── lifecycle ────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Called whenever a database leaves this node. `src/server/surfaces.ts` registers here to drop
+   * its introspection and GraphQL schema caches: those invalidate themselves on `PRAGMA
+   * schema_version`, which a re-created database of the same name resets to 1 — so deletion is the
+   * one case the version counter cannot cover (`docs/h6-mount.md`).
+   *
+   * A list rather than a single callback, and an import direction of `surfaces.ts → runtime.ts`
+   * only, so the runtime owes the surfaces nothing.
+   */
+  onEvict(listener: (name: string) => void): () => void {
+    this.#onEvict.push(listener)
+    return () => {
+      const at = this.#onEvict.indexOf(listener)
+      if (at >= 0) this.#onEvict.splice(at, 1)
+    }
+  }
+
   /** Closes a tenant's subscriptions, transactions and connections — used by delete and restore. */
   evict(name: string): void {
+    for (const listener of this.#onEvict) {
+      try {
+        listener(name)
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
     for (const session of [...this.#tx.values()]) {
       if (session.db !== name) continue
       try {

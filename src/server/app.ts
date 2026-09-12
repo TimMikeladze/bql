@@ -23,9 +23,11 @@ import { loadConfig, resolveAuth, type ServerConfig, type ServerConfigInput } fr
 import { BunQLError, errorResponse } from "./errors.ts"
 import { failedIndexOf } from "./exec.ts"
 import { Metrics } from "./metrics.ts"
-import * as handlers from "./routes.ts"
+import type { Operation } from "../core/index.ts"
+import { serverRegistry } from "./registry.ts"
 import type { Handler, RouteContext } from "./routes.ts"
 import { ServerRuntime } from "./runtime.ts"
+import { Surfaces } from "./surfaces.ts"
 import {
   busPublisher,
   closeSocket,
@@ -181,6 +183,8 @@ function isCluster(data: AppSocketData): data is RaftSocketData {
 
 export interface App {
   routes: Record<string, unknown>
+  /** The generated surfaces this table serves, so a caller that owns the app can release them. */
+  surfaces: Surfaces
   fetch: (
     request: Request,
     server: unknown,
@@ -189,53 +193,44 @@ export interface App {
 }
 
 /**
- * The route table of design §6. Methods are spelled out per path so an unsupported verb answers
- * 405 from Bun rather than falling through to the 404 handler.
+ * The route table of design §6, built from `src/server/registry.ts` — the one list of operations
+ * that `GET /v1/openapi.json` is also emitted from, so the table and the document cannot drift
+ * (`docs/h6-mount.md`).
+ *
+ * Each operation is mounted behind `wrap()`, not behind `src/http/`'s compiled pipeline, and the
+ * reason is in `registry.ts`'s header: `wrap` has to see the error code a handler refused with,
+ * to answer C2's same-origin `307`, and the compiled pipeline turns that error into a `Response`
+ * before anything else can look at it. The generated data API *is* compiled — it needs the
+ * coercion and it gets no `307` — and that happens inside `src/server/surfaces.ts`.
+ *
+ * Methods stay spelled out per path so an unsupported verb answers 405 from Bun rather than
+ * falling through to the 404 handler.
+ *
+ * Async because whether GraphQL is mounted at all depends on two optional peer packages
+ * resolving, which is an `import()`. It is resolved once here, never per request.
  */
-export function createApp(runtime: ServerRuntime): App {
-  const on = (handler: Handler) => wrap(runtime, handler)
+export async function createApp(runtime: ServerRuntime): Promise<App> {
   const options = (request: Request) => preflight(runtime.config, request)
+  const surfaces = new Surfaces(runtime)
+  const registry = serverRegistry(surfaces, {
+    api: runtime.config.api.enabled,
+    graphql: await Surfaces.graphqlEnabled(runtime),
+  })
 
-  const routes: Record<string, unknown> = {
-    "/v1/db/:db/query": { POST: on(handlers.query), OPTIONS: options },
-    "/v1/db/:db/batch": { POST: on(handlers.batch), OPTIONS: options },
-    "/v1/db/:db/tx": { POST: on(handlers.txBegin), OPTIONS: options },
-    "/v1/db/:db/tx/:tx": { POST: on(handlers.txQuery), OPTIONS: options },
-    "/v1/db/:db/tx/:tx/commit": { POST: on(handlers.txCommit), OPTIONS: options },
-    "/v1/db/:db/tx/:tx/rollback": { POST: on(handlers.txRollback), OPTIONS: options },
-    "/v1/db/:db/changes": { GET: on(handlers.changes), OPTIONS: options },
-    "/v1/db/:db/live": { GET: on(handlers.live), OPTIONS: options },
-    "/v1/db/:db/snapshot": { POST: on(handlers.snapshotDb), OPTIONS: options },
-    "/v1/db/:db/restore": { POST: on(handlers.restoreDb), OPTIONS: options },
-    "/v1/db/:db/dump": { GET: on(handlers.dumpDb), OPTIONS: options },
-    "/v1/db/:db/import": { POST: on(handlers.importDb), OPTIONS: options },
-    "/v1/db/:db/checkpoint": { POST: on(handlers.checkpointDb), OPTIONS: options },
-    "/v1/db/:db/replication": { GET: on(handlers.replication), OPTIONS: options },
-    "/v1/db/:db/promote": { POST: on(handlers.promoteDb), OPTIONS: options },
-    "/v1/db/:db/backup": { GET: on(handlers.backupStatus), OPTIONS: options },
-    "/v1/db/:db/backup/verify": { POST: on(handlers.backupVerify), OPTIONS: options },
-    "/v1/db/:db/backup/generations": {
-      GET: on(handlers.backupGenerations),
-      OPTIONS: options,
-    },
-    "/v1/db/:db": {
-      GET: on(handlers.statDb),
-      DELETE: on(handlers.deleteDb),
-      OPTIONS: options,
-    },
-    "/v1/db": { GET: on(handlers.listDbs), POST: on(handlers.createDb), OPTIONS: options },
-    "/v1/cluster": { GET: on(handlers.cluster), OPTIONS: options },
-    "/v1/tokens": { POST: on(handlers.mintToken), OPTIONS: options },
-    "/v1/tokens/:jti": { DELETE: on(handlers.revokeToken), OPTIONS: options },
-    "/healthz": { GET: on(handlers.healthz), OPTIONS: options },
-    "/readyz": { GET: on(handlers.readyz), OPTIONS: options },
-    "/metrics": { GET: on(handlers.metrics), OPTIONS: options },
+  const routes: Record<string, unknown> = {}
+  for (const operation of registry.operations()) {
+    mountOperation(routes, operation, wrap(runtime, asHandler(operation)))
+  }
+  // One preflight per path the registry claims, exactly as the hand-written table wrote by hand.
+  for (const entry of Object.values(routes)) {
+    ;(entry as Record<string, unknown>).OPTIONS = options
   }
 
   Object.assign(routes, hranaRoutes(runtime))
 
   return {
     routes,
+    surfaces,
     fetch(request: Request, server: unknown) {
       const url = new URL(request.url)
       if (url.pathname === "/v1/ws") return upgrade(runtime, request, server, url)
@@ -319,6 +314,25 @@ export function createApp(runtime: ServerRuntime): App {
       },
     } as unknown as Record<string, unknown>,
   }
+}
+
+/** An operation's handler as the `Handler` `wrap()` takes. The input is unused: see `registry.ts`. */
+function asHandler(operation: Operation<unknown, unknown, RouteContext>): Handler {
+  return (ctx) => operation.handler(undefined, ctx) as Response | Promise<Response>
+}
+
+/** Merges one method into the table, refusing a collision rather than letting one silently win. */
+function mountOperation(
+  routes: Record<string, unknown>,
+  operation: Operation<unknown, unknown, RouteContext>,
+  handler: unknown,
+): void {
+  const method = operation.method.toUpperCase()
+  const table = (routes[operation.path] ??= {}) as Record<string, unknown>
+  if (table[method] !== undefined) {
+    throw new Error(`operation "${operation.id}": ${method} ${operation.path} is already mounted`)
+  }
+  table[method] = handler
 }
 
 interface UpgradeHost {
@@ -508,7 +522,7 @@ export async function startServer(
       }
   const runtime = resolved.runtime
 
-  const app = createApp(runtime)
+  const app = await createApp(runtime)
   // The route table and the socket handler are built dynamically, so they are handed to
   // `Bun.serve` opaquely and the socket data type is reasserted here.
   const server = Bun.serve({
@@ -554,6 +568,7 @@ export async function startServer(
       await server.stop(true)
       // Everything committed before the listener stopped belongs in the bucket, so the shippers
       // are drained before the runtime — and before the registry closes the logs they read from.
+      app.surfaces.close()
       if (owned) await runtime.closeStorage()
       // A runtime that was passed in belongs to its owner — the embedded API keeps serving from it
       // after `serve()` is stopped, and closing it here would take the engine with the listener.

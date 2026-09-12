@@ -218,11 +218,20 @@ Tim's constraint: OpenAPI before GraphQL. Each is one Opus subagent with its own
 | H3 | openapi: 3.1 emitter, `GET /v1/openapi.json`, security schemes, error responses | `src/openapi/*`, `test/openapi/*` | H1 |
 | H4 | dataapi: introspection, resource operations, filter grammar, `GET /v1/db/{db}/openapi.json` | `src/dataapi/*`, `test/dataapi/*` | H2, H3 |
 | H5 | graphql: schema from the document, in-process fetch, GraphiQL, optional peers | `src/graphql/*`, `test/graphql/*` | H4 |
-| H6 | port the existing `/v1` routes onto the operation model; `scripts/routes.ts --check` reads the registry instead of guessing | `src/server/routes.ts`, `scripts/routes.ts` | H5 |
+| H6 | ~~port the existing `/v1` routes onto the operation model; `scripts/routes.ts --check` reads the registry instead of guessing~~ **Done**, `docs/h6-mount.md` | `src/server/registry.ts`, `src/server/surfaces.ts`, `scripts/routes.ts` | H5 |
 | H7 | GraphQL subscriptions over the existing change feed | `src/graphql/*`, `src/realtime/*` | H5 |
 
 H3 and H4's *emitter* half are independent enough to run beside each other; H4 cannot finish
 without H3.
+
+**H6 as built differs from this plan in one way, deliberately.** The registry supplies the routing
+and the description for the `/v1` routes, but not the request pipeline: each operation's handler is
+the existing `Handler`, which parses its own body as it always did. `src/server/app.ts`'s `wrap()`
+has to see the *error code* a handler refused with, to answer C2's same-origin `307`, and
+`compileOperation` turns that error into a `Response` before anything else can look at it. The
+generated data API does go through the compiled pipeline, because it needs the coercion and gets no
+`307`. `docs/h6-mount.md` decision 1 argues it out; moving the hand-written handlers onto the
+validated pipeline is the follow-up.
 
 H6 is the one that touches existing files, so it is scheduled after phase 2's C1–C3 have had their
 turn in `src/server/routes.ts` — two agents editing that file is the one thing phase 1 proved not

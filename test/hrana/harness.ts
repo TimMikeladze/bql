@@ -65,7 +65,7 @@ export async function startHrana(overrides: ServerConfigInput = {}): Promise<Tes
     },
   })
   const { runtime, adminKey } = await createRuntime(config)
-  const app = createApp(runtime)
+  const app = await createApp(runtime)
 
   // ── the wiring under test ──────────────────────────────────────────────────────────────────
   const routes = { ...(app.routes as Record<string, unknown>), ...hranaRoutes(runtime) }
