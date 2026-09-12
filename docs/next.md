@@ -185,11 +185,30 @@ is a devDependency used by tests and benches only). Never import `bun:sqlite` in
 `bench/driver.ts` may, for parity checks). Keep `docs/design.md` as the design of record and
 `docs/api.md` as the as-built reference — update both when an API changes, and
 `bun run scripts/routes.ts --check` fails if the route table falls behind. Every module header
-states its invariant. Tests go in `test/<area>/`, temp dirs under `os.tmpdir()`. On macOS the
-driver wants Homebrew SQLite (`/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib`, 3.53.4 with SESSION
-and PREUPDATE); Apple's system build lacks `load_extension`. `BUNQL_SQLITE_LIB` overrides the
-search.
+states its invariant. Tests go in `test/<area>/`, temp dirs under `os.tmpdir()`.
 
-Commands: `bun test`, `bun run typecheck`, `bun run bench` (`--quick`,
+**The SQLite library.** Run `bun run sqlite:build` once: it compiles 3.53.4 from a hash-pinned
+amalgamation into `vendor/sqlite/`, which `src/sqlite/lib.ts` now prefers over anything on the
+system. That is what CI uses on both platforms. Without it the driver still finds Homebrew's build
+on macOS and a distro one on Linux — contrary to what this file used to say, Debian and Ubuntu
+*do* ship `ENABLE_PREUPDATE_HOOK` and `ENABLE_SESSION` — but no distro ships
+`SQLITE_ENABLE_SNAPSHOT`, and the floor is SQLite 3.37.0 because `sqlite3_changes64` is in the
+core symbol table, so an older library fails `dlopen` entirely and reads as *no* library. Apple's
+system build lacks `load_extension`. `BUNQL_SQLITE_LIB` overrides the search, and a capability
+that is missing now names the remedy in its error. See `docs/c6-packaging.md`.
+
+**No raw control bytes in source.** A separator or a magic value must be written as an escape —
+`"\0"`, `"\x01"` — never as the byte itself. `bun run bytes` (`scripts/bytes.ts`) enforces it and
+runs in CI, because git only sniffs for a NUL in a blob's **first 8000 bytes**: past that window a
+file with one still gets a normal line diff, `file(1)` still calls it text, and nothing warns
+anyone. Three files carried one; one had been in `src/realtime/live.ts` since phase 0.
+
+The trap that produces them, worth knowing before it catches you: writing `"\u0000"` in a
+**JSON-encoded tool argument** — an `Edit` or `Write` `new_string` — decodes to the byte before it
+ever reaches disk. The escape you type is not the escape that lands. Write `"\\0"` in that
+argument to get the two-character escape in the file, and the same applies to `\n`, `\t` and
+`\r`. After any edit that places a control character, run `bun run bytes`.
+
+Commands: `bun test`, `bun run typecheck`, `bun run bytes`, `bun run bench` (`--quick`,
 `--only <driver|wal|tenant|http|replication|storage>`, `--json`), `bun run start`,
 `bun run src/cli.ts serve --dir ./data --port 4321`.
