@@ -219,6 +219,25 @@ read capacity is per node. Measured per process: 219k–259k reads/s on a socket
 against an engine that can do ~1.3M/s in process — so reads are transport-bound, and adding nodes
 adds close to linear capacity.
 
+**Reads do not scale the same way across *threads*, and C4c measured which way each leg goes.** A
+replica may now be sharded (`[server] workers = N` beside `[replication] primary`), and the ladder
+splits by surface — eight databases, point reads, replica and load client in separate processes,
+two alternating rounds of each (`bun run bench/workers.ts --follow [--transport http]`):
+
+| workers | HTTP reads/s | socket reads/s |
+|---|---|---|
+| 1 | 34 320 – 34 879 | 257 887 – 261 533 |
+| 2 | 56 653 | — |
+| 6 | 54 386 – 54 552 | 232 004 – 232 582 |
+| | **1.56 – 1.60x** | **0.89 – 0.90x** |
+
+An HTTP request is parsed, authenticated and answered on the worker, so moving it off the main
+thread buys real work — until two workers, after which the *router's* accept-and-hop loop is the
+ceiling rather than the thread running the query. A socket frame is relayed: the router parses it
+far enough to route, posts it, and writes the answer back, and a point read is 0.79 µs against a hop
+that costs more. So sharding a replica helps HTTP readers and mildly hurts socket readers, which is
+the opposite of what "~220k/s per thread" suggested. `docs/c4c-replication-follow.md` §9.
+
 **Writes scale by sharding databases across threads, and `[server] workers` now does the routing.**
 The original measurement, same client, same 8 databases, same total load, across *processes*:
 
@@ -248,10 +267,11 @@ back in JavaScript. The shape is unchanged; the floor is higher. It peaks at six
 is one thread, and eight databases over eight shards is a lumpy split.
 
 What is *not* lifted: one database still has one writer, and `workers > 1` still refuses to start
-alongside `[replication] primary` or `[cluster] enabled`. *Serving* replicas is supported as of C4b
-— the router owns the replication connection and the worker that owns a database owns its stream,
-which costs 15% of write throughput on a single-threaded node and 19% on a sharded one
-(`docs/c4b-replication-workers.md` §9). Placement (milestone 3) is still what routes across *nodes*.
+alongside `[cluster] enabled`. Both halves of replication are supported: *serving* replicas as of
+C4b — the router owns the replication connection and the worker that owns a database owns its
+stream, which costs 15% of write throughput on a single-threaded node and 19% on a sharded one
+(`docs/c4b-replication-workers.md` §9) — and *following* an upstream as of C4c, measured above.
+Placement (milestone 3) is still what routes across *nodes*.
 
 **The ladder, in the order it pays off**
 

@@ -1,11 +1,15 @@
 // What `[server] workers` is worth (`docs/c4-workers.md`, phase-2 milestone 4).
 //
 //   bun run bench/workers.ts [--workers 1,2,4] [--dbs 8] [--concurrent 64] [--seconds 5]
-//                            [--replication]
+//                            [--replication] [--follow] [--transport ws|http]
 //
 // `--replication` (C4b) attaches a real replica to every node on the ladder before the load starts,
 // so the figure is what a node does while it is also serving its replicas — each commit crossing
 // the worker channel as one frame on its way to the socket the router holds.
+//
+// `--follow` (C4c) turns the ladder round: each rung is a *replica* of one single-threaded primary,
+// and the load is **reads**, because a node that follows an upstream takes no writes. This is the
+// lever C4c exists for — a replica was stuck on one thread while the rest of the machine idled.
 //
 // The shape is exactly the one `docs/performance.md` §5 measured across processes: N databases,
 // single-row writes, many concurrent clients. There it was one process against four; here it is
@@ -34,23 +38,38 @@ const CONCURRENT = Number(flag("concurrent", "64"))
 const SECONDS = Number(flag("seconds", "5"))
 /** C4b: run the ladder with a real replica attached to each node. */
 const REPLICATION = Bun.argv.includes("--replication")
+/** C4c: make each rung a replica of one primary, and measure reads. */
+const FOLLOW = Bun.argv.includes("--follow")
+/** Which surface the load uses. See `bench/workers-client.ts` for why it changes the answer. */
+const TRANSPORT = flag("transport", "ws")
 const SECRET = "bench-cluster-secret-0123456789"
 const ADMIN = "bench-admin-key"
 const NAMES = Array.from({ length: DBS }, (_, i) => `bench${i}`)
 
 const results: { workers: number; rate: number }[] = []
 
-for (const workers of LADDER) {
-  results.push({ workers, rate: await run(workers) })
+/** `--follow`: one single-threaded primary, seeded once, that every rung of the ladder follows. */
+const upstream = FOLLOW ? await startUpstream() : null
+try {
+  for (const workers of LADDER) {
+    results.push({ workers, rate: await run(workers) })
+  }
+} finally {
+  if (upstream) {
+    upstream.server.kill()
+    await upstream.server.exited
+    fs.rmSync(upstream.root, { recursive: true, force: true })
+  }
 }
 
 const base = results[0]?.rate ?? 0
 console.log(
   `bunql workers bench · ${DBS} databases · ${CONCURRENT} sockets · ${SECONDS}s · ` +
-    `${REPLICATION ? "one replica attached · " : "no replication · "}` +
+    `${FOLLOW ? "replica reads · " : REPLICATION ? "one replica attached · " : "no replication · "}` +
+    `over ${TRANSPORT === "http" ? "HTTP" : "one socket"} · ` +
     `Bun ${Bun.version} · ${process.platform}/${process.arch} · ${os.cpus().length} cores\n`,
 )
-console.log("workers    writes/s    speedup")
+console.log(`workers    ${FOLLOW ? " reads/s" : "writes/s"}    speedup`)
 console.log("-".repeat(31))
 for (const { workers, rate } of results) {
   console.log(
@@ -60,7 +79,10 @@ for (const { workers, rate } of results) {
 
 const legs: Record<string, Sample> = {}
 for (const { workers, rate } of results) {
-  legs[`single-row writes, ${workers} worker${workers === 1 ? "" : "s"}`] = {
+  legs[
+    `${FOLLOW ? "replica point reads" : "single-row writes"} over ${TRANSPORT}, ` +
+      `${workers} worker${workers === 1 ? "" : "s"}`
+  ] = {
     p50: rate,
     p90: rate,
     p99: rate,
@@ -72,6 +94,46 @@ emit({
   info: { databases: String(DBS), sockets: String(CONCURRENT), seconds: String(SECONDS) },
   legs,
 })
+
+/**
+ * `--follow`: one single-threaded primary that every rung follows, seeded with the benchmark's
+ * databases and one row each, because a point read wants a row to find.
+ */
+async function startUpstream(): Promise<{ server: Bun.Subprocess; root: string; url: string }> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-workers-upstream-"))
+  const port = 4399
+  const server = Bun.spawn(
+    [
+      process.execPath,
+      "run",
+      path.join(import.meta.dir, "..", "src", "cli.ts"),
+      "serve",
+      "--dir",
+      root,
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+      "--cluster-secret",
+      SECRET,
+    ],
+    {
+      stdout: "ignore",
+      stderr: "inherit",
+      env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+    },
+  )
+  const url = `http://127.0.0.1:${port}`
+  await waitFor(url)
+  for (const name of NAMES) {
+    await post(url, "/v1/db", { name })
+    await post(url, `/v1/db/${name}/query`, {
+      sql: "create table t(id integer primary key, v text)",
+    })
+    await post(url, `/v1/db/${name}/query`, { sql: "insert into t(v) values ('seed')" })
+  }
+  return { server, root, url }
+}
 
 /** Starts a node with `workers` threads, seeds it, runs the load client, returns writes/s. */
 async function run(workers: number): Promise<number> {
@@ -91,7 +153,9 @@ async function run(workers: number): Promise<number> {
       "127.0.0.1",
       "--workers",
       String(workers),
-      ...(REPLICATION ? ["--cluster-secret", SECRET] : []),
+      ...(REPLICATION || FOLLOW ? ["--cluster-secret", SECRET] : []),
+      // C4c: this rung *is* the replica, and the load below reads from it.
+      ...(FOLLOW && upstream ? ["--replica-of", `ws://127.0.0.1:4399/v1/replication`] : []),
     ],
     {
       stdout: "ignore",
@@ -104,11 +168,17 @@ async function run(workers: number): Promise<number> {
   try {
     const url = `http://127.0.0.1:${port}`
     await waitFor(url)
-    for (const name of NAMES) {
-      await post(url, "/v1/db", { name })
-      await post(url, `/v1/db/${name}/query`, {
-        sql: "create table t(id integer primary key, v text)",
-      })
+    if (FOLLOW) {
+      // Every database bootstrapped before the load starts, so the figure measures reads against a
+      // settled replica rather than reads racing a snapshot.
+      await untilFollowing(url)
+    } else {
+      for (const name of NAMES) {
+        await post(url, "/v1/db", { name })
+        await post(url, `/v1/db/${name}/query`, {
+          sql: "create table t(id integer primary key, v text)",
+        })
+      }
     }
     if (REPLICATION) {
       replicaRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-workers-${workers}-replica-`))
@@ -157,6 +227,9 @@ async function run(workers: number): Promise<number> {
         String(CONCURRENT),
         "--seconds",
         String(SECONDS),
+        ...(FOLLOW ? ["--op", "read"] : []),
+        "--transport",
+        TRANSPORT,
       ],
       { stdout: "pipe", stderr: "inherit" },
     )

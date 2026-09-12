@@ -43,6 +43,7 @@ import {
 } from "./workers/router.ts"
 import { WorkerPool } from "./workers/pool.ts"
 import { ReplicationRouter } from "./workers/replication.ts"
+import { followHost, WorkerShards } from "./workers/replica.ts"
 import { resolveWorkers } from "./workers/shard.ts"
 import {
   busPublisher,
@@ -716,10 +717,15 @@ export async function startServer(
 
   // The pool is started before the listener so a worker that cannot build its runtime fails
   // `startServer` rather than leaving a node that answers `DB_NOT_FOUND` for a shard.
-  const pool =
-    workers > 1
-      ? await WorkerPool.start(config, options.onError ?? ((err) => console.error("bunql:", err)))
-      : null
+  const onError = options.onError ?? ((err: unknown) => console.error("bunql:", err))
+  const pool = workers > 1 ? await WorkerPool.start(config, onError) : null
+  // C4c: with workers, the one upstream connection is this thread's and every stream is a
+  // worker's, so the client is built in `"routed"` mode over the pool. Set before
+  // `startReplication` below, because which mode the client is in is decided at construction.
+  if (pool && config.replication.primary) {
+    const shards = new WorkerShards(pool, onError)
+    runtime.setShardHost(shards)
+  }
 
   const app = pool ? await createApp(runtime, pool) : await createApp(runtime)
   // The route table and the socket handler are built dynamically, so they are handed to
@@ -746,6 +752,9 @@ export async function startServer(
   // upstream of a third node, and a chain that opens sockets before it can answer them is racy.
   if (owned) await runtime.startCluster()
   if (owned) runtime.startReplication()
+  // C4c: the workers report what is not a frame — an install, a divergence, a disposed copy, a
+  // forwarded write, C2's detach — and each is a decision the one `"routed"` client owns.
+  if (pool && runtime.replica) pool.setFollowHost(followHost(runtime.replica, runtime, onError))
   // Shipping starts with the listener for the same reason replication does: a snapshot taken from
   // a drain can be served over `/v1/db/:db/dump`, and a node that ships before it can answer is
   // a node whose backup and whose API disagree about what exists.
@@ -774,10 +783,14 @@ export async function startServer(
       // Every replica socket is closed before the workers go, so a stream is ended by a `1001` the
       // replica reconnects from rather than by a channel that stops answering under it.
       app.replication?.stop()
+      // C4c, for the same reason in the other direction: the upstream connection is ended here,
+      // while the workers its streams live on are still there to be told.
+      if (pool) runtime.replica?.stop()
       await server.stop(true)
       if (pool) {
         pool.setHost(null)
         pool.setReplicationHost(null)
+        pool.setFollowHost(null)
         await pool.close()
       }
       // Everything committed before the listener stopped belongs in the bucket, so the shippers

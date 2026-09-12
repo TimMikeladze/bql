@@ -206,6 +206,160 @@ export interface ReplAnnounce {
   kind: "repl.announce"
 }
 
+// ── following an upstream (C4c) ────────────────────────────────────────────────────────────────
+//
+// C4b's seam, cut the other way: the router owns the one upstream connection — the socket, the
+// reconnect, the HMAC proof, the frame reader, the generation ledger, R7's reconciliation and R2's
+// forward queue — and the worker that owns a database owns that database's stream, with
+// `registry.openReplica`, the snapshot file, `installSnapshot`, `registry.pin` and
+// `tenant.applyRecord` all called on the thread that holds the writer. Nothing that touches a
+// tenant is here; the hot path is one `follow.frame` per `TXN` down and one `follow.out` per `ACK`
+// up, both irreducible. `docs/c4c-replication-follow.md` §4.
+
+/** Follow `db` on the stream the router minted: open the copy, pin it, send `SUBSCRIBE`. */
+export interface FollowStart {
+  kind: "follow.start"
+  stream: number
+  db: string
+  /**
+   * What the router's ledger says this node's copy is, since the ledger is node-level and the
+   * txid, epoch and checksum that go beside it in the body are the worker's. §3.3.
+   */
+  generation: string | null
+  /** "My file cannot be trusted; send a snapshot even at txid 0." */
+  reset: boolean
+}
+
+/**
+ * One frame the router decoded, for this worker's streams. Only `SNAPSHOT_BEGIN`,
+ * `SNAPSHOT_CHUNK`, `SNAPSHOT_END` and `TXN` are ever here — the four that touch a tenant. A
+ * snapshot chunk crosses **compressed**, so zstd runs on the worker rather than on the one thread
+ * that also holds every socket (§3.1), and every one of the four names its own stream in its body.
+ */
+export interface FollowFrame {
+  kind: "follow.frame"
+  type: number
+  body: Uint8Array
+}
+
+/** End one stream. `drop` disposes of the local copy (R7); false is C2's detach, which keeps it. */
+export interface FollowStop {
+  kind: "follow.stop"
+  stream: number
+  db: string
+  drop: boolean
+  reason: string
+}
+
+/**
+ * The connection-level facts, pushed so a read route on a worker needs no round trip — design
+ * §5.3's rule for the lease, applied to the one other node-level fact a handler needs. Changes on
+ * connect, close and `retarget`, never per record.
+ */
+export interface FollowLink {
+  kind: "follow.link"
+  connected: boolean
+  primary: string
+  node: string | null
+  lastError: string | null
+}
+
+/**
+ * The generation ledger, after every save. Without it a *chained* sharded replica would mint a
+ * fresh identity from its own catalog row for every database it re-announces, and every downstream
+ * replica would trash its copy and bootstrap again for no reason. §3.2.
+ */
+export interface FollowGenerations {
+  kind: "follow.generations"
+  entries: [string, string][]
+}
+
+/** The heartbeat tick: the upstream's positions down, this worker's up, once per `heartbeatMs`. */
+export interface FollowStatus {
+  kind: "follow.status"
+  id: number
+  primary: [number, string][]
+}
+
+export interface FollowStatusReply {
+  kind: "follow.status.reply"
+  id: number
+  streams: { stream: number; db: string; applied: string; bootstrapping: boolean }[]
+}
+
+/** A finished frame for the upstream socket: `SUBSCRIBE`, `ACK`, `ERROR`. */
+export interface FollowOut {
+  kind: "follow.out"
+  bytes: Uint8Array
+}
+
+/**
+ * A snapshot installed, and the copy now exists. Posted **before** the `ACK` that follows it, so
+ * the router writes the ledger before the ack reaches the wire: a copy on disk whose identity is
+ * not recorded is the one failure R7 cannot recover from. §3.2.
+ */
+export interface FollowInstalled {
+  kind: "follow.installed"
+  stream: number
+  db: string
+  txid: string
+}
+
+/** A diverged apply wants a fresh stream from zero, and only the router may mint one. */
+export interface FollowAgain {
+  kind: "follow.again"
+  stream: number
+  db: string
+  reason: string
+}
+
+/** The local copy was disposed of; the trash path belongs in `ReplicaStatus.unfollowed`. */
+export interface FollowStopped {
+  kind: "follow.stopped"
+  db: string
+  trash: string | null
+}
+
+/** R2: a write this worker could not take, on its way to the one upstream socket. */
+export interface FollowForward {
+  kind: "follow.forward"
+  id: number
+  db: string
+  op: string
+  body: unknown
+}
+
+/** R2: the upstream's answer, back to the worker that asked. The shape of `ResultBody`. */
+export interface FollowResult {
+  kind: "follow.result"
+  id: number
+  ok: boolean
+  result?: unknown
+  error?: {
+    code: string
+    message: string
+    status?: number
+    txid?: number
+    failedIndex?: number
+  }
+}
+
+/** C2 on a worker: a promotion detached a database, or a demotion re-attached one. */
+export interface FollowDetach {
+  kind: "follow.detach" | "follow.attach"
+  db: string
+}
+
+/**
+ * C4b §6's gap: a database fenced on a worker demotes and then wants this node to follow whoever
+ * took it over. Starting a client inside a worker is what C4c makes unnecessary — the router has
+ * one — so the worker reports the URL and the router retargets.
+ */
+export interface FollowPrimary {
+  kind: "follow.primary"
+  url: string
+}
+
 // ── worker → router, unsolicited ───────────────────────────────────────────────────────────────
 
 /**
@@ -289,6 +443,13 @@ export type ToWorker =
   | ReplFrame
   | ReplGone
   | ReplPositions
+  | FollowStart
+  | FollowFrame
+  | FollowStop
+  | FollowLink
+  | FollowGenerations
+  | FollowStatus
+  | FollowResult
   | MetricsAsk
   | Shutdown
 
@@ -306,6 +467,14 @@ export type FromWorker =
   | ReplShut
   | ReplAnnounce
   | ReplPositionsReply
+  | FollowOut
+  | FollowInstalled
+  | FollowAgain
+  | FollowStopped
+  | FollowForward
+  | FollowDetach
+  | FollowPrimary
+  | FollowStatusReply
   | PublishEvent
   | MovedEvent
   | ErrorEvent

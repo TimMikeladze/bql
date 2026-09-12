@@ -17,7 +17,11 @@
 // run against it unchanged; `send`, `subscribe`, `unsubscribe` and `close` post back.
 
 import { HEADERS } from "../../client/protocol.ts"
-import type { ReplicationSocket } from "../../replication/index.ts"
+import type {
+  ClientSocket,
+  ReplicaHost,
+  ReplicationSocket,
+} from "../../replication/index.ts"
 import { createApp, createRuntime, type App } from "../app.ts"
 import type { ServerConfig } from "../config.ts"
 import { BunQLError, errorResponse } from "../errors.ts"
@@ -229,6 +233,60 @@ class VirtualReplicationSocket {
   }
 }
 
+// ── following an upstream (C4c) ────────────────────────────────────────────────────────────────
+
+/**
+ * The upstream socket as `src/replication/replica.ts` sees it, in a worker that owns no socket.
+ * `send` posts the finished frame to the router, which owns the one connection — so `#send`,
+ * `#subscribe`, `#ack` and the whole snapshot path are the same code a single-threaded node runs,
+ * which is the measure of whether this seam was cut in the right place.
+ * `docs/c4c-replication-follow.md` §2.
+ */
+class VirtualUpstreamSocket {
+  binaryType = "arraybuffer"
+
+  send(data: string | ArrayBufferLike | ArrayBufferView): void {
+    if (typeof data === "string") return
+    const bytes =
+      data instanceof Uint8Array
+        ? data
+        : ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(data as ArrayBuffer)
+    post({ kind: "follow.out", bytes })
+  }
+
+  close(): void {
+    // The connection is the router's; a worker never ends it.
+  }
+
+  addEventListener(): void {
+    // The router owns the socket's events; a hosted client is driven by `follow.*` instead.
+  }
+}
+
+/** Everything the hosted client reports that is not a frame. */
+const FOLLOW_HOST: ReplicaHost = {
+  installed(stream, db, txid) {
+    post({ kind: "follow.installed", stream, db, txid })
+  },
+  again(stream, db, reason) {
+    post({ kind: "follow.again", stream, db, reason })
+  },
+  stopped(db, trash) {
+    post({ kind: "follow.stopped", db, trash })
+  },
+  forward(id, request) {
+    post({ kind: "follow.forward", id, db: request.db, op: request.op, body: request.body })
+  },
+  detach(db) {
+    post({ kind: "follow.detach", db })
+  },
+  attach(db) {
+    post({ kind: "follow.attach", db })
+  },
+}
+
 // ── start ──────────────────────────────────────────────────────────────────────────────────────
 
 async function start(index: number, workers: number, config: ServerConfig): Promise<void> {
@@ -248,9 +306,15 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
   // C4b: `announce()` in a worker asks the router for one, because the announcement is a fact
   // about the whole node (`plan-phase1.md` finding 1 across threads).
   runtime.replication?.setAnnounceHandler(() => post({ kind: "repl.announce" }))
+  // C4c: this worker holds the streams, for the databases this shard owns, of the one upstream
+  // connection the router holds. `adopt` is what makes the hosted client's `#send` reach the real
+  // socket; nothing below it knows a thread boundary exists.
+  runtime.setFollowPrimaryHandler((url) => post({ kind: "follow.primary", url }))
+  runtime.startReplication()
+  runtime.replica?.adopt(new VirtualUpstreamSocket() as unknown as ClientSocket, FOLLOW_HOST)
   // Shipping, retention and snapshots are per database and belong to the thread that owns it.
-  // Replication and the cluster are refused by `loadConfig` when `workers > 1`, so they are not
-  // started here at all rather than started into a no-op.
+  // The cluster is refused by `loadConfig` when `workers > 1`, so it is not started here at all
+  // rather than started into a no-op.
   runtime.startStorage()
   state = {
     index,
@@ -512,6 +576,63 @@ self.onmessage = (event: MessageEvent): void => {
       current.runtime.replication?.close(socket as unknown as ReplicationSocket)
       return
     }
+    case "follow.start": {
+      const client = current.runtime.replica
+      if (!client) return
+      // The router chose this worker from the database name; if the name does not hash here,
+      // something has gone wrong on the other side and following it would open a file another
+      // thread owns. Same rule, same reason, as `assertOwned` on a hopped request.
+      const owner = shardOf(message.db, current.workers)
+      if (owner !== current.index) {
+        post({
+          kind: "error",
+          message: `follow.start for ${JSON.stringify(message.db)} belongs to worker ${owner}, not ${current.index}`,
+        })
+        return
+      }
+      try {
+        client.follow(message.stream, message.db, message.generation, message.reset)
+      } catch (err) {
+        post({ kind: "error", message: String(err) })
+      }
+      return
+    }
+    case "follow.frame":
+      try {
+        current.runtime.replica?.deliver(message.type, message.body)
+      } catch (err) {
+        post({ kind: "error", message: String(err) })
+      }
+      return
+    case "follow.stop":
+      current.runtime.replica?.unfollow(message.stream, message.db, message.drop, message.reason)
+      return
+    case "follow.link":
+      current.runtime.replica?.link({
+        connected: message.connected,
+        primary: message.primary,
+        node: message.node,
+        lastError: message.lastError,
+      })
+      return
+    case "follow.generations":
+      current.runtime.replica?.generations(message.entries)
+      return
+    case "follow.status":
+      post({
+        kind: "follow.status.reply",
+        id: message.id,
+        streams: current.runtime.replica?.positions(message.primary) ?? [],
+      })
+      return
+    case "follow.result":
+      current.runtime.replica?.result({
+        id: message.id,
+        ok: message.ok,
+        ...(message.result !== undefined ? { result: message.result } : {}),
+        ...(message.error ? { error: message.error } : {}),
+      })
+      return
     case "repl.positions": {
       const server = current.runtime.replication
       const streams = (server?.positions() ?? []).map((one) => ({
@@ -526,6 +647,9 @@ self.onmessage = (event: MessageEvent): void => {
       return
     }
     case "metrics": {
+      // Whichever half of replication this worker runs, by the same rule `replicationMetrics`
+      // applies on a single-threaded node: a node that follows reports what it applied.
+      const client = current.runtime.replica
       const server = current.runtime.replication
       post({
         kind: "metrics.reply",
@@ -533,10 +657,13 @@ self.onmessage = (event: MessageEvent): void => {
         metrics: current.runtime.metrics.state(),
         registry: pick(current.runtime.registry.stats()),
         // Only what is per stream. `connected` and `bytes` are the router's, which is the thread
-        // that owns every socket and writes every byte. `docs/c4b-replication-workers.md` §7.
-        replication: server
-          ? { lagTxid: server.maxLagTxid, records: server.recordsSent }
-          : null,
+        // that owns every socket and writes and reads every byte.
+        // `docs/c4b-replication-workers.md` §7, `docs/c4c-replication-follow.md` §3.4.
+        replication: client
+          ? { lagTxid: client.maxLagTxid, records: client.recordsApplied }
+          : server
+            ? { lagTxid: server.maxLagTxid, records: server.recordsSent }
+            : null,
       })
       return
     }

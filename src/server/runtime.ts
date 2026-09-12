@@ -29,9 +29,11 @@ import {
   generationId,
   NoReplicas,
   ReplicaClient,
+  type ReplicaMode,
   ReplicaNotice,
   type ReplicaView,
   ReplicationServer,
+  type ShardHost,
 } from "../replication/index.ts"
 import {
   AuthorizerHub,
@@ -141,6 +143,10 @@ export class ServerRuntime {
   readonly replicationMode: "own" | "none" | "hosted"
   /** The replica's client, or null on a primary. Started by `startServer`, stopped by `close`. */
   replica: ReplicaClient | null = null
+  /** C4c: where a `"routed"` client's per-database work happens, on a node with workers. */
+  #shards: ShardHost | null = null
+  /** C4c: where a worker sends `followPrimary`, since the one client is on the router. */
+  #onFollowPrimary: ((url: string) => void) | null = null
   /** R2: the waiter behind `ack: "replica" | "quorum"`. */
   readonly acks: AckTracker
   /** R2: the path a write takes off a replica. `enabled` is false everywhere else. */
@@ -313,18 +319,11 @@ export class ServerRuntime {
     }
     if (!this.config.replication.secret) return
     if (this.replicationMode === "hosted") {
-      // C4b lifts serving replicas from a worker, not *following* one from a worker: the upstream
-      // socket, the reconnect and the generation ledger are node-level and belong on the router
-      // (C4c). The safety half of the demotion has already happened — the database is a replica
-      // copy now and refuses writes with `NOT_PRIMARY` — so this is a convergence gap, not a
-      // correctness one, and it is worth a line rather than a silent no-op.
-      this.#onError(
-        new Error(
-          `${this.node}: a database was demoted on a worker and should now follow ${url}, but a ` +
-            "node with `[server] workers > 1` cannot follow an upstream yet " +
-            "(docs/c4b-replication-workers.md §6). Point this node at it by hand.",
-        ),
-      )
+      // C4c closes C4b §6's gap: the upstream socket, the reconnect and the ledger are node-level
+      // and the router holds exactly one of each, so a worker reports the URL rather than opening
+      // a socket of its own. The safety half of the demotion already happened on this thread — the
+      // database is a replica copy now and refuses writes with `NOT_PRIMARY`.
+      this.#onFollowPrimary?.(url)
       return
     }
     this.config.replication.primary = url
@@ -565,6 +564,11 @@ export class ServerRuntime {
     if (this.replica) return
     const section = this.config.replication
     if (!section.primary) return
+    // C4c: `"routed"` on a router that has shards to hand streams to, `"hosted"` in a worker, and
+    // `"own"` on a single-threaded node. One class, three modes, one copy of every decision —
+    // `docs/c4c-replication-follow.md` §5.
+    const mode: ReplicaMode =
+      this.replicationMode === "hosted" ? "hosted" : this.#shards ? "routed" : "own"
     this.replica = new ReplicaClient({
       registry: this.registry,
       primary: section.primary,
@@ -576,8 +580,23 @@ export class ServerRuntime {
       forwardTimeoutMs: section.forwardTimeoutMs,
       maxForwards: section.maxForwards,
       onError: this.#onError,
+      mode,
+      ...(this.#shards && mode === "routed" ? { host: this.#shards } : {}),
     })
     this.replica.start()
+  }
+
+  /**
+   * C4c: where a `"routed"` client's per-database work happens. Set by `startServer` after the pool
+   * exists and before `startReplication`, so the client is built knowing which mode it is in.
+   */
+  setShardHost(host: ShardHost | null): void {
+    this.#shards = host
+  }
+
+  /** C4b §6's gap: where a worker sends a demotion's convergence, since the router holds the client. */
+  setFollowPrimaryHandler(handler: ((url: string) => void) | null): void {
+    this.#onFollowPrimary = handler
   }
 
   /**

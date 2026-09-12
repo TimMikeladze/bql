@@ -366,9 +366,16 @@ where it did 28 809, and more than the 39 734 four separate processes did in §5
   hot path is one `postMessage` per `TXN`, which is what a socket on another thread costs and no
   more. A proxy would have made `onCommit` and `log.iterate` request/response per record, which is
   exactly how it would have got slow.
-- **C4c: following an upstream** (`[replication] primary`) with `workers > 1` is still refused. It
-  is C4b mirrored, and `ReplicaClient` is the harder half: the upstream socket, the reconnect and
-  the generation ledger are node-level while `installSnapshot` and `applyRecord` are per shard.
+- ~~**C4c: following an upstream** (`[replication] primary`) with `workers > 1` is still refused.~~
+  **Done** — `docs/c4c-replication-follow.md`. It is C4b mirrored: the router owns the one upstream
+  connection (the socket, the reconnect, the proof, the frame reader, the generation ledger, R7's
+  reconciliation, R2's forward queue) and the worker that owns a database owns that database's
+  stream. It is **one class in three modes** rather than two classes — `ReplicaClient` runs `"own"`,
+  `"routed"` and `"hosted"` — because `#resolveFollow`, the backoff and the ledger are the same
+  logic in each and duplicating them is how the halves drift. The hot path is one `postMessage` per
+  `TXN` down and one per `ACK` up, both irreducible. What it is worth is narrower than the premise:
+  a replica's HTTP reads scale 1.60x and its socket reads *lose* 10%, because the router relays
+  every frame and a point read is cheaper than the hop.
 - The Raft lease consulted from a worker (a push of the lease state down the channel, since the
   worker must not block on the control plane — design §5.3's whole premise). Still open, and still
   why `[cluster] enabled` is refused.

@@ -1113,7 +1113,9 @@ export const replication: Handler = async (ctx) => {
     return json({
       ...common,
       role: "replica",
-      primary: ctx.runtime.config.replication.primary,
+      // The client's own answer, not the config's: C2's `retarget` moves it at runtime, and with
+      // workers the connection is on the router while this handler runs on the shard (C4c §3.4).
+      primary: status?.primary ?? ctx.runtime.config.replication.primary,
       connected: status?.connected ?? false,
       applied: Number(tenant.txid),
       lagTxid: stream?.lagTxid ?? 0,

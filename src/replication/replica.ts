@@ -21,6 +21,15 @@
 // stops being streamed and keeps its copy and its generation — that copy is the thing being
 // promoted. Only an announcement that says the database is gone, or is a different database, may
 // delete anything. `docs/c2-promotion.md`.
+//
+// Fifth invariant (C4c, `docs/c4c-replication-follow.md`): this class has **three modes and one
+// copy of every decision**. `"own"` is a single-threaded node. On a node with `[server] workers`,
+// the *stream* crosses the worker channel and the tenant never does — so `"routed"` runs on the
+// router and owns the connection, the ledger and the follow/unfollow decision while touching no
+// registry, and `"hosted"` runs on a worker and owns `openReplica`, the snapshot file,
+// `installSnapshot`, `pin` and `applyRecord` while owning no socket. It is not split into three
+// classes because `#resolveFollow`, the backoff and the ledger are the same logic in every mode,
+// and duplicating them is how the halves drift.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -128,6 +137,78 @@ export interface ReplicaClientOptions {
   forwardTimeoutMs?: number
   /** R2: forwarded writes in flight at once. Past this, `forward` throws `BUSY`. Default 256. */
   maxForwards?: number
+  /**
+   * C4c. `"own"` (default) is a single-threaded node. `"routed"` is the router thread of a
+   * `workers > 1` node: it owns the socket, the ledger and every decision, and hands each stream's
+   * per-database work to `host`. `"hosted"` is a worker thread: it owns the registry work for the
+   * streams of the databases this shard holds, and is driven by `adopt`, `follow` and `deliver`.
+   */
+  mode?: ReplicaMode
+  /** Required in `"routed"` mode: where a stream's per-database work actually happens. */
+  host?: ShardHost
+}
+
+export type ReplicaMode = "own" | "routed" | "hosted"
+
+/** One stream's local position, as the thread that holds its tenant sees it. */
+export interface StreamPosition {
+  stream: number
+  db: string
+  /** Last txid applied locally, decimal. */
+  applied: string
+  bootstrapping: boolean
+}
+
+/** The connection-level facts the router owns, pushed to every shard (C4c §3.4). */
+export interface LinkState {
+  connected: boolean
+  primary: string
+  /** The upstream's node id, from its `HELLO`. */
+  node: string | null
+  lastError: string | null
+}
+
+/**
+ * C4c: what a `"routed"` client does instead of touching a registry it does not own. Every method
+ * is a post onto the worker channel; nothing here returns tenant state except `positions`, which
+ * is gathered once per heartbeat rather than once per record.
+ */
+export interface ShardHost {
+  /** Follow `db` on `stream`: the shard opens the copy, pins it and sends `SUBSCRIBE`. */
+  start(stream: number, db: string, generation: string | null, reset: boolean): void
+  /** One decoded frame — `SNAPSHOT_*` or `TXN` — for the shard that holds `stream`. */
+  frame(stream: number, db: string, type: number, body: Uint8Array): void
+  /** End `stream`. `drop` disposes of the local copy through the registry's delete path (R7). */
+  stop(stream: number, db: string, drop: boolean, reason: string): void
+  /** The connection-level facts, pushed so a read route on a shard needs no round trip. */
+  link(state: LinkState): void
+  /** The generation ledger, after every save, for a chained replica's own announcement. */
+  generations(entries: [string, string][]): void
+  /** Every shard's stream positions, with the primary's own positions pushed down in the same tick. */
+  positions(primary: [number, string][]): Promise<StreamPosition[]>
+  /** R2: the upstream's answer to one forwarded write, back to the shard that asked for it. */
+  result(shard: number, id: number, body: ResultBody): void
+}
+
+/**
+ * C4c: what a `"hosted"` client reports to the router, which is everything that is *not* a frame.
+ * One seam rather than five setters, because they are only ever installed together.
+ */
+export interface ReplicaHost {
+  /**
+   * A snapshot is installed and the copy now exists. Posted **before** the `ACK`, so the router
+   * writes the ledger before the ack reaches the wire — see `docs/c4c-replication-follow.md` §3.2.
+   */
+  installed(stream: number, db: string, txid: string): void
+  /** A diverged apply wants a fresh stream from zero, and only the router may mint one. */
+  again(stream: number, db: string, reason: string): void
+  /** The local copy was disposed of; the trash path belongs in `ReplicaStatus.unfollowed`. */
+  stopped(db: string, trash: string | null): void
+  /** R2: a write this shard could not take, on its way to the one upstream socket. */
+  forward(id: number, request: ForwardRequest): void
+  /** C2 on a worker: a promotion detached a database, or a demotion re-attached one. */
+  detach(db: string): void
+  attach(db: string): void
 }
 
 /** A write this node could not take, on its way to the primary (R2). */
@@ -202,13 +283,19 @@ interface Bootstrap {
 interface Forward {
   resolve: (value: unknown) => void
   reject: (err: unknown) => void
-  timer: ReturnType<typeof setTimeout>
+  /** Null in `"hosted"` mode: the router owns the one node-level timeout and the one cap. */
+  timer: ReturnType<typeof setTimeout> | null
 }
 
 interface Stream {
   id: number
   db: string
+  /** Null in `"routed"` mode, where the tenant is on another thread and never crosses. */
   tenant: Tenant | null
+  /** `"routed"`: the last position the shard reported, since there is no tenant to ask. */
+  applied: bigint
+  /** `"routed"`: whether the shard said it is receiving a snapshot. */
+  bootstrapping: boolean
   /**
    * The generation id the primary named in `SUBSCRIBED` for this stream. Held here until the copy
    * it describes actually exists locally — at `SNAPSHOT_END` for a bootstrap, immediately for a
@@ -230,6 +317,8 @@ export class ReplicaClient {
   readonly reconnectMs: number
   readonly heartbeatMs: number
   readonly bootstrapDir: string
+  /** C4c: which third of this class is live on this thread. */
+  readonly mode: ReplicaMode
 
   /** Bytes received, for `bunql_replication_bytes_total`. */
   bytesReceived = 0
@@ -285,8 +374,17 @@ export class ReplicaClient {
   /** Where this node follows from. C2's `retarget` moves it when a failover names a new primary. */
   #primary: string
 
+  /** C4c: the shards, in `"routed"` mode. */
+  #shards: ShardHost | null = null
+  /** C4c: the router, in `"hosted"` mode. */
+  #host: ReplicaHost | null = null
+  /** C4c: what the router last said about the connection, in `"hosted"` mode. */
+  #link: LinkState | null = null
+  /** C4c: `"routed"` mode only — which shard asked for a forwarded write, by its own id. */
+  #forwardShards = new Map<number, { shard: number; id: number }>()
+
   get primary(): string {
-    return this.#primary
+    return this.mode === "hosted" ? (this.#link?.primary ?? this.#primary) : this.#primary
   }
 
   constructor(options: ReplicaClientOptions) {
@@ -309,7 +407,140 @@ export class ReplicaClient {
       ((url: string) => new WebSocket(url) as unknown as ClientSocket)
     this.forwardTimeoutMs = options.forwardTimeoutMs ?? 10_000
     this.maxForwards = options.maxForwards ?? 256
-    this.#loadGenerations()
+    this.mode = options.mode ?? "own"
+    this.#shards = options.host ?? null
+    // A hosted client keeps no ledger of its own: the router holds the one file with the one
+    // writer and pushes its contents down (§3.2), so reading it here would be a second reader of a
+    // file this thread must never write.
+    if (this.mode !== "hosted") this.#loadGenerations()
+  }
+
+  // ── C4c: the two seams ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * `"hosted"`: the router hands this worker its end of the one upstream connection. The socket is
+   * virtual — its `send` posts the finished frame back — so `#send`, `#subscribe`, `#ack` and the
+   * snapshot path are the same code a single-threaded node runs.
+   */
+  adopt(socket: ClientSocket, host: ReplicaHost): void {
+    this.#socket = socket
+    this.#host = host
+    // Disconnected until the router says otherwise: a worker is built before the node's upstream
+    // connection exists, and `Forwarder` asks this client whether there is a socket to forward
+    // over. Saying yes before the handshake would turn a `NOT_PRIMARY` into a write that vanishes.
+    this.#connected = false
+    this.#handshook = false
+  }
+
+  /** `"hosted"`: follow `db` on the stream the router minted. */
+  follow(stream: number, db: string, generation: string | null, reset: boolean): void {
+    if (this.#byDb.has(db)) return
+    this.#subscribeAs(stream, db, generation, reset)
+  }
+
+  /** `"hosted"`: one frame the router decoded — `SNAPSHOT_*` or `TXN` — for `#handle`. */
+  deliver(type: number, body: Uint8Array): void {
+    this.#handle(type, body)
+  }
+
+  /**
+   * `"hosted"`: end one stream. `drop` takes the local copy through the registry's delete path
+   * (R7); false is C2's detach, which keeps the copy because that copy is what is being promoted.
+   */
+  unfollow(stream: number, db: string, drop: boolean, _reason: string): void {
+    const held = this.#streams.get(stream)
+    if (held && held.db !== db) return
+    const trash = this.#dropLocal(db, drop)
+    if (drop) this.#host?.stopped(db, trash)
+  }
+
+  /** Every local stream's position, with the upstream's own positions pushed down in the same tick. */
+  positions(primary: [number, string][] = []): StreamPosition[] {
+    for (const [stream, txid] of primary) {
+      const held = this.#streams.get(stream)
+      if (held) held.primaryTxid = big(txid)
+    }
+    return [...this.#byDb.values()].map((stream) => ({
+      stream: stream.id,
+      db: stream.db,
+      applied: this.#appliedOf(stream).toString(),
+      bootstrapping: stream.bootstrap !== null,
+    }))
+  }
+
+  /** `"hosted"`: the connection-level facts the router owns (§3.4). */
+  link(state: LinkState): void {
+    const was = this.#link?.connected ?? false
+    this.#link = state
+    this.#connected = state.connected
+    this.#handshook = state.connected
+    this.#primaryNode = state.node
+    this.#lastError = state.lastError
+    if (was && !state.connected) {
+      this.#failForwards(`the connection to ${state.primary} closed before the write was answered`)
+    }
+  }
+
+  /** `"hosted"`: the generation ledger, so a chained replica announces the ids it was given. */
+  generations(entries: [string, string][]): void {
+    this.#generations = new Map(entries)
+  }
+
+  /** `"routed"`: a shard asking for one forwarded write over the one upstream socket (R2). */
+  forwardFrom(shard: number, id: number, request: ForwardRequest): void {
+    this.forward(request).then(
+      (result) => this.#shards?.result(shard, id, { id, ok: true, result }),
+      (err: unknown) => {
+        const mapped =
+          err instanceof ForwardError
+            ? {
+                code: err.code,
+                message: err.message,
+                ...(err.status !== undefined ? { status: err.status } : {}),
+                ...(err.details?.txid !== undefined ? { txid: err.details.txid } : {}),
+                ...(err.details?.failedIndex !== undefined
+                  ? { failedIndex: err.details.failedIndex }
+                  : {}),
+              }
+            : { code: "INTERNAL", message: err instanceof Error ? err.message : String(err) }
+        this.#shards?.result(shard, id, { id, ok: false, error: mapped })
+      },
+    )
+  }
+
+  /** `"routed"`: one finished frame a shard built — `SUBSCRIBE`, `ACK`, `ERROR` — for the socket. */
+  sendFrame(bytes: Uint8Array): void {
+    this.#send(bytes)
+  }
+
+  /** `"hosted"`: the upstream's answer to one forwarded write, routed back by the router (R2). */
+  result(body: ResultBody): void {
+    this.#result(body)
+  }
+
+  /** `"routed"`: a shard installed a snapshot, so the identity the upstream promised is recorded. */
+  installed(stream: number, db: string, _txid: string): void {
+    const held = this.#streams.get(stream)
+    this.#recordGeneration(db, held?.generation ?? null)
+  }
+
+  /** `"routed"`: a shard's apply diverged; give it a fresh stream from zero, which means a snapshot. */
+  again(stream: number, db: string, _reason: string): void {
+    const held = this.#streams.get(stream)
+    if (!held || held.db !== db) return
+    this.#resubscribe(held, false)
+  }
+
+  /** `"routed"`: a shard disposed of a local copy; the trash path belongs in `status()`. */
+  stopped(db: string, trash: string | null): void {
+    const last = [...this.#unfollowed].reverse().find((one) => one.db === db && one.trash === null)
+    if (last) last.trash = trash
+  }
+
+  /** The position this thread can see: the tenant's, or the last a shard reported. */
+  #appliedOf(stream: Stream): bigint {
+    if (stream.tenant && !stream.tenant.closed) return stream.tenant.txid
+    return stream.tenant ? 0n : stream.applied
   }
 
   // ── generation ledger ────────────────────────────────────────────────────────────────────────
@@ -340,6 +571,12 @@ export class ReplicaClient {
 
   /** Temp file then rename, so a crash mid-write leaves the previous ledger rather than none. */
   #saveGenerations(): void {
+    // C4c: a hosted client holds a read-only copy pushed down from the router, which owns the one
+    // file and the one writer. Writing here would be a second writer of a node-level file.
+    if (this.mode === "hosted") return
+    // Every shard gets the new ledger, so a *chained* sharded replica announces to its own
+    // downstream replicas the ids it was given rather than minting fresh ones from its catalog.
+    this.#shards?.generations([...this.#generations])
     const file = this.#generationsPath()
     const temp = `${file}.${process.pid}.tmp`
     try {
@@ -400,7 +637,9 @@ export class ReplicaClient {
         ),
       )
     }
-    if (this.#forwards.size >= this.maxForwards) {
+    // The cap is node-level, so in `"hosted"` mode it is the router's — one queue and one ceiling
+    // over the one socket, rather than N ceilings that add up to N times the cap.
+    if (this.mode !== "hosted" && this.#forwards.size >= this.maxForwards) {
       return Promise.reject(
         new ForwardError(
           "BUSY",
@@ -410,6 +649,14 @@ export class ReplicaClient {
       )
     }
     const id = this.#nextForward++
+    if (this.mode === "hosted") {
+      // The router owns the timeout for the same reason it owns the cap, so this end is only the
+      // promise: it is settled by the `RESULT` the router routes back through `#result`.
+      return new Promise<unknown>((resolve, reject) => {
+        this.#forwards.set(id, { resolve, reject, timer: null })
+        this.#host?.forward(id, request)
+      })
+    }
     return new Promise<unknown>((resolve, reject) => {
       const pending: Forward = {
         resolve,
@@ -425,7 +672,7 @@ export class ReplicaClient {
           )
         }, this.forwardTimeoutMs),
       }
-      pending.timer.unref?.()
+      pending.timer?.unref?.()
       this.#forwards.set(id, pending)
       this.#send(
         encodeJson(FRAME.FORWARD, {
@@ -444,7 +691,7 @@ export class ReplicaClient {
     const pending = [...this.#forwards.values()]
     this.#forwards.clear()
     for (const one of pending) {
-      clearTimeout(one.timer)
+      if (one.timer) clearTimeout(one.timer)
       one.reject(new ForwardError("NOT_PRIMARY", message, 503))
     }
   }
@@ -462,13 +709,13 @@ export class ReplicaClient {
   status(): ReplicaStatus {
     const streams: StreamStatus[] = []
     for (const stream of this.#byDb.values()) {
-      const applied = stream.tenant && !stream.tenant.closed ? stream.tenant.txid : 0n
+      const applied = this.#appliedOf(stream)
       const lag = stream.primaryTxid > applied ? stream.primaryTxid - applied : 0n
       streams.push({
         db: stream.db,
         applied: Number(applied),
         lagTxid: Number(lag),
-        bootstrapping: stream.bootstrap !== null,
+        bootstrapping: stream.tenant ? stream.bootstrap !== null : stream.bootstrapping,
         generation: this.#generations.get(stream.db) ?? null,
       })
     }
@@ -493,7 +740,7 @@ export class ReplicaClient {
 
   /** Opens the connection. Returns immediately; the first attempt runs on this tick. */
   start(): void {
-    if (this.#stopped) return
+    if (this.#stopped || this.mode === "hosted") return
     this.#connect()
   }
 
@@ -511,9 +758,12 @@ export class ReplicaClient {
     this.#connected = false
     this.#handshook = false
     for (const stream of this.#streams.values()) this.#abortBootstrap(stream)
+    this.#endRoutedStreams("this node stopped following")
     this.#streams.clear()
     this.#byDb.clear()
-    if (socket) {
+    // A hosted client's socket is the router's; closing it here would end the node's connection
+    // from one shard's shutdown.
+    if (socket && this.mode !== "hosted") {
       try {
         socket.close(1000, "stopping")
       } catch {
@@ -531,18 +781,34 @@ export class ReplicaClient {
    * not re-subscribe this node to a database it now owns.
    */
   detach(db: string): void {
+    // C4c: `#detached` is node-level — a primary that is still announcing the database must not
+    // pull *any* shard back into following it — so on a worker this reports and the router decides.
+    if (this.mode === "hosted") {
+      this.#host?.detach(db)
+      return
+    }
     this.#detached.add(db)
     const stream = this.#byDb.get(db)
     if (!stream) return
+    this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id } satisfies UnsubscribeBody))
+    if (this.mode === "routed") {
+      this.#streams.delete(stream.id)
+      this.#byDb.delete(db)
+      this.#shards?.stop(stream.id, db, false, "promoted here")
+      return
+    }
     this.#abortBootstrap(stream)
     this.#streams.delete(stream.id)
     this.#byDb.delete(db)
-    this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id } satisfies UnsubscribeBody))
     this.registry.unpin(db, PIN_OWNER)
   }
 
   /** The mirror of `detach`: this node has been demoted, so follow the database again. */
   attach(db: string): void {
+    if (this.mode === "hosted") {
+      this.#host?.attach(db)
+      return
+    }
     if (!this.#detached.delete(db)) return
     if (!this.#handshook || this.#byDb.has(db)) return
     try {
@@ -563,6 +829,7 @@ export class ReplicaClient {
    * no-op, because reconnecting would only cost a re-handshake.
    */
   retarget(url: string): void {
+    if (this.mode === "hosted") return
     if (!url || url === this.#primary) return
     this.#primary = url
     const socket = this.#socket
@@ -575,10 +842,12 @@ export class ReplicaClient {
       this.#retry = null
     }
     for (const stream of this.#streams.values()) this.#abortBootstrap(stream)
+    this.#endRoutedStreams("following a new primary")
     this.#streams.clear()
     this.#byDb.clear()
     this.#sawDatabases = false
     this.#emptyAnnouncementReported = false
+    this.#pushLink()
     if (socket) {
       try {
         socket.close(1000, "following a new primary")
@@ -589,16 +858,21 @@ export class ReplicaClient {
     if (!this.#stopped) this.#connect()
   }
 
-  /** Resolves once every followed database has applied at least `txid`. For tests and `readyz`. */
+  /**
+   * Resolves once every followed database has applied at least `txid`. For tests and `readyz`.
+   *
+   * In `"routed"` mode the position is only as fresh as the last heartbeat gather, because the
+   * tenant is on another thread; a caller that needs it exactly asks the shard over HTTP instead.
+   */
   async waitForTxid(db: string, txid: bigint, timeoutMs = 5000): Promise<void> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
       const stream = this.#byDb.get(db)
-      const tenant = stream?.tenant
-      if (tenant && !tenant.closed && tenant.txid >= txid) return
+      const applied = stream ? this.#appliedOf(stream) : null
+      if (applied !== null && applied >= txid) return
       if (Date.now() > deadline) {
         throw new Error(
-          `${db} did not reach txid ${txid} in ${timeoutMs}ms (at ${tenant?.txid ?? "no stream"})`,
+          `${db} did not reach txid ${txid} in ${timeoutMs}ms (at ${applied ?? "no stream"})`,
         )
       }
       await new Promise((resolve) => setTimeout(resolve, 5))
@@ -607,8 +881,26 @@ export class ReplicaClient {
 
   // ── connection ───────────────────────────────────────────────────────────────────────────────
 
+  /** C4c: the connection-level facts every shard needs but cannot see (§3.4). */
+  #pushLink(): void {
+    this.#shards?.link({
+      connected: this.connected,
+      primary: this.#primary,
+      node: this.#primaryNode,
+      lastError: this.#lastError,
+    })
+  }
+
+  /** C4c: tell every shard its streams are over, when the connection they rode is. */
+  #endRoutedStreams(reason: string): void {
+    if (this.mode !== "routed") return
+    for (const stream of this.#streams.values()) {
+      this.#shards?.stop(stream.id, stream.db, false, reason)
+    }
+  }
+
   #connect(): void {
-    if (this.#stopped || this.#socket) return
+    if (this.#stopped || this.#socket || this.mode === "hosted") return
     this.#reader = new FrameReader()
     this.#handshook = false
     let socket: ClientSocket
@@ -694,10 +986,12 @@ export class ReplicaClient {
     this.#stopHeartbeat()
     this.#failForwards(`the connection to ${this.primary} closed before the write was answered`)
     for (const stream of this.#streams.values()) this.#abortBootstrap(stream)
+    this.#endRoutedStreams("the connection to the primary closed")
     // The stream table is rebuilt on the next handshake; the *positions* live in the tenants, so
     // nothing is lost by forgetting it.
     this.#streams.clear()
     this.#byDb.clear()
+    this.#pushLink()
     this.#scheduleRetry()
   }
 
@@ -761,6 +1055,16 @@ export class ReplicaClient {
   // ── frames ───────────────────────────────────────────────────────────────────────────────────
 
   #handle(type: number, body: Uint8Array): void {
+    // C4c: the four frames that touch a tenant go to the shard that holds it, and nothing else
+    // does. `HELLO`, `SUBSCRIBED`, `HEARTBEAT`, `ERROR` and `RESULT` each touch the connection, the
+    // ledger or the forward queue, and none of them touches a tenant — so they stay here.
+    if (this.mode === "routed" && SHARDED.has(type)) {
+      const id = type === FRAME.TXN ? streamOfTxn(body) : streamOfJson(type, body)
+      const stream = this.#streams.get(id)
+      if (!stream) return
+      this.#shards?.frame(id, stream.db, type, body)
+      return
+    }
     switch (type) {
       case FRAME.HELLO:
         this.#hello(decodeJson<HelloBody>(type, body))
@@ -799,7 +1103,7 @@ export class ReplicaClient {
     const pending = this.#forwards.get(Number(body.id))
     if (!pending) return
     this.#forwards.delete(Number(body.id))
-    clearTimeout(pending.timer)
+    if (pending.timer) clearTimeout(pending.timer)
     if (body.ok) {
       pending.resolve(body.result)
       return
@@ -834,6 +1138,7 @@ export class ReplicaClient {
     this.#handshook = true
     this.#everHandshook = true
     this.#lastError = null
+    this.#pushLink()
     this.#startHeartbeat()
     this.#resolveFollow(hello.databases ?? [], hello.generations)
   }
@@ -921,44 +1226,108 @@ export class ReplicaClient {
   #unfollow(db: string, reason: string): void {
     const stream = this.#byDb.get(db)
     if (stream) {
-      this.#abortBootstrap(stream)
-      this.#streams.delete(stream.id)
-      this.#byDb.delete(db)
       this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id } satisfies UnsubscribeBody))
     }
-    this.registry.unpin(db, PIN_OWNER)
     this.#forgetGeneration(db)
 
+    // C4c: in `"routed"` mode the copy is on another thread, so the shard disposes of it and
+    // reports the trash path back through `stopped()` — the entry is pushed here first so the
+    // drop is in `status()` and in the log at the moment it is decided, not one hop later.
     let trash: string | null = null
-    try {
-      // Only a copy this node received as a follower. A database authored here that happens to
-      // share the name is somebody else's, whatever the primary announces.
-      const row = this.registry.list().find((one) => one.name === db)
-      if (row?.role === "replica") trash = this.registry.delete(db)
-    } catch (err) {
-      this.#onError(err)
+    if (this.mode === "routed") {
+      if (stream) {
+        this.#streams.delete(stream.id)
+        this.#byDb.delete(db)
+      }
+      this.#shards?.stop(stream?.id ?? 0, db, true, reason)
+    } else {
+      trash = this.#dropLocal(db, true)
     }
 
     this.#unfollowed.push({ db, atMs: Date.now(), reason, trash })
     if (this.#unfollowed.length > MAX_UNFOLLOWED) this.#unfollowed.shift()
     this.#onError(
       new ReplicaUnfollowed(
-        `${reason}; the local copy was ${trash ? `moved to ${trash}` : "not found locally"}`,
+        `${reason}; the local copy was ${
+          this.mode === "routed"
+            ? "handed to the worker that owns it"
+            : trash
+              ? `moved to ${trash}`
+              : "not found locally"
+        }`,
       ),
     )
   }
 
+  /**
+   * The local half of letting a database go: end the stream, release the pin, and — when `drop` —
+   * dispose of the copy through the registry's own delete path, so it is as recoverable as a
+   * primary-side delete leaves one (`<dataDir>/trash/<name>-<ms>`, never a bare `rm`).
+   *
+   * The abort comes first on purpose: an announcement that lands mid-bootstrap must not leave a
+   * half-written snapshot in `<dataDir>/bootstrap`.
+   */
+  #dropLocal(db: string, drop: boolean): string | null {
+    const stream = this.#byDb.get(db)
+    if (stream) {
+      this.#abortBootstrap(stream)
+      this.#streams.delete(stream.id)
+      this.#byDb.delete(db)
+    }
+    this.registry.unpin(db, PIN_OWNER)
+    if (!drop) return null
+    try {
+      // Only a copy this node received as a follower. A database authored here that happens to
+      // share the name is somebody else's, whatever the primary announces.
+      const row = this.registry.list().find((one) => one.name === db)
+      if (row?.role === "replica") return this.registry.delete(db)
+    } catch (err) {
+      this.#onError(err)
+    }
+    return null
+  }
+
   #subscribe(db: string): void {
+    this.#subscribeAs(this.#nextStream++, db, this.#generations.get(db) ?? null, false)
+  }
+
+  /**
+   * Opens (or creates) the local copy, pins it and sends `SUBSCRIBE`.
+   *
+   * C4c §3.3: the body needs `tenant.txid`, `epoch` and `checksum`, which are the owning thread's,
+   * and `generation`, which is the router's — so the router sends the one field it owns *with the
+   * instruction* and the frame is encoded where the other three live. No round trip, and no
+   * message per record.
+   */
+  #subscribeAs(id: number, db: string, held: string | null, reset: boolean): void {
+    if (this.mode === "routed") {
+      const stream: Stream = {
+        id,
+        db,
+        tenant: null,
+        applied: 0n,
+        bootstrapping: false,
+        generation: reset ? null : held,
+        primaryTxid: 0n,
+        bootstrap: null,
+        deferred: [],
+        retrying: false,
+      }
+      this.#streams.set(id, stream)
+      this.#byDb.set(db, stream)
+      this.#shards?.start(id, db, stream.generation, reset)
+      return
+    }
     const tenant = this.registry.has(db)
       ? this.registry.openReplica(db)
       : this.registry.createReplica(db)
-    const id = this.#nextStream++
-    const held = this.#generations.get(db)
     const stream: Stream = {
       id,
       db,
       tenant,
-      generation: held ?? null,
+      applied: tenant.txid,
+      bootstrapping: false,
+      generation: reset ? null : held,
       primaryTxid: tenant.txid,
       bootstrap: null,
       deferred: [],
@@ -970,50 +1339,59 @@ export class ReplicaClient {
     // the tenant, and reopening it mid-stream would leave a gap nobody would notice.
     this.registry.pin(db, PIN_OWNER)
     this.#send(
-      encodeJson(FRAME.SUBSCRIBE, {
-        stream: id,
-        db,
-        fromTxid: tenant.txid.toString(),
-        epoch: tenant.epoch,
-        checksum: tenant.checksum.toString(),
-        // What this node believes its copy is. A primary holding a different id answers with a
-        // snapshot however well the txid and checksum line up.
-        ...(held ? { generation: held } : {}),
-      } satisfies SubscribeBody),
+      encodeJson(
+        FRAME.SUBSCRIBE,
+        reset
+          ? ({
+              stream: id,
+              db,
+              fromTxid: "0",
+              epoch: 0,
+              checksum: "0",
+              // This database is here because an apply did not verify, so its file holds pages
+              // from a history the primary does not share. Only a snapshot can settle that, even
+              // at txid 0.
+              reset: true,
+            } satisfies SubscribeBody)
+          : ({
+              stream: id,
+              db,
+              fromTxid: tenant.txid.toString(),
+              epoch: tenant.epoch,
+              checksum: tenant.checksum.toString(),
+              // What this node believes its copy is. A primary holding a different id answers with
+              // a snapshot however well the txid and checksum line up.
+              ...(held ? { generation: held } : {}),
+            } satisfies SubscribeBody),
+      ),
     )
   }
 
-  /** Drops a stream and asks for it again from zero, which always means a snapshot. */
-  #resubscribe(stream: Stream): void {
+  /**
+   * Drops a stream and asks for it again from zero, which always means a snapshot.
+   *
+   * `tellShard` is false on the one path where the shard has already let the stream go: a diverged
+   * apply, which is decided on the shard and reaches the router as `again()`.
+   */
+  #resubscribe(stream: Stream, tellShard = true): void {
+    // C4c: only the router may mint a stream id, so a hosted client says what happened and the
+    // router sends the `UNSUBSCRIBE` and comes back with a fresh `follow.start`. The pin is kept
+    // across the round trip, exactly as a single-threaded node keeps it across `#resubscribe`.
+    if (this.mode === "hosted") {
+      this.#abortBootstrap(stream)
+      this.#streams.delete(stream.id)
+      this.#byDb.delete(stream.db)
+      this.#host?.again(stream.id, stream.db, this.#lastError ?? "an apply did not verify")
+      return
+    }
     this.#abortBootstrap(stream)
     this.#streams.delete(stream.id)
     this.#byDb.delete(stream.db)
-    this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id }))
-    const id = this.#nextStream++
-    const next: Stream = {
-      id,
-      db: stream.db,
-      tenant: stream.tenant,
-      generation: null,
-      primaryTxid: stream.primaryTxid,
-      bootstrap: null,
-      deferred: [],
-      retrying: false,
+    if (this.mode === "routed" && tellShard) {
+      this.#shards?.stop(stream.id, stream.db, false, "re-bootstrapping")
     }
-    this.#streams.set(id, next)
-    this.#byDb.set(stream.db, next)
-    this.#send(
-      encodeJson(FRAME.SUBSCRIBE, {
-        stream: id,
-        db: stream.db,
-        fromTxid: "0",
-        epoch: 0,
-        checksum: "0",
-        // This database is here because an apply did not verify, so its file holds pages from a
-        // history the primary does not share. Only a snapshot can settle that, even at txid 0.
-        reset: true,
-      } satisfies SubscribeBody),
-    )
+    this.#send(encodeJson(FRAME.UNSUBSCRIBE, { stream: stream.id }))
+    this.#subscribeAs(this.#nextStream++, stream.db, null, true)
   }
 
   #subscribed(body: SubscribedBody): void {
@@ -1115,7 +1493,12 @@ export class ReplicaClient {
       pageSize: begin.pageSize,
     })
     this.registry.pin(stream.db, PIN_OWNER)
-    this.#recordGeneration(stream.db, stream.generation)
+    // C4c §3.2: the ledger is the router's, so the install is *reported* rather than recorded —
+    // and reported **before** the `ACK`, because `postMessage` to one port is FIFO and that is what
+    // makes the router write the ledger before the ack reaches the wire. A copy on disk with no
+    // recorded identity is the one thing R7 cannot recover from.
+    if (this.mode === "hosted") this.#host?.installed(stream.id, stream.db, begin.txid)
+    else this.#recordGeneration(stream.db, stream.generation)
     this.#ack(stream, big(begin.txid), true)
   }
 
@@ -1219,19 +1602,48 @@ export class ReplicaClient {
 
   #startHeartbeat(): void {
     this.#stopHeartbeat()
-    this.#heartbeat = setInterval(() => {
-      if (!this.#handshook) return
-      this.#send(
-        encodeJson(FRAME.HEARTBEAT, {
-          ts: Date.now(),
-          streams: [...this.#streams.values()].map((stream) => ({
-            stream: stream.id,
-            txid: (stream.tenant && !stream.tenant.closed ? stream.tenant.txid : 0n).toString(),
-          })),
-        }),
-      )
-    }, this.heartbeatMs)
+    if (this.mode === "hosted") return
+    this.#heartbeat = setInterval(() => void this.#beat(), this.heartbeatMs)
     this.#heartbeat.unref?.()
+  }
+
+  /**
+   * One `HEARTBEAT` up, carrying every stream's applied txid.
+   *
+   * In `"routed"` mode the positions come from the shards in **one gather per tick**, and the
+   * upstream's own per-stream positions ride down in the same message — the same fold C4b settled
+   * on for the primary's tick, for the same reason: the two halves each need the other's thread.
+   */
+  async #beat(): Promise<void> {
+    if (!this.#handshook) return
+    let positions: StreamPosition[]
+    if (this.mode === "routed" && this.#shards) {
+      const primary: [number, string][] = [...this.#streams.values()].map((stream) => [
+        stream.id,
+        stream.primaryTxid.toString(),
+      ])
+      try {
+        positions = await this.#shards.positions(primary)
+      } catch (err) {
+        this.#onError(err)
+        return
+      }
+      for (const one of positions) {
+        const stream = this.#streams.get(one.stream)
+        if (!stream) continue
+        stream.applied = big(one.applied)
+        stream.bootstrapping = one.bootstrapping
+      }
+    } else {
+      positions = this.positions()
+    }
+    if (!this.#handshook) return
+    this.#send(
+      encodeJson(FRAME.HEARTBEAT, {
+        ts: Date.now(),
+        streams: positions.map((one) => ({ stream: one.stream, txid: one.applied })),
+      }),
+    )
   }
 
   #stopHeartbeat(): void {
@@ -1279,6 +1691,9 @@ export class ReplicaClient {
     this.#abortBootstrap(stream)
     this.#streams.delete(stream.id)
     this.#byDb.delete(stream.db)
+    if (this.mode === "routed") {
+      this.#shards?.stop(stream.id, stream.db, false, `the primary refused the stream: ${body.code}`)
+    }
     const db = stream.db
     const timer = setTimeout(() => {
       if (this.#stopped || !this.#handshook || this.#byDb.has(db)) return
@@ -1290,6 +1705,29 @@ export class ReplicaClient {
     }, 100)
     timer.unref?.()
   }
+}
+
+/**
+ * C4c: the four frames that touch a tenant, and are therefore the only ones a `"routed"` client
+ * hands to a shard. Everything else touches the connection, the ledger or the forward queue.
+ */
+const SHARDED = new Set<number>([
+  FRAME.SNAPSHOT_BEGIN,
+  FRAME.SNAPSHOT_CHUNK,
+  FRAME.SNAPSHOT_END,
+  FRAME.TXN,
+])
+
+/** A `TXN`'s stream id: the first four bytes of the body, big-endian, as `#txn` reads them. */
+function streamOfTxn(body: Uint8Array): number {
+  if (body.byteLength < 4) throw new ProtocolError("TXN body is shorter than its stream id")
+  return new DataView(body.buffer, body.byteOffset, 4).getUint32(0, false)
+}
+
+/** A snapshot frame's stream id, without decoding more of it than routing needs. */
+function streamOfJson(type: number, body: Uint8Array): number {
+  if (type === FRAME.SNAPSHOT_CHUNK) return decodeSnapshotChunk(body).stream
+  return decodeJson<{ stream: number }>(type, body).stream
 }
 
 function big(value: string | number | undefined): bigint {

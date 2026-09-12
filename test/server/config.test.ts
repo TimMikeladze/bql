@@ -332,17 +332,20 @@ describe("[server] workers", () => {
     expect(config.replication.secret).toBe("s")
   })
 
-  test("refuses to shard a node that follows an upstream", () => {
-    expect(() =>
-      loadConfig({
-        file: null,
-        env: {},
-        overrides: {
-          server: { workers: 4 },
-          replication: { primary: "wss://p/v1/replication", secret: "s" },
-        },
-      }),
-    ).toThrow(/\[replication\] primary/)
+  // C4c moved this contract on purpose, the same way C4b moved the one above: the router owns the
+  // one upstream connection and the worker that owns a database owns its stream, so following and
+  // sharding are no longer exclusive. `docs/c4c-replication-follow.md`.
+  test("shards a node that follows an upstream", () => {
+    const config = loadConfig({
+      file: null,
+      env: {},
+      overrides: {
+        server: { workers: 4 },
+        replication: { primary: "wss://p/v1/replication", secret: "s" },
+      },
+    })
+    expect(config.server.workers).toBe(4)
+    expect(config.replication.role).toBe("replica")
   })
 
   test("refuses to shard a node in a cluster", () => {

@@ -297,14 +297,27 @@ export async function routerMetrics(
   // counters belong in the total.
   metrics.absorb(runtime.metrics.state())
   registry.tenants = runtime.registry.list().length
-  const replicationMetrics: ReplicationMetrics | null = replication
+  // The rule is `replicationMetrics`'s, applied across threads: a node that *follows* reports its
+  // client, a node that *serves* reports its sockets, and the per-stream half of either is summed
+  // from the workers. `connected` and `bytes` are always the router's — it owns every socket and
+  // reads or writes every byte — while `records` sums and `lagTxid` takes the max, because a
+  // record belongs to exactly one worker and a lag is already a max over streams.
+  const client = runtime.replica
+  const replicationMetrics: ReplicationMetrics | null = client
     ? {
-        connected: replication.connections,
-        bytes: replication.bytesSent,
+        connected: client.connected ? 1 : 0,
+        bytes: client.bytesReceived,
         lagTxid: shards?.lagTxid ?? 0,
         records: shards?.records ?? 0,
       }
-    : null
+    : replication
+      ? {
+          connected: replication.connections,
+          bytes: replication.bytesSent,
+          lagTxid: shards?.lagTxid ?? 0,
+          records: shards?.records ?? 0,
+        }
+      : null
   const body = metrics.render(registry, runtime.node, replicationMetrics, null)
   return new Response(body, {
     headers: {

@@ -418,9 +418,19 @@ replication connection — the socket, the handshake, the frame reader, the send
 and the node's announcement — and the worker that owns a database owns that database's stream, so
 `tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()` and `registry.pin` are still called on
 the thread that holds the writer. Nothing about a `Tenant` crosses the channel; one finished frame
-per `TXN` does, which is what a socket on another thread costs. `workers > 1` still refuses to
-*follow* an upstream (`[replication] primary`) or to join a cluster (`[cluster] enabled`), each for
-its own reason. Scale-out beyond one node is still more nodes with tenant placement.
+per `TXN` does, which is what a socket on another thread costs.
+**And it follows one** (C4c, `docs/c4c-replication-follow.md`): the same seam cut the other way —
+the router owns the one upstream connection, the reconnect, the generation ledger, R7's
+reconciliation and R2's forward queue, and the worker that owns a database owns that database's
+stream, so `openReplica`, the snapshot file, `installSnapshot`, `pin` and `applyRecord` run on the
+thread that holds the writer. It is one class in three modes rather than two classes, so every
+decision exists once. What that buys is narrower than it looks and the measurement says so: a
+replica's **HTTP** reads go 34 600/s to 55 300/s at six workers (1.60x, flat past two), while its
+**socket** reads go 259 700 to 232 300 (0.90x), because every frame is relayed by the router and a
+point read is cheaper than the hop. `workers > 1` still refuses to join a cluster
+(`[cluster] enabled`): the Raft lease is consulted on the write path, which is now a worker, and a
+worker must not block on the control plane (§5.3). Scale-out beyond one node is still more nodes
+with tenant placement.
 
 ## 6. HTTP API (JSON)
 

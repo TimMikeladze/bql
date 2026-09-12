@@ -17,7 +17,7 @@
 
 import type { ServerConfig } from "../config.ts"
 import { Metrics, type MetricsState } from "../metrics.ts"
-import type { FromWorker, ToWorker } from "./protocol.ts"
+import type { FollowResult, FromWorker, ToWorker } from "./protocol.ts"
 import { resolveWorkers, shardOf } from "./shard.ts"
 
 /** What the pool needs from the listener, once it exists. */
@@ -31,6 +31,23 @@ export interface ReplicationHost {
   out(conn: string, bytes: Uint8Array): void
   shut(conn: string, code?: number, reason?: string): void
   announce(): void
+}
+
+/**
+ * What the pool needs from the `ReplicaClient` in `"routed"` mode (C4c), when this node follows an
+ * upstream. Everything a worker reports that is *not* a frame for the socket.
+ */
+export interface FollowHost {
+  /** A finished frame for the upstream socket: `SUBSCRIBE`, `ACK`, `ERROR`. */
+  out(bytes: Uint8Array): void
+  installed(stream: number, db: string, txid: string): void
+  again(stream: number, db: string, reason: string): void
+  stopped(db: string, trash: string | null): void
+  forwardFrom(shard: number, id: number, request: { db: string; op: string; body: unknown }): void
+  detach(db: string): void
+  attach(db: string): void
+  /** C4b §6's gap: a database fenced on a worker wants this node pointed at its new primary. */
+  followPrimary(url: string): void
 }
 
 export interface RouterSocket {
@@ -76,10 +93,15 @@ export class WorkerPool {
   #streams = new Map<number, Stream>()
   #metrics = new Map<number, (reply: WorkerMetrics) => void>()
   #positions = new Map<number, (streams: { conn: string; stream: number; txid: string }[]) => void>()
+  #follows = new Map<
+    number,
+    (streams: { stream: number; db: string; applied: string; bootstrapping: boolean }[]) => void
+  >()
   #shutdowns = new Map<number, () => void>()
   #seq = 0
   #host: RouterHost | null = null
   #replication: ReplicationHost | null = null
+  #follow: FollowHost | null = null
   #onError: (err: unknown) => void
   #closed = false
 
@@ -277,6 +299,83 @@ export class WorkerPool {
     this.#replication = host
   }
 
+  // ── following an upstream (C4c) ──────────────────────────────────────────────────────────────
+
+  /** Follow `db` on the stream the router minted; the worker opens the copy and sends `SUBSCRIBE`. */
+  followStart(index: number, stream: number, db: string, generation: string | null, reset: boolean): void {
+    this.#post(index, { kind: "follow.start", stream, db, generation, reset })
+  }
+
+  /** One decoded frame — `SNAPSHOT_*` or `TXN` — for the worker that owns the stream it names. */
+  followFrame(index: number, type: number, body: Uint8Array): void {
+    this.#post(index, { kind: "follow.frame", type, body })
+  }
+
+  followStop(index: number, stream: number, db: string, drop: boolean, reason: string): void {
+    this.#post(index, { kind: "follow.stop", stream, db, drop, reason })
+  }
+
+  /** The connection-level facts, to every worker: they change on connect, close and retarget. */
+  followLink(state: { connected: boolean; primary: string; node: string | null; lastError: string | null }): void {
+    for (let index = 0; index < this.#workers.length; index++) {
+      try {
+        this.#post(index, { kind: "follow.link", ...state })
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
+  }
+
+  /** The generation ledger, to every worker, after every save. */
+  followGenerations(entries: [string, string][]): void {
+    for (let index = 0; index < this.#workers.length; index++) {
+      try {
+        this.#post(index, { kind: "follow.generations", entries })
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
+  }
+
+  followResult(index: number, message: Omit<FollowResult, "kind">): void {
+    this.#post(index, { kind: "follow.result", ...message })
+  }
+
+  /**
+   * The heartbeat gather: every worker's stream positions, with the upstream's own positions
+   * pushed the other way in the same message. Once per `heartbeatMs` for the whole node.
+   */
+  async followStatus(
+    primary: [number, string][],
+  ): Promise<{ stream: number; db: string; applied: string; bootstrapping: boolean }[]> {
+    const out: { stream: number; db: string; applied: string; bootstrapping: boolean }[] = []
+    await Promise.all(
+      this.#workers.map(
+        (_, index) =>
+          new Promise<void>((resolve) => {
+            const id = this.#seq++
+            const timer = setTimeout(() => {
+              this.#follows.delete(id)
+              resolve()
+            }, 2000)
+            timer.unref?.()
+            this.#follows.set(id, (streams) => {
+              clearTimeout(timer)
+              out.push(...streams)
+              resolve()
+            })
+            this.#post(index, { kind: "follow.status", id, primary })
+          }),
+      ),
+    )
+    return out
+  }
+
+  /** Where the `"routed"` `ReplicaClient` plugs in, so this module never imports it. */
+  setFollowHost(host: FollowHost | null): void {
+    this.#follow = host
+  }
+
   // ── metrics and shutdown ─────────────────────────────────────────────────────────────────────
 
   /**
@@ -444,6 +543,40 @@ export class WorkerPool {
       case "repl.positions.reply": {
         const waiting = this.#positions.get(message.id)
         this.#positions.delete(message.id)
+        waiting?.(message.streams)
+        return
+      }
+      case "follow.out":
+        this.#follow?.out(message.bytes)
+        return
+      case "follow.installed":
+        this.#follow?.installed(message.stream, message.db, message.txid)
+        return
+      case "follow.again":
+        this.#follow?.again(message.stream, message.db, message.reason)
+        return
+      case "follow.stopped":
+        this.#follow?.stopped(message.db, message.trash)
+        return
+      case "follow.forward":
+        this.#follow?.forwardFrom(index, message.id, {
+          db: message.db,
+          op: message.op,
+          body: message.body,
+        })
+        return
+      case "follow.detach":
+        this.#follow?.detach(message.db)
+        return
+      case "follow.attach":
+        this.#follow?.attach(message.db)
+        return
+      case "follow.primary":
+        this.#follow?.followPrimary(message.url)
+        return
+      case "follow.status.reply": {
+        const waiting = this.#follows.get(message.id)
+        this.#follows.delete(message.id)
         waiting?.(message.streams)
         return
       }

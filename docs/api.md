@@ -174,9 +174,10 @@ The body is judged **after** the token and the database, so a request that may n
 `401` or `404` rather than a `400` describing what the route would have taken.
 
 `WORKERS_UNSUPPORTED` is the one code raised at startup rather than for a request: `[server]
-workers` above 1 shards databases across threads, and two things a node can be configured for do
-not work that way yet — following an upstream and joining a cluster. Such a node refuses to start
-and names which one to drop. *Serving* replicas is supported. `docs/c4b-replication-workers.md` §6.
+workers` above 1 shards databases across threads, and one thing a node can be configured for does
+not work that way yet — joining a cluster. Such a node refuses to start and says so. Both halves of
+replication are supported: *serving* replicas (`docs/c4b-replication-workers.md`) and *following*
+an upstream (`docs/c4c-replication-follow.md`).
 
 | code | status | when |
 |---|---|---|
@@ -1444,10 +1445,24 @@ as of C4b: the router owns the replication socket and the worker that owns a dat
 database's stream, so one socket follows databases across every shard and a replica sees exactly
 the bytes a single-threaded node would have sent it. `docs/c4b-replication-workers.md`.
 
-**`workers > 1` still cannot be combined with `[replication] primary` or `[cluster] enabled`** —
-the node refuses to start with `WORKERS_UNSUPPORTED` and says which, and why. Following an upstream
-is C4b mirrored and is not built; the Raft lease is consulted on the write path, which is now a
-worker, and a worker must not block on the control plane. `docs/c4b-replication-workers.md` §6.
+**And it follows one.** `[server] workers = N` and `[replication] primary` work together as of C4c,
+the same seam cut the other way: the router owns the one upstream connection — the socket, the
+reconnect, the handshake, the generation ledger, R7's reconciliation and R2's forward queue — and
+the worker that owns a database owns that database's stream, so `openReplica`, the snapshot file,
+`installSnapshot`, `pin` and `applyRecord` all run on the thread that holds the writer. `readyz` on
+such a node is still one fact and it is the router's; `GET /v1/db/{db}/replication` reports that
+shard's stream beside the connection state pushed down to it.
+`docs/c4c-replication-follow.md`.
+
+**Sharding a replica helps its HTTP reads and not its socket reads**, and the difference is the
+router. Point reads against a replica of eight databases: **34 600 reads/s at one worker and 55 300
+at six over HTTP** (1.60x, flat past two workers), against **259 700 and 232 300 over one
+WebSocket** — 0.90x, because every socket frame is relayed by the router and a point read is
+cheaper than the hop. `bun run bench/workers.ts --follow [--transport http]`.
+
+**`workers > 1` still cannot be combined with `[cluster] enabled`** — the node refuses to start
+with `WORKERS_UNSUPPORTED`: the Raft lease is consulted on the write path, which is now a worker,
+and a worker must not block on the control plane. `docs/c4c-replication-follow.md` §7.
 
 ## Configuration
 

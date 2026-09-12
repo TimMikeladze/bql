@@ -212,7 +212,8 @@ Touched:
 
 ## 6. What C4b does **not** lift, and why
 
-**`[replication] primary` with `workers > 1` stays refused.** Following an upstream is the mirror of
+**`[replication] primary` with `workers > 1` stays refused** — *until C4c, which built it;
+see `docs/c4c-replication-follow.md`.* Following an upstream is the mirror of
 this document — the router would own the socket, the reconnect, the generation ledger
 (`generations.json`, one file, one writer) and R7's unfollow, and the worker would own
 `installSnapshot`, `applyRecord` and the deferred-retry queue. It is the same shape and it is its
@@ -226,7 +227,8 @@ separately and it is a different problem: the Raft lease is consulted on the wri
 now a worker, and a worker must not block on the control plane (design §5.3). It wants the lease
 state *pushed* down the channel, not asked for.
 
-**A fenced database on a worker demotes but does not auto-follow.** `Promoter.demote` ends with
+**A fenced database on a worker demotes but does not auto-follow** — *closed by C4c, which gave the
+router the one client a worker now reports to.* `Promoter.demote` ends with
 `runtime.followPrimary(url)`, which starts a `ReplicaClient` — a node-level socket that has no
 business being opened inside a worker thread, and which C4c is what makes possible. On a worker,
 `followPrimary` reports rather than starts. The safety half of the demotion — the database stops
