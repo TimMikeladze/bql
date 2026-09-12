@@ -1,58 +1,43 @@
 # Resume here — state of BunQL and what to do next
 
-Written 2026-09-12 at the end of the session that built C1, C2, C6 and the H1-H5 surfaces. Read
-this, then `docs/design.md` §0, §11 and §14, then `docs/api.md`. The plans of record are
-`docs/plan-phase2.md` (the cluster) and `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL).
+Rewritten 2026-09-12 at the end of the session that measured the hot paths and acted on what it
+found. Read this, then `docs/performance.md`, then `docs/design.md` §0, §11 and §14, then
+`docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md`
+(HTTP, OpenAPI, GraphQL), `docs/p1-pragmas.md` and `docs/p2-group-commit.md` (this session).
 
 ## Where things stand
 
-Phases 0 and 1 are complete, and phase 2 has its control plane, its failover and its packaging.
-On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current,
-tree clean). `bun test` → **1233 pass, 2 skip, 0 fail** across 96 files. `bun run typecheck` clean.
-`bun run bytes` clean. **CI green on macOS and Linux.** A single-row write is still **28.2 µs** —
-the control plane cost the write path nothing, which was its defining constraint. Zero runtime
-dependencies, verified by deleting `graphql` and `openapi-x-graphql` from `node_modules` and
-starting the server.
+Phases 0 and 1 are complete; phase 2 has its control plane, its failover and its packaging. On
+`main`, pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree
+clean). `bun test` → **1283 pass, 2 skip, 0 fail** across 102 files. `bun run typecheck`,
+`bun run bytes` and `bun run routes:check` clean. **CI green on macOS and Linux.** Zero runtime
+dependencies.
 
-**Both open §13 decisions are settled** (see §13's footer): **#11 built-in Raft**, control plane
-only; **#9 default `ack` stays `local`**.
+**Both open §13 decisions are settled:** **#11 built-in Raft**, control plane only; **#9 default
+`ack` stays `local`**.
 
-| landed this session | commit | what it is |
+### What the last session established, and it changes where to look next
+
+`docs/performance.md` takes both hot paths apart. The headline: **SQLite is not the bottleneck
+anywhere.** A single-row write is 28.4 µs, of which SQLite is 8.2 (29%), the WAL tail and page
+checksums 8.0, zstd 10.2 (36%) and the segment append 2.0. A point read is 0.79 µs in the driver
+and 2.5 µs serialised, against 28 µs over a socket and 48 over HTTP — so the transport is the cost
+and the query is a rounding error on top.
+
+Throughput, per process: **~220k reads/s on a socket, ~50k/s over HTTP, 25–30k writes/s** no
+matter how many databases they are spread over. Writes are bound by the process, not the database:
+one process with eight databases does 17 214 writes/s, four processes with two each do 39 734.
+That is the case for `workers: N` below, measured rather than assumed.
+
+| landed in that session | commit | what it is |
 |---|---|---|
-| C1 control plane | `de51dbe` | Raft as a **pure** `step(input, now) -> Action[]`; pre-vote, own-term commit rule, single-server membership. A seeded simulator asserts all five safety properties after every step (9.4M assertions). Leases with a guard that makes two holders impossible |
-| C2 promotion and failover | `444b269` `a18cb8c` `82afcd9` | `POST /v1/db/{db}/promote`, `bunql promote`, per-database live role, `307` + `BunQL-Primary`, the old primary fenced and **demoted durably** |
-| C6 Linux packaging + CI | `868d548` | `scripts/sqlite.ts` builds 3.53.4 from a hash-pinned amalgamation; `.github/workflows/ci.yml` on both platforms |
-| H1-H5 surfaces | `fe17b6a` `54ce79f` `a64af2a` `53d07ea` `766a01c` | one `Operation` rendered three ways: `src/http/` runs it, `src/openapi/` describes it, `src/graphql/` is generated from that document. `src/dataapi/` turns a tenant's own tables into all three |
-| R6 retention | `49db1c4` | `retain()`/`removeSnapshot()` were dead code; now behind a floor over PITR, replicas and the shipper |
-| R7 stale generations | `082f651` | a replica no longer serves a deleted database's rows |
-
-**What phase 2 still owes:** placement and the `[cluster]` section (C3), `workers: N` (C4), replica
-apply mechanism A (C5). The surfaces still owe H6 (port the existing `/v1` routes onto the
-operation model, so `/v1/openapi.json` covers the whole server) and H7 (GraphQL subscriptions over
-the existing change feed).
-
-| area | module | state |
-|---|---|---|
-| SQLite driver | `src/sqlite/` | own `bun:ffi` driver over a shared libsqlite3. 0.77 µs point reads. Hooks, authorizer, deadline cancellation, limits, sessions, `stmt.vmSteps()`, and the prepare-time program facts `lastInsertRowid` needs |
-| WAL replication core | `src/wal/` | frame tailer, zstd `TxnRecord` with rolling db checksum, segment log with a sidecar index, replica applier (mechanism B), reflink snapshots, PITR restore |
-| replication transport | `src/replication/` | one binary WebSocket per node pair: `HELLO`/`SUBSCRIBE`/`SNAPSHOT_*`/`TXN`/`ACK`/`FORWARD`/`RESULT`/`HEARTBEAT`, snapshot bootstrap, gapless resume, epoch fencing, divergence and retention re-snapshot, ack tracking |
-| tenants | `src/tenant/` | LRU registry, single-writer write path (28 µs), replica-mode tenants, checkpoint policy, quotas, crash reconcile, fork, catalog `_system.db` |
-| storage | `src/storage/` | `Bun.S3Client` shipper, specified bucket layout, manifest and generations, retention, verify, restore onto a node that has never seen the database |
-| realtime | `src/realtime/` | preupdate-hook change capture, authorizer read-sets, live queries with keyed diffs, ring buffer, authorizer hub; on a replica, applier-driven |
-| server | `src/server/` | HTTP + WebSocket + SSE per design §6/§7, EdDSA tokens with table ACLs, write forwarding, ack levels, a fair transaction queue, TOML/env config, metrics |
-| libsql compatibility | `src/server/hrana/` | `/v2/pipeline`, `/v3/pipeline`, `/v3/cursor`, `hrana3`/`hrana2` sockets, batons, cursors, over the same `exec.ts` as the native routes |
-| client / embedded / ORMs / CLI | `src/client/`, `src/embedded.ts`, `src/kysely.ts`, `src/drizzle.ts`, `src/cli.ts` | Bun.SQL-shaped SDK (no Bun/Node imports), in-process API with `.sync`, Kysely dialect and Drizzle driver as optional peers, `bunql` CLI |
-| cluster control plane | `src/cluster/` | Raft as a pure state machine, its own framed log, a WebSocket transport, per-database leases and the epoch that fences a replaced primary. Never on the data path |
-| surfaces core | `src/core/`, `src/http/`, `src/openapi/` | a schema that **is** a JSON Schema, the `Operation`/`Registry` model, a router that composes with `app.ts`, an in-process dispatcher, and an OpenAPI 3.1 emitter |
-| generated APIs | `src/dataapi/`, `src/graphql/` | a tenant's tables introspected into REST + OpenAPI + GraphQL, every statement through `exec.ts`. `graphql` and `openapi-x-graphql` are optional peers |
-| tests / benches / docs | `test/`, `bench/`, `docs/` | two e2e scenarios (single node, cluster), `bun run bench` against design §10 plus a phase-1 table, `docs/api.md` as-built reference, `docs/benchmarks.md` |
-
-Per-milestone deviations live in `docs/m3-wal.md` … `docs/m8-e2e.md` (phase 0) and
-`docs/r1-replication.md` … `docs/r5-orm.md` (phase 1). Empirical proofs that predate the code are
-in `experiments/`.
-
-Design page published for review (republish with `bun scripts/design-page.ts <out.html>` then the
-Artifact tool against the same path): https://claude.ai/code/artifact/c08e3642-c1f9-4f73-87da-5cc028e541f7
+| README rewritten from `src/`, surface subpaths exported | `ebf5555` | `bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql` now resolve; `test/package/exports.test.ts` fails if a doc imports a subpath the package does not publish |
+| Apple libsqlite3 correction | `724eb97` | it *has* preupdate/session/snapshot on macOS 26; what differs is its page-cache default, and six tests fail on it. `docs/c6-packaging.md` §1.1 |
+| performance audit | `12f94a1` `cbe1cd8` | `bench/profile.ts`, `docs/performance.md`, and the SQLite settings audit read off live connections |
+| `[sqlite]` + token cache | `c020766` | pragmas stated rather than inherited; EdDSA verification cached, so an HTTP read with a real token went 76.4 µs → 45.3 |
+| `[durability] compress` | `ea1f73f` | zstd is 36% of a write; off is 28% faster and 4.4x larger. Per record, so a mixed log still replays |
+| group commit | `80ac667` | `[limits] groupCommit`, **opt-in**: 4.7x at 64 concurrent clients, 15% slower at one |
+| snapshot floor + WAL-tail negative result | `179f3a9` | every node now takes a local snapshot, so retention cannot make it unrestorable; and the WAL tail is memory-bound, proven by an allocation-free rewrite that changed nothing |
 
 ## How the work is run (keep doing this)
 
@@ -106,6 +91,21 @@ GraphQL subscriptions over the change feed `src/realtime/` already has. `docs/pl
 has both.
 
 ## Known gaps worth fixing along the way
+
+Added by the performance session (2026-09-12):
+
+- **The generated REST/OpenAPI/GraphQL surfaces are built and exported but not mounted.** See
+  "Start here" C above.
+- **Group commit is off by default** (`[limits] groupCommit`) because folded writes share a txid
+  and the change feed emits one event per fold. Two e2e scenarios assert a txid per write and fail
+  with it on — which is the honest signal that it is a contract change, not an optimisation. If
+  that contract is ever renegotiated, those two tests are where it is written down.
+- **A single client is 15% slower with group commit on**, because the drain costs an event-loop
+  iteration and one socket's messages arrive one per iteration. `docs/p2-group-commit.md`.
+- **`bench/http.ts` authenticates with the admin key**, which is a constant-time compare, so its
+  numbers are still the best case rather than what a token-bearing client sees. The token path is
+  now cached (45.3 µs against 44.2), so the gap is small — but the benchmark still does not measure
+  what deployments do.
 
 Carried forward from phase 0, still true:
 
@@ -211,29 +211,76 @@ What phase 1 added to the list:
   bench), but a workload with large transactions pays for the same bytes more than once. Ship
   closed segments only, or upload ranges.
 
-## Start here, before milestone 1
+## Start here — pick one of these three
 
-Both items that stood here have landed — `fix(server): refuse admin writes on a replica instead of
-acting locally` and `fix(tenant): sweep the trash directory on the log's retention` — so milestone
-1, the control plane, is the next thing to build.
+They do not overlap in files, so two can run in parallel. Each is written so it can be started
+cold, with the evidence for why it is worth doing.
 
-What they changed, in case it matters to phase 2:
+### A. `workers: N` (phase 2, C4) — the biggest throughput lever left
 
-- `POST /v1/db`, `DELETE /v1/db/{db}`, `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import`
-  answer `503 NOT_PRIMARY` with `BunQL-Primary` on a replica. The gate is `requirePrimary` in
-  `src/server/routes.ts`, at the HTTP layer only: the replication client still creates and deletes
-  tenants through the registry, which is how a bootstrap works at all. **Promotion (milestone 2)
-  has to flip `runtime.role`, not just the catalog row**, or a promoted node will keep refusing its
-  own lifecycle routes.
-- `[durability] retention` now has consumers — it was a dead key before. `sweepTrash(dataDir,
-  retentionMs, now?, onError?)` in `src/tenant/registry.ts` sweeps the trash, and R6 (`49db1c4`)
-  grew it into the log and snapshot retention it was always documented to govern: `retain()` and
-  `removeSnapshot()` had been written, tested and **never called**, so the log and the snapshot
-  directory grew without bound. Both now run behind `logRetentionFloor()`, the minimum over the
-  consumers that could still read the log — the oldest snapshot kept, the slowest connected
-  replica, and the S3 shipper's position. One `[durability] sweepIntervalMs` (300000) replaced the
-  short-lived `trashSweepIntervalMs` and runs both; `[durability] maxLogBytes` (0 = unlimited)
-  bounds a log by size, still behind the same floor. See `docs/r6-retention.md`.
+**Why.** Write throughput is bound by the process, not by the database. Measured: one process
+holding eight databases does **17 214 writes/s**; four processes holding two each do **39 734**
+(2.31x on 18 cores, with the load client itself likely the next limit). Spreading writes over more
+databases inside one process changes nothing — 28.8k vs 28.1k msg/s — because one thread owns every
+writer. `docs/performance.md` §5.
+
+**What.** `docs/plan-phase2.md` milestone 4: one worker per subset of databases with a router in
+front. The hard part is named there and is still true — the registry, the realtime bus and the
+replication socket are all per-process singletons. Decide first whether a worker owns a *shard of
+databases* (simplest: routing by database name hash, each worker a whole `ServerRuntime` minus the
+listener) or whether workers share one listener via `reusePort`.
+
+**Watch for.** The realtime bus and the change feed are per-process today, so a subscriber on
+worker 1 must still see commits from worker 2 — that is the design decision this milestone really
+makes. `GET /v1/cluster`, promotion and the Raft node must stay on exactly one worker.
+
+### B. Replica apply mechanism A (phase 2, C5) — and it pays twice
+
+**Why.** Two measurements point at it. The replica read leg is 48 µs because mechanism B rescans
+the WAL per apply (`bench/wal.ts`). And the primary's WAL tail is **7.25 µs of a 28.4 µs write**,
+of which ~5 is SQLite's checksum over a page *just read back from the WAL* — memory-bound, proven
+by an allocation-free rewrite that moved it 7.25 → 7.21 and was reverted. The write path touches
+each page about four times; mechanism A is the change that stops re-reading it.
+
+**What.** Design §4.5: write pages into the database file and rewrite the shm header under the WAL
+locks, LiteFS-style, instead of appending frames and letting the next reader rebuild the wal-index.
+
+**Watch for.** This is the most correctness-sensitive milestone left. The existing checksum chain
+(`computeFull`, the rolling database checksum in every `TxnRecord`) is the oracle — a replica that
+diverges must fail loudly, and `test/wal/replication.test.ts` plus the two e2e scenarios are what
+must keep passing unchanged.
+
+### C. H6 — put the existing `/v1` routes on the operation model
+
+**Why.** `src/core/`, `src/http/`, `src/openapi/`, `src/dataapi/` and `src/graphql/` are built and
+tested but **no route serves them**, so `/v1/openapi.json` describes nothing and the generated data
+API is unreachable. It is the largest built-but-dark surface in the repo.
+
+**What.** `docs/plan-surfaces.md` H6: port the hand-written routes in `src/server/routes.ts` onto
+`Operation`/`Registry` so one document covers the whole server, then mount the data API and the
+GraphQL handler (`POST /v1/db/{db}/graphql`, `GET /v1/db/{db}/openapi.json`). H7 adds GraphQL
+subscriptions over the existing change feed.
+
+**Watch for.** `scripts/routes.ts --check` currently compares `docs/api.md` against a hand-kept
+list; once the registry exists it should read the registry instead. Keep `src/server/errors.ts` as
+the one error vocabulary — the surfaces reuse it, they do not define a second.
+
+### Smaller, if you want something bounded
+
+- **Deferred compression** (`docs/performance.md` §4C). zstd is 9.5 µs of a 28.4 µs write and is
+  *already* a setting; the better version compresses **after** the ack for `ack: "local"`, keeping
+  the 4.3x ratio and moving the CPU off the answer path. It decouples the log append from the
+  commit, which is why it was not done — the change feed, the replication stream and the position
+  save all read the log synchronously today.
+- **Per-database `foreignKeys`** — the node-level switch exists (`[sqlite] foreignKeys`); making it
+  per database needs a catalog column and a lifecycle route. `docs/p1-pragmas.md`.
+- **`defensive` for the vendored build.** `SQLITE_DBCONFIG_DEFENSIVE` has no pragma and
+  `sqlite3_db_config` is variadic — binding it fixed-arity through bun:ffi ignores the value, never
+  writes the out-parameter, and **killed the process with SIGKILL**. The remedy is a non-variadic
+  shim compiled by `scripts/sqlite.ts` into `vendor/sqlite/`, declared optional exactly as
+  `sqlite3_snapshot_*` is. `docs/p1-pragmas.md`.
+- **Hrana write forwarding.** A write to `/v2/pipeline` on a replica is still `NOT_PRIMARY`;
+  forwarding means deciding what a baton opened on a replica means (R4 left it).
 
 ## House rules for this repo
 

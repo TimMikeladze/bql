@@ -244,17 +244,27 @@ describe("the segment index", () => {
     fill(log, 6000)
     log.close()
 
-    const withIndexNs = measure(() => TxnLog.open({ dir, fsync: "never" }))
+    const withIndexNs = best(() => TxnLog.open({ dir, fsync: "never" }))
     for (const file of indexPaths(dir)) fs.rmSync(file)
-    const scanningNs = measure(() => TxnLog.open({ dir, fsync: "never", index: false }))
+    const scanningNs = best(() => TxnLog.open({ dir, fsync: "never", index: false }))
 
     console.log(
       `cold open of a 6000-record log: ${(scanningNs / 1e6).toFixed(2)} ms scanning, ` +
         `${(withIndexNs / 1e6).toFixed(2)} ms from the index`,
     )
-    expect(withIndexNs).toBeLessThan(scanningNs)
+    // Best of three, and a factor rather than a hair: the index is ~17x on this machine, and a
+    // bare `<` on two single wall-clock samples failed about one run in four on a loaded laptop —
+    // the flake was the assertion, not the index.
+    expect(withIndexNs * 2).toBeLessThan(scanningNs)
   })
 })
+
+/** The fastest of three opens: one sample of a few milliseconds is mostly whatever else ran. */
+function best(open: () => TxnLog): number {
+  let fastest = Number.POSITIVE_INFINITY
+  for (let i = 0; i < 3; i++) fastest = Math.min(fastest, measure(open))
+  return fastest
+}
 
 function measure(open: () => TxnLog): number {
   const started = Bun.nanoseconds()
