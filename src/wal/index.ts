@@ -49,6 +49,8 @@ export {
 export {
   DEFAULT_SEGMENT_BYTES,
   type FsyncPolicy,
+  type LogConsumers,
+  logRetentionFloor,
   type RetentionPolicy,
   type RetentionResult,
   TxnLog,
@@ -83,12 +85,15 @@ export {
 } from "./record.ts"
 export {
   listSnapshots,
+  planSnapshotPrune,
+  pruneSnapshots,
   removeSnapshot,
   restore,
   type RestoreOptions,
   type RestoreResult,
   snapshot,
   type SnapshotOptions,
+  type SnapshotPrunePlan,
   type SnapshotRef,
   type SnapshotTarget,
 } from "./snapshot.ts"

@@ -402,11 +402,26 @@ DELETE /v1/db/acme  → { "name": "acme", "deleted": true, "trash": "<dataDir>/t
 ```
 
 `DELETE` moves the directory to `trash/` and tombstones the catalog row; the files themselves are
-removed later, by the sweep, once they are older than `[durability] retention` (default `7d`). The
-sweep runs when the node starts and then every `[durability] trashSweepIntervalMs` (default one
-hour); `retention = "0"` keeps a deleted database for ever, which is what phase 0 and phase 1 did.
-Only a directory the server itself named — `<name>-<ms>` — is ever removed, so anything an
-operator puts in `trash/` by hand stays where it is.
+removed later, by the sweep, once they are older than `[durability] retention` (default `7d`).
+`retention = "0"` keeps a deleted database for ever, which is what phase 0 and phase 1 did. Only a
+directory the server itself named — `<name>-<ms>` — is ever removed, so anything an operator puts
+in `trash/` by hand stays where it is.
+
+**The same sweep retains the log and the snapshots** of every database this node has open, which is
+what stops a busy node filling its disk (`docs/r6-retention.md`). It runs when the node starts and
+then every `[durability] sweepIntervalMs` (default five minutes), and a database also gets one pass
+when it is opened. A log segment is dropped only when every record in it is older than the
+retention **and** below the floor: the txid of the oldest snapshot still kept, the lowest position
+acked by a replica currently connected, and what the S3 shipper has put in the bucket, whichever is
+lowest. A consumer that is absent imposes no floor. Snapshots older than the retention are removed
+too, except the most recent one at or before the cutoff — the base a restore to exactly `retention`
+ago replays from — and the newest snapshot, which is kept whatever its age. `[durability]
+maxLogBytes` bounds a log by size as well, under the same floor.
+
+A database that has **never been snapshotted** has no floor at all, so its log is bounded by age
+alone and it stops being restorable to a point before its oldest surviving segment. Only the S3
+shipper and a replica bootstrap take snapshots on their own; a node with neither should call
+`POST /v1/db/{db}/snapshot` if it wants point-in-time restore.
 
 **On a replica, `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore` and
 `POST /v1/db/:db/import` answer `503 NOT_PRIMARY` with `BunQL-Primary`**, the same shape a
@@ -1109,7 +1124,8 @@ the canonical one wins when both are set.
 | `[durability] defaultAck` | `"local"` (also `fsync`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
 | `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
 | `[durability] retention` | `"7d"` (`"0"` keeps everything) | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
-| `[durability] trashSweepIntervalMs` | `3600000` (`0` sweeps only at start) | `BUNQL_DURABILITY_TRASH_SWEEP_INTERVAL_MS` | — |
+| `[durability] sweepIntervalMs` | `300000` (`0` sweeps only at start) | `BUNQL_DURABILITY_SWEEP_INTERVAL_MS` | — |
+| `[durability] maxLogBytes` | `0` (unlimited) | `BUNQL_DURABILITY_MAX_LOG_BYTES` | — |
 | `[durability] segmentBytes` | `16777216` | `BUNQL_DURABILITY_SEGMENT_BYTES` | — |
 | `[realtime] ringBytes` | `10000000` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
 | `[realtime] ringMaxAgeMs` | `60000` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
@@ -1166,7 +1182,8 @@ Setting `[s3] bucket` turns shipping on the same way. `enabled = false` keeps th
 configured without shipping to it, which is how a recovery node reads a backup it does not write.
 A `[s3] retention` or a `[durability] retention` that is not a duration is refused at start rather
 than silently ignored. `[durability] retention` is how long a deleted database stays in
-`<dataDir>/trash/`; the local transaction log is not pruned by it.
+`<dataDir>/trash/`, and how far back this node keeps its own log segments and snapshots; `[s3]
+retention` is the separate bound on what the bucket holds.
 
 One more, outside the config file: `BUNQL_SQLITE_LIB` names the `libsqlite3` the driver loads.
 Without it the usual Homebrew and Linux paths are tried.
@@ -1191,6 +1208,7 @@ document is not edited; this is the list.
 | §5.2 a new database reaches a wildcard replica at once | R2. The primary announces its database list on create, import and delete |
 | §5.2 replica realtime | R2, in part: live queries converge, the change feed is txid-only. See "Realtime on a replica" above |
 | §4.4 S3 shipper (`Bun.S3Client`, snapshots + segments, retention) | R3. `[s3] bucket` turns it on; see "S3 backup" above |
+| §4.4 local log and snapshot retention | R6. `TxnLog.retain` and `removeSnapshot` had no caller at all; `[durability] sweepIntervalMs` and `maxLogBytes` are new. See `docs/r6-retention.md` |
 | §4.4 restore from a bucket by txid or timestamp | R3. `POST /v1/db/{db}/restore {"from":"s3"}` and `bunql restore --from s3://…` |
 | §6.5 "S3 position" on `GET /v1/db/{db}/replication` | R3, as the `s3` block |
 | §9.4 `[s3]` | R3, with every key taking a `BUNQL_S3_*` override |
@@ -1285,8 +1303,13 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **Writes during a snapshot or a fork throw `BUSY`.** A commit inside that window would make the
   snapshot newer than the txid it is filed under.
 - **`DELETE /v1/db/{db}` moves, never removes.** The directory goes to `<dataDir>/trash/<name>-<ms>`
-  and is removed by the trash sweep once it is older than `[durability] retention`, which is that
-  key's only consumer — the local log is kept whole.
+  and is removed by the sweep once it is older than `[durability] retention`.
+- **Log retention is held to a floor, not to the age bound alone.** Design §4.4 says "`retention:
+  "7d"` default; a replica or S3 shipper that falls behind the retention window re-bootstraps from
+  snapshot + tail". This node keeps the log for a *connected* replica and for an unshipped bucket
+  however far behind they are, and re-bootstraps only a replica that has actually gone — deleting
+  records a live follower is about to read would be silent and unrecoverable. See
+  `docs/r6-retention.md`.
 - **Admin writes are refused on a replica, not forwarded.** `POST /v1/db`, `DELETE /v1/db/{db}`,
   `POST /v1/db/{db}/restore` and `POST /v1/db/{db}/import` answer `503 NOT_PRIMARY`. Design §5.2's
   "forward writes to the primary" is about statement writes; the lifecycle routes act on a node's

@@ -48,10 +48,18 @@ export interface DurabilitySection {
    */
   retention: string
   /**
-   * How often the trash sweep runs. A deletion is rare and the retention is measured in days, so
-   * the default is hourly; `0` turns the interval off and leaves only the sweep at start.
+   * How often the retention sweep runs: `<dataDir>/trash/`, then every open database's snapshots
+   * and log segments. Five minutes by default, because a log grows far faster than the trash does;
+   * `0` turns the interval off and leaves only the sweep at start.
    */
-  trashSweepIntervalMs: number
+  sweepIntervalMs: number
+  /**
+   * Bound one database's log by size as well as by age, in bytes. `0` (the default) is unlimited.
+   * It is still subject to the retention floor: a size cap never drops a segment a snapshot, a
+   * connected replica or the S3 shipper can still need, because a full disk is recoverable and a
+   * deleted record is not.
+   */
+  maxLogBytes: number
   /** Roll to a new log segment past this many bytes. Design §4.4 says 16 MB. */
   segmentBytes: number
 }
@@ -198,7 +206,8 @@ export const DEFAULT_CONFIG: ServerConfig = {
     defaultAck: "local",
     checkpointWalBytes: 4_000_000,
     retention: "7d",
-    trashSweepIntervalMs: 3_600_000,
+    sweepIntervalMs: 300_000,
+    maxLogBytes: 0,
     segmentBytes: 16 * 1024 * 1024,
   },
   realtime: {

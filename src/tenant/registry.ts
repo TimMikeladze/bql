@@ -545,7 +545,8 @@ export class TenantRegistry {
 
   /**
    * `sweepTrash` against this registry's data root, with failures going wherever the registry's
-   * own failures go. The server runtime calls it at start and on `[durability] trashSweepIntervalMs`.
+   * own failures go. The server runtime calls it at start and on `[durability] sweepIntervalMs`,
+   * alongside the per-database log and snapshot retention (`docs/r6-retention.md`).
    */
   sweepTrash(retentionMs: number, now?: number): { removed: string[]; bytes: number } {
     return sweepTrash(this.dir, retentionMs, now, (err) => this.#report(err))

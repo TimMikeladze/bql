@@ -1,7 +1,7 @@
-// The trash sweep as the server actually runs it: `[durability] retention` governs how long a
-// deleted database survives in `<dataDir>/trash/`, and the runtime sweeps once at start so a node
-// that was down past its retention comes back clean rather than waiting an hour for the first
-// interval.
+// The trash half of the retention sweep as the server actually runs it: `[durability] retention`
+// governs how long a deleted database survives in `<dataDir>/trash/`, and the runtime sweeps once
+// at start so a node that was down past its retention comes back clean rather than waiting out the
+// first interval. The log and snapshot half is `retention.test.ts`.
 
 import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
@@ -14,13 +14,13 @@ afterAll(stopAll)
 
 describe("trash retention", () => {
   test("the interval has a default and a canonical environment override", () => {
-    expect(DEFAULT_CONFIG.durability.trashSweepIntervalMs).toBe(3_600_000)
+    expect(DEFAULT_CONFIG.durability.sweepIntervalMs).toBe(300_000)
     expect(DEFAULT_CONFIG.durability.retention).toBe("7d")
 
     const config = loadConfig({
-      env: { BUNQL_DURABILITY_TRASH_SWEEP_INTERVAL_MS: "60000", BUNQL_RETENTION: "1h" },
+      env: { BUNQL_DURABILITY_SWEEP_INTERVAL_MS: "60000", BUNQL_RETENTION: "1h" },
     })
-    expect(config.durability.trashSweepIntervalMs).toBe(60_000)
+    expect(config.durability.sweepIntervalMs).toBe(60_000)
     expect(config.durability.retention).toBe("1h")
 
     // A typo in a duration is refused at start rather than quietly keeping everything for ever.

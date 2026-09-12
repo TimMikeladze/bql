@@ -12,11 +12,13 @@
 // reader keeps the last request's authorizer until the next one re-scopes it — that is what makes
 // re-scoping free, and it is only safe while every borrow goes through the same door.
 //
-// The trash sweep lives here because it is node-wide rather than per-database: `<dataDir>/trash/`
-// is swept once in the constructor and then every `[durability] trashSweepIntervalMs` (one hour by
-// default). A configured interval beats a derived one — an operator who shortens `retention` to an
-// hour for a test wants to say so once, not to reason about what a divisor made of it — and the
-// timer is `unref`'d and cleared in `close`, so maintenance is never why a process is still alive.
+// The retention sweep lives here because it is the only place that can see every consumer of a
+// database's log at once: the snapshots on disk, the replicas this node is streaming to, and the
+// S3 shipper. It runs once in the constructor and then every `[durability] sweepIntervalMs` (five
+// minutes by default), doing `<dataDir>/trash/` and then each open tenant. A configured interval
+// beats a derived one — an operator who shortens `retention` to an hour for a test wants to say so
+// once, not to reason about what a divisor made of it — and the timer is `unref`'d and cleared in
+// `close`, so maintenance is never why a process is still alive.
 
 import type { Args } from "../client/protocol.ts"
 import {
@@ -25,6 +27,7 @@ import {
   NoReplicas,
   ReplicaClient,
   ReplicaOffline,
+  type ReplicaView,
   ReplicationServer,
 } from "../replication/index.ts"
 import {
@@ -136,11 +139,14 @@ export class ServerRuntime {
   #onTenantOpen: ((tenant: Tenant) => void) | null = null
   #onError: (err: unknown) => void
   #closed = false
-  /** The `<dataDir>/trash/` sweep. Null when `retention` or the interval turns it off. */
-  #trashSweeper: ReturnType<typeof setInterval> | null = null
+  /** The trash and per-database retention sweep. Null when `retention` or the interval turns it off. */
+  #sweeper: ReturnType<typeof setInterval> | null = null
+  /** `[durability] retention` in milliseconds, parsed once. 0 or less keeps everything for ever. */
+  readonly #retentionMs: number
 
   constructor(options: RuntimeOptions) {
     this.config = options.config
+    this.#retentionMs = parseRetentionMs(options.config.durability.retention)
     this.auth = options.auth
     this.metrics = options.metrics ?? new Metrics()
     this.node = options.config.server.node
@@ -189,18 +195,20 @@ export class ServerRuntime {
       withoutReplicas: options.config.replication.ackWithoutReplicas,
     })
     this.forwarder = new Forwarder(this)
-    this.#startTrashSweep()
+    this.#startSweep()
   }
 
   /**
-   * Sweeps `<dataDir>/trash/` now and on the configured interval. Deleting a database moves its
-   * directory aside and removes nothing, so this is what keeps a node that churns databases from
-   * growing a trash directory for ever. The first sweep is synchronous: it is a `readdir` of a
-   * directory that is usually empty, and doing it at start is what makes a node that has been
-   * down past its retention come back clean.
+   * Sweeps now and on the configured interval: `<dataDir>/trash/`, then every open database's
+   * snapshots and log segments. Deleting a database moves its directory aside and removes nothing,
+   * and a committed transaction appends a log record that nothing else ever removes, so this is
+   * what keeps a node that churns databases — or simply one that is busy — from filling its disk.
+   *
+   * The first sweep is synchronous, and doing it at start is what makes a node that has been down
+   * past its retention come back clean rather than waiting out an interval first.
    */
-  #startTrashSweep(): void {
-    const retentionMs = parseRetentionMs(this.config.durability.retention)
+  #startSweep(): void {
+    const retentionMs = this.#retentionMs
     if (retentionMs <= 0) return
     const sweep = (): void => {
       try {
@@ -208,12 +216,51 @@ export class ServerRuntime {
       } catch (err) {
         this.#onError(err)
       }
+      // Only what is open. A closed tenant's log is not growing, and opening every database on the
+      // node to look at one would evict the ones actually serving traffic — so a tenant gets its
+      // pass when it is opened instead (`#tenantOpened`). Iterating `openNames` in order and
+      // touching each through `open` leaves the LRU's recency order exactly as it found it.
+      for (const name of this.registry.openNames) {
+        try {
+          this.retainTenant(this.registry.open(name), retentionMs)
+        } catch (err) {
+          // A database deleted underneath the sweep, or one that failed to open. Neither is a
+          // reason to leave the rest of the node's logs unswept.
+          this.#onError(err)
+        }
+      }
     }
     sweep()
-    const every = this.config.durability.trashSweepIntervalMs
+    const every = this.config.durability.sweepIntervalMs
     if (!(every > 0)) return
-    this.#trashSweeper = setInterval(sweep, every)
-    this.#trashSweeper.unref?.()
+    this.#sweeper = setInterval(sweep, every)
+    this.#sweeper.unref?.()
+  }
+
+  /**
+   * One retention pass over one open database. This is the only place that knows where all three
+   * consumers of its log stand, which is why the floor is computed from here rather than inside
+   * the tenant: the replicas come from this node's replication server, the bucket position from
+   * its shipper, and the snapshots the tenant reads for itself.
+   *
+   * A failure is reported and swallowed. One tenant whose directory is unreadable must not stop
+   * every other tenant on the node from being swept.
+   */
+  retainTenant(tenant: Tenant, retentionMs: number): void {
+    try {
+      // A shipper exists for every non-replica tenant this pool has seen open, so "no shipper"
+      // means nothing ships this database — a replica, or a node with no `[s3] bucket` — and the
+      // bucket therefore imposes no floor.
+      const shipper = this.storage?.shipperFor(tenant.name)
+      tenant.retain({
+        retentionMs,
+        maxLogBytes: this.config.durability.maxLogBytes,
+        replicaTxid: slowestReplicaTxid(this.replication?.replicasOf(tenant.name) ?? []),
+        shippedTxid: shipper ? shipper.shippedTxid : null,
+      })
+    } catch (err) {
+      this.#onError(err)
+    }
   }
 
   /**
@@ -247,6 +294,10 @@ export class ServerRuntime {
     } catch (err) {
       this.#onError(err)
     }
+    // One pass at open, after the shipper is attached so its position counts. Without it a
+    // database that was written to and then evicted from the LRU would keep its log until
+    // something opened it again, which on a node with ten thousand tenants may be never.
+    if (this.#retentionMs > 0) this.retainTenant(tenant, this.#retentionMs)
   }
 
   /** Starts the shipper sweep. Called by `startServer`, beside `startReplication`. */
@@ -729,9 +780,9 @@ export class ServerRuntime {
       }
     }
     this.#txQueue.clear()
-    if (this.#trashSweeper !== null) {
-      clearInterval(this.#trashSweeper)
-      this.#trashSweeper = null
+    if (this.#sweeper !== null) {
+      clearInterval(this.#sweeper)
+      this.#sweeper = null
     }
     this.acks.close()
     // The awaitable form is `closeStorage()`, which `startServer`'s handle calls first; this is
@@ -776,6 +827,25 @@ export class ServerRuntime {
         return encodeRows(stmt, stmt.values(...decodeArgs(args)))
       })
   }
+}
+
+/**
+ * The lowest txid acked by a replica currently streaming a database, or null when none is.
+ *
+ * Only the replicas on the wire count. A replica that has gone imposes no floor: it is told
+ * `RETENTION` and handed a snapshot when it comes back (`docs/r1-replication.md` deviation 4),
+ * which is what stops a follower that never returns pinning the log for ever. A replica that is
+ * connected but not acking does hold the log, and `[replication] slowReplicaMs` is what eventually
+ * closes its socket — deleting records a live follower is about to ask for would be the silent,
+ * unrecoverable failure the floor exists to prevent.
+ */
+export function slowestReplicaTxid(replicas: ReplicaView[]): bigint | null {
+  let lowest: bigint | null = null
+  for (const replica of replicas) {
+    const at = BigInt(replica.txid)
+    if (lowest === null || at < lowest) lowest = at
+  }
+  return lowest
 }
 
 /**

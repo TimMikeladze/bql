@@ -14,6 +14,11 @@
 // pre-images, so `write`, `txBegin`/`txCommit` and an operator TRUNCATE checkpoint are refused
 // with `NOT_PRIMARY` rather than quietly producing a txid no primary knows about.
 //
+// Fourth invariant: `retain` prunes snapshots before it computes the log's floor, never after.
+// The floor is the minimum over the consumers that could still read the log, and the oldest
+// snapshot that *survived* the prune is one of them — held the other way round, the log would be
+// pinned to a base that is already gone. See `docs/r6-retention.md`.
+//
 // Hook slots: the tenant takes the writer's WAL hook and nothing else. The commit, rollback and
 // authorizer slots belong to `src/realtime` and the route layer (docs/m6-realtime.md), which is
 // why `onCommit` here is a list of listeners this class calls after `log.append` rather than
@@ -34,8 +39,11 @@ import {
   computeFull,
   encode,
   listSnapshots,
+  logRetentionFloor,
+  pruneSnapshots,
   type RecorderPosition,
   restore,
+  type RetentionPolicy,
   snapshot,
   type SnapshotRef,
   TxnLog,
@@ -229,6 +237,30 @@ interface Waiter {
 export interface ReaderLease {
   db: Database
   pooled: boolean
+}
+
+/** What one retention pass needs to know about this database's consumers (`Tenant.retain`). */
+export interface RetainOptions {
+  /** `[durability] retention` in milliseconds. `0` or less keeps everything. */
+  retentionMs: number
+  /** `[durability] maxLogBytes`. `0` (the default) is unlimited; the floor still wins. */
+  maxLogBytes?: number
+  /** Lowest txid acked by a replica currently streaming this database, or null when none is. */
+  replicaTxid?: bigint | null
+  /** What the S3 shipper has put in the bucket, or null when nothing ships this database. */
+  shippedTxid?: bigint | null
+  /** Clock, for tests. */
+  now?: number
+}
+
+export interface RetainResult {
+  /** Snapshot files removed. */
+  snapshots: string[]
+  /** Log segment files removed. */
+  segments: string[]
+  bytesFreed: number
+  /** The `keepAfterTxid` the log was held to, or null when no consumer imposed one. */
+  floor: bigint | null
 }
 
 export class Tenant {
@@ -790,6 +822,49 @@ export class Tenant {
   }
 
   /**
+   * One retention pass over this database: prune the snapshots, then drop the log segments that
+   * are past the retention and that nothing can still need (design §4.4, `docs/r6-retention.md`).
+   *
+   * The order is the whole of it. Snapshots go first, so the floor below is computed from what
+   * actually survived rather than from a base that is about to be deleted; then the floor is the
+   * minimum over every consumer that could still read the log; then the age and size bounds choose
+   * among the segments below it. `retentionMs <= 0` keeps everything, matching `retention = "0"`.
+   */
+  retain(options: RetainOptions): RetainResult {
+    this.#assertOpen()
+    const result: RetainResult = { snapshots: [], segments: [], bytesFreed: 0, floor: null }
+    if (!(options.retentionMs > 0)) return result
+    // A snapshot or a fork is copying this database's file right now, and both read the snapshot
+    // index and the log. Maintenance that runs every five minutes can wait for the next pass.
+    if (this.#exclusive) return result
+
+    const cutoffMs = (options.now ?? Date.now()) - options.retentionMs
+    const { removed, kept } = pruneSnapshots(this.dir, cutoffMs, (err) => this.#report(err))
+    for (const ref of removed) {
+      this.catalog.removeSnapshotRow(this.name, BigInt(ref.txid))
+      result.snapshots.push(ref.path)
+    }
+
+    const floor = logRetentionFloor({
+      oldestSnapshotTxid: kept.length > 0 ? BigInt((kept[0] as SnapshotRef).txid) : null,
+      slowestReplicaTxid: options.replicaTxid ?? null,
+      shippedTxid: options.shippedTxid ?? null,
+    })
+    result.floor = floor ?? null
+
+    const maxBytes = options.maxLogBytes ?? 0
+    const policy: RetentionPolicy = {
+      maxAgeMs: options.retentionMs,
+      ...(floor !== undefined ? { keepAfterTxid: floor } : {}),
+      ...(maxBytes > 0 ? { maxBytes } : {}),
+    }
+    const log = this.log.retain(policy)
+    result.segments = log.removed
+    result.bytesFreed = log.bytesFreed
+    return result
+  }
+
+  /**
    * Branches this database into a new tenant (design §4.4, "fork/branch = snapshot reflink + new
    * tenant + fresh log"). With `at`, the fork is the database as of that txid, rebuilt from the
    * newest snapshot at or before it plus the log; without, it is the database as it stands now.
@@ -1126,11 +1201,16 @@ export class Tenant {
       try {
         listener(event)
       } catch (err) {
-        const onError = this.#options.onError
-        if (onError) onError(err)
-        else console.error(`bunql: commit hook for ${this.name} threw`, err)
+        this.#report(err)
       }
     }
+  }
+
+  /** Where a failure that must not abort what it happened inside of goes. */
+  #report(err: unknown): void {
+    const onError = this.#options.onError
+    if (onError) onError(err)
+    else console.error(`bunql: ${this.name}`, err)
   }
 
   #wake(txid: bigint): void {

@@ -8,6 +8,11 @@
 //
 // `Bun.write(dst, Bun.file(src))` is a reflink on APFS/XFS/btrfs *only when the destination does
 // not exist*, which is why every snapshot gets a fresh path and nothing is ever overwritten.
+//
+// Second invariant: pruning never leaves a restorable point without a base. `planSnapshotPrune`
+// keeps everything newer than the cutoff, the newest snapshot at or before it, and the newest
+// snapshot there is — so "restore to exactly `retention` ago" and "restore a database nobody has
+// written to in a month" both still find a file to start from. See `docs/r6-retention.md`.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -161,6 +166,77 @@ export function removeSnapshot(dir: string, txid: bigint): boolean {
   }
   writeAtomic(indexPath(dir), JSON.stringify({ version: 1, snapshots: keep }, null, 2))
   return true
+}
+
+export interface SnapshotPrunePlan {
+  /** Oldest first, as `listSnapshots` returns them. */
+  keep: SnapshotRef[]
+  remove: SnapshotRef[]
+}
+
+/**
+ * Which snapshots a retention cutoff may remove, and which it may not. Pure, so the rule can be
+ * stated without a disk.
+ *
+ * Everything newer than `cutoffMs` is kept, and then two exceptions keep point-in-time restore
+ * whole. **The most recent snapshot at or before the cutoff is kept**, because a restore to
+ * exactly `retention` ago needs a base at or before that point to replay from; keeping only what
+ * is newer than the cutoff would leave the oldest restorable point sitting an arbitrary distance
+ * inside the window. **The newest snapshot overall is kept whatever its age**, so a database that
+ * has not been written to in a month is still restorable.
+ *
+ * The order is by txid rather than by age — that is the order a restore searches — but the cutoff
+ * is compared against `createdAtMs`, so a snapshot index that somehow disagrees about which is
+ * older cannot make the rule drop a base it should have kept.
+ */
+export function planSnapshotPrune(refs: SnapshotRef[], cutoffMs: number): SnapshotPrunePlan {
+  const sorted = [...refs].sort((a, b) => (BigInt(a.txid) < BigInt(b.txid) ? -1 : 1))
+  if (sorted.length <= 1) return { keep: sorted, remove: [] }
+
+  const newest = sorted.at(-1) as SnapshotRef
+  // The base a restore to the oldest point still in the window would start from.
+  let base: SnapshotRef | null = null
+  for (const ref of sorted) {
+    if (ref.createdAtMs <= cutoffMs) base = ref
+  }
+
+  const keep: SnapshotRef[] = []
+  const remove: SnapshotRef[] = []
+  for (const ref of sorted) {
+    if (ref.createdAtMs > cutoffMs || ref === base || ref === newest) keep.push(ref)
+    else remove.push(ref)
+  }
+  return { keep, remove }
+}
+
+/**
+ * Applies `planSnapshotPrune` to `<dir>/snapshots`. Returns what survived, oldest first — the
+ * first of those is the floor the log is then held to, because it is the oldest base a restore can
+ * still start from.
+ *
+ * A removal that throws (a file still mapped, a permissions error) is handed to `onError` and the
+ * prune carries on; that snapshot is reported as kept, which is the safe direction, since the log
+ * floor then still protects the records it needs.
+ */
+export function pruneSnapshots(
+  dir: string,
+  cutoffMs: number,
+  onError?: (err: unknown) => void,
+): { removed: SnapshotRef[]; kept: SnapshotRef[] } {
+  const plan = planSnapshotPrune(listSnapshots(dir), cutoffMs)
+  const removed: SnapshotRef[] = []
+  const kept = [...plan.keep]
+  for (const ref of plan.remove) {
+    try {
+      removeSnapshot(dir, BigInt(ref.txid))
+      removed.push(ref)
+    } catch (err) {
+      onError?.(err)
+      kept.push(ref)
+    }
+  }
+  kept.sort((a, b) => (BigInt(a.txid) < BigInt(b.txid) ? -1 : 1))
+  return { removed, kept }
 }
 
 export interface RestoreOptions {

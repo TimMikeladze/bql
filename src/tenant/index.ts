@@ -29,6 +29,8 @@ export {
   type ReaderLease,
   type ReadOptions,
   type ReconcileOutcome,
+  type RetainOptions,
+  type RetainResult,
   Tenant,
   tenantDir,
   TenantError,

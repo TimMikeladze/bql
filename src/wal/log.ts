@@ -15,6 +15,11 @@
 // pass resumes the scan at the byte the index stops at, so the ordinary crash — an index one flush
 // behind the file — costs a scan of the tail and nothing more. Phase 0 measured 3.1 ms of a 3.6 ms
 // cold open walking 6k record headers; this removes it.
+//
+// Fourth invariant: `retain` never drops a record somebody can still ask for. It is given a
+// `keepAfterTxid` computed by `logRetentionFloor` from every consumer that could still read the
+// log — the oldest snapshot kept, the slowest connected replica, the S3 shipper — and the age and
+// size bounds only ever choose *among* the segments below that floor. See `docs/r6-retention.md`.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -75,6 +80,55 @@ export interface RetentionPolicy {
 export interface RetentionResult {
   removed: string[]
   bytesFreed: number
+}
+
+/**
+ * Where every consumer that could still read this log stands. A consumer that is not present —
+ * no snapshot ever taken, no replica attached, no bucket configured — is left out, and imposes
+ * nothing.
+ */
+export interface LogConsumers {
+  /**
+   * The txid of the oldest snapshot being kept. A point-in-time restore copies a snapshot and
+   * replays the records after it, so the records above the oldest snapshot are the only thing
+   * that makes that snapshot restorable to anything but its own txid.
+   */
+  oldestSnapshotTxid?: bigint | null
+  /**
+   * The lowest txid acked by a replica that is *currently connected*. A replica resumes from the
+   * record after the one it acked. A replica that has gone imposes nothing: it is told `RETENTION`
+   * and given a snapshot when it comes back (`docs/r1-replication.md` deviation 4), which is what
+   * stops one dead follower pinning the log for ever.
+   */
+  slowestReplicaTxid?: bigint | null
+  /**
+   * The highest txid the S3 shipper has put in the bucket. A node whose bucket is behind has to
+   * keep the records the bucket does not hold: the shipper uploads them out of this log, so a
+   * segment dropped before it ships is a hole in the backup that nothing can ever fill.
+   */
+  shippedTxid?: bigint | null
+}
+
+/**
+ * The lowest txid the log must still hold, or `undefined` when nothing needs it.
+ *
+ * Getting this wrong in one direction wastes disk and in the other loses data silently, so it is
+ * the minimum over the consumers above and nothing else: whichever one is furthest behind decides,
+ * and one that is absent does not vote. `undefined` is handed to `retain` as no `keepAfterTxid`,
+ * which leaves only the age and size bounds — a database with no snapshot, no replica and no
+ * bucket is held by its own retention alone, which is what that key promises.
+ */
+export function logRetentionFloor(consumers: LogConsumers): bigint | undefined {
+  let floor: bigint | undefined
+  for (const at of [
+    consumers.oldestSnapshotTxid,
+    consumers.slowestReplicaTxid,
+    consumers.shippedTxid,
+  ]) {
+    if (at === undefined || at === null) continue
+    if (floor === undefined || at < floor) floor = at
+  }
+  return floor
 }
 
 interface Segment {
