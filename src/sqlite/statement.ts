@@ -6,6 +6,8 @@ import {
   SQLITE_DONE,
   SQLITE_OK,
   SQLITE_ROW,
+  STMT_STATUS,
+  type StmtStatusName,
 } from "./constants.ts"
 import { SqliteError } from "./errors.ts"
 import { ptr } from "bun:ffi"
@@ -119,6 +121,25 @@ export class Statement {
   get readonly(): boolean {
     this.#assertLive()
     return this.#host.lib.symbols.sqlite3_stmt_readonly(this.#handle) !== 0
+  }
+
+  /**
+   * One `sqlite3_stmt_status` counter for this statement. Counters accumulate over every run of
+   * the statement until `reset` is passed, which zeroes the counter after reading it.
+   */
+  status(op: StmtStatusName, reset = false): number {
+    this.#assertLive()
+    const code = STMT_STATUS[op]
+    if (code === undefined) throw new RangeError(`unknown statement counter ${op}`)
+    return this.#host.lib.symbols.sqlite3_stmt_status(this.#handle, code, reset ? 1 : 0)
+  }
+
+  /**
+   * Virtual-machine instructions the statement has executed. This is the cost unit design §6.1
+   * bills on: SQLite has no native rows-read counter, and VM steps are the honest equivalent.
+   */
+  vmSteps(reset = false): number {
+    return this.status("VM_STEP", reset)
   }
 
   /** Resets the statement, aborting any in-progress iteration. */

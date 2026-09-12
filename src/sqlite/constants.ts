@@ -282,6 +282,24 @@ export const FILE_CONTROLS = {
 
 export type FileControlName = keyof typeof FILE_CONTROLS
 
+/**
+ * `sqlite3_stmt_status` counters. `MEMUSED` is 99 in sqlite3.h, not the next number in the run.
+ * `VM_STEP` is the cost unit design §6.1 bills on: SQLite has no native rows-read counter.
+ */
+export const STMT_STATUS = {
+  FULLSCAN_STEP: 1,
+  SORT: 2,
+  AUTOINDEX: 3,
+  VM_STEP: 4,
+  REPREPARE: 5,
+  RUN: 6,
+  FILTER_MISS: 7,
+  FILTER_HIT: 8,
+  MEMUSED: 99,
+} as const
+
+export type StmtStatusName = keyof typeof STMT_STATUS
+
 /** `sqlite3_wal_checkpoint_v2` modes. */
 export const CHECKPOINT_MODES = {
   PASSIVE: 0,
