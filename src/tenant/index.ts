@@ -22,6 +22,7 @@ export {
   assertValidName,
   type CommitEvent,
   type CommitListener,
+  type ReaderLease,
   type ReadOptions,
   type ReconcileOutcome,
   Tenant,

@@ -40,7 +40,10 @@ The 2-character prefix is the first byte of `Bun.hash.xxHash3(name)` in hex.
    `tenant.writer` as the connection its capture hooks attach to.
 7. The checkpoint policy runs, then `{result, txid}` is returned.
 
-A transaction that writes nothing produces no record and returns the tenant's current txid.
+A transaction that writes no WAL pages produces no record and returns the tenant's current txid,
+rather than throwing. That covers the read-only transaction and, less obviously, a transaction
+whose statements are writes that match no rows: no pages change, so the recorder sees nothing and
+the txid does not advance. Both are tested.
 
 **`ack: "fsync"` is an explicit `fdatasync` of the WAL descriptor**, not `PRAGMA synchronous=FULL`
 for that commit and not `SQLITE_FCNTL_SYNC`. The unix VFS does not answer `SQLITE_FCNTL_SYNC` from
@@ -77,6 +80,13 @@ and must not run under an open read transaction (design §4.5, "reader coordinat
   keeps its length while `mxFrame` goes back to 1. Draining *makes* the precondition true instead
   of testing for it, and after the write path it is a poll that finds nothing.
 - `checkpoint(mode)` is the manual escape hatch of design §6.5.
+- One read (`select 1 from sqlite_schema limit 1`) precedes the first checkpoint on a connection
+  that has not committed yet. A checkpoint on a connection whose pager has never opened the WAL
+  does nothing, and says so in counters that cannot be told apart from an empty WAL — on this
+  build `wal_checkpoint_v2` returned `log = 0, checkpointed = 0` from both a real fold and a
+  no-op, so the only trustworthy proof is the size of the file afterwards. The read is skipped
+  once the WAL hook has fired, since a WAL commit proves the pager has it open; doing it at open
+  instead measured 1.8 ms a tenant.
 - `close()` runs a TRUNCATE checkpoint as well. Resuming a tailer costs two verification passes
   over the WAL, so leaving an empty one behind is what keeps a cold open cheap, and the backfill
   is work SQLite would have done later anyway.
@@ -124,8 +134,10 @@ what a crash leaves.
   reconcile needs is still there and a reopen does not pay to recreate it.
 - **A fork empties the new database's WAL.** `restore()` leaves the applier's frames in the new
   `-wal`; they are already counted in the restored checksum, so a fresh recorder tailing them
-  would count them twice. `fork` TRUNCATE-checkpoints the new file before the tenant opens, then
-  takes its checksum from the file.
+  would count them twice. `fork` TRUNCATE-checkpoints the new file before the tenant opens and
+  refuses to file the fork if any WAL survived that, then takes the checksum from the file. The
+  old shape of this — checkpoint, then close the connection — happened to work only because
+  SQLite folds the WAL when the last connection closes, which is luck, not a contract.
 - **Forking a young tenant needs no snapshot.** With no snapshot at or before `at`, the log
   rebuilds the database from nothing as long as it still reaches txid 1. The seed is a database
   with one header page in WAL mode, not a zero-length file: with no header SQLite cannot know the
@@ -138,6 +150,13 @@ what a crash leaves.
 - **`delete()` moves, never removes.** The directory goes to `<dataDir>/trash/<name>-<ms>` and the
   catalog row is tombstoned. Nothing sweeps the trash in phase 0; design §4.4 keeps the log and
   snapshots after a delete, and retention is an operator decision.
+- **The tenant takes one hook slot, the writer's WAL hook, and no others.** `src/realtime` owns
+  the commit, rollback and authorizer slots (docs/m6-realtime.md), so `onCommit` here is a list of
+  listeners the write path calls after `log.append` rather than SQLite's own commit hook — `write`
+  is synchronous, so it can. `onConnection(db, role)` is the seam the route layer installs its
+  authorizer trampoline through, called for every writer and every lazily opened reader;
+  `acquireReader` hands back a `ReaderLease` holding the `Database` itself, and a pooled
+  connection keeps its prepared-statement cache across leases.
 - **Eviction can exceed `maxOpen`.** The LRU skips tenants with a write, a snapshot or a reader
   lease in flight. The cap is a target, not a promise a correct write may be broken for.
 - **Driver additions.** `sqlite3_stmt_status` with `stmt.status(op, reset)` and `stmt.vmSteps()`
@@ -157,6 +176,9 @@ what a crash leaves.
 | the `BEGIN IMMEDIATE`…`COMMIT` alone | 6.5 | 7.7 | 11.5 |
 | `readSync`, point read by primary key | 0.9 | 1.1 | 3.3 |
 | `read`, the same through a promise | 1.0 | 1.3 | 2.8 |
+
+Taken on an idle machine; the same run with three other agents building alongside it reads 28 µs
+and 70 µs for the two write legs, which is the honest spread.
 
 Design §10 budgets 40 µs p50 for a single-row write including the tail and the log; the write path
 comes in at 27 µs, of which 6.5 µs is SQLite's own commit and the rest is the M3 legs (tail 9 µs,

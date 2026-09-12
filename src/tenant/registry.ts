@@ -9,6 +9,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { BunQLError } from "../server/errors.ts"
+import type { Database } from "../sqlite/index.ts"
 import { Catalog, positionOf, type TenantRow } from "./catalog.ts"
 import {
   type AckLevel,
@@ -46,6 +47,8 @@ export interface RegistryOptions {
   /** Where the fd-budget warning goes. Defaults to `console.warn`. */
   warn?: (message: string) => void
   onError?: (err: unknown) => void
+  /** Passed to every tenant: called for each connection opened, writer or reader. */
+  onConnection?: (db: Database, role: "writer" | "reader") => void
 }
 
 export interface CreateOptions {
@@ -278,6 +281,9 @@ export class TenantRegistry {
         : {}),
       ...(this.#options.logFsync !== undefined ? { logFsync: this.#options.logFsync } : {}),
       ...(this.#options.onError !== undefined ? { onError: this.#options.onError } : {}),
+      ...(this.#options.onConnection !== undefined
+        ? { onConnection: this.#options.onConnection }
+        : {}),
     }
     const tenant = Tenant.open(options)
     this.#open.set(row.name, tenant)

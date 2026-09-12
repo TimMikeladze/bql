@@ -3,6 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { BunQLError } from "../../src/server/errors.ts"
 import { type CommitEvent, TenantRegistry } from "../../src/tenant/index.ts"
+import { computeFull } from "../../src/wal/index.ts"
 import {
   cleanupTempDirs,
   crashKeeper,
@@ -35,9 +36,17 @@ describe("tenant write and read path", () => {
     expect(created.result.lastInsertRowid).toBe(1)
     expect(tenant.write((db) => db.run("insert into users(name) values ('bob')")).txid).toBe(2n)
 
-    // A transaction that writes nothing produces no record and no txid.
+    // A transaction that writes no pages produces no record and does not advance the txid —
+    // including one whose statements are writes that happen to match no rows.
     expect(tenant.write((db) => db.prepare("select count(*) c from users").get()).txid).toBe(2n)
+    const missed = tenant.write((db) => db.run("update users set name = 'x' where id = -1"))
+    expect(missed.txid).toBe(2n)
+    expect(missed.result.changes).toBe(0)
+    expect(tenant.write((db) => db.run("delete from users where 1 = 0")).txid).toBe(2n)
     expect(tenant.log.lastTxid).toBe(2n)
+    expect(tenant.readSync((db) => db.prepare("select count(*) c from users").get())).toEqual({
+      c: 2,
+    })
 
     expect(tenant.readSync((db) => db.prepare("select name from users order by id").values())).toEqual(
       [["ann"], ["bob"]],
@@ -322,6 +331,10 @@ describe("snapshot and fork", () => {
     expect(past.txid).toBe(3n)
     expect(past.readSync((db) => dump(db))).toBe(atThree)
     expect(integrityOk(past.dbPath)).toBe(true)
+    // The fork's database file is the whole state: the frames the restore left in its WAL were
+    // folded in, so the checksum it was filed under is the checksum of the file.
+    expect(past.walBytes).toBe(0)
+    expect(past.stats().checksum).toBe(computeFull(past.dbPath, { includeWal: false }).checksum)
 
     const latest = await reg.create("acme-now", { from: { db: "acme" } })
     expect(latest.txid).toBe(tenant.txid)

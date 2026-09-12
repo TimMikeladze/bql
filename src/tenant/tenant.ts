@@ -8,6 +8,11 @@
 // Second invariant: only this class checkpoints. SQLite's autocheckpoint is off, so no frame can
 // leave the WAL before the tailer has read it, which is what makes the log complete by
 // construction rather than by luck.
+//
+// Hook slots: the tenant takes the writer's WAL hook and nothing else. The commit, rollback and
+// authorizer slots belong to `src/realtime` and the route layer (docs/m6-realtime.md), which is
+// why `onCommit` here is a list of listeners this class calls after `log.append` rather than
+// SQLite's own commit hook — `write()` is synchronous, so it can.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -99,6 +104,12 @@ export interface TenantOptions {
   limits?: Partial<Record<LimitName, number>>
   /** Where a throwing commit hook goes. Defaults to `console.error`. */
   onError?: (err: unknown) => void
+  /**
+   * Called once for every connection this tenant opens, after its pragmas and limits are set and
+   * before anything uses it. The seam the route layer installs its authorizer trampoline through,
+   * since readers are opened lazily and a pooled one outlives the request that created it.
+   */
+  onConnection?: (db: Database, role: "writer" | "reader") => void
 }
 
 /** Design §4.7: SQL bombs are bounded by the library, not by parsing. */
@@ -176,7 +187,11 @@ interface Waiter {
   timer: ReturnType<typeof setTimeout>
 }
 
-interface Lease {
+/**
+ * A borrowed reader connection. `pooled` is false for a connection opened past the pool's size,
+ * which is closed rather than returned on release.
+ */
+export interface ReaderLease {
   db: Database
   pooled: boolean
 }
@@ -218,6 +233,7 @@ export class Tenant {
   #positionIntervalMs: number
   /** Frames in the current WAL generation, from the WAL hook: `walBytes` without a syscall. */
   #walFrames = 0
+  #walOpened = false
 
   private constructor(
     options: TenantOptions,
@@ -439,7 +455,7 @@ export class Tenant {
    * Borrows a reader. The lease is what keeps a TRUNCATE checkpoint or a snapshot from taking the
    * exclusive WAL locks underneath an open read transaction (design §4.5).
    */
-  acquireReader(): Lease {
+  acquireReader(): ReaderLease {
     this.#assertOpen()
     this.#lastActivityMs = Date.now()
     const pooled = this.#free.pop()
@@ -459,7 +475,7 @@ export class Tenant {
     return { db: openConnection(this.dbPath, this.#options, { writer: false }), pooled: false }
   }
 
-  releaseReader(lease: Lease): void {
+  releaseReader(lease: ReaderLease): void {
     this.#leased -= 1
     this.#lastActivityMs = Date.now()
     if (!lease.pooled || this.#closed) {
@@ -479,6 +495,7 @@ export class Tenant {
       throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
     }
     this.drain()
+    this.#openWal()
     const result = this.writer.walCheckpoint(mode)
     this.#afterCheckpoint()
     this.#lastActivityMs = Date.now()
@@ -497,6 +514,7 @@ export class Tenant {
     if (this.walBytes <= WAL_HEADER_SIZE) return
     // Nothing may leave the WAL before it is recorded; draining first is what guarantees it.
     this.drain()
+    this.#openWal()
     this.writer.walCheckpoint("TRUNCATE")
     this.#afterCheckpoint()
   }
@@ -517,6 +535,7 @@ export class Tenant {
     this.#exclusive = true
     try {
       this.drain()
+      this.#openWal()
       const txid = this.recorder.position.txid
       const existing = listSnapshots(this.dir).find((ref) => BigInt(ref.txid) === txid)
       if (existing) return existing
@@ -574,13 +593,7 @@ export class Tenant {
 
       // `restore` leaves the applier's frames in the new `-wal`; they are already counted in the
       // checksum below, so a fresh recorder tailing them would count them twice.
-      const seed = Database.open(targetPath, { wal: false })
-      try {
-        seed.exec("pragma journal_mode = wal")
-        seed.walCheckpoint("TRUNCATE")
-      } finally {
-        seed.close()
-      }
+      foldWal(targetPath)
       fs.rmSync(path.join(target, "meta.json"), { force: true })
 
       const full = computeFull(targetPath, { includeWal: false })
@@ -656,6 +669,7 @@ export class Tenant {
       // over the WAL, so leaving an empty one behind is what keeps a cold open cheap — and the
       // backfill is work SQLite would have had to do later anyway.
       if (this.#leased === 0 && this.walBytes > WAL_HEADER_SIZE) {
+        this.#openWal()
         this.writer.walCheckpoint("TRUNCATE")
         this.#walFrames = 0
       }
@@ -765,10 +779,26 @@ export class Tenant {
     this.#positionSavedMs = now
   }
 
+  /**
+   * One read, the first time this connection is about to checkpoint. A checkpoint on a connection
+   * whose pager has never opened the WAL does nothing at all, and reports that it did nothing in
+   * counters that cannot be told apart from an empty WAL. Doing it here rather than at open keeps
+   * the cost off the open path, where it measured 1.8 ms a tenant.
+   */
+  #openWal(): void {
+    if (this.#walOpened) return
+    this.#walOpened = true
+    this.writer.prepare("select 1 from sqlite_schema limit 1").get()
+  }
+
+  /** True once the WAL hook has fired, which only a real WAL commit can do. */
+
   /** Counts WAL frames as they commit, so the checkpoint policy costs no `stat` per write. */
   trackWal(): void {
     this.writer.onWal((_dbName, frames) => {
       this.#walFrames = frames
+      // A WAL commit proves this connection's pager has the WAL open, so no probe read is needed.
+      this.#walOpened = true
     })
   }
 
@@ -837,6 +867,7 @@ export class Tenant {
     if (walBytes <= this.checkpointWalBytes) return
     // The write path has just drained, so every committed frame is already in the log — the
     // precondition design §4.3 puts on checkpointing ("the log has shipped past mxFrame").
+    this.#openWal()
     this.writer.walCheckpoint("PASSIVE")
     this.#afterCheckpoint()
   }
@@ -893,6 +924,7 @@ function openConnection(
     for (const [name, value] of Object.entries(limits)) {
       if (value !== undefined) db.limit(name as LimitName, value)
     }
+    options.onConnection?.(db, role.writer ? "writer" : "reader")
     return db
   } catch (err) {
     db.close()
@@ -913,6 +945,33 @@ function applyQuota(db: Database, quotaBytes: number, pageSize: number): void {
   if (quotaBytes <= 0) return
   const pages = Math.max(1, Math.floor(quotaBytes / pageSize))
   db.exec(`pragma max_page_count = ${pages}`)
+}
+
+/**
+ * Moves everything in a database's WAL into the database file and leaves the WAL empty. The read
+ * comes first because a checkpoint on a connection whose pager has not opened the WAL does
+ * nothing at all, and the size check afterwards is what proves it did.
+ */
+function foldWal(dbPath: string): void {
+  const db = Database.open(dbPath, { wal: false })
+  try {
+    db.exec("pragma journal_mode = wal")
+    db.prepare("select 1 from sqlite_schema limit 1").get()
+    const result = db.walCheckpoint("TRUNCATE")
+    if (result.busy) {
+      throw new TenantError("BUSY", `checkpoint of ${dbPath} was blocked by another connection`)
+    }
+  } finally {
+    db.close()
+  }
+  const walPath = `${dbPath}-wal`
+  const walBytes = fs.existsSync(walPath) ? fs.statSync(walPath).size : 0
+  if (walBytes > WAL_HEADER_SIZE) {
+    throw new TenantError(
+      "CHECKPOINT_INCOMPLETE",
+      `${walBytes} bytes of WAL survived the checkpoint of ${dbPath}`,
+    )
+  }
 }
 
 /**
