@@ -99,6 +99,19 @@ Carried forward from phase 0, still true:
 
 What phase 1 added to the list:
 
+- **A database deleted on the primary is never dropped by a replica, and the name can be reused
+  underneath it.** Verified by hand: create `beta` on the primary, let a `follow: ["*"]` replica
+  bootstrap it, `DELETE /v1/db/beta` on the primary, then re-create `beta` and write to it. The
+  primary serves `NEW-GENERATION`; the replica serves `OLD-GENERATION` — *at the same txid*, with
+  no error and nothing in either log. Because the txids match, a `minTxid` read-your-writes check
+  is satisfied by the stale replica, so the consistency mechanism vouches for wrong data. Two
+  causes: `ReplicaClient.#resolveFollow` (`src/replication/replica.ts:616`) only ever adds streams
+  and never drops one for a database that has left the announcement — and `#subscribe` pins the
+  tenant, so it cannot even be evicted — and database identity on the wire is the bare name: the
+  catalog `tenants` table has no generation id, and `HELLO`/`HEARTBEAT` announce
+  `databases?: string[]`. The S3 layout already mints generation ids; the catalog and the protocol
+  do not. This has to land before phase-2 milestone 2, since promoting a replica holding a stale
+  generation would promote wrong data.
 - **A replica cannot be promoted.** Recovery from a lost primary today is a new node pointed at
   the bucket. This is the headline gap and it is phase-2 milestone 2.
 - **The Hrana surface does not forward writes.** A write to `/v2/pipeline` on a replica is
@@ -136,11 +149,6 @@ What they changed, in case it matters to phase 2:
   `[durability] trashSweepIntervalMs` beside it. `sweepTrash(dataDir, retentionMs, now?, onError?)`
   in `src/tenant/registry.ts` is pure; `ServerRuntime` calls it at start and on the interval. The
   local transaction log is still never pruned, which is the next thing that key could grow into.
-
-Still open, and still cheap: **a delete on the primary does not remove the replica's copy.**
-`DELETE /v1/db/{db}` tombstones the catalog row on the primary and announces the new database
-list, but a replica that has already bootstrapped the database keeps it and simply stops receiving
-records for it. `test/server/replica.test.ts` documents the behaviour rather than asserting it away.
 
 ## House rules for this repo
 
