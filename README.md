@@ -258,3 +258,4 @@ Also not implemented: exactly-once delivery (as opposed to effectively-once effe
 - [A message bus for agents and ordinary work](docs/superpowers/specs/2026-09-12-message-bus.md) — the current design and why it is shaped this way.
 - [Finishing AgenticBus](docs/superpowers/specs/2026-09-13-finishing.md) — schema versioning, cancellation, operability, packaging and the decisions behind them.
 - [Running it](docs/operations.md) — metrics, logging, shutdown, backup and restore.
+- [What was verified](docs/FINISHING-REPORT.md) — how each claim was checked, and what still is not.
