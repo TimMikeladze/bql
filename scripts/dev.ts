@@ -81,7 +81,7 @@ const bus = spawn([
   "--port",
   String(port),
   "--assets",
-  "dist",
+  "dist/dashboard",
 ]);
 
 let ready = false;

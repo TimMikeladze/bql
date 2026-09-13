@@ -22,6 +22,7 @@ import type {
 } from "../shared/protocol";
 import { DEFAULT_WORKSPACE } from "../shared/protocol";
 import type { BlobStore } from "./blobs";
+import { type MetricsSink, noopMetrics } from "./metrics";
 import { assertPattern, assertSubject, matches, narrowingGlob } from "./subjects";
 
 export class BusError extends Error {
@@ -139,6 +140,12 @@ export interface StoreOptions {
   retentionMs?: number;
   /** How many log rows one claim may examine while materializing deliveries. */
   scanBatch?: number;
+  /**
+   * Where counters go. The store rather than the server, because the
+   * transitions that matter most — a lease reclaimed, a delivery
+   * dead-lettered inside the sweep — never pass through an HTTP handler.
+   */
+  metrics?: MetricsSink;
 }
 
 interface MessageRow {
@@ -210,6 +217,7 @@ export class BusStore {
   private blobs: BlobStore | undefined;
   private retentionMs: number;
   private scanBatch: number;
+  private metrics: MetricsSink;
 
   constructor(path: string, options: StoreOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -217,6 +225,7 @@ export class BusStore {
     this.blobs = options.blobs;
     this.retentionMs = options.retentionMs ?? 7 * 24 * 60 * 60 * 1000;
     this.scanBatch = options.scanBatch ?? 500;
+    this.metrics = options.metrics ?? noopMetrics();
     this.db = new Database(path, { create: true, strict: true });
     this.db.run("PRAGMA journal_mode=WAL");
     this.db.run("PRAGMA synchronous=FULL");
@@ -375,7 +384,8 @@ export class BusStore {
           .get(workspace, request.dedupeKey) as
           | { seq: number; id: string; headers: string }
           | null;
-        if (existing)
+        if (existing) {
+          this.metrics.counter("agenticbus.messages.deduplicated", 1);
           // The *original* correlation, not the one this call just generated:
           // a caller retrying an idempotent request has to be handed the
           // correlation the answer will actually arrive under, or it waits
@@ -387,6 +397,7 @@ export class BusStore {
             correlation:
               parse<Headers>(existing.headers, {}).correlation ?? correlation,
           };
+        }
       }
       const id = uuid();
       const now = this.now();
@@ -412,6 +423,7 @@ export class BusStore {
           seq: number;
         }).seq,
       );
+      this.metrics.counter("agenticbus.messages.published", 1);
       return { seq, id, duplicate: false, correlation };
     })();
   }
@@ -711,6 +723,8 @@ export class BusStore {
             ["lease expired", now, row.id],
           );
       }
+      if (rows.length > 0)
+        this.metrics.counter("agenticbus.deliveries.reclaimed", rows.length);
       return rows.length;
     })();
   }
@@ -721,6 +735,9 @@ export class BusStore {
     reason: string,
   ) {
     const now = this.now();
+    this.metrics.counter("agenticbus.deliveries.dead", 1, {
+      subscription: subscription.name,
+    });
     this.db.run(
       "UPDATE deliveries SET status='dead', consumer_id=NULL, lease_until=NULL, error=?, updated_at=? WHERE id=?",
       [reason, now, row.id],
@@ -769,6 +786,7 @@ export class BusStore {
     consumerId: string,
     max = 1,
   ): Promise<Envelope[]> {
+    const started = this.now();
     const leased = this.db.transaction(() => {
       const subscription = this.subscriptionRow(workspace, name);
       if (subscription.paused === 1) return [] as DeliveryRow[];
@@ -820,13 +838,23 @@ export class BusStore {
     })();
 
     const subscription = this.subscriptionRow(workspace, name);
-    return Promise.all(
+    const envelopes = await Promise.all(
       leased.map(async (row) => ({
         delivery: this.toDelivery(row, subscription),
         message: await this.message(workspace, row.message_seq),
         idempotencyKey: `${name}:${row.message_seq}`,
       })),
     );
+    // Timed around the whole call, hydration included: a claim that spends its
+    // time reading a blob is still a slow claim to the consumer waiting on it.
+    this.metrics.histogram("agenticbus.claim.duration", this.now() - started, {
+      subscription: name,
+    });
+    if (envelopes.length > 0)
+      this.metrics.counter("agenticbus.deliveries.claimed", envelopes.length, {
+        subscription: name,
+      });
+    return envelopes;
   }
 
   private owned(
@@ -871,6 +899,9 @@ export class BusStore {
         "UPDATE deliveries SET status='acked', lease_until=NULL, error=NULL, updated_at=? WHERE id=? AND status='leased'",
         [this.now(), row.id],
       );
+      this.metrics.counter("agenticbus.deliveries.acked", 1, {
+        subscription: subscription.name,
+      });
       return this.toDelivery(
         this.db.query("SELECT * FROM deliveries WHERE id=?").get(row.id) as
           DeliveryRow,
@@ -896,6 +927,9 @@ export class BusStore {
       const reason = (options.error ?? "consumer nacked").slice(0, 4000);
       const exhausted =
         options.fatal === true || row.attempt >= subscription.max_attempts;
+      this.metrics.counter("agenticbus.deliveries.nacked", 1, {
+        subscription: subscription.name,
+      });
       if (exhausted) this.deadLetter(row, subscription, reason);
       else
         this.db.run(
@@ -1013,7 +1047,11 @@ export class BusStore {
          WHERE message_seq=? AND status IN ('pending','leased')`,
         [now, seq],
       );
-      return { cancelled: result.changes, alreadyCancelled: meta.cancelledAt !== null };
+      this.metrics.counter("agenticbus.deliveries.cancelled", result.changes);
+      return {
+        cancelled: result.changes,
+        alreadyCancelled: meta.cancelledAt !== null,
+      };
     })();
   }
 
@@ -1027,6 +1065,7 @@ export class BusStore {
          WHERE id=? AND status IN ('pending','leased')`,
         [this.now(), deliveryId],
       );
+      this.metrics.counter("agenticbus.deliveries.cancelled", result.changes);
       return {
         cancelled: result.changes,
         alreadyCancelled: delivery.status === "cancelled",
@@ -1233,6 +1272,36 @@ export class BusStore {
       lastSeq,
       now: this.now(),
     };
+  }
+
+  /**
+   * Every workspace this install has a subscription in.
+   *
+   * Tenancy is normally a filter the caller supplies, but a metrics scrape and
+   * an operator listing are properties of the *install*, so they need the list.
+   */
+  workspaces(): string[] {
+    return (
+      this.db
+        .query(
+          "SELECT DISTINCT workspace FROM subscriptions UNION SELECT DISTINCT workspace FROM messages",
+        )
+        .all() as { workspace: string }[]
+    ).map((row) => row.workspace);
+  }
+
+  /**
+   * Write a consistent copy of the database to `path`.
+   *
+   * `VACUUM INTO` rather than copying the file: it is SQLite's supported online
+   * backup, it is consistent under WAL without stopping writes, and it needs no
+   * `sqlite3` binary on the host. Copying `bus.db` alone while a WAL exists is
+   * the classic way to restore a database that is missing its last few minutes.
+   */
+  backup(path: string): void {
+    if (/['\x00]/.test(path))
+      throw new BusError("invalid backup path", 400);
+    this.db.run(`VACUUM INTO '${path}'`);
   }
 
   /**

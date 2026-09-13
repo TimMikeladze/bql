@@ -45,6 +45,9 @@ function injectReaderToken(): Plugin {
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), injectReaderToken()],
+  // The library bundle owns `dist/`, so the dashboard lives beneath it. Both
+  // ship in the package, and the bus serves `--assets dist/dashboard`.
+  build: { outDir: "dist/dashboard", emptyOutDir: true },
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src/dashboard", import.meta.url)) },
   },

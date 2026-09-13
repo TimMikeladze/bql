@@ -6,7 +6,23 @@ export {
   type Migration,
   type StoreOptions,
 } from "./bus/store";
-export { createServer, type ServerOptions } from "./bus/server";
+export { createServer, type BusServer, type ServerOptions } from "./bus/server";
+export {
+  createLogger,
+  isLogLevel,
+  silentLogger,
+  type Fields,
+  type Logger,
+  type LogFormat,
+  type LogLevel,
+} from "./bus/log";
+export {
+  noopMetrics,
+  prometheusMetrics,
+  type MetricsSink,
+  type PrometheusMetrics,
+  type Tags,
+} from "./bus/metrics";
 export {
   authorizeConsumer,
   authorizePublish,

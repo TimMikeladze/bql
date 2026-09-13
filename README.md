@@ -121,6 +121,7 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `agenticbus subscribe <name> <pattern>` | create a durable subscription |
 | `agenticbus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
 | `agenticbus cancel <seq>` | stop a message; in-flight handlers abort |
+| `agenticbus backup <dir>` | a consistent copy of the database and blobs |
 | `agenticbus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
 ## HTTP API
@@ -137,6 +138,28 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `GET` | `/api/messages/:seq` · `/api/log` · `/api/stream` | the log; SSE refresh signal |
 | `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
 | `POST` | `/api/tokens` | mint (admin) |
+| `GET` | `/metrics` | Prometheus text (read token) |
+| `GET` | `/health` · `/ready` | no token; `/ready` is 503 while draining |
+
+## Operating it
+
+[docs/operations.md](docs/operations.md) is the whole story: what to scrape, what to alert on,
+how a backup is taken and restored, and what the fleet does afterwards. The short version:
+
+```sh
+agenticbus serve --log-level info --log-format json
+curl -H "Authorization: Bearer $READER" localhost:4317/metrics
+agenticbus backup /backups/$(date +%F)
+```
+
+**SIGTERM drains.** The bus stops handing out work first — a claim answers empty rather than
+holding the consumer for the rest of its long poll — then lets parked polls return, then finishes
+requests in flight, and only then closes the database. `bun run soak --term-bus` is the check:
+SIGTERM in the middle of five thousand messages, restart, nothing lost.
+
+**Counters live in the store, gauges are read at scrape time.** A gauge only written when
+something moves is stale exactly when it matters: an idle subscription with a thousand pending
+deliveries would keep reporting whatever it last reported.
 
 ## Security
 
@@ -208,3 +231,5 @@ Also not implemented: exactly-once delivery (as opposed to effectively-once effe
 ## Design
 
 - [A message bus for agents and ordinary work](docs/superpowers/specs/2026-09-12-message-bus.md) — the current design and why it is shaped this way.
+- [Finishing AgenticBus](docs/superpowers/specs/2026-09-13-finishing.md) — schema versioning, cancellation, operability, packaging and the decisions behind them.
+- [Running it](docs/operations.md) — metrics, logging, shutdown, backup and restore.

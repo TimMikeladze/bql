@@ -5,6 +5,8 @@ import type {
   TokenClaims,
 } from "../shared/protocol";
 import { ANY, DEFAULT_WORKSPACE } from "../shared/protocol";
+import { type Logger, silentLogger } from "./log";
+import type { PrometheusMetrics } from "./metrics";
 import { BusError, BusStore } from "./store";
 import { SubjectError } from "./subjects";
 import {
@@ -28,6 +30,28 @@ export interface ServerOptions {
   assets?: string;
   /** Longest a claim or response request may be held open. */
   maxWaitMs?: number;
+  /** Renders `GET /metrics`. Without one, that route is a 404. */
+  metrics?: PrometheusMetrics;
+  logger?: Logger;
+}
+
+export interface BusServer {
+  readonly hostname: string;
+  readonly port: number;
+  /** Stop immediately. `force` closes connections that are still open. */
+  stop(force?: boolean): void;
+  /**
+   * Drain and close.
+   *
+   * Stops accepting claims first, so a consumer's long poll returns empty
+   * instead of being cut off mid-request, waits for the polls already inside
+   * the handler, and only then closes. The previous shutdown stopped the
+   * server and closed the store underneath live long polls; only the abort
+   * guard inside the claim loop made that survivable.
+   */
+  shutdown(options?: { timeoutMs?: number }): Promise<void>;
+  /** True once `shutdown` has begun. `/ready` reports it. */
+  readonly draining: boolean;
 }
 
 const json = (body: unknown, status = 200) =>
@@ -75,9 +99,13 @@ function strings(value: unknown, field: string, max = 64): string[] {
   return value.map((entry) => str(entry, field, 200));
 }
 
-export function createServer(options: ServerOptions) {
+export function createServer(options: ServerOptions): BusServer {
   const { store, signingKey, adminToken } = options;
   const maxWaitMs = options.maxWaitMs ?? 30_000;
+  const log = options.logger ?? silentLogger();
+  let draining = false;
+  /** Long polls currently parked inside the handler, so shutdown can wait. */
+  let parked = 0;
 
   const authenticate = (req: Request, url: URL): TokenClaims => {
     const header = req.headers.get("authorization") ?? "";
@@ -162,7 +190,7 @@ export function createServer(options: ServerOptions) {
       signingKey,
     );
 
-  return Bun.serve({
+  const server = Bun.serve({
     hostname: options.hostname ?? "127.0.0.1",
     port: options.port ?? 4317,
     idleTimeout: 120,
@@ -171,12 +199,24 @@ export function createServer(options: ServerOptions) {
       const url = new URL(req.url);
       const path = url.pathname;
       try {
-        if (path === "/health") return json({ ok: true });
+        if (path === "/health") return json({ ok: true, draining });
         if (path === "/ready") {
+          // Draining is deliberately *not* ready: a load balancer should stop
+          // routing here before the process stops answering.
+          if (draining) return json({ ok: false, reason: "draining" }, 503);
           const live = store.liveConsumers();
           return live > 0
             ? json({ ok: true, consumers: live })
             : json({ ok: false, reason: "no consumer has checked in" }, 503);
+        }
+        if (path === "/metrics" && req.method === "GET") {
+          if (!options.metrics) return json({ error: "not found" }, 404);
+          // Subject and subscription names are tenant information, so a scrape
+          // needs the same read credential every other data route needs.
+          requireRead(authenticate(req, url));
+          return new Response(renderMetrics(store, options.metrics), {
+            headers: { "Content-Type": "text/plain; version=0.0.4" },
+          });
         }
         if (!path.startsWith("/api/"))
           return serveAsset(options.assets, path, () =>
@@ -292,26 +332,38 @@ export function createServer(options: ServerOptions) {
             // lease to plausibly have expired — before trying again.
             let seenSeq = -1;
             let nextRetry = 0;
-            for (;;) {
-              // A caller that has gone away, or a server being shut down,
-              // aborts the request — and continuing to poll after that once
-              // meant touching a database that had already been closed.
-              if (req.signal.aborted) return json([]);
-              const now = Date.now();
-              const seq = store.lastSeq();
-              if (seq !== seenSeq || now >= nextRetry) {
-                const envelopes = await store.claim(
-                  workspace,
-                  name,
-                  consumer,
-                  max,
+            parked++;
+            try {
+              for (;;) {
+                // A caller that has gone away, or a server being shut down,
+                // aborts the request — and continuing to poll after that once
+                // meant touching a database that had already been closed.
+                if (req.signal.aborted) return json([]);
+                // Draining: answer now rather than holding the consumer for
+                // the rest of its wait. An empty claim is a normal answer, so
+                // the consumer simply asks again — somewhere else, once this
+                // process is out of rotation.
+                if (draining) return json([]);
+                const now = Date.now();
+                const seq = store.lastSeq();
+                if (seq !== seenSeq || now >= nextRetry) {
+                  const envelopes = await store.claim(
+                    workspace,
+                    name,
+                    consumer,
+                    max,
+                  );
+                  if (envelopes.length > 0) return json(envelopes);
+                  seenSeq = seq;
+                  nextRetry = now + 1000;
+                }
+                if (Date.now() >= deadline) return json([]);
+                await Bun.sleep(
+                  Math.min(100, Math.max(1, deadline - Date.now())),
                 );
-                if (envelopes.length > 0) return json(envelopes);
-                seenSeq = seq;
-                nextRetry = now + 1000;
               }
-              if (Date.now() >= deadline) return json([]);
-              await Bun.sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+            } finally {
+              parked--;
             }
           }
           if (req.method === "POST" && action === "replay") {
@@ -512,11 +564,76 @@ export function createServer(options: ServerOptions) {
         // A malformed subject is the caller's mistake, not a server fault.
         if (error instanceof SubjectError)
           return json({ error: error.message }, 400);
-        console.error("bus error", error);
+        log.error("the bus could not commit an operation", {
+          path,
+          method: req.method,
+          error: error instanceof Error ? error.message : String(error),
+        });
         return json({ error: "the bus could not commit the operation" }, 500);
       }
     },
   });
+
+  return {
+    // Bun types these as optional because a unix-socket server has neither;
+    // this one always listens on TCP.
+    hostname: server.hostname ?? "127.0.0.1",
+    port: server.port ?? 0,
+    get draining() {
+      return draining;
+    },
+    stop(force = false) {
+      draining = true;
+      void server.stop(force);
+    },
+    async shutdown({ timeoutMs = 15_000 } = {}) {
+      if (draining) return;
+      draining = true;
+      log.info("draining", { parked });
+      const deadline = Date.now() + timeoutMs;
+      while (parked > 0 && Date.now() < deadline) await Bun.sleep(25);
+      if (parked > 0)
+        log.warn("closing with long polls still parked", { parked });
+      // `stop(false)` lets requests already in flight finish; `true` would cut
+      // an ack off at the socket, which is the one thing worth waiting for.
+      await server.stop(false);
+      log.info("stopped");
+    },
+  };
+}
+
+/**
+ * Counters as they accumulated, plus gauges read at scrape time.
+ *
+ * A gauge that is only written when something moves is stale exactly when it
+ * matters — an idle subscription with a thousand pending deliveries would keep
+ * reporting whatever it last reported. So depth, lag and consumer counts are
+ * read from the store here, per workspace, on every scrape.
+ */
+function renderMetrics(store: BusStore, metrics: PrometheusMetrics): string {
+  for (const workspace of store.workspaces()) {
+    const stats = store.stats(workspace);
+    metrics.gauge("agenticbus.messages", stats.messages, { workspace });
+    metrics.gauge("agenticbus.last_seq", stats.lastSeq, { workspace });
+    metrics.gauge("agenticbus.consumers", stats.consumers.length, { workspace });
+    metrics.gauge(
+      "agenticbus.consumers_live",
+      stats.consumers.filter((c) => !c.paused && stats.now - c.lastSeen < 60_000)
+        .length,
+      { workspace },
+    );
+    for (const subscription of stats.subscriptions) {
+      const tags = { workspace, subscription: subscription.name };
+      metrics.gauge("agenticbus.subscription.lag", subscription.lag, tags);
+      metrics.gauge("agenticbus.subscription.paused", subscription.paused ? 1 : 0, tags);
+      for (const status of ["pending", "leased", "acked", "dead", "cancelled"] as const)
+        metrics.gauge("agenticbus.subscription.deliveries", subscription[status], {
+          ...tags,
+          status,
+        });
+    }
+  }
+  return metrics.render();
 }
 
 /** SSE: a sequence number, not a durable subscription. Re-read after it moves. */

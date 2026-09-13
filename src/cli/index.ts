@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileBlobs } from "../bus/blobs";
+import { createLogger, isLogLevel, type LogLevel } from "../bus/log";
+import { prometheusMetrics } from "../bus/metrics";
 import { createServer } from "../bus/server";
 import { BusStore } from "../bus/store";
 import { generateKey, mint } from "../bus/tokens";
@@ -40,6 +42,16 @@ function pairs(name: string): Record<string, string> {
 
 const stateDir = flag("state", ".agenticbus") as string;
 const workspace = flag("workspace", DEFAULT_WORKSPACE) as string;
+
+const level = flag("log-level", process.env.BUS_LOG_LEVEL ?? "info") as string;
+if (!isLogLevel(level))
+  throw new Error(`--log-level wants debug, info, warn, error or silent`);
+const logger = createLogger({
+  level: level as LogLevel,
+  format: (flag("log-format", process.env.BUS_LOG_FORMAT ?? "text") === "json"
+    ? "json"
+    : "text") as "json" | "text",
+});
 
 /** Secrets live in a 0600 file, not in argv where `ps` would show them. */
 async function loadOrCreate(path: string): Promise<string> {
@@ -86,8 +98,10 @@ switch (command) {
     const { signingKey, adminToken } = await secrets();
     const db = flag("db", `${stateDir}/bus.db`) as string;
     await mkdir(dirname(resolve(db)), { recursive: true });
+    const metrics = prometheusMetrics();
     const store = new BusStore(db, {
       blobs: fileBlobs(flag("blobs", `${stateDir}/blobs`) as string),
+      metrics,
       ...(has("retention-ms")
         ? { retentionMs: Number(flag("retention-ms")) }
         : {}),
@@ -96,26 +110,58 @@ switch (command) {
       store,
       signingKey,
       adminToken,
+      metrics,
+      logger,
       port: Number(flag("port", process.env.PORT ?? "4317")),
-      hostname: flag("host", "127.0.0.1") as string,
+      // Loopback by default. A container has to bind 0.0.0.0 to receive
+      // anything, so that is an explicit choice its environment makes rather
+      // than a default everyone inherits.
+      hostname: flag("host", process.env.BUS_HOST ?? "127.0.0.1") as string,
       ...(has("assets")
         ? { assets: flag("assets") as string }
-        : { assets: "dist" }),
+        : { assets: "dist/dashboard" }),
     });
     const sweep = setInterval(() => store.sweep(), 1000);
     // Blob collection touches a filesystem, so it runs on its own slower
     // interval rather than on the path every claim shares.
     const collect = setInterval(() => {
-      void store.collectBlobs().catch(() => {});
+      void store.collectBlobs().catch((error: unknown) => {
+        logger.warn("blob collection failed", { error: String(error) });
+      });
     }, 60_000);
+    logger.info("listening", {
+      url: `http://${server.hostname}:${server.port}`,
+      db,
+      adminToken: `${stateDir}/admin-token`,
+    });
     console.log(`agenticbus http://${server.hostname}:${server.port}`);
     console.log(`admin token  ${stateDir}/admin-token`);
-    shutdown(() => {
+    shutdown(async () => {
       clearInterval(sweep);
       clearInterval(collect);
-      server.stop(true);
+      // Drain before closing: a consumer's long poll should return empty, not
+      // be cut off, and the store must outlive the requests still using it.
+      await server.shutdown();
       store.close();
     });
+    break;
+  }
+
+  // A backup is `VACUUM INTO` plus the blob directory, taken from a *second*
+  // connection to the same file while the bus keeps serving. Copying `bus.db`
+  // on its own is the classic way to restore a database missing its last few
+  // minutes, because the WAL holds them.
+  case "backup": {
+    const target = flag("into", argv[1]);
+    if (!target) throw new Error("backup wants a directory: agenticbus backup <dir>");
+    const into = resolve(target);
+    await mkdir(into, { recursive: true });
+    const store = new BusStore(flag("db", `${stateDir}/bus.db`) as string);
+    store.backup(`${into}/bus.db`);
+    store.close();
+    const blobs = flag("blobs", `${stateDir}/blobs`) as string;
+    await cp(blobs, `${into}/blobs`, { recursive: true }).catch(() => {});
+    console.log(into);
     break;
   }
 
@@ -316,6 +362,7 @@ switch (command) {
   consume     <subscription> --exec CMD   consume; message is stdin, stdout is the reply
               --exec-timeout <ms>          abort and nack a handler that hangs
   cancel      <seq>                       stop a message: in-flight handlers abort
+  backup      <dir>                       consistent copy of the database and blobs
   tail        follow the log
   stats       subscriptions, consumers, lag
 
@@ -324,6 +371,8 @@ Common flags:
   --state <dir>        signing key and admin token (default .agenticbus)
   --workspace <name>   tenancy (default "default")
   --port --host --db --blobs           serve
+  --log-level <level>  debug|info|warn|error|silent (BUS_LOG_LEVEL)
+  --log-format <fmt>   text|json (BUS_LOG_FORMAT)
   --publish a.b,c.>    token: subject patterns it may publish to
   --subscribe name     token: subscriptions it may claim from
 

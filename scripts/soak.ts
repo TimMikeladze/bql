@@ -18,6 +18,7 @@
  *   bun scripts/soak.ts
  *   bun scripts/soak.ts --ordered
  *   bun scripts/soak.ts --kill-bus
+ *   bun scripts/soak.ts --term-bus
  *   bun scripts/soak.ts --repeat 10
  */
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -46,6 +47,8 @@ interface Options {
   killEveryMs: number;
   ordered: boolean;
   killBus: boolean;
+  /** SIGTERM the bus mid-flight instead of SIGKILLing it: the deploy case. */
+  termBus: boolean;
   quiet: boolean;
 }
 
@@ -59,6 +62,7 @@ const options: Options = {
   killEveryMs: num("kill-every-ms", 400),
   ordered: has("ordered"),
   killBus: has("kill-bus"),
+  termBus: has("term-bus"),
   quiet: has("quiet"),
 };
 
@@ -262,16 +266,26 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
       }
     })();
 
-    const busKiller = options.killBus
-      ? (async () => {
-          await Bun.sleep(1500);
-          children.get("bus")?.kill("SIGKILL");
-          if (!options.quiet) console.log("     … killed the bus");
-          await Bun.sleep(400);
-          await startBus();
-          if (!options.quiet) console.log("     … the bus is back");
-        })()
-      : Promise.resolve();
+    const busKiller =
+      options.killBus || options.termBus
+        ? (async () => {
+            await Bun.sleep(1500);
+            const bus = children.get("bus");
+            if (options.termBus) {
+              // The deploy case: SIGTERM drains — long polls return empty,
+              // in-flight acks finish — and only then does the process exit.
+              bus?.kill("SIGTERM");
+              await bus?.exited;
+              if (!options.quiet) console.log("     … the bus drained and exited");
+            } else {
+              bus?.kill("SIGKILL");
+              if (!options.quiet) console.log("     … killed the bus");
+              await Bun.sleep(400);
+            }
+            await startBus();
+            if (!options.quiet) console.log("     … the bus is back");
+          })()
+        : Promise.resolve();
 
     await Promise.all([publisher, busKiller]);
 
@@ -383,12 +397,43 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
       );
     }
 
-    if (options.killBus)
+    if (options.killBus || options.termBus)
       check(
-        "the log survived the bus being killed",
+        options.termBus
+          ? "the log survived a SIGTERM and restart"
+          : "the log survived the bus being killed",
         stats.messages >= published.size,
         `${stats.messages} messages in the log, ${published.size} published`,
       );
+
+    // ---- the scrape is clean, under load, with real subscriptions ----
+    const scrape = await fetch(`${url}/metrics`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    const text = await scrape.text();
+    const malformed = text
+      .split("\n")
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .filter(
+        (line) =>
+          !/^[a-zA-Z_:][a-zA-Z0-9_:]*(\{[^}]*\})? -?(\d+(\.\d+)?([eE][-+]?\d+)?|[+-]?Inf|NaN)$/.test(
+            line,
+          ),
+      );
+    // Gauges, not counters: a restarted bus has a fresh registry, and a
+    // counter that resets on restart is normal Prometheus. The gauges are
+    // computed from the store at scrape time, so they are there either way.
+    check(
+      "/metrics scrapes clean",
+      scrape.status === 200 &&
+        malformed.length === 0 &&
+        text.includes('agenticbus_subscription_lag{subscription="soak"'),
+      malformed.length > 0
+        ? `malformed: ${malformed[0]}`
+        : scrape.status !== 200
+          ? `HTTP ${scrape.status}`
+          : `${text.split("\n").length} lines`,
+    );
   } catch (error) {
     check("the soak ran without an unexpected error", false, String(error));
   } finally {
@@ -410,7 +455,9 @@ for (let run = 1; run <= repeat; run++) {
   console.log(
     `\n— ${label}: ${options.consumers} consumers, ${options.messages} messages, ${options.kills} kills${
       options.ordered ? ", ordered" : ""
-    }${options.killBus ? ", killing the bus" : ""}`,
+    }${options.killBus ? ", killing the bus" : ""}${
+      options.termBus ? ", SIGTERMing the bus" : ""
+    }`,
   );
   allFailures.push(...(await runOnce(label, options)));
   console.log(`   ${((Date.now() - started) / 1000).toFixed(1)}s`);
