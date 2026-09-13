@@ -62,10 +62,11 @@ export function candidatePaths(): string[] {
     // /usr/lib is absent or unreadable; the fixed candidates still apply.
   }
   out.push("/usr/lib/libsqlite3.so.0", "libsqlite3.so", "/usr/lib/libsqlite3.dylib")
-  // Windows ships no libsqlite3 at all and has no system path worth guessing, so the vendored
-  // build above is the only candidate; `winsqlite3.dll` exists but exports a private subset and
-  // is not a SQLite anything should link against.
-  if (process.platform === "win32") out.push("sqlite3.dll")
+  // **No system candidate on Windows**, deliberately. It ships no libsqlite3, and a bare
+  // `"sqlite3.dll"` is not a name — it is a request to the loader to search System32 and every
+  // directory on PATH, which found *something* on a CI runner and segfaulted at address 0 on the
+  // first call into it (`docs/e1-windows.md` §3). A clean "no library, run `bun run sqlite:build`"
+  // is the honest answer, and it is what the absence of a candidate produces.
   return out
 }
 

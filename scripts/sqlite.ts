@@ -16,6 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { inflateRawSync } from "node:zlib"
 import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { loadFrom, vendoredName } from "../src/sqlite/lib.ts"
 
 // ── the pins ─────────────────────────────────────────────────────────────────────────────────
@@ -189,7 +190,10 @@ function verify(zip: string): void {
  * node on a system libsqlite3 simply does not get them. `docs/p3-wal-checksum.md`.
  */
 function helperSource(): string {
-  return new URL("./native/walsum.c", import.meta.url).pathname
+  // `fileURLToPath`, not `.pathname`: on Windows the latter is `/D:/a/…`, which no file API takes.
+  // Observed rather than reasoned about — it is what stopped the first Windows CI run dead
+  // (`docs/e1-windows.md` §3).
+  return fileURLToPath(new URL("./native/walsum.c", import.meta.url))
 }
 
 function compile(sources: string[], artefact: string, quiet: boolean): void {
