@@ -124,7 +124,10 @@ Retention and TTL deletion are both guarded by "no unfinished delivery of this m
 | `GET` | `/api/stream` | SSE: new sequence numbers |
 | `POST` | `/api/consumers/register`, `/api/consumers/:id/pause` | fleet |
 | `POST` | `/api/tokens` | mint a scoped token (admin) |
-| `GET` | `/api/snapshot`, `/api/usage` | observation |
+| `POST` | `/api/messages/:seq/requeue` | republish a dead letter onto its original subject |
+| `GET` | `/api/log?subject=&newest=` | the log, filtered by subject pattern |
+| `GET` | `/metrics` | Prometheus text (read token) |
+| `GET` | `/health`, `/ready` | no token; `/ready` is 503 while draining |
 
 ## Security
 

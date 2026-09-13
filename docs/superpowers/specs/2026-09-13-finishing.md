@@ -21,6 +21,7 @@ The assertions are chosen so they can only pass for the right reason:
 | no surprise dead letters | `dead` is zero, with `maxAttempts` set high enough that kills alone cannot exhaust it |
 | per-key FIFO (`--ordered`) | receipts grouped by key must be non-decreasing in seq — a redelivery may repeat a seq, but may never go backwards |
 | the bus itself can die | `--kill-bus` SIGKILLs the broker mid-flight and restarts it on the same file; the log must still hold every message and the run must still drain |
+| a deploy loses nothing | `--term-bus` SIGTERMs it instead, so the drain path is exercised rather than WAL recovery, and `/metrics` is scraped afterwards and must parse |
 
 A killed consumer is restarted under **the same id**, because that is the interesting path: the
 dead process's lease has to expire and be reclaimed, rather than the work quietly moving to a
@@ -28,6 +29,10 @@ fresh name.
 
 Receipts are files rather than messages on a `receipts.>` subject: a receipt that goes through
 the bus is a second thing that can fail, and it would double the load being measured.
+
+Kills are paced by **wall-clock**, not by the message count. The first version derived the
+spacing from the workload, which put most kills after the run had already drained — it passed
+while proving nothing, and the tell was that 12 kills produced one redelivery.
 
 ## 2. Schema versioning
 
@@ -138,7 +143,25 @@ as dagr, for the same reason: one process owns one SQLite file.
 
 The bus stays **loopback-bound by default**. Containers have to bind `0.0.0.0` to receive traffic
 at all, so that is an explicit `BUS_HOST=0.0.0.0` in the image's environment rather than a changed
-default, and the platform terminates TLS in front of it.
+default, and the platform terminates TLS in front of it. `BUS_STATE` is the other half: a
+container relocates the signing key, admin token, database and blobs onto its volume without
+rewriting the command line.
+
+The platform health check is `/health` alone. `/ready` also requires that a consumer has checked
+in recently — a genuine signal, and the wrong one for a check that restarts the machine, because
+a freshly deployed bus with no consumers yet is healthy rather than broken.
+
+Deployed and checked: `agenticbus-demo.fly.dev`, with a consumer on a laptop registering over TLS
+and a request round-tripping through it.
+
+## What is not done
+
+**Publishing to npm.** Everything up to it is: the build, the manifest rewrite, and
+`verify-pack`, which packs the tarball, installs it into an empty directory, imports every
+advertised entry point and runs a bus out of the installed copy. The publish itself needs a
+credential — the stored npm token is rejected with a 401 — so it is one command away rather than
+done. `dagr-remote` keeps its `file:` link to this repo until there is a published version to
+point at; swapping it sooner would break every install in the meantime.
 
 ## What did not change
 
