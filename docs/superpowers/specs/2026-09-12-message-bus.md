@@ -68,7 +68,7 @@ This is what makes RPC durable: the caller can die and come back, and the answer
 
 ### Tenancy
 
-`workspace` is a mandatory filter on **every** query, not a column that gets written and forgotten — which is what it was before, written at `store.ts:284` and read nowhere. A token carries its workspace; a request cannot name another one.
+`workspace` is a mandatory filter on **every** query, not a column that gets written and forgotten — which is what it was in the previous design, written on dispatch and read nowhere. A token carries its workspace; a request cannot name another one.
 
 ### Payloads
 
@@ -95,7 +95,9 @@ Indexed on `messages(workspace, seq)`, `deliveries(subscription_id, status, mess
 
 One broker process owns one SQLite file in WAL mode. Consumers never open it — they hold leases over HTTP, and the conditional `UPDATE … WHERE status='pending'` is what makes two consumers racing for one delivery safe rather than merely unlikely. The honest ceiling: fine for a fleet, wrong for infrastructure a dozen services depend on. The store is behind a seam so that is a swap and not a rewrite, but nothing here pretends to be replicated.
 
-`reclaim` runs in the sweep and on the claim path **for one subscription only**, not as a global scan on every claim — the previous version's dominant write cost at any real consumer count.
+`reclaim` runs in the sweep and on the claim path **for one subscription only**, not as a global scan on every claim — the previous version's dominant write cost at any real consumer count. An idle long poll does not re-run it at all until the log moves or a lease could plausibly have expired.
+
+Retention and TTL deletion are both guarded by "no unfinished delivery of this message": `deliveries` cascades from `messages`, and a cursor being past a message means it was examined, not that anyone finished it. Blob handles outlive their message row in a `blobs` table so orphans are collectable — a dead letter shares its original's handle, so "no message references it" is the only safe test.
 
 ## HTTP API
 

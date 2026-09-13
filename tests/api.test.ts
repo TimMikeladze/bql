@@ -182,3 +182,66 @@ test("the admin can read stats, the log and mint scoped tokens", async () => {
   await expect(fresh.publish({ subject: "a.b", body: 1 })).resolves.toBeTruthy();
   await expect(fresh.publish({ subject: "b.c", body: 1 })).rejects.toThrow();
 });
+
+test("a publish that merely carries a correlation is not treated as a reply", async () => {
+  // A request that picks its own correlation must not answer itself.
+  const result = await admin.request({
+    subject: "rpc.self",
+    body: "question",
+    correlation: "chosen-by-caller",
+    waitMs: 100,
+  });
+  expect(result.response).toBeNull();
+
+  // Only an explicit reply lands as the answer.
+  await admin.call("/api/publish", {
+    subject: "reply",
+    correlation: "chosen-by-caller",
+    body: "answer",
+    reply: true,
+  });
+  expect((await admin.response("chosen-by-caller"))?.body).toBe("answer");
+});
+
+test("a reply without a correlation is rejected", async () => {
+  await expect(
+    admin.call("/api/publish", { subject: "reply", body: 1, reply: true }),
+  ).rejects.toThrow(/needs a correlation/);
+});
+
+test("an idle long-poll still picks up a message published mid-wait", async () => {
+  // The loop skips redundant claims while the log is unchanged, so this is the
+  // check that it still wakes when the log actually moves.
+  const pending = worker.claim("work", "worker-1", 1, 6000);
+  await Bun.sleep(1200);
+  await admin.publish({ subject: "work.after-idle", body: "woke" });
+  const envelopes = await pending;
+  expect(envelopes).toHaveLength(1);
+  expect(envelopes[0]!.message.body).toBe("woke");
+  await worker.ack(envelopes[0]!.delivery, "worker-1");
+});
+
+test("an expired lease is still reclaimed by a long-poll with a quiet log", async () => {
+  await admin.subscribe({ name: "brief", pattern: "brief.>", ackWaitMs: 1000 });
+  const token = mint(
+    {
+      sub: "brief-1",
+      scope: "consumer",
+      workspace: "default",
+      publish: [],
+      subscribe: ["brief"],
+      exp: 0,
+    },
+    signingKey,
+  );
+  const first = new BusClient({ url, token });
+  await admin.publish({ subject: "brief.one", body: "x" });
+
+  const taken = await first.claim("brief", "brief-1", 1, 2000);
+  expect(taken).toHaveLength(1);
+
+  // Nothing new is published; only the lease expiring makes this claimable.
+  const again = await first.claim("brief", "brief-1", 1, 5000);
+  expect(again).toHaveLength(1);
+  expect(again[0]!.delivery.attempt).toBe(2);
+});

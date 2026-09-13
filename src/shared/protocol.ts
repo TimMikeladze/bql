@@ -36,6 +36,8 @@ export interface PublishRequest {
   replyTo?: string | null;
   correlation?: string | null;
   ttlMs?: number | null;
+  /** Marks this publish as the answer to `correlation`, not a new request. */
+  reply?: boolean;
 }
 
 export interface PublishResult {

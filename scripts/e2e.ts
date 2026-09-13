@@ -109,8 +109,11 @@ try {
   await admin.subscribe({
     name: "work",
     pattern: "work.>",
+    // Short enough that a killed consumer's lease expires quickly, with more
+    // than one attempt left afterwards — the check is that recovery happens,
+    // not that the attempt budget is spent to the last one.
     ackWaitMs: 2500,
-    maxAttempts: 2,
+    maxAttempts: 4,
   });
   await admin.subscribe({ name: "audit", pattern: ">", ackWaitMs: 10_000 });
   await admin.subscribe({ name: "rpc", pattern: "rpc.>", ackWaitMs: 10_000 });
@@ -192,7 +195,13 @@ try {
         : null;
     },
     45_000,
-  );
+  ).catch(async (error) => {
+    const deliveries = (await admin.call("/api/deliveries")) as unknown[];
+    const stats = await admin.stats();
+    console.error("deliveries:", JSON.stringify(deliveries).slice(0, 900));
+    console.error("subs:", JSON.stringify(stats.subscriptions).slice(0, 500));
+    throw error;
+  });
   check(
     "a surviving consumer recovered the expired lease",
     recovered.attempt >= 2,

@@ -160,7 +160,7 @@ export function createServer(options: ServerOptions) {
       try {
         if (path === "/health") return json({ ok: true });
         if (path === "/ready") {
-          const live = store.liveConsumers(DEFAULT_WORKSPACE);
+          const live = store.liveConsumers();
           return live > 0
             ? json({ ok: true, consumers: live })
             : json({ ok: false, reason: "no consumer has checked in" }, 503);
@@ -199,10 +199,14 @@ export function createServer(options: ServerOptions) {
                 ? null
                 : int(body.ttlMs, "ttlMs"),
           });
-          // A reply to an outstanding request is recorded against its
-          // correlation, so the caller can collect it after a restart.
+          // A reply is recorded against its correlation so the caller can
+          // collect it after a restart. It has to say so explicitly: inferring
+          // it from "carries a correlation but no reply-to" would silently turn
+          // a request that chose its own correlation into an answer to itself.
           const correlation = optionalStr(body.correlation, "correlation", 200);
-          if (correlation && body.replyTo === undefined)
+          if (body.reply === true) {
+            if (!correlation)
+              throw new BusError("a reply needs a correlation", 400);
             store.respond(
               workspace,
               correlation,
@@ -210,6 +214,7 @@ export function createServer(options: ServerOptions) {
               (body.body ?? null) as Json,
               headerMap(body.headers, "headers"),
             );
+          }
           return json(result, result.duplicate ? 200 : 201);
         }
 
@@ -263,23 +268,33 @@ export function createServer(options: ServerOptions) {
               Math.max(0, int(body.waitMs, "waitMs", 0)),
             );
             const deadline = Date.now() + waitMs;
+            // An empty claim is not free: it reclaims, materializes and scans
+            // inside a transaction. Idle consumers holding a long poll would
+            // otherwise pay that four times a second each, so once a claim has
+            // come back empty the loop waits for the log to move — or for a
+            // lease to plausibly have expired — before trying again.
+            let seenSeq = -1;
+            let nextRetry = 0;
             for (;;) {
               // A caller that has gone away, or a server being shut down,
               // aborts the request — and continuing to poll after that once
               // meant touching a database that had already been closed.
               if (req.signal.aborted) return json([]);
-              const envelopes = await store.claim(
-                workspace,
-                name,
-                consumer,
-                max,
-              );
-              if (envelopes.length > 0 || Date.now() >= deadline)
-                return json(envelopes);
-              // Long-poll: hold the request rather than making the consumer
-              // spin. A tight loop here is the difference between a bus that
-              // idles at nothing and one that idles at 100% of a core.
-              await Bun.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+              const now = Date.now();
+              const seq = store.lastSeq();
+              if (seq !== seenSeq || now >= nextRetry) {
+                const envelopes = await store.claim(
+                  workspace,
+                  name,
+                  consumer,
+                  max,
+                );
+                if (envelopes.length > 0) return json(envelopes);
+                seenSeq = seq;
+                nextRetry = now + 1000;
+              }
+              if (Date.now() >= deadline) return json([]);
+              await Bun.sleep(Math.min(100, Math.max(1, deadline - Date.now())));
             }
           }
           if (req.method === "POST" && action === "replay") {

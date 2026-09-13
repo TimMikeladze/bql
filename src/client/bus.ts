@@ -116,11 +116,13 @@ export class BusClient {
     const correlation = message.headers.correlation;
     if (!correlation)
       throw new Error("that message carries no correlation to reply to");
-    return this.publish({
+    return this.call<PublishResult>("/api/publish", {
       subject: message.headers["reply-to"] ?? "reply",
       correlation,
       body,
       headers,
+      // Explicit: this publish is an answer, not a new request.
+      reply: true,
     });
   }
 

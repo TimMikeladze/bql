@@ -198,6 +198,9 @@ export class BusStore {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (workspace, correlation))`);
 
+    this.db.run(`CREATE TABLE IF NOT EXISTS blobs (
+      handle TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`);
+
     this.db.run(`CREATE TABLE IF NOT EXISTS consumers (
       id TEXT PRIMARY KEY,
       workspace TEXT NOT NULL,
@@ -222,7 +225,12 @@ export class BusStore {
         `body is ${text.length} bytes and no blob store is configured`,
         413,
       );
-    return { inline: null, blob: await this.blobs.put(uuid(), text) };
+    const handle = await this.blobs.put(uuid(), text);
+    this.db.run(
+      "INSERT INTO blobs (handle, created_at) VALUES (?,?) ON CONFLICT(handle) DO NOTHING",
+      [handle, this.now()],
+    );
+    return { inline: null, blob: handle };
   }
 
   private async readBody(row: MessageRow): Promise<Json> {
@@ -820,20 +828,35 @@ export class BusStore {
   }
 
   deliveries(workspace: string, limit = 200): Delivery[] {
+    // The subscription's name and attempt cap come back on the join: this is
+    // the dashboard's refresh path, and a lookup per row made it 200 queries a
+    // second for a screen showing 200 rows.
     const rows = this.db
       .query(
-        `SELECT d.* FROM deliveries d JOIN subscriptions s ON s.id = d.subscription_id
-         WHERE s.workspace = ? ORDER BY d.updated_at DESC LIMIT ?`,
+        `SELECT d.*, s.name AS subscription_name, s.max_attempts AS subscription_max
+           FROM deliveries d JOIN subscriptions s ON s.id = d.subscription_id
+          WHERE s.workspace = ? ORDER BY d.updated_at DESC LIMIT ?`,
       )
-      .all(workspace, limit) as DeliveryRow[];
-    return rows.map((row) =>
-      this.toDelivery(
-        row,
-        this.db
-          .query("SELECT * FROM subscriptions WHERE id=?")
-          .get(row.subscription_id) as SubscriptionRow,
-      ),
-    );
+      .all(workspace, limit) as (DeliveryRow & {
+      subscription_name: string;
+      subscription_max: number;
+    })[];
+    return rows.map((row) => ({
+      id: row.id,
+      subscriptionId: row.subscription_id,
+      subscription: row.subscription_name,
+      messageSeq: row.message_seq,
+      status: row.status,
+      consumerId: row.consumer_id,
+      generation: row.generation,
+      attempt: row.attempt,
+      maxAttempts: row.subscription_max,
+      leaseUntil: row.lease_until,
+      key: row.key,
+      error: row.error,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
   }
 
   // ------------------------------------------------------------ responses
@@ -948,12 +971,24 @@ export class BusStore {
     ).map((row) => JSON.parse(row.data) as Consumer);
   }
 
-  liveConsumers(workspace: string, withinMs = 60_000): number {
-    const row = this.db
-      .query(
-        "SELECT COUNT(*) AS n FROM consumers WHERE workspace=? AND last_seen > ?",
-      )
-      .get(workspace, this.now() - withinMs) as { n: number };
+  /**
+   * How many consumers have checked in recently. Readiness is a property of the
+   * install, not of one tenant, so `workspace` is optional here — an install
+   * with consumers in some other workspace is still able to run work.
+   */
+  liveConsumers(workspace?: string, withinMs = 60_000): number {
+    const since = this.now() - withinMs;
+    const row = (
+      workspace === undefined
+        ? this.db
+            .query("SELECT COUNT(*) AS n FROM consumers WHERE last_seen > ?")
+            .get(since)
+        : this.db
+            .query(
+              "SELECT COUNT(*) AS n FROM consumers WHERE workspace=? AND last_seen > ?",
+            )
+            .get(workspace, since)
+    ) as { n: number };
     return row.n;
   }
 
@@ -991,23 +1026,58 @@ export class BusStore {
     };
   }
 
-  /** Expire leases, drop expired messages, prune history. */
+  /**
+   * Delete blobs no message references any more.
+   *
+   * Kept off `sweep` because it is the one part that touches a filesystem, and
+   * the sweep runs every second on the same thread as every claim. A dead
+   * letter shares its original's handle, so "no message references it" is the
+   * only safe test — reference counting a two-row relationship is not worth a
+   * table.
+   */
+  async collectBlobs(): Promise<number> {
+    if (!this.blobs) return 0;
+    const orphans = this.db
+      .query(
+        `SELECT handle FROM blobs
+          WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.body_blob = blobs.handle)`,
+      )
+      .all() as { handle: string }[];
+    for (const { handle } of orphans) {
+      await this.blobs.delete(handle);
+      this.db.run("DELETE FROM blobs WHERE handle = ?", [handle]);
+    }
+    return orphans.length;
+  }
+
+  /**
+   * Expire leases, drop expired messages, prune history.
+   *
+   * Both deletions are guarded by the same predicate, for the same reason:
+   * `deliveries` cascades from `messages`, so removing a message removes any
+   * unfinished delivery of it. A cursor being past a message means it was
+   * *examined*, not that anyone finished it — so "every subscription has moved
+   * past it" is not enough on its own.
+   */
   sweep() {
     this.reclaim();
     const now = this.now();
+    const UNFINISHED = `NOT EXISTS (
+      SELECT 1 FROM deliveries d
+       WHERE d.message_seq = messages.seq AND d.status IN ('pending','leased'))`;
+
     this.db.run(
-      "DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?",
+      `DELETE FROM messages
+        WHERE expires_at IS NOT NULL AND expires_at <= ? AND ${UNFINISHED}`,
       [now],
     );
-    if (this.retentionMs > 0) {
-      const cutoff = now - this.retentionMs;
-      // Only prune a message every subscription has moved past, so retention
-      // can never swallow work that was never delivered.
+    if (this.retentionMs > 0)
       this.db.run(
-        `DELETE FROM messages WHERE published_at < ?
-           AND seq <= COALESCE((SELECT MIN(cursor_seq) FROM subscriptions), 0)`,
-        [cutoff],
+        `DELETE FROM messages
+          WHERE published_at < ?
+            AND seq <= COALESCE((SELECT MIN(cursor_seq) FROM subscriptions), 0)
+            AND ${UNFINISHED}`,
+        [now - this.retentionMs],
       );
-    }
   }
 }

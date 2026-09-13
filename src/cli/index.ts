@@ -103,10 +103,16 @@ switch (command) {
         : { assets: "dist" }),
     });
     const sweep = setInterval(() => store.sweep(), 1000);
+    // Blob collection touches a filesystem, so it runs on its own slower
+    // interval rather than on the path every claim shares.
+    const collect = setInterval(() => {
+      void store.collectBlobs().catch(() => {});
+    }, 60_000);
     console.log(`agenticbus http://${server.hostname}:${server.port}`);
     console.log(`admin token  ${stateDir}/admin-token`);
     shutdown(() => {
       clearInterval(sweep);
+      clearInterval(collect);
       server.stop(true);
       store.close();
     });

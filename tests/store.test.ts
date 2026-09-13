@@ -365,3 +365,107 @@ test("a deduplicated request keeps the original correlation", async () => {
   expect(store.response(W, retry.correlation!)?.body).toEqual({ sum: 2 });
   store.close();
 });
+
+test("retention never deletes a message whose delivery is unfinished", async () => {
+  const store = new BusStore(":memory:", { now, retentionMs: 1000 });
+  store.subscribe(W, {
+    name: "work",
+    pattern: "work.>",
+    ackWaitMs: 60_000,
+    deliverFrom: "beginning",
+  });
+  await store.publish(W, { subject: "work.do", body: "unhandled" });
+  await store.publish(W, { subject: "work.do", body: "in-flight" });
+
+  // Move the cursor past both — examined is not the same as finished.
+  const claimed = await store.claim(W, "work", "c1", 1);
+  expect(claimed).toHaveLength(1);
+
+  clock += 10_000;
+  store.sweep();
+
+  // The leased one is still there for its consumer to ack.
+  store.ack(W, claimed[0]!.delivery.id, "c1", claimed[0]!.delivery.generation);
+  // And the one that was never delivered is still waiting.
+  const rest = await store.claim(W, "work", "c1", 10);
+  expect(rest.map((e) => e.message.body)).toEqual(["in-flight"]);
+  store.close();
+});
+
+test("retention does collect messages every subscription has settled", async () => {
+  const store = new BusStore(":memory:", { now, retentionMs: 1000 });
+  store.subscribe(W, {
+    name: "work",
+    pattern: "work.>",
+    ackWaitMs: 60_000,
+    deliverFrom: "beginning",
+  });
+  await store.publish(W, { subject: "work.do", body: 1 });
+  const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
+  store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
+
+  clock += 10_000;
+  store.sweep();
+  expect(store.stats(W).messages).toBe(0);
+  store.close();
+});
+
+test("a ttl does not delete a message a consumer is holding", async () => {
+  const store = new BusStore(":memory:", { now, retentionMs: 0 });
+  store.subscribe(W, {
+    name: "work",
+    pattern: "work.>",
+    ackWaitMs: 60_000,
+    deliverFrom: "beginning",
+  });
+  await store.publish(W, { subject: "work.do", body: 1, ttlMs: 1000 });
+  const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
+
+  clock += 5000;
+  store.sweep();
+  // The handler is still running; taking its message away would leave it
+  // acking a delivery that no longer exists.
+  expect(() =>
+    store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation),
+  ).not.toThrow();
+  store.close();
+});
+
+test("blobs are collected once no message references them", async () => {
+  const blobs = new Map<string, string>();
+  const store = new BusStore(":memory:", {
+    now,
+    inlineMaxBytes: 32,
+    retentionMs: 1000,
+    blobs: {
+      put: async (key, data) => {
+        blobs.set(key, data);
+        return key;
+      },
+      get: async (handle) => blobs.get(handle)!,
+      delete: async (handle) => {
+        blobs.delete(handle);
+      },
+    },
+  });
+  store.subscribe(W, {
+    name: "work",
+    pattern: "work.>",
+    ackWaitMs: 60_000,
+    deliverFrom: "beginning",
+  });
+  await store.publish(W, { subject: "work.do", body: { big: "x".repeat(200) } });
+  expect(blobs.size).toBe(1);
+
+  // Still referenced while the message lives.
+  expect(await store.collectBlobs()).toBe(0);
+
+  const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
+  store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
+  clock += 10_000;
+  store.sweep();
+
+  expect(await store.collectBlobs()).toBe(1);
+  expect(blobs.size).toBe(0);
+  store.close();
+});
