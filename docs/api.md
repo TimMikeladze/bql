@@ -89,7 +89,7 @@ Accepted as body fields on every statement-bearing request, and two of them as h
 | `rows` | — | `"array"`, `"object"` | `"array"` |
 | `maxRows` | — | positive integer; a result above it fails the request | `[limits] maxRows`, 10000 |
 | `timeoutMs` | — | positive integer, clamped to the configured limit | `[limits] queryTimeoutMs` |
-| `ack` | `BunQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `local` |
+| `ack` | `BunQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `fsync` |
 | `minTxid` | `BunQL-Min-Txid` | integer; the request waits up to 2 s, then `425` | none |
 | `consistency` | — | `"ryw"`, `"primary"`, `"any"` | `"ryw"` |
 
@@ -118,8 +118,15 @@ Two failures belong to the replica levels, and **neither rolls anything back**:
   arrive within `[replication] ackTimeoutMs`. The body carries the `txid` that committed, plus
   `acks` and `needed`. Retrying the statement would write it twice; read the txid back instead.
 
-**`ack: "local"` and failover lose the tail.** This is the default, and it is worth stating as
-plainly as it deserves: a write answered `local` is durable on **one** node. Failover picks the
+**The default is `fsync`**, so a write is on this machine's disk before it is answered. It costs
+what an `fdatasync` costs — measured on an Apple SSD, a single-row write goes from **24.0 us to
+65.0 us at p50** — and it is the default for the same reason `synchronous_commit = on` is
+Postgres's and `innodb_flush_log_at_trx_commit = 1` is MySQL's: a database that loses acknowledged
+transactions on power loss should say so rather than do it quietly. `ack: "local"` is the opt-out
+and is 2.7x faster.
+
+**`ack: "local"` and failover lose the tail.** Worth stating as plainly as it deserves: a write
+answered `local` is durable on **one** node, and not on its disk. Failover picks the
 replica with the highest txid the control plane has been told about, which is the best any replica
 has — but a primary that dies may have committed and *answered* transactions past that point which
 no replica ever received. Those are gone, and nothing reports a gap: the new primary simply starts
@@ -1502,8 +1509,10 @@ operation on the socket runs as it; `ro` on the database is what a subscription 
 
 ### `[durability] deferAppend`
 
-Off by default. On, a committed transaction is filed in the replication log **after** the client has
-been answered, for `ack: "local"` only — which takes a write from ~21 µs to ~9 µs while keeping
+**On by default.** A committed transaction is filed in the replication log **after** the client has
+been answered, for `ack: "local"` only — so with the default `ack` of `fsync` it does nothing, and
+it is on so that a deployment which chooses `local` for speed gets the safe version of that choice
+rather than the slow one. On, it takes such a write from ~21 us to ~9 us — which takes a write from ~21 µs to ~9 µs while keeping
 compression's 4.3x ratio, faster than turning compression off and at a quarter of its bytes.
 
 It is safe because the data is already durable when the append starts: SQLite has committed, and a
@@ -1513,6 +1522,27 @@ never deferred — they wait on a record having shipped, which needs it encoded.
 
 What it costs: a replica and the change feed see a transaction one microtask later, and a crash
 between the answer and the append is recovered rather than free. `docs/p5-deferred-compression.md`.
+
+### `[limits] groupCommit`
+
+**On by default.** Writes that arrive while the writer is busy are folded into one transaction:
+every fixed cost of the write path is per transaction, so this turns concurrency into batch size.
+Measured **4.7x at 64 concurrent clients and 2.2x at four** — and **15% slower for a single client**
+with nobody to fold with, because the drain costs an event-loop iteration and one socket's messages
+arrive one per iteration.
+
+**What it changes for a client, which is the part to read.** Folded writes **share one txid**. Each
+statement still gets its own result, its own `rowsAffected` and its own failure; what is no longer
+one-to-one is the *transaction*. Two consequences:
+
+- **The change feed emits one event per fold**, not one per write. A CDC consumer sees fewer, fatter
+  events carrying every row change in the fold.
+- **`BunQL-Min-Txid` is coarser.** A txid you were handed covers your write and possibly others, so
+  reading at it is still read-your-writes — it cannot be *weaker*, only less precise about whose
+  other writes came with yours.
+
+Set it to `false` for a strict txid per write. `docs/p2-group-commit.md`; `test/e2e/` is where the
+contract is written down.
 
 ### Writes on a replica
 
@@ -1632,7 +1662,7 @@ the canonical one wins when both are set.
 | `[sqlite] foreignKeys` | `false` | `BUNQL_SQLITE_FOREIGN_KEYS` | — |
 | `[sqlite] trustedSchema` | `true` | `BUNQL_SQLITE_TRUSTED_SCHEMA` | — |
 | `[sqlite] cellSizeCheck` | `false` | `BUNQL_SQLITE_CELL_SIZE_CHECK` | — |
-| `[durability] defaultAck` | `"local"` (also `fsync`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
+| `[durability] defaultAck` | `"fsync"` (also `local`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
 | `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
 | `[durability] retention` | `"7d"` (`"0"` keeps everything) | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
 | `[durability] sweepIntervalMs` | `300000` (`0` sweeps only at start) | `BUNQL_DURABILITY_SWEEP_INTERVAL_MS` | — |
@@ -1653,7 +1683,7 @@ the canonical one wins when both are set.
 | `[limits] txWaitMs` | `5000` | `BUNQL_LIMITS_TX_WAIT_MS` | `BUNQL_TX_WAIT_MS` |
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
-| `[limits] groupCommit` | `false` | `BUNQL_LIMITS_GROUP_COMMIT` | — |
+| `[limits] groupCommit` | `true` | `BUNQL_LIMITS_GROUP_COMMIT` | — |
 | `[limits] maxReadTx` | `16` | `BUNQL_LIMITS_MAX_READ_TX` | — |
 | `[limits] readTxTimeoutMs` | `30000` | `BUNQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
 | `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |

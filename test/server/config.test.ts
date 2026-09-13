@@ -25,7 +25,11 @@ describe("loadConfig", () => {
     expect(config.realtime.ringBytes).toBe(10_000_000)
     expect(config.realtime.maxLiveQueries).toBe(1000)
     expect(config.realtime.maxRowsPerLive).toBe(1000)
-    expect(config.durability.defaultAck).toBe("local")
+    // Production defaults, settled 2026-09-13: a write is durable on this machine before it is
+    // answered, the log append is filed after the answer, and writes that arrive together fold.
+    expect(config.durability.defaultAck).toBe("fsync")
+    expect(config.durability.deferAppend).toBe(true)
+    expect(config.limits.groupCommit).toBe(true)
     expect(config.server.tenantFromHost).toBe(false)
     expect(config.server.cors).toBe(true)
     // C5: mechanism A is the default replica apply (`docs/c5-apply-pages.md`).

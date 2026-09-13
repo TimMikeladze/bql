@@ -165,16 +165,26 @@ describe("bunql end to end", () => {
       const perDb = TASKS * WRITES_PER_TASK / DBS.length
       for (const name of DBS) {
         const txids = committed.get(name) as number[]
+        // Every write is still answered, with its own result and its own txid.
         expect(txids.length).toBe(perDb)
-        // The single writer hands out a dense, ascending txid per commit.
         const sorted = [...txids].sort((a, b) => a - b)
-        expect(new Set(sorted).size).toBe(perDb)
-        expect(sorted[sorted.length - 1] as number).toBe((sorted[0] as number) + perDb - 1)
+        const distinct = [...new Set(sorted)]
+        // **`[limits] groupCommit` is on by default**, so writes that arrive together are folded
+        // into one transaction and share its txid. This is the contract that change made, and it
+        // is written down here: there are no more transactions than writes, and the txid space the
+        // single writer hands out is still one dense ascending run — it is the *writes per
+        // transaction* that moved, not the sequence.
+        expect(distinct.length).toBeLessThanOrEqual(perDb)
+        expect(distinct.length).toBeGreaterThan(0)
+        expect(distinct[distinct.length - 1] as number).toBe(
+          (distinct[0] as number) + distinct.length - 1,
+        )
       }
 
-      // Every SSE subscriber saw every commit, once.
+      // Every SSE subscriber saw every commit, once — one event per *transaction*, which under a
+      // fold is fewer events than writes and never fewer than transactions.
       for (const name of DBS) {
-        const expected = [...(committed.get(name) as number[])].sort((a, b) => a - b)
+        const expected = [...new Set(committed.get(name) as number[])].sort((a, b) => a - b)
         for (const collector of feeds.get(name) as SseCollector[]) {
           await collector.waitFor(
             () => collector.of("change").length >= expected.length,

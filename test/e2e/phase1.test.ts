@@ -126,7 +126,8 @@ describe("a primary, two replicas, a bucket and a libsql client", () => {
   test("concurrent writers on three routes at once land on every node", async () => {
     // Native writes on the primary, forwarded writes through a replica, and a Hrana client, all
     // writing the same table at the same time. The txid space is one dense sequence whichever
-    // route a write took, because every one of them ends up on the primary's single writer.
+    // route a write took, because every one of them ends up on the primary's single writer — and
+    // since group commit became the default, several writes may share one point in that sequence.
     const before = Number(primary.handle.registry.open(DB).txid)
     const txids: number[] = []
 
@@ -154,8 +155,23 @@ describe("a primary, two replicas, a bucket and a libsql client", () => {
 
     expectedRows = TASKS * WRITES_PER_TASK + WRITES_PER_TASK
     const sorted = [...txids].sort((a, b) => a - b)
-    expect(new Set(sorted).size).toBe(sorted.length)
+    // Every write that reported a txid is here — the Hrana lane above asserts its own results
+    // rather than collecting them — and every txid is past where the database started.
+    expect(sorted.length).toBe(TASKS * WRITES_PER_TASK)
     expect(sorted[0]).toBeGreaterThan(before)
+    // **`[limits] groupCommit` is on by default**, so concurrent writes — including the ones
+    // forwarded from a replica — fold into one transaction and share its txid. Repeats here are
+    // the fold, not a lost write: the row count below is what proves every one of them landed.
+    //
+    // Not asserted: that these txids are a *dense* run. The Hrana lane above commits into the same
+    // sequence without reporting into `txids`, so the collected ones have gaps whether or not
+    // anything folds. What is true either way is that they all name transactions this database
+    // actually has.
+    const distinct = [...new Set(sorted)]
+    expect(distinct.length).toBeLessThanOrEqual(sorted.length)
+    expect(sorted[sorted.length - 1] as number).toBeLessThanOrEqual(
+      Number(primary.handle.registry.open(DB).txid),
+    )
 
     expect(await converged("every node to hold every write")).toBe(expectedRows)
   }, 30_000)

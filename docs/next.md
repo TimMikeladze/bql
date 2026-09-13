@@ -68,20 +68,32 @@ them no longer refuses `ack: "replica"` on the other nine. Same shape as per-dat
 — a nullable catalog column and `PATCH /v1/db/{db}` — but read at ack time rather than held on a
 connection, so setting it closes nothing.
 
-### The three questions this session asked and did not get an answer to
+### The three defaults, settled: production ones
 
-They are in the session's opening message and they are still open. Nothing was changed for any of
-them, so each is still one line:
+Asked at the start of the session and answered at the end of it — *"take recommendations"*. All
+three are flipped, and each is a client-visible change rather than a tuning knob, so each is written
+down in `docs/api.md` as well as here.
 
-1. **Default `ack`** — still `local`. `replica` on a node that has replicas is the alternative; the
-   reason to leave it is that `NO_REPLICAS` then fires when the only replica is restarting. R8 makes
-   it per-database now, which is the blunt-instrument objection answered.
-2. **`[durability] deferAppend`** — built, verified, **still off**. 2.4x on a write (21 → 9 µs)
-   keeping compression's 4.3x ratio, suite green with it forced on, `kill -9` verified.
-   `docs/p5-deferred-compression.md`.
-3. **`[limits] groupCommit`** — **still off**. Folded writes share a txid, which coarsens the change
-   feed; two e2e tests assert one txid per write and are where that contract is written down.
-   `docs/p2-group-commit.md`.
+1. **`[durability] defaultAck` is `"fsync"`**, was `local`. A write is on this machine's disk before
+   it is answered, which is what `synchronous_commit = on` means in Postgres and
+   `innodb_flush_log_at_trx_commit = 1` in MySQL. **Benched before flipping, as promised: a
+   single-row write goes 24.0 µs → 65.0 µs at p50** on an Apple SSD — a 2.7x tax, not the 5x cliff
+   that would have changed the answer. `ack: "local"` is the opt-out. Deliberately **not**
+   `"replica"`: that couples every write's success to a peer being attached, so one restarting
+   replica takes writes down.
+2. **`[durability] deferAppend` is on.** With `defaultAck` now `fsync` it is dormant — it only
+   applies to `ack: "local"` — and that is the point: a deployment that chooses `local` for speed
+   gets the safe fast version without having to know the flag exists.
+3. **`[limits] groupCommit` is on.** 4.7x at 64 concurrent clients, 2.2x at four, and **15% slower
+   for a single client** with nobody to fold with. It changes what a client sees and the change is
+   documented rather than defaulted away: folded writes share one txid, so the change feed emits one
+   event per fold and `BunQL-Min-Txid` is coarser — never weaker, since a txid covering more than
+   your write still satisfies read-your-writes.
+
+**The two e2e tests that asserted one txid per write were rewritten, not deleted**, because they are
+where that contract lives: they now assert that every write is answered, that there are no more
+transactions than writes, and that the fold is visible in the change feed. `test/e2e/scenario.test.ts`
+and `test/e2e/phase1.test.ts`.
 
 ### What the performance session established, and it still shapes where to look
 
@@ -371,11 +383,14 @@ through a handle opened for sharing — and most of the 150 go with it. The `win
 already in CI and is the instrument for saying whether it worked; it becomes a gate by deleting its
 `continue-on-error` lines. One test also hard-codes `/tmp/bunql-canonical`, which is just a typo.
 
-### 2. The three defaults nobody has ruled on
+### 2. Re-measure the ladders against the new defaults
 
-`[durability] defaultAck`, `[durability] deferAppend` and `[limits] groupCommit` — see the section
-above. Each is one line plus a paragraph of `docs/api.md`, and each is a *decision* rather than a
-piece of work.
+Every throughput figure in this file and in `docs/performance.md` was taken with `defaultAck =
+local` and `groupCommit` off. Both defaults moved, in opposite directions and by more than the
+noise: a single write now pays an `fdatasync` (24.0 → 65.0 µs) and concurrent writes now fold (4.7x
+at 64 clients). **Nothing here is wrong, but the headline numbers no longer describe a default
+node.** `bun run bench --json` and a pass over `docs/performance.md` §1 and §5 is the honest
+follow-up, and `bench/router.ts` is the harness to trust for anything within 10%.
 
 ### One flaky test, observed
 

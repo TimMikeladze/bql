@@ -97,6 +97,16 @@ export interface SqliteSection {
 }
 
 export interface DurabilitySection {
+  /**
+   * What a write is answered at when the request does not say. **`"fsync"` since 2026-09-13**: a
+   * write is on this machine's disk before it is acknowledged, which is what
+   * `synchronous_commit = on` and `innodb_flush_log_at_trx_commit = 1` mean elsewhere. It costs
+   * what an `fdatasync` costs — 24.0 us to 65.0 us at p50 on an Apple SSD — and `"local"` is the
+   * opt-out for a deployment that would rather have the 2.7x.
+   *
+   * Not `"replica"`, even on a node that has replicas: that would couple every write's success to
+   * a peer being attached, so one restarting replica would take writes down.
+   */
   defaultAck: DefaultAck
   checkpointWalBytes: number
   /**
@@ -148,7 +158,12 @@ export interface DurabilitySection {
    *
    * Safe because a log record is **derived from the WAL** rather than authored: a crash in the
    * window is recovered by the reconcile that already runs after an unclean shutdown, re-polling
-   * the WAL from the saved position. Off by default; `docs/p5-deferred-compression.md`.
+   * the WAL from the saved position.
+   *
+   * **On by default since 2026-09-13.** With `defaultAck` now `"fsync"` it is dormant unless a
+   * deployment asks for `ack: "local"` — and the point of the default is that such a deployment
+   * gets the fast version of that choice without having to know this flag exists.
+   * `docs/p5-deferred-compression.md`.
    */
   deferAppend: boolean
 }
@@ -189,10 +204,12 @@ export interface LimitsSection {
    * 4.7x at 64 concurrent clients, 2.2x at four, and 15% *slower* for a single client with nobody
    * to fold with.
    *
-   * **Off by default, because it changes what a client sees**: folded writes share one txid and
-   * the change feed emits one event for the fold. Each statement still gets its own result and its
-   * own failure. Per the rule in `docs/c6-packaging.md`, a setting that changes meaning does not
-   * take a new default.
+   * **On by default since 2026-09-13**, because production means concurrency. It does change what
+   * a client sees — folded writes share one txid and the change feed emits one event for the fold —
+   * but not in a direction that can be wrong: each statement still gets its own result and its own
+   * failure, and a txid that covers more than your write still satisfies read-your-writes. What it
+   * costs is precision in the change feed, which is documented rather than defaulted away.
+   * `false` restores a strict txid per write.
    */
   groupCommit: boolean
   /** Most statements one group commit folds. Default 64. */
@@ -424,14 +441,14 @@ export const DEFAULT_CONFIG: ServerConfig = {
     defensive: false,
   },
   durability: {
-    defaultAck: "local",
+    defaultAck: "fsync",
     checkpointWalBytes: 4_000_000,
     retention: "7d",
     sweepIntervalMs: 300_000,
     maxLogBytes: 0,
     segmentBytes: 16 * 1024 * 1024,
     compress: true,
-    deferAppend: false,
+    deferAppend: true,
     snapshotIntervalMs: 60 * 60 * 1000,
   },
   realtime: {
@@ -450,7 +467,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     txWaitMs: 5000,
     maxBodyBytes: 8 * 1024 * 1024,
     maxImportBytes: 1024 * 1024 * 1024,
-    groupCommit: false,
+    groupCommit: true,
     groupCommitMax: 64,
     maxReadTx: 16,
     readTxTimeoutMs: 30_000,
