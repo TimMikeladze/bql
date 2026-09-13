@@ -4,6 +4,11 @@
 //   <prefix>db/<name>/manifest.json
 //   <prefix>db/<name>/snapshots/<20-digit txid>.db.zst
 //   <prefix>db/<name>/segments/<20-digit startTxid>-<20-digit endTxid>.seg.zst
+//   <prefix>db/<name>/index/<20-digit startTxid>-<20-digit endTxid>.json
+//
+// The manifest holds only the *tail* of the segment inventory; everything older is frozen into
+// immutable index chunks under `index/` and found by listing, which is what keeps the manifest a
+// bounded object rather than one that is rewritten whole on every drain (`docs/r9-segment-index.md`).
 //
 // Invariant: keys sort lexicographically in txid order. That is what makes a plain
 // `ListObjectsV2` return an ordered inventory with nothing to sort, and it is why every txid is
@@ -20,7 +25,27 @@
 /** Width of every txid in a key: `2^64 - 1` is twenty digits. */
 export const TXID_WIDTH = 20
 
-export const MANIFEST_VERSION = 1
+/**
+ * 2 since R9, which moved the bulk of the segment inventory out of the manifest. A version-1
+ * manifest is still read — its `segments` array is the whole inventory and there are no chunks —
+ * so an older bucket keeps restoring and the first drain migrates it.
+ */
+export const MANIFEST_VERSION = 2
+
+/** Versions `decodeManifest` accepts. */
+const READABLE_VERSIONS = new Set([1, 2])
+
+/**
+ * Entries in one frozen index chunk, and so the point at which the manifest's tail is frozen: the
+ * oldest `INDEX_CHUNK` entries go into a chunk object as soon as that many have accumulated.
+ *
+ * The manifest therefore carries between 0 and `INDEX_CHUNK - 1` segment entries — 16 on average —
+ * whatever the age of the database, which is the whole point of `docs/r9-segment-index.md`. The
+ * number is the one trade-off in the design: the per-drain manifest body is O(INDEX_CHUNK) and the
+ * number of chunk objects a restore lists is O(segments / INDEX_CHUNK), so it is a straight swap
+ * between what a running database uploads and what a restore enumerates.
+ */
+export const INDEX_CHUNK = 32
 
 export function padTxid(txid: bigint): string {
   return txid.toString().padStart(TXID_WIDTH, "0")
@@ -47,6 +72,47 @@ export function snapshotPrefix(prefix: string, db: string): string {
 
 export function segmentPrefix(prefix: string, db: string): string {
   return `${dbPrefix(prefix, db)}segments/`
+}
+
+/**
+ * Frozen segment-inventory chunks. A **sibling** of `segments/` rather than a child of it, because
+ * `Shipper.#sweepOrphans` lists `segments/` and deletes every key the manifest does not name — a
+ * chunk under that prefix would be swept away the moment it was written.
+ */
+export function indexPrefix(prefix: string, db: string): string {
+  return `${dbPrefix(prefix, db)}index/`
+}
+
+/**
+ * A chunk key carries its range *and* a random tag. The range is what makes the listing ordered
+ * and readable without fetching bodies; the tag is because a segment key does not carry a
+ * generation, so two timelines in one prefix can produce the same txid range — and a chunk that
+ * overwrote another generation's chunk would take its entries with it. Duplicates across chunks
+ * are what `mergeInventory` is for; a lost chunk has no remedy.
+ */
+export function indexChunkKey(
+  prefix: string,
+  db: string,
+  startTxid: bigint,
+  endTxid: bigint,
+  tag = newChunkTag(),
+): string {
+  return `${indexPrefix(prefix, db)}${padTxid(startTxid)}-${padTxid(endTxid)}-${tag}.json`
+}
+
+function newChunkTag(): string {
+  const bytes = new Uint8Array(4)
+  crypto.getRandomValues(bytes)
+  let out = ""
+  for (const byte of bytes) out += byte.toString(16).padStart(2, "0")
+  return out
+}
+
+/** The `(start, end)` an index chunk key names, or null when the key is not one of ours. */
+export function parseIndexChunkKey(key: string): { startTxid: bigint; endTxid: bigint } | null {
+  const match = /\/index\/(\d{20})-(\d{20})-[0-9a-f]{8}\.json$/.exec(key)
+  if (!match) return null
+  return { startTxid: BigInt(match[1] as string), endTxid: BigInt(match[2] as string) }
 }
 
 export function snapshotKey(prefix: string, db: string, txid: bigint): string {
@@ -136,6 +202,53 @@ export interface Manifest {
   segments: SegmentEntry[]
 }
 
+/** One frozen chunk of the segment inventory. Written once, never rewritten. */
+export interface IndexChunk {
+  version: number
+  db: string
+  segments: SegmentEntry[]
+}
+
+export function encodeIndexChunk(db: string, segments: SegmentEntry[]): string {
+  return `${JSON.stringify({ version: MANIFEST_VERSION, db, segments } satisfies IndexChunk, null, 2)}\n`
+}
+
+/**
+ * Parses a chunk, or returns null for a body that is not one — which is what a torn `PUT` leaves
+ * behind. The caller fails loudly on null rather than skipping it: a skipped chunk is a hole in
+ * the middle of the inventory, and `planRestore` would then refuse a restore the bucket can serve.
+ */
+export function decodeIndexChunk(body: Uint8Array | string): SegmentEntry[] | null {
+  const text = typeof body === "string" ? body : new TextDecoder().decode(body)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== "object") return null
+  const chunk = parsed as Partial<IndexChunk>
+  if (typeof chunk.version !== "number" || !READABLE_VERSIONS.has(chunk.version)) return null
+  if (!Array.isArray(chunk.segments)) return null
+  return chunk.segments
+}
+
+/**
+ * The inventory as one ordered array, from the frozen chunks and the manifest's tail.
+ *
+ * A **merge by key**, not a concatenation: a crash between freezing a chunk and rewriting the
+ * manifest leaves the same entries in both, and the two readings have to agree. The tail wins,
+ * because it is the newer copy of the same fact.
+ */
+export function mergeInventory(chunks: SegmentEntry[][], tail: SegmentEntry[]): SegmentEntry[] {
+  const byKey = new Map<string, SegmentEntry>()
+  for (const chunk of chunks) {
+    for (const entry of chunk) byKey.set(entry.key, entry)
+  }
+  for (const entry of tail) byKey.set(entry.key, entry)
+  return [...byKey.values()].sort(byTxid((one) => BigInt(one.startTxid)))
+}
+
 /** A manifest for a database nothing has been shipped for yet. */
 export function emptyManifest(db: string, pageSize: number, generation: string): Manifest {
   const now = Date.now()
@@ -182,11 +295,13 @@ export function decodeManifest(body: Uint8Array | string): Manifest | null {
   }
   if (!parsed || typeof parsed !== "object") return null
   const manifest = parsed as Partial<Manifest>
-  if (manifest.version !== MANIFEST_VERSION) return null
+  if (typeof manifest.version !== "number" || !READABLE_VERSIONS.has(manifest.version)) return null
   if (typeof manifest.db !== "string") return null
   if (!Array.isArray(manifest.snapshots) || !Array.isArray(manifest.segments)) return null
   return {
-    version: MANIFEST_VERSION,
+    // Carried through rather than stamped: a version-1 body holds its whole inventory and has no
+    // chunks to go and find, and `readManifest` needs to know which it is looking at.
+    version: manifest.version,
     db: manifest.db,
     generation: manifest.generation ?? "",
     pageSize: manifest.pageSize ?? 0,

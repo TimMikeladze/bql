@@ -39,8 +39,34 @@ export class FakeS3 {
   offline = false
   /** Answer `403 AccessDenied`, which is the one failure that must never be retried. */
   denyAll = false
-  /** Every request the server saw, for assertions about ordering. */
-  readonly log: Array<{ method: string; key: string; status: number }> = []
+  /**
+   * Every request the server saw, for assertions about ordering. `bytes` is the request body's
+   * length on a `PUT` and 0 otherwise — which is what makes "how many bytes did this workload
+   * upload" a question the harness can answer (`docs/r9-open-segment.md`).
+   */
+  readonly log: Array<{ method: string; key: string; status: number; bytes: number }> = []
+
+  /** Bytes uploaded, by key. A key uploaded twice counts twice, which is the whole point. */
+  uploadedBytes(match?: (key: string) => boolean): number {
+    let total = 0
+    for (const entry of this.log) {
+      if (entry.method !== "PUT" || entry.status !== 200) continue
+      if (match && !match(entry.key)) continue
+      total += entry.bytes
+    }
+    return total
+  }
+
+  /** How many `PUT`s landed on each key, oldest first. */
+  uploadCounts(match?: (key: string) => boolean): Map<string, number> {
+    const counts = new Map<string, number>()
+    for (const entry of this.log) {
+      if (entry.method !== "PUT" || entry.status !== 200) continue
+      if (match && !match(entry.key)) continue
+      counts.set(entry.key, (counts.get(entry.key) ?? 0) + 1)
+    }
+    return counts
+  }
 
   #server: ReturnType<typeof Bun.serve> | null = null
   #port = 0
@@ -203,7 +229,7 @@ export class FakeS3 {
       lastModified: Date.now(),
       etag,
     })
-    this.#note("PUT", key, 200)
+    this.#note("PUT", key, 200, body.byteLength)
     return new Response(null, { status: 200, headers: { etag } })
   }
 
@@ -306,8 +332,9 @@ export class FakeS3 {
     const parts = this.#uploads.get(uploadId)
     if (!parts) return this.#error("PUT", uploadId, 404, "NoSuchUpload", uploadId)
     const number = Number(url.searchParams.get("partNumber") ?? "1")
-    parts.set(number, new Uint8Array(await request.arrayBuffer()))
-    this.#note("PUT", `${uploadId}#${number}`, 200)
+    const part = new Uint8Array(await request.arrayBuffer())
+    parts.set(number, part)
+    this.#note("PUT", `${uploadId}#${number}`, 200, part.byteLength)
     return new Response(null, { status: 200, headers: { etag: `"part-${number}"` } })
   }
 
@@ -349,8 +376,8 @@ export class FakeS3 {
     )
   }
 
-  #note(method: string, key: string, status: number): void {
-    this.log.push({ method, key, status })
+  #note(method: string, key: string, status: number, bytes = 0): void {
+    this.log.push({ method, key, status, bytes })
   }
 }
 

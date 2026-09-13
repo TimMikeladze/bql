@@ -8,11 +8,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import path from "node:path"
 import {
+  decodeIndexChunk,
+  INDEX_CHUNK,
+  listIndexChunks,
   manifestKey,
   readManifest,
   RestoreError,
   restoreFromBucket,
   restoreIntoCatalog,
+  segmentPrefix,
   Shipper,
   verifyBucket,
 } from "../../src/storage/index.ts"
@@ -598,6 +602,159 @@ describe("a snapshot base", () => {
     expect(result.txid).toBe(tenant.txid)
     expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
     expect(fs.existsSync(path.join(into, "meta.json"))).toBe(false)
+    await shipper.close()
+  })
+})
+
+// R9 (`docs/r9-segment-index.md`). The claim is not "the inventory is smaller" — it is the same
+// inventory — but that the *manifest body* stops growing with the age of the database, because the
+// old one was rewritten whole on every drain and carried an entry per segment ever shipped.
+describe("the segment index", () => {
+  /** The manifest object's size in the bucket, which is what a drain uploads. */
+  async function manifestBytes(prefix: string, db: string): Promise<number> {
+    const head = await backend.store().head(manifestKey(prefix, db))
+    return head?.size ?? 0
+  }
+
+  async function chunkCount(prefix: string, db: string): Promise<number> {
+    return (await listIndexChunks(backend.store(), prefix, db)).length
+  }
+
+  test("the manifest stops growing while the inventory keeps growing", async () => {
+    const registry = openRegistry()
+    const tenant = await openTenant(registry, "bounded")
+    const prefix = backend.prefix()
+    const shipper = shipperFor("bounded", prefix, { retentionMs: 0 })
+    shipper.bind(tenant)
+
+    // One drain per write, which is what `shipIntervalMs` does to a steadily written database and
+    // the shape that made the old manifest quadratic.
+    let early = 0
+    for (let i = 1; i <= 200; i++) {
+      writeRows(tenant, i, 1)
+      await shipper.flush()
+      if (i === 40) early = await manifestBytes(prefix, "bounded")
+    }
+    const late = await manifestBytes(prefix, "bounded")
+
+    const manifest = await readManifest(backend.store(), prefix, "bounded")
+    // The inventory really did grow — otherwise the size claim below is about nothing.
+    expect(manifest.segments.length).toBeGreaterThan(INDEX_CHUNK * 3)
+    expect(await chunkCount(prefix, "bounded")).toBeGreaterThanOrEqual(3)
+    // And the body a drain uploads did not. The bound is the tail, which never holds more than
+    // `INDEX_CHUNK` entries however many segments the database has.
+    expect(late).toBeLessThan(early * 2)
+    expect(manifest.shippedTxid).toBe(tenant.txid.toString())
+
+    // Bounded and still restorable byte for byte, which is the only thing the inventory is for.
+    const into = tempDir("bunql-restore-")
+    const result = await restoreFromBucket({
+      store: backend.store(),
+      prefix,
+      db: "bounded",
+      dir: into,
+    })
+    expect(result.txid).toBe(tenant.txid)
+    expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
+    await shipper.close()
+  })
+
+  test("a frozen chunk is only ever written full, and never rewritten", async () => {
+    const registry = openRegistry()
+    const tenant = await openTenant(registry, "chunks")
+    const prefix = backend.prefix()
+    const shipper = shipperFor("chunks", prefix, { retentionMs: 0 })
+    shipper.bind(tenant)
+    for (let i = 1; i <= 120; i++) {
+      writeRows(tenant, i, 1)
+      await shipper.flush()
+    }
+    const keys = await listIndexChunks(backend.store(), prefix, "chunks")
+    expect(keys.length).toBeGreaterThanOrEqual(3)
+
+    const fake = backend.fake
+    if (fake) {
+      // Immutable is the property the whole design leans on: a chunk written twice would be the
+      // quadratic rewrite back again, wearing a different name.
+      for (const [key, count] of fake.uploadCounts((one) => one.includes("/index/"))) {
+        expect({ key, count }).toEqual({ key, count: 1 })
+      }
+    }
+    // Each chunk holds exactly `INDEX_CHUNK` entries, which is what makes the number of objects a
+    // restore lists `segments / INDEX_CHUNK` rather than one per drain.
+    for (const key of keys) {
+      const entries = decodeIndexChunk(await backend.store().get(key))
+      expect(entries?.length).toBe(INDEX_CHUNK)
+    }
+    await shipper.close()
+  })
+
+  test("retention prunes the chunks with the segments, and what is left still restores", async () => {
+    const registry = openRegistry()
+    const tenant = await openTenant(registry, "pruned")
+    const prefix = backend.prefix()
+    const shipper = shipperFor("pruned", prefix, {
+      retentionMs: 1,
+      retentionSweepMs: 0,
+      maxBatchBytes: 512,
+    })
+    shipper.bind(tenant)
+    for (let i = 1; i <= 120; i++) {
+      writeRows(tenant, i, 1)
+      await shipper.flush()
+    }
+    const before = await chunkCount(prefix, "pruned")
+    expect(before).toBeGreaterThanOrEqual(3)
+
+    // Two snapshots with writes between them, so retention has a floor it is allowed to move up to.
+    await tenant.snapshot()
+    await shipper.flush()
+    writeRows(tenant, 500, 40)
+    await shipper.flush()
+    await tenant.snapshot()
+    await shipper.flush()
+    await shipper.flush()
+
+    expect(await chunkCount(prefix, "pruned")).toBeLessThan(before)
+    const manifest = await readManifest(backend.store(), prefix, "pruned")
+    const oldest = BigInt(manifest.snapshots[0]?.txid ?? "0")
+    // Nothing the surviving snapshot still needs was taken with them.
+    for (const segment of manifest.segments) {
+      expect(BigInt(segment.endTxid)).toBeGreaterThanOrEqual(oldest)
+    }
+    // And no entry survives in a chunk naming an object that has been deleted, which is the one
+    // thing a reader is promised never to meet.
+    const keys = new Set((await backend.store().list({ prefix: segmentPrefix(prefix, "pruned") })).map((one) => one.key))
+    for (const segment of manifest.segments) expect(keys.has(segment.key)).toBe(true)
+
+    const verified = await verifyBucket({ store: backend.store(), prefix, db: "pruned" })
+    expect(verified.ok).toBe(true)
+    const into = tempDir("bunql-restore-")
+    const result = await restoreFromBucket({ store: backend.store(), prefix, db: "pruned", dir: into })
+    expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
+    await shipper.close()
+  })
+
+  test("a torn chunk fails loudly rather than restoring a hole", async () => {
+    const fake = backend.fake
+    if (!fake) return
+    const registry = openRegistry()
+    const tenant = await openTenant(registry, "torn")
+    const prefix = backend.prefix()
+    const shipper = shipperFor("torn", prefix, { retentionMs: 0 })
+    shipper.bind(tenant)
+    for (let i = 1; i <= 80; i++) {
+      writeRows(tenant, i, 1)
+      await shipper.flush()
+    }
+    const [key] = await listIndexChunks(backend.store(), prefix, "torn")
+    expect(key).toBeDefined()
+    // Half a chunk is what a PUT that did not complete leaves behind.
+    await backend.store().put(key as string, '{"version":2,"db":"torn","segm', "application/json")
+
+    await expect(
+      restoreFromBucket({ store: backend.store(), prefix, db: "torn", dir: tempDir("bunql-restore-") }),
+    ).rejects.toMatchObject({ code: "S3_INDEX_UNREADABLE" })
     await shipper.close()
   })
 })

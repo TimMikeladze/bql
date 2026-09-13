@@ -22,11 +22,16 @@ import { LogGap } from "../wal/errors.ts"
 import {
   decodeManifest,
   emptyManifest,
+  encodeIndexChunk,
   encodeManifest,
+  INDEX_CHUNK,
+  indexChunkKey,
+  indexPrefix,
   type Manifest,
   manifestKey,
   newGenerationId,
   normalizeManifest,
+  parseIndexChunkKey,
   parseSegmentKey,
   parseSnapshotKey,
   type SegmentEntry,
@@ -36,6 +41,7 @@ import {
   snapshotKey,
   snapshotPrefix,
 } from "./layout.ts"
+import { type IndexChunkRef, loadIndex } from "./restore.ts"
 import { S3Store } from "./s3.ts"
 
 /** `30d`, `7d`, `12h`, `90m`, a bare number of seconds, or `0`/`""` for "never expire". */
@@ -132,6 +138,14 @@ export class Shipper {
   #unhook: (() => void) | null = null
   #manifest: Manifest | null = null
   #shippedTxid = 0n
+  /**
+   * The frozen part of the segment inventory (`docs/r9-segment-index.md`). `#manifest.segments`
+   * is always the *whole* inventory — every reader of it, from `planRestore` to retention, wants
+   * it whole — and these say which of those entries are already in a chunk object and therefore
+   * do not belong in the manifest body.
+   */
+  #chunks: IndexChunkRef[] = []
+  #frozen = new Set<string>()
 
   /** Encoded records since `#shippedTxid`, oldest first. Dropped whole when it gets too big. */
   #queue: Uint8Array[] = []
@@ -402,6 +416,17 @@ export class Shipper {
     if (manifest === null) {
       manifest = emptyManifest(this.db, tenant.pageSize, newGenerationId())
     } else {
+      // A version-1 manifest carries its whole inventory and has no chunks; a version-2 one
+      // carries the tail, and the rest is under `index/`. Either way what comes back here is the
+      // whole thing, which is what every reader below expects.
+      if (manifest.version >= 2) {
+        const index = await loadIndex(this.store, this.prefix, this.db, manifest.segments)
+        manifest.segments = index.segments
+        this.#chunks = index.chunks
+        this.#frozen = new Set(
+          index.chunks.flatMap((chunk) => chunk.entries.map((one) => one.key)),
+        )
+      }
       manifest = normalizeManifest(manifest)
     }
 
@@ -669,9 +694,51 @@ export class Shipper {
     manifest.generations = next.generations
     manifest.shippedTxid = next.shippedTxid
     manifest.updatedAtMs = next.updatedAtMs
-    const body = encodeManifest(next)
+    await this.#freeze(next)
+    await this.#putManifest(next)
+  }
+
+  /** The manifest body: everything, with only the unfrozen tail of the segment inventory. */
+  async #putManifest(manifest: Manifest): Promise<void> {
+    const body = encodeManifest({ ...manifest, segments: this.#tailOf(manifest.segments) })
     await this.store.put(manifestKey(this.prefix, this.db), body, "application/json")
     this.#bytesShipped += body.length
+  }
+
+  #tailOf(segments: SegmentEntry[]): SegmentEntry[] {
+    if (this.#frozen.size === 0) return segments
+    return segments.filter((one) => !this.#frozen.has(one.key))
+  }
+
+  /**
+   * Moves the oldest of the tail into immutable chunk objects, so the manifest body stops growing
+   * with the age of the database (`docs/r9-segment-index.md`).
+   *
+   * Written **before** the manifest that drops them from the tail, which leaves one crash window:
+   * the entries are then in both the chunk and the tail, and `mergeInventory` resolves that to one
+   * entry. The other order would lose them.
+   */
+  async #freeze(manifest: Manifest): Promise<void> {
+    let tail = this.#tailOf(manifest.segments)
+    // `>=`, not `>`: a chunk is only ever written full, so the number of chunk objects a restore
+    // has to enumerate is exactly `segments / INDEX_CHUNK` rather than one per drain.
+    while (tail.length >= INDEX_CHUNK) {
+      const take = tail.slice(0, INDEX_CHUNK)
+      const first = take[0] as SegmentEntry
+      const last = take.at(-1) as SegmentEntry
+      const key = indexChunkKey(
+        this.prefix,
+        this.db,
+        BigInt(first.startTxid),
+        BigInt(last.endTxid),
+      )
+      const body = encodeIndexChunk(this.db, take)
+      await this.store.put(key, body, "application/json")
+      this.#bytesShipped += body.length
+      this.#chunks.push({ key, entries: take })
+      for (const entry of take) this.#frozen.add(entry.key)
+      tail = tail.slice(INDEX_CHUNK)
+    }
   }
 
   /**
@@ -715,12 +782,50 @@ export class Shipper {
     // The manifest is narrowed *first*, so a reader never sees it naming an object that is gone.
     manifest.snapshots = keptSnapshots
     manifest.segments = keptSegments
-    await this.store.put(
-      manifestKey(this.prefix, this.db),
-      encodeManifest(normalizeManifest({ ...manifest, updatedAtMs: now })),
-      "application/json",
-    )
-    await this.store.deleteMany(doomed)
+    const superseded = await this.#pruneChunks(new Set(keptSegments.map((one) => one.key)))
+    const narrowed = normalizeManifest({ ...manifest, updatedAtMs: now })
+    manifest.shippedTxid = narrowed.shippedTxid
+    manifest.generations = narrowed.generations
+    await this.#putManifest(narrowed)
+    await this.store.deleteMany([...doomed, ...superseded])
+  }
+
+  /**
+   * Retention prunes from the front, so this is bounded rather than a rewrite of the index: a
+   * chunk wholly below the floor goes, the one chunk that straddles it is rewritten under a new
+   * key covering only its survivors, and everything above is untouched.
+   *
+   * Returns the keys of the chunks the caller should delete — after the manifest has been
+   * narrowed, like every other deletion here.
+   */
+  async #pruneChunks(kept: Set<string>): Promise<string[]> {
+    const superseded: string[] = []
+    const next: IndexChunkRef[] = []
+    for (const chunk of this.#chunks) {
+      const survivors = chunk.entries.filter((one) => kept.has(one.key))
+      if (survivors.length === chunk.entries.length) {
+        next.push(chunk)
+        continue
+      }
+      superseded.push(chunk.key)
+      if (survivors.length === 0) continue
+      const first = survivors[0] as SegmentEntry
+      const last = survivors.at(-1) as SegmentEntry
+      const key = indexChunkKey(
+        this.prefix,
+        this.db,
+        BigInt(first.startTxid),
+        BigInt(last.endTxid),
+      )
+      const body = encodeIndexChunk(this.db, survivors)
+      await this.store.put(key, body, "application/json")
+      this.#bytesShipped += body.length
+      next.push({ key, entries: survivors })
+    }
+    if (superseded.length === 0) return []
+    this.#chunks = next
+    this.#frozen = new Set(next.flatMap((chunk) => chunk.entries.map((one) => one.key)))
+    return superseded
   }
 
   /**
@@ -750,6 +855,17 @@ export class Shipper {
         if (high === null || high > this.#shippedTxid) continue
         strays.push(object.key)
       }
+    }
+    // An index chunk this shipper does not hold is what a crash between freezing one and writing
+    // the manifest leaves behind. Harmless while its segments are alive — `mergeInventory` folds
+    // the duplicate away — but once retention has removed those segments it names objects that
+    // are gone, which is the one thing a reader is promised never to meet.
+    const mine = new Set(this.#chunks.map((one) => one.key))
+    for (const object of await this.store.list({ prefix: indexPrefix(this.prefix, this.db) })) {
+      if (mine.has(object.key)) continue
+      const range = parseIndexChunkKey(object.key)
+      if (range === null || range.endTxid > this.#shippedTxid) continue
+      strays.push(object.key)
     }
     if (strays.length > 0) await this.store.deleteMany(strays)
     return strays

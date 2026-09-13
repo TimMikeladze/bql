@@ -21,7 +21,21 @@ brief, and the operational notes.
 <prefix>db/<name>/manifest.json
 <prefix>db/<name>/snapshots/<20-digit txid>.db.zst
 <prefix>db/<name>/segments/<20-digit startTxid>-<20-digit endTxid>.seg.zst
+<prefix>db/<name>/index/<20-digit startTxid>-<20-digit endTxid>-<8 hex>.json
 ```
+
+**`index/` is R9** (`docs/r9-segment-index.md`), and it changed what `manifest.json` holds: the
+manifest carries only the *tail* of the segment inventory — fewer than `INDEX_CHUNK` (32) entries,
+whatever the age of the database — and everything older is frozen into immutable chunk objects
+under `index/`, found by listing rather than named in the manifest. A reader reconstructs the
+inventory as chunks-then-tail, merging by segment key so the one crash window (a chunk written,
+the manifest not yet rewritten) resolves to one entry. `MANIFEST_VERSION` is **2**; a version-1
+manifest carries its whole inventory and no chunks, and is still read.
+
+The reason: the manifest is rewritten on every drain, so an inventory inside it made a database's
+backup cost O(n²) in the number of drains. Measured on 400 drains, before and after: **28.2 MB of
+manifest uploaded for 296 KB of records, against 2.26 MB after** — and, more to the point, bounded
+rather than growing.
 
 `<prefix>` is `s3.prefix` with any leading `/` stripped and exactly one trailing `/` when it is
 non-empty. `<name>` is the database name, which `assertValidName` has already restricted to
@@ -79,7 +93,9 @@ Rules a reader may rely on:
   not always the file's own page count — see deviation 3.
 - `hash` is `Bun.hash.xxHash3` of the **plain** (decompressed) body. It is verified on download.
 - `snapshots` and `segments` are sorted ascending by txid and hold **no gaps and no overlaps**
-  within a generation: `segments[i].startTxid === segments[i-1].endTxid + 1`.
+  within a generation: `segments[i].startTxid === segments[i-1].endTxid + 1`. Since R9 the
+  manifest's own `segments` is the tail of that list, not all of it — `readManifest` returns the
+  whole thing, having fetched the `index/` chunks, so nothing downstream of it sees the difference.
 - `shippedTxid` is the highest txid any listed segment or snapshot covers. Everything at or below
   it is in the bucket.
 - The manifest is written **last**, after every object it names is durable. A reader that finds an
@@ -150,9 +166,11 @@ first record has aged out from under it — and that is the one thing here that 
 exclusive, for the length of a checkpoint and a reflink copy, exactly as `POST /v1/db/:db/snapshot`
 does.
 
-**Order.** Within a drain: snapshots first, then segments, then the manifest. A crash between any
-two leaves objects the manifest does not name, which the next drain re-lists and adopts, and which
-a reader ignores.
+**Order.** Within a drain: snapshots first, then segments, then any newly frozen index chunk, then
+the manifest. A crash between any two leaves objects the manifest does not name, which the next
+drain re-lists and adopts, and which a reader ignores — with the one exception R9 added: an index
+chunk written before the manifest that drops its entries from the tail leaves those entries in
+*both*, which `mergeInventory` resolves to one entry by segment key.
 
 **State**, exposed on `GET /v1/db/:db/backup`, `GET /v1/db/:db/replication` and `/metrics`:
 `{shippedTxid, pendingRecords, pendingBytes, lastError, lastShipMs, lastShipAtMs, behind,
@@ -162,6 +180,9 @@ bytesShipped, errors, snapshots, segments}`.
 (default 60 s). It deletes snapshots older than `s3.retention` (default 30 d) and the segments
 below the oldest snapshot that survives — so the newest snapshot and everything after it is always
 kept, and no object a retained snapshot needs to replay from is ever removed, however old it is.
+Index chunks go with the segments they describe: one wholly below the floor is deleted, the one
+that straddles it is rewritten under a new key covering only its survivors, and everything above is
+untouched — so pruning is bounded rather than a rewrite of the index.
 
 ## 4. `src/storage/restore.ts`
 

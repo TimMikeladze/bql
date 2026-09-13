@@ -20,11 +20,15 @@ import { WalApplier } from "../wal/applier.ts"
 import { WAL_HEADER_SIZE } from "../wal/codec.ts"
 import { computeFull, decode, type TxnRecord } from "../wal/record.ts"
 import {
+  decodeIndexChunk,
   decodeManifest,
+  indexPrefix,
   type GenerationRef,
   latestTxid,
   type Manifest,
   manifestKey,
+  mergeInventory,
+  parseIndexChunkKey,
   planRestore,
   type RestorePlan,
   RestorePlanError,
@@ -104,7 +108,83 @@ export async function readManifest(
       `the backup manifest for ${db} at ${store.describe().bucket}/${key} is not readable`,
     )
   }
-  return manifest
+  if (manifest.version < 2) return manifest
+  return { ...manifest, segments: await loadInventory(store, prefix, db, manifest.segments) }
+}
+
+/**
+ * The whole segment inventory: the frozen chunks under `index/`, then the manifest's tail
+ * (`docs/r9-segment-index.md`).
+ *
+ * The chunks are found by listing rather than named in the manifest, because a list of them would
+ * grow exactly as the inventory it replaced did. Their keys carry their txid ranges, so the
+ * listing is ordered and no body is fetched to find out what is in it.
+ */
+export async function loadInventory(
+  store: S3Store,
+  prefix: string,
+  db: string,
+  tail: SegmentEntry[],
+): Promise<SegmentEntry[]> {
+  return (await loadIndex(store, prefix, db, tail)).segments
+}
+
+/** One frozen chunk, as the shipper has to know it: its key and what it holds. */
+export interface IndexChunkRef {
+  key: string
+  entries: SegmentEntry[]
+}
+
+/**
+ * The chunk keys under `index/`, in txid order. The keys carry their ranges, so this costs one
+ * listing and no bodies.
+ */
+export async function listIndexChunks(
+  store: S3Store,
+  prefix: string,
+  db: string,
+): Promise<string[]> {
+  try {
+    const objects = await store.list({ prefix: indexPrefix(prefix, db) })
+    return objects.map((one) => one.key).filter((one) => parseIndexChunkKey(one) !== null)
+  } catch (err) {
+    throw new RestoreError(
+      "S3_UNREACHABLE",
+      `cannot list the segment index for ${db}: ${messageOf(err)}`,
+    )
+  }
+}
+
+/** The inventory and the chunks it came from — what the shipper needs to prune them later. */
+export async function loadIndex(
+  store: S3Store,
+  prefix: string,
+  db: string,
+  tail: SegmentEntry[],
+): Promise<{ segments: SegmentEntry[]; chunks: IndexChunkRef[] }> {
+  const keys = await listIndexChunks(store, prefix, db)
+  if (keys.length === 0) return { segments: tail, chunks: [] }
+  const chunks = await Promise.all(
+    keys.map(async (key): Promise<IndexChunkRef> => {
+      let body: Uint8Array
+      try {
+        body = await store.get(key)
+      } catch (err) {
+        throw new RestoreError("S3_INDEX_UNREADABLE", `cannot read ${key}: ${messageOf(err)}`)
+      }
+      const entries = decodeIndexChunk(body)
+      if (entries === null) {
+        // Skipping it would leave a hole in the middle of the inventory and `planRestore` would
+        // then refuse a restore this bucket can actually serve. Failing is the honest answer.
+        throw new RestoreError(
+          "S3_INDEX_UNREADABLE",
+          `the segment index chunk ${key} for ${db} is not readable`,
+        )
+      }
+      return { key, entries }
+    }),
+  )
+  return { segments: mergeInventory(chunks.map((one) => one.entries), tail), chunks }
 }
 
 /** The generations the bucket knows about, newest first. */
