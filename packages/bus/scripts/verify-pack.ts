@@ -62,6 +62,7 @@ try {
   check("bun pm pack produced a tarball", pack.code === 0, pack.err.slice(-400));
 
   const manifest = JSON.parse(await Bun.file(`${repo}/package.json`).text()) as {
+    name: string;
     bin: Record<string, string>;
     exports: Record<string, unknown>;
   };
@@ -71,10 +72,15 @@ try {
     manifest.bin.agenticbus,
   );
 
+  // Derived from the manifest rather than spelled out, because the two have already disagreed
+  // once: a scoped name packs with the scope flattened into the filename, so `@bunql/bus`
+  // produces `bunql-bus-*.tgz`. A hardcoded prefix turns a rename into a failure here instead
+  // of into a failure where the rename was.
+  const slug = manifest.name.replace(/^@/, "").replace(/\//g, "-");
   const tarball = (await Array.fromAsync(
-    new Bun.Glob("agenticbus-*.tgz").scan({ cwd: scratch, absolute: true }),
+    new Bun.Glob(`${slug}-*.tgz`).scan({ cwd: scratch, absolute: true }),
   ))[0];
-  if (!tarball) throw new Error("no tarball was produced");
+  if (!tarball) throw new Error(`no ${slug}-*.tgz was produced in ${scratch}`);
 
   // ---- a clean install, in a directory that knows nothing about this repo ----
   const consumer = `${scratch}/consumer`;
@@ -87,8 +93,8 @@ try {
 
   await Bun.write(
     `${consumer}/use.ts`,
-    `import { BusStore, createServer, generateKey, mint, prometheusMetrics, createLogger, SCHEMA_VERSION } from "agenticbus";
-import { BusClient, BusConsumer, FatalError, CancelledError } from "agenticbus/client";
+    `import { BusStore, createServer, generateKey, mint, prometheusMetrics, createLogger, SCHEMA_VERSION } from "${manifest.name}";
+import { BusClient, BusConsumer, FatalError, CancelledError } from "${manifest.name}/client";
 
 for (const [name, value] of Object.entries({ BusStore, createServer, generateKey, mint, prometheusMetrics, createLogger, BusClient, BusConsumer, FatalError, CancelledError }))
   if (value === undefined) throw new Error(\`missing export \${name}\`);
@@ -133,7 +139,7 @@ console.log("USABLE");
   check(
     "the dashboard shipped with the package",
     await Bun.file(
-      `${consumer}/node_modules/agenticbus/dist/dashboard/index.html`,
+      `${consumer}/node_modules/${manifest.name}/dist/dashboard/index.html`,
     ).exists(),
   );
 

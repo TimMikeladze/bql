@@ -54,9 +54,21 @@ nothing else. Neither package has been published yet, so this costs nothing to d
 would cost a deprecation later.
 
 **History is preserved with `git subtree`.** `git subtree add --prefix packages/bus ../agenticbus main`
-brings every AgenticBus commit into this history rather than landing 8,600 lines as one
-anonymous "import" commit. `git log --follow packages/bus/src/bus/store.ts` still reaches back
-through the whole file's life.
+brings every AgenticBus commit into this history rather than landing 8,600 lines as one anonymous
+"import" commit.
+
+Reaching it takes the right incantation, and it is worth writing down because the obvious one
+returns nothing. Those commits touched `src/bus/store.ts`, not `packages/bus/src/bus/store.ts` —
+the path they are recorded under does not exist on this side of the merge, and history
+simplification stops a path-limited `git log` at the merge commit either way:
+
+```sh
+git log packages/bus/src/bus/store.ts                     # 1 commit: the subtree merge
+git log --follow 6800161^2 -- src/bus/store.ts            # 10 commits: the file's whole life
+```
+
+`6800161^2` is the subtree merge's second parent — the AgenticBus tip as it was imported. Every
+commit is present and reachable; only the path is addressed as it was, not as it is.
 
 **One lockfile at the root.** Bun workspaces hoist. The bus's React/Vite/Tailwind dashboard
 dependencies and BunQL's Kysely/Drizzle/GraphQL peers resolve in one tree, and
@@ -88,10 +100,29 @@ Ubuntu now. Windows is its own piece of work, with its own evidence, the way Bun
 refuses — is kept per package. Two packages that version independently cannot share a `v*` tag
 namespace without one of them lying.
 
+## What changed outside the move
+
+Three edits, each one something the move broke or exposed. Nothing else in either `src/` moved or
+changed.
+
+- **`packages/bus/scripts/verify-pack.ts`** spelled `agenticbus` into a tarball glob, two import
+  specifiers and a `node_modules` path. A scoped name packs with the scope flattened —
+  `@bunql/bus` produces `bunql-bus-0.1.0.tgz` — so all four broke at once on the rename. They are
+  derived from `manifest.name` now, which is the same discipline
+  `packages/db/test/package/exports.test.ts` already applies. The *binary* name is still spelled
+  out, because `agenticbus` is genuinely fixed and the check is that it has not moved.
+- **`scripts/bytes.ts`** read every path `git ls-files` returned and ended the scan on the first
+  one that was absent. A path can be tracked and absent at once — a staged deletion is the
+  ordinary case, and deleting `packages/bus/bun.lock` produced exactly that. It skips them now.
+- **Both READMEs** gained their monorepo install path, and the bus's gained its new published
+  name.
+
 ## What this does not do
 
-- No source change in either package. `bun test` before and after must report the same counts.
+- No change to either package's `src/`. `bun test` reports the same counts as before the move:
+  1487 pass / 2 skip for `@bunql/db`, 137 pass for `@bunql/bus`.
 - No shared code yet. `@bunql/bus` does not depend on `@bunql/db` in this commit.
+- No Windows coverage for the bus. See the CI note above.
 - The `agenticbus` repository is left exactly as it is. Archive it when the monorepo has run
   green for a while, not on the same day.
 

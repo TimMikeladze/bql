@@ -1,0 +1,16 @@
+{
+  // What both packages already agreed on. Anything they disagreed about stays in the package —
+  // see docs/monorepo.md; merging those would have meant loosening one of the two.
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true
+  }
+}

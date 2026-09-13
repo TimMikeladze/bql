@@ -1,0 +1,32 @@
+{
+  "name": "bunql",
+  "private": true,
+  "type": "module",
+  "description": "SQLite as a multi-tenant database server, and a durable message bus on top of it.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TimMikeladze/bunql.git"
+  },
+  "homepage": "https://github.com/TimMikeladze/bunql#readme",
+  "bugs": {
+    "url": "https://github.com/TimMikeladze/bunql/issues"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "scripts": {
+    "bytes": "bun run scripts/bytes.ts --check",
+    "typecheck": "tsc --noEmit && bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test",
+    "db": "bun run --filter '@bunql/db'",
+    "bus": "bun run --filter '@bunql/bus'"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -6,7 +6,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TimMikeladze/bunql.git"
+    "url": "git+https://github.com/TimMikeladze/bunql.git",
+    "directory": "packages/db"
   },
   "homepage": "https://github.com/TimMikeladze/bunql#readme",
   "bugs": {
@@ -57,7 +58,6 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "bytes": "bun run scripts/bytes.ts --check",
     "sqlite:build": "bun run scripts/sqlite.ts",
     "routes:check": "bun run scripts/routes.ts --check",
     "start": "bun run src/server/main.ts",
@@ -103,7 +103,6 @@
     "graphql": "^17.0.2",
     "kysely": "^0.29.5",
     "kysely-libsql": "^0.7.1",
-    "openapi-x-graphql": "^1.0.0",
-    "typescript": "^7.0.2"
+    "openapi-x-graphql": "^1.0.0"
   }
 }

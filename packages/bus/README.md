@@ -23,8 +23,11 @@ Three things at once, from one set of primitives:
 
 Bun 1.4 or newer.
 
+The package is `@bunql/bus`. The product is still AgenticBus and the binary is still
+`agenticbus` — only the publishing name is scoped.
+
 ```sh
-bun add agenticbus
+bun add @bunql/bus
 bunx agenticbus serve &
 bunx agenticbus subscribe work 'work.>'
 bunx agenticbus publish work.resize '{"src":"a.png"}'
@@ -33,13 +36,20 @@ bunx agenticbus publish work.resize '{"src":"a.png"}'
 The package ships the library, the `agenticbus` binary and the built dashboard, so `serve` has a
 UI with nothing else to install.
 
-**Working on the bus itself** runs it from source instead:
+**Working on the bus itself** runs it from source instead. It lives in the BunQL monorepo
+alongside [`@bunql/db`](../db) — see [docs/monorepo.md](../../docs/monorepo.md) for why:
 
 ```sh
-bun install
-bun run build      # the library bundle and the dashboard
-bun run dev
+git clone https://github.com/TimMikeladze/bunql && cd bunql
+bun install                # the whole workspace, one lockfile
+
+bun run bus build          # the library bundle and the dashboard
+bun run bus dev
+bun run bus test
 ```
+
+`bun run bus <script>` forwards from the repository root to this package. From inside
+`packages/bus`, every script still runs by its own name — `bun run build`, `bun run dev`.
 
 `bun run dev` starts the bus, three consumer processes and the dashboard, choosing free ports rather than fighting for taken ones.
 
@@ -350,6 +360,9 @@ deliveries would keep reporting whatever it last reported.
 **Transport is the operator's job.** A bearer token must not cross an untrusted network in plaintext: terminate TLS or use a tunnel. The bundled `Dockerfile` and `fly.toml` do exactly that — the platform terminates TLS, and the bus binds `0.0.0.0` only because a container must, never as a changed default. See [docs/operations.md](docs/operations.md#deploying).
 
 ## Verify
+
+From `packages/bus`. Prefix any of them with `bun run bus` to run it from the repository root
+instead.
 
 ```sh
 bun run typecheck

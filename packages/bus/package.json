@@ -1,7 +1,7 @@
 {
-  "name": "agenticbus",
+  "name": "@bunql/bus",
   "version": "0.1.0",
-  "description": "A durable message bus for agents and ordinary work \u2014 Bun, SQLite, subjects, consumer groups, leases",
+  "description": "A durable message bus for agents and ordinary work — Bun, SQLite, subjects, consumer groups, leases",
   "keywords": [
     "message-bus",
     "message-queue",
@@ -16,16 +16,18 @@
   ],
   "license": "MIT",
   "author": "Tim Mikeladze <tim.mikeladze@gmail.com>",
-  "homepage": "https://github.com/TimMikeladze/agenticbus#readme",
+  "homepage": "https://github.com/TimMikeladze/bunql/tree/main/packages/bus#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TimMikeladze/agenticbus.git"
+    "url": "git+https://github.com/TimMikeladze/bunql.git",
+    "directory": "packages/bus"
   },
   "bugs": {
-    "url": "https://github.com/TimMikeladze/agenticbus/issues"
+    "url": "https://github.com/TimMikeladze/bunql/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "type": "module",
   "bin": {
@@ -88,7 +90,6 @@
     "react-dom": "^19.2.8",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "^7.0.2",
     "vite": "^8.2.2"
   }
 }

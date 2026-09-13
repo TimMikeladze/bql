@@ -38,9 +38,13 @@ The package is `@bunql/db`. It is **not on npm yet**; until the first release, u
 ```sh
 git clone https://github.com/TimMikeladze/bunql && cd bunql
 bun install
-bun run sqlite:build        # once per machine → vendor/sqlite/libsqlite3.{dylib,so,dll}
-bun test                    # optional, and the fastest way to know the build is good
+bun run db sqlite:build     # once per machine → packages/db/vendor/sqlite/libsqlite3.{dylib,so,dll}
+bun run db test             # optional, and the fastest way to know the build is good
 ```
+
+BunQL is one of two packages in this repository — [`@bunql/bus`](../bus) is the other, and
+[docs/monorepo.md](../../docs/monorepo.md) is why. `bun run db <script>` forwards from the root to
+this package; from inside `packages/db`, every script still runs by its own name.
 
 Once published, `bun add @bunql/db` and `bun run sqlite:build` in your own project.
 

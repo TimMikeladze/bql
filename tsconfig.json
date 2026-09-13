@@ -1,0 +1,12 @@
+{
+  // The repository's own scripts. Each package type-checks itself against its own tsconfig —
+  // they do not agree on `target`, `types` or `jsx`, so there is no single project that could
+  // cover both without weakening one.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "types": ["bun-types"]
+  },
+  "include": ["scripts"]
+}

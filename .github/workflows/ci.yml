@@ -1,8 +1,14 @@
-# Invariant: every leg of this workflow proves the same thing on all three platforms — that BunQL
-# builds the libsqlite3 it needs from a pinned source, type-checks, and passes its whole suite.
-# Nothing here needs a secret, and nothing here reaches a network service the tests do not start
-# themselves: the storage tests use the in-process FakeS3 unless BUNQL_TEST_S3_ENDPOINT names a
-# real bucket, and this workflow never sets it.
+# Invariant: every leg of this workflow proves the same thing on all three platforms — that
+# @bunql/db builds the libsqlite3 it needs from a pinned source, that both packages type-check,
+# and that both suites pass. Nothing here needs a secret, and nothing here reaches a network
+# service the tests do not start themselves: the storage tests use the in-process FakeS3 unless
+# BUNQL_TEST_S3_ENDPOINT names a real bucket, and this workflow never sets it.
+#
+# Two packages, one pipeline. @bunql/bus arrived with the monorepo (docs/monorepo.md) and had
+# never run in CI before, so it is on macOS and Ubuntu and **not** on the Windows gate. That gate
+# was earned over three exploratory runs for @bunql/db (packages/db/docs/e2-windows-gate.md);
+# putting an unproven suite behind it on day one would mean either a red main branch or a
+# `continue-on-error` that makes the gate meaningless for the package that did earn it.
 
 name: ci
 
@@ -23,7 +29,7 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -40,44 +46,52 @@ jobs:
           # turn a green branch red on its own.
           bun-version: 1.4.2
 
-      # scripts/sqlite.ts holds the pinned SQLite version and the flag list, and
-      # scripts/native/walsum.c is compiled into the same artefact, so the two hashed together are
-      # exactly its identity. Change either and the cache misses, as it should. (The stamp beside
-      # the artefact hashes both as well, so a stale cache would be rebuilt rather than trusted —
-      # this key is what stops that from happening on every run.)
+      # packages/db/scripts/sqlite.ts holds the pinned SQLite version and the flag list, and
+      # packages/db/scripts/native/walsum.c is compiled into the same artefact, so the two hashed
+      # together are exactly its identity. Change either and the cache misses, as it should. (The
+      # stamp beside the artefact hashes both as well, so a stale cache would be rebuilt rather
+      # than trusted — this key is what stops that from happening on every run.)
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: vendor/sqlite
-          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sqlite.ts', 'scripts/native/walsum.c') }}
+          path: packages/db/vendor/sqlite
+          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/db/scripts/sqlite.ts', 'packages/db/scripts/native/walsum.c') }}
 
       - run: bun install --frozen-lockfile
 
       - name: build libsqlite3
-        run: bun run sqlite:build
+        run: bun run db sqlite:build
 
       - name: report the library under test
+        working-directory: packages/db
         run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
 
       # A raw control byte in source is invisible to git past its 8000-byte binary sniff, so a
-      # byte scan is the only thing that finds one. See scripts/bytes.ts.
-      - run: bun run scripts/bytes.ts --check
+      # byte scan is the only thing that finds one. It walks `git ls-files`, so one run at the
+      # root covers both packages. See scripts/bytes.ts.
+      - run: bun run bytes
 
       - run: bun run typecheck
 
-      - run: bun test
+      - name: "@bunql/db"
+        run: bun run db test
+
+      - name: "@bunql/bus"
+        run: bun run bus test
 
       - name: docs/api.md covers every route
-        run: bun run scripts/routes.ts --check
+        run: bun run db routes:check
 
-  # Windows is a gate as of E2 (`docs/e2-windows-gate.md`). It was exploratory for three runs and
-  # `continue-on-error` at every level while it answered the question E1 asked; the answer was 1346
-  # of 1498, then one fix took it to 1479, then five POSIX assumptions in tests and one that was
-  # merely slow took it to the whole suite. The `continue-on-error` lines are gone, which is what
-  # E1 §2 said would happen on the day it passed.
+  # Windows is a gate as of E2 (`packages/db/docs/e2-windows-gate.md`). It was exploratory for
+  # three runs and `continue-on-error` at every level while it answered the question E1 asked; the
+  # answer was 1346 of 1498, then one fix took it to 1479, then five POSIX assumptions in tests
+  # and one that was merely slow took it to the whole suite. The `continue-on-error` lines are
+  # gone, which is what E1 §2 said would happen on the day it passed.
   #
-  # It keeps its own job rather than joining the matrix because it needs 30 minutes where the other
-  # two need 20: creating a file and opening SQLite on it are both far dearer there, and the suite
-  # runs about three times as long as a result.
+  # It keeps its own job rather than joining the matrix because it needs 30 minutes where the
+  # other two need 25: creating a file and opening SQLite on it are both far dearer there, and the
+  # suite runs about three times as long as a result.
+  #
+  # @bunql/db only. The bus has its own Windows question to answer, with its own evidence.
   windows:
     name: windows-latest
     runs-on: windows-latest
@@ -92,27 +106,31 @@ jobs:
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: vendor/sqlite
-          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sqlite.ts', 'scripts/native/walsum.c') }}
+          path: packages/db/vendor/sqlite
+          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/db/scripts/sqlite.ts', 'packages/db/scripts/native/walsum.c') }}
 
       - run: bun install --frozen-lockfile
 
       - name: build libsqlite3
-        run: bun run sqlite:build
+        run: bun run db sqlite:build
 
       - name: report the library under test
+        working-directory: packages/db
         run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
 
-      - run: bun run scripts/bytes.ts --check
+      - run: bun run bytes
 
-      - run: bun run typecheck
+      - name: typecheck @bunql/db
+        run: bun run db typecheck
 
       # `--timeout 20000` rather than bun's default 5000, and it is scaling the clock rather than
       # the assertions. Creating a file and opening SQLite on it are both several times dearer on
       # Windows: sibling tests in the two files that timed out here take 3.6 s and 0.95 s on the
       # same runner, so 5 s is a limit the platform crosses doing legitimate work. A hang still
       # fails, four times slower than it would elsewhere.
-      - run: bun test --timeout 20000
+      - name: "@bunql/db"
+        working-directory: packages/db
+        run: bun test --timeout 20000
 
       - name: docs/api.md covers every route
-        run: bun run scripts/routes.ts --check
+        run: bun run db routes:check

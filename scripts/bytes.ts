@@ -35,7 +35,11 @@ interface Finding {
 const findings: Finding[] = []
 
 for (const file of files) {
-  const bytes = new Uint8Array(await Bun.file(file).arrayBuffer())
+  // A path can be tracked and absent at once — a staged deletion, a sparse checkout. That is a
+  // normal state, not a finding, and reading it would end the scan on the first one.
+  const handle = Bun.file(file)
+  if (!(await handle.exists())) continue
+  const bytes = new Uint8Array(await handle.arrayBuffer())
   for (let i = 0; i < bytes.length; i++) {
     const byte = bytes[i] as number
     if ((byte >= 0x20 && byte !== 0x7f) || ALLOWED.has(byte)) continue
