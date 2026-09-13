@@ -106,6 +106,15 @@ export function createServer(options: ServerOptions): BusServer {
   let draining = false;
   /** Long polls currently parked inside the handler, so shutdown can wait. */
   let parked = 0;
+  /**
+   * Open SSE streams, and how to end each one.
+   *
+   * A stream is a response that never completes, so `server.stop(false)` —
+   * which waits for in-flight requests — would wait for it forever. A single
+   * open dashboard would have turned SIGTERM into a hang.
+   */
+  const streams = new Set<() => void>();
+  let shuttingDown: Promise<void> | null = null;
 
   const authenticate = (req: Request, url: URL): TokenClaims => {
     const header = req.headers.get("authorization") ?? "";
@@ -460,13 +469,25 @@ export function createServer(options: ServerOptions): BusServer {
           );
           const correlation = published.correlation!;
           const deadline = Date.now() + waitMs;
-          for (;;) {
-            if (req.signal.aborted) return json({ ...published, response: null }, 202);
-            const response = store.response(workspace, correlation);
-            if (response) return json({ ...published, response });
-            if (Date.now() >= deadline)
-              return json({ ...published, response: null }, 202);
-            await Bun.sleep(Math.min(200, Math.max(1, deadline - Date.now())));
+          parked++;
+          try {
+            for (;;) {
+              if (req.signal.aborted)
+                return json({ ...published, response: null }, 202);
+              // Draining answers now. The message is published and the
+              // correlation is durable, so the caller collects the reply from
+              // whichever process is serving next — which is the whole point
+              // of a response being recorded rather than streamed.
+              if (draining)
+                return json({ ...published, response: null }, 202);
+              const response = store.response(workspace, correlation);
+              if (response) return json({ ...published, response });
+              if (Date.now() >= deadline)
+                return json({ ...published, response: null }, 202);
+              await Bun.sleep(Math.min(200, Math.max(1, deadline - Date.now())));
+            }
+          } finally {
+            parked--;
           }
         }
         const request = /^\/api\/requests\/([^/]+)$/.exec(path);
@@ -476,13 +497,20 @@ export function createServer(options: ServerOptions): BusServer {
             Math.max(0, Number(url.searchParams.get("waitMs") ?? 0)),
           );
           const deadline = Date.now() + waitMs;
-          for (;;) {
-            if (req.signal.aborted) return json({ error: "client went away" }, 499);
-            const response = store.response(workspace, request[1]!);
-            if (response) return json(response);
-            if (Date.now() >= deadline)
-              return json({ error: "no response yet" }, 404);
-            await Bun.sleep(Math.min(200, Math.max(1, deadline - Date.now())));
+          parked++;
+          try {
+            for (;;) {
+              if (req.signal.aborted)
+                return json({ error: "client went away" }, 499);
+              if (draining) return json({ error: "no response yet" }, 404);
+              const response = store.response(workspace, request[1]!);
+              if (response) return json(response);
+              if (Date.now() >= deadline)
+                return json({ error: "no response yet" }, 404);
+              await Bun.sleep(Math.min(200, Math.max(1, deadline - Date.now())));
+            }
+          } finally {
+            parked--;
           }
         }
 
@@ -519,7 +547,7 @@ export function createServer(options: ServerOptions): BusServer {
         }
         if (req.method === "GET" && path === "/api/stream") {
           requireRead(claims);
-          return stream(req, store);
+          return stream(req, store, streams);
         }
 
         // -------------------------------------------------------- fleet
@@ -599,20 +627,29 @@ export function createServer(options: ServerOptions): BusServer {
     },
     stop(force = false) {
       draining = true;
+      for (const close of [...streams]) close();
       void server.stop(force);
     },
-    async shutdown({ timeoutMs = 15_000 } = {}) {
-      if (draining) return;
-      draining = true;
-      log.info("draining", { parked });
-      const deadline = Date.now() + timeoutMs;
-      while (parked > 0 && Date.now() < deadline) await Bun.sleep(25);
-      if (parked > 0)
-        log.warn("closing with long polls still parked", { parked });
-      // `stop(false)` lets requests already in flight finish; `true` would cut
-      // an ack off at the socket, which is the one thing worth waiting for.
-      await server.stop(false);
-      log.info("stopped");
+    shutdown({ timeoutMs = 15_000 } = {}) {
+      // Idempotent, and correct even after `stop()` has already set `draining`
+      // — the flag alone is not evidence that anything was awaited.
+      shuttingDown ??= (async () => {
+        draining = true;
+        log.info("draining", { parked, streams: streams.size });
+        const deadline = Date.now() + timeoutMs;
+        while (parked > 0 && Date.now() < deadline) await Bun.sleep(25);
+        if (parked > 0)
+          log.warn("closing with long polls still parked", { parked });
+        // An SSE stream is a response that never completes, so it has to be
+        // ended explicitly before waiting on in-flight requests.
+        for (const close of [...streams]) close();
+        // `stop(false)` lets requests already in flight finish; `true` would
+        // cut an ack off at the socket, which is the one thing worth waiting
+        // for.
+        await server.stop(false);
+        log.info("stopped");
+      })();
+      return shuttingDown;
     },
   };
 }
@@ -652,7 +689,11 @@ function renderMetrics(store: BusStore, metrics: PrometheusMetrics): string {
 }
 
 /** SSE: a sequence number, not a durable subscription. Re-read after it moves. */
-function stream(req: Request, store: BusStore): Response {
+function stream(
+  req: Request,
+  store: BusStore,
+  open: Set<() => void>,
+): Response {
   let cleanup = () => {};
   const body = new ReadableStream({
     start(controller) {
@@ -680,11 +721,13 @@ function stream(req: Request, store: BusStore): Response {
         if (stopped) return;
         stopped = true;
         clearInterval(timer);
+        open.delete(cleanup);
         req.signal.removeEventListener("abort", cleanup);
         try {
           controller.close();
         } catch {}
       };
+      open.add(cleanup);
       req.signal.addEventListener("abort", cleanup, { once: true });
       tick();
     },

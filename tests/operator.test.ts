@@ -122,3 +122,24 @@ test("a paused subscription hands out nothing until it is resumed", async () => 
   expect(claimed.length).toBeGreaterThan(0);
   for (const envelope of claimed) await worker.ack(envelope.delivery, "worker-1");
 });
+
+test("a filtered page is filled even when the glob over-matches most of the log", async () => {
+  // A hundred messages the SQL glob accepts and the pattern rejects, then ten
+  // real matches behind them. A single bounded read — the obvious
+  // implementation — returns an empty page here and looks like "no matches".
+  for (let index = 0; index < 100; index++)
+    await admin.publish({ subject: "eu.west.created", body: index });
+  for (let index = 0; index < 10; index++)
+    await admin.publish({ subject: "eu.created", body: index });
+
+  // `eu.*` narrows to the SQL glob `eu.*`, which accepts both — but `*` is
+  // exactly one token, so only the two-token subject really matches.
+  const page = await admin.log(0, 5, { subject: "eu.*" });
+  expect(page).toHaveLength(5);
+  expect(new Set(page.map((m) => m.subject))).toEqual(new Set(["eu.created"]));
+
+  const newest = await admin.log(0, 3, { subject: "eu.*", newest: true });
+  expect(newest).toHaveLength(3);
+  expect(newest[0]!.seq).toBeGreaterThan(newest[2]!.seq);
+  expect(new Set(newest.map((m) => m.subject))).toEqual(new Set(["eu.created"]));
+});

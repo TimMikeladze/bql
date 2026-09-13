@@ -266,11 +266,16 @@ export class BusStore {
       current = 1;
     }
 
-    if (current > SCHEMA_VERSION)
+    if (current > SCHEMA_VERSION) {
+      // Close before throwing: the constructor has already opened the file, and
+      // a caller that catches this — a CLI probing a directory of databases,
+      // say — would otherwise leak a handle per attempt.
+      this.db.close();
       throw new BusError(
         `this database is at schema version ${current}, and this build only knows ${SCHEMA_VERSION} — upgrade agenticbus rather than downgrading the data`,
         500,
       );
+    }
 
     for (const migration of MIGRATIONS) {
       if (migration.version <= current) continue;
@@ -441,8 +446,15 @@ export class BusStore {
    *
    * `subject` is a pattern, narrowed in SQL and decided in JavaScript — the
    * same two-step `materialize` uses, for the same reason: `GLOB` cannot
-   * express "`*` is exactly one token". `newest` reverses the order, which is
-   * what an operator looking at a dead-letter queue actually wants.
+   * express "`*` is exactly one token". Because the glob over-matches, a
+   * single bounded read could come back short of `limit` while matches were
+   * still waiting behind it, so this walks forward in batches until it has a
+   * full page or runs out of log.
+   *
+   * `newest` reverses the order, which is what an operator looking at a
+   * dead-letter queue wants. Note that `after` is a floor on the sequence
+   * number in both directions — it selects *which* messages, not where a page
+   * resumes — so `newest` is "the newest N above `after`", not a cursor.
    */
   async log(
     workspace: string,
@@ -451,32 +463,47 @@ export class BusStore {
     options: { subject?: string; newest?: boolean } = {},
   ): Promise<Message[]> {
     const capped = Math.min(1000, limit);
+    const order = options.newest ? "DESC" : "ASC";
     if (options.subject === undefined) {
       const rows = this.db
         .query(
           `SELECT * FROM messages WHERE workspace = ? AND seq > ?
-            ORDER BY seq ${options.newest ? "DESC" : "ASC"} LIMIT ?`,
+            ORDER BY seq ${order} LIMIT ?`,
         )
         .all(workspace, after, capped) as MessageRow[];
       return Promise.all(rows.map((row) => this.hydrate(row)));
     }
-    assertPattern(options.subject);
-    const rows = this.db
-      .query(
-        `SELECT * FROM messages WHERE workspace = ? AND seq > ? AND subject GLOB ?
-          ORDER BY seq ${options.newest ? "DESC" : "ASC"} LIMIT ?`,
-      )
-      .all(
-        workspace,
-        after,
-        narrowingGlob(options.subject),
-        // The glob over-matches, so read more than asked and cut after the
-        // exact match — otherwise a page could come back short.
-        capped * 4,
-      ) as MessageRow[];
-    const exact = rows
-      .filter((row) => matches(options.subject!, row.subject))
-      .slice(0, capped);
+
+    const pattern = options.subject;
+    assertPattern(pattern);
+    const glob = narrowingGlob(pattern);
+    const batch = Math.min(1000, Math.max(capped * 4, 64));
+    const exact: MessageRow[] = [];
+    // Walk from whichever end the order starts at, carrying the last sequence
+    // number seen so each batch resumes where the previous one stopped.
+    let edge = options.newest ? Number.MAX_SAFE_INTEGER : after;
+    for (;;) {
+      const rows = this.db
+        .query(
+          `SELECT * FROM messages
+            WHERE workspace = ? AND seq > ? AND seq < ? AND subject GLOB ?
+            ORDER BY seq ${order} LIMIT ?`,
+        )
+        .all(
+          workspace,
+          options.newest ? after : edge,
+          options.newest ? edge : Number.MAX_SAFE_INTEGER,
+          glob,
+          batch,
+        ) as MessageRow[];
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        if (matches(pattern, row.subject)) exact.push(row);
+        if (exact.length >= capped) break;
+      }
+      if (exact.length >= capped || rows.length < batch) break;
+      edge = rows[rows.length - 1]!.seq;
+    }
     return Promise.all(exact.map((row) => this.hydrate(row)));
   }
 
@@ -1393,9 +1420,9 @@ export class BusStore {
    * the classic way to restore a database that is missing its last few minutes.
    */
   backup(path: string): void {
-    if (/['\x00]/.test(path))
-      throw new BusError("invalid backup path", 400);
-    this.db.run(`VACUUM INTO '${path}'`);
+    // A bound parameter, not string interpolation: `VACUUM INTO` takes an
+    // expression, so the path never has to be quoted or escaped by hand.
+    this.db.run("VACUUM INTO ?", [path]);
   }
 
   /**

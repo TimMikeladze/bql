@@ -94,6 +94,15 @@ if (import.meta.main) {
       console.log("restored package.json");
     }
   } else {
+    // Never clobber an existing backup. Running this twice without a restore
+    // in between would otherwise overwrite the source-pointing manifest with
+    // the dist-pointing one, and there would be nothing left to restore from.
+    if (await Bun.file(BACKUP).exists()) {
+      console.error(
+        `${BACKUP} already exists — a previous prepack did not finish. Run 'bun scripts/prepack.ts --restore' first.`,
+      );
+      process.exit(1);
+    }
     const original = await Bun.file(MANIFEST).text();
     await Bun.write(BACKUP, original);
     const pkg = JSON.parse(original) as Record<string, unknown>;

@@ -76,17 +76,18 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   const threshold = ORDER[level];
 
   const make = (bound: Fields): Logger => {
-    const at =
-      (at: Exclude<LogLevel, "silent">) => (message: string, fields: Fields = {}) => {
+    const emit =
+      (at: Exclude<LogLevel, "silent">) =>
+      (message: string, fields: Fields = {}) => {
         if (ORDER[at] < threshold) return;
         write(render(format, at, now(), message, { ...bound, ...fields }));
       };
     return {
       level,
-      debug: at("debug"),
-      info: at("info"),
-      warn: at("warn"),
-      error: at("error"),
+      debug: emit("debug"),
+      info: emit("info"),
+      warn: emit("warn"),
+      error: emit("error"),
       child: (fields: Fields) => make({ ...bound, ...fields }),
     };
   };

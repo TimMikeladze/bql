@@ -166,3 +166,53 @@ test("a backup is a consistent copy that opens on its own", async () => {
   restored.close();
   store.close();
 });
+
+test("shutdown ends an open SSE stream instead of waiting for it forever", async () => {
+  const store = new BusStore(":memory:");
+  const adminToken = generateKey();
+  const server = createServer({
+    store,
+    signingKey: generateKey(),
+    adminToken,
+    port: 0,
+    hostname: "127.0.0.1",
+  });
+  const url = `http://127.0.0.1:${server.port}`;
+
+  // An SSE response never completes on its own, so `server.stop(false)` — which
+  // waits for in-flight requests — used to wait for it forever. One open
+  // dashboard turned SIGTERM into a hang.
+  const stream = await fetch(`${url}/api/stream?token=${adminToken}`);
+  expect(stream.status).toBe(200);
+  const reader = stream.body!.getReader();
+  await reader.read(); // the first tick, so the stream is genuinely established
+
+  const started = Date.now();
+  await server.shutdown({ timeoutMs: 3000 });
+  expect(Date.now() - started).toBeLessThan(3000);
+
+  // The client side sees the stream end rather than hanging.
+  for (;;) {
+    const { done } = await reader.read();
+    if (done) break;
+  }
+  store.close();
+});
+
+test("shutdown is idempotent, and still drains after a bare stop()", async () => {
+  const store = new BusStore(":memory:");
+  const server = createServer({
+    store,
+    signingKey: generateKey(),
+    adminToken: generateKey(),
+    port: 0,
+    hostname: "127.0.0.1",
+  });
+  server.stop();
+  // `draining` alone is not evidence that anything was awaited, so this must
+  // still do the work rather than return immediately on the flag.
+  await server.shutdown({ timeoutMs: 1000 });
+  await server.shutdown({ timeoutMs: 1000 });
+  expect(server.draining).toBe(true);
+  store.close();
+});
