@@ -20,8 +20,9 @@ and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluste
 
 ## Where things stand
 
-**Phases 0, 1 and 2 are complete, and so is the surfaces track.** C1-C6, C3a/C3b, C4-C4e, H1-H8,
-P1-P6, R1-R10, E1-E2. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
+**Phases 0, 1 and 2 are complete, and so is the surfaces track, and Windows is a supported
+platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2. **CI green on macOS, Linux and
+Windows**, all three gating. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
 `bun test` → **1485 pass, 2 skip, 0 fail** across 124 files, and green again with
 `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what proves the JavaScript fallback).
 `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. Zero runtime dependencies.
@@ -424,7 +425,7 @@ What phase 1 added to the list:
 chores turned out to be bugs and are fixed. What is left is genuinely optional, and it is listed in
 the order it is worth doing.
 
-### 1. Re-measure on a quiet machine
+### 1. Re-measure §5's worker ladder on a quiet machine
 
 The one thing this session could not finish. `docs/performance.md` §5's worker ladder — the 2.67x
 table — still describes the old defaults, and it could not be re-taken: five-second runs at the
@@ -443,7 +444,7 @@ worker — **27.7-30.4k writes/s on the old defaults against 46.0-53.6k on the n
 interleaved rounds. `docs/benchmarks.md` is deliberately *not* restitched from parts; its contract
 is one coherent run and it says at the top which of its rows have moved under it.
 
-### 2. Windows: whether it is a gate now depends on one CI run
+### 2. ✅ Windows is a gate
 
 `docs/e2-windows-gate.md` is the fix and the reasoning. E1's 150 failures were one cause, and it
 was not the one E1 named: mechanism A published its wal-index header by writing the `-shm` file
@@ -465,10 +466,18 @@ a `maxOpen` of 50 and took over two minutes there against five seconds on macOS;
 `maxOpen` is what the test is about, so it is 500 now. All six are fixed and
 `docs/e2-windows-gate.md` §4 lists them.
 
-**If the next `windows-latest` run is clean, delete its `continue-on-error` lines** — the job level
-and the four step levels — and Windows is a gate. That deliberately did not happen in the same push
-as the fixes: flipping it there would only have turned main red if one of the six was more than it
-looked.
+One of the six *was* more than it looked, and only a Windows run could have found it.
+`candidatePaths()` has said since E1 that there is **no system candidate on Windows**; the comment
+was true about the intent and false about the code, which omitted the bare `"sqlite3.dll"` and then
+pushed the Homebrew dylib, `libsqlite3.so.0` and `/usr/lib/libsqlite3.dylib` on every platform.
+Nothing broke — none of them opens — but the "no library" remedy on Windows named `libc.so.6`, a
+file the platform has never had. The test that caught it was one written to encode the comment's
+claim.
+
+**The whole suite now passes on `windows-latest`, and the job is a gate**: `continue-on-error` is
+gone from the job and its four steps, the name has lost "(exploratory)", and it has gained the
+raw-byte scan and the route-table check the other two platforms run. `docs/e2-windows-gate.md` §5
+and §6. **CI is green on macOS, Linux and Windows.**
 
 ### 3. The bounded ones
 

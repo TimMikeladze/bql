@@ -137,4 +137,5 @@ four steps, and the job is named `windows-latest` rather than `windows-latest (e
 also gained the two checks the other platforms run and it did not — the raw-byte scan and the route
 table — because a gate that proves less than its peers is a gate with a hole in it.
 
-E1 §2 said it becomes a gate on the day it passes. This is that day.
+E1 §2 said it becomes a gate on the day it passes. This is that day: **macos-latest, ubuntu-latest
+and windows-latest all green on the same commit, all three gating.**
