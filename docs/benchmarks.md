@@ -15,6 +15,25 @@ the client never shares an event loop with the server. A missed budget is a WARN
 failure — a benchmark measures the machine it ran on. The one hard gate is the driver's own
 point-read target, which `bench/driver.ts` enforces itself.
 
+> **This run is from 2026-09-12 and has not been re-recorded. Three things have happened since,
+> and all three move numbers in it.** Read `docs/performance.md` §1, §5 and §8 for what is
+> currently known; this file stays as it is until a quiet machine can produce one coherent run,
+> because one run is the whole contract of the file and a table stitched from several is worse
+> than an old one.
+>
+> 1. **The defaults moved (2026-09-13).** `defaultAck` is `fsync`, `groupCommit` and `deferAppend`
+>    are on. A single write costs 2.7x more (23.7 µs → 62 µs) and concurrent writes cost 1.69x
+>    *less* (27.7–30.4k → 46.0–53.6k writes/s at 64 clients, three interleaved rounds). Every
+>    write and throughput row below is the old defaults.
+> 2. **`bench/http-client.ts` was charging its own warm-up to the first leg it measured** — 40 µs,
+>    which is most of the distance between the `point read over HTTP keep-alive` row below and its
+>    budget. Fixed; the row now lands at 53.7 µs. `docs/performance.md` §8.
+> 3. **There is a new leg**, `point read, HTTP keep-alive, minted token`, so the token cost is
+>    measured rather than extrapolated: 58.6 µs against 53.7 for the admin key.
+>
+> The one figure below that is *not* suspect is the driver's, which is in-process and does not
+> touch any of the three.
+
 ## Machine
 
 | | |
@@ -25,7 +44,7 @@ point-read target, which `bench/driver.ts` enforces itself.
 | filesystem | APFS |
 | Bun | 1.4.0 |
 | SQLite | 3.53.4 |
-| library | `/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib` (Homebrew) |
+| library | `/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib` (Homebrew) — since C6, `bun run sqlite:build` vendors one and it is what is measured now |
 | `ulimit -n` | 1 048 576 |
 | recorded | 2026-09-12, end of phase 1 |
 
