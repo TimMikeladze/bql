@@ -5,8 +5,8 @@ on the write path, and `[durability] compress = false` already offers the crude 
 trade — 28% off a write for 4.4x the bytes. The better version §4C asks for is to keep the ratio
 *and* move the cost: compress **after** the client is answered.
 
-Written 2026-09-12, **before any code and without any**. This document is the decision; §6 says
-plainly what is not built and why that was the right call for one session.
+Written 2026-09-12 before any code, and **built the same day** — §7 is what it measured and what
+building it found.
 
 ## 1. What is actually on the path
 
@@ -110,8 +110,7 @@ has already advanced, so it is correct in the synchronous half and the client is
 flushPending(): void
 ```
 
-`#deferAppend` is `[durability] deferCompress` (or the truer name `deferAppend`), default **off**
-until the measurement in §5 is taken on a real node.
+`#deferAppend` is `[durability] deferAppend`, default **off**.
 
 ## 5. What has to be measured before it ships
 
@@ -124,14 +123,41 @@ until the measurement in §5 is taken on a real node.
    and the WAL agree and a replica converges on the primary's checksum. That is the test that
    matters, and it is the one `docs/c5-apply-pages.md` ran by hand for the same class of change.
 
-## 6. Not built, and why
+## 6. What it cost to build
 
-This is a change to when a durable record is written, in a file whose header begins *"a record is
-acked only after it is applied and the position is persisted"*. It has four readers to move, a
-recovery path to re-argue, and a crash test that has to be run by hand on a real node. It is one
-milestone's work and it deserves a session, not the end of one.
+`Tenant` gained `#pending`, `#file`, `#scheduleFile` and a public `flushPending`; `#capture` took
+an `ack`. The four readers of §3 flush first: `snapshot()`, `close()`, `drain()`, and
+`ReplicationServer`'s three catch-up reads of the log as a file. `[durability] deferAppend` threads
+through the registry the way `compress` already does.
 
-What this document buys the next session: the split is decided (§2), the recovery argument is made
-and rests on something already built rather than something new (§2, the reconcile), the four
-readers are enumerated with what each needs (§3), the shape is written (§4), and the three
-measurements that decide whether it ships are named (§5).
+## 7. As built — the measurements, and the bug the ordering test found
+
+`bun test` → **1460 pass, 2 skip, 0 fail**, and **the same 1460 with `deferAppend` forced on for
+the whole suite** — replication, PITR, the cluster and the e2e scenarios included. `bun run
+typecheck`, `bun run bytes` and `bun run routes:check` clean.
+
+**§5.1's prediction was beaten.** 4000 single-row transactions through the real tenant write path,
+alternating so neither arrangement gets an unfair cache:
+
+| | write p50 | p90 | bytes/record |
+|---|---|---|---|
+| compress, append now (today) | 21.1–22.0 µs | 25.3–27.8 | 1032 |
+| **compress, append deferred (P5)** | **8.7–9.5 µs** | **10.7–12.8** | **1032** |
+| no compress, append now (§4C's trade) | 14.1–14.7 µs | 17.2–18.0 | 4231 |
+
+**A write is 2.4x faster and the 4.3x ratio is kept.** It also beats `compress = false` on *both*
+axes — faster than the uncompressed path and a quarter of the bytes — which retires §4C's trade
+rather than tuning it. The prediction was ~19 µs; the deferral is worth more than the zstd in it,
+because the whole append goes rather than the compression alone.
+
+**The crash test passes, and it is the one that matters.** A writer process with the deferral on,
+`kill -9`'d mid-write and reopened: the rows in the database, the tenant's txid and the log's last
+txid all agree, and the log replays to exactly that txid. In one run 132 916 transactions came back
+consistent. The reconcile re-derived the outstanding records from the WAL, which is what §2 said it
+would and the reason this is safe at all.
+
+**The bug the tests found: nothing may jump the queue.** A write that is *not* deferred —
+`ack: "replica"`, or the flag off — filed its records immediately while earlier deferred ones were
+still outstanding, so the log was handed txid 2 while txid 1 was pending and refused it, correctly
+and loudly. Every direct path now flushes first. It is the obvious failure in hindsight and it is
+exactly what a queue with two producers does when one of them is allowed to skip.

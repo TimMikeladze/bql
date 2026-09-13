@@ -140,6 +140,17 @@ export interface DurabilitySection {
    * everything already written readable and a replica reads either kind.
    */
   compress: boolean
+  /**
+   * P5: file a committed transaction in the log **after** the client has been answered, for
+   * `ack: "local"` only. zstd is 9.5 µs of a 28.4 µs write and the whole append is ~10, and none
+   * of it is what makes the write durable — SQLite committed before it starts, and everything the
+   * append serves (replicas, the bucket, PITR, the change feed) is an asynchronous consumer.
+   *
+   * Safe because a log record is **derived from the WAL** rather than authored: a crash in the
+   * window is recovered by the reconcile that already runs after an unclean shutdown, re-polling
+   * the WAL from the saved position. Off by default; `docs/p5-deferred-compression.md`.
+   */
+  deferAppend: boolean
 }
 
 export interface RealtimeSection {
@@ -404,6 +415,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     maxLogBytes: 0,
     segmentBytes: 16 * 1024 * 1024,
     compress: true,
+    deferAppend: false,
     snapshotIntervalMs: 60 * 60 * 1000,
   },
   realtime: {

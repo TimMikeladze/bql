@@ -147,6 +147,8 @@ export interface TenantOptions {
    * everything already written readable.
    */
   compressLog?: boolean
+  /** P5: file a committed transaction after the client is answered, for `ack: "local"`. */
+  deferAppend?: boolean
   /**
    * Replica only: which of design §4.5's two apply mechanisms to prefer, and how long a page apply
    * waits for the WAL lock set. Defaults `"pages"` and 5000. `docs/c5-apply-pages.md`.
@@ -373,6 +375,12 @@ export class Tenant {
   #txTimer: ReturnType<typeof setTimeout> | null = null
   #exclusive = false
   #closed = false
+  /** P5: records polled but not yet filed, in order. Never reordered, never dropped. */
+  #pending: TxnRecordInput[] = []
+  /** A flush is already queued for this turn. */
+  #filing = false
+  /** `[durability] deferAppend`, resolved once. */
+  readonly #deferAppend: boolean
   #lastActivityMs = Date.now()
   #maintainedAt = 0
   #lastSnapshotTxid: bigint | null
@@ -409,6 +417,7 @@ export class Tenant {
     this.checkpointWalBytes = options.checkpointWalBytes ?? 4_000_000
     this.idleCheckpointMs = options.idleCheckpointMs ?? 1000
     this.defaultAck = options.defaultAck ?? "local"
+    this.#deferAppend = options.deferAppend === true
     this.waitMs = options.waitMs ?? 2000
     this.#positionIntervalMs = options.positionIntervalMs ?? 200
     this.reconciled = reconciled
@@ -732,7 +741,7 @@ export class Tenant {
       } catch (err) {
         throw translateWriteError(err, this.name)
       }
-      const txid = this.#capture()
+      const txid = this.#capture(ack)
       if (acksLocallyDurable(ack)) this.#syncDurable()
       this.#maybeCheckpoint()
       return { result, txid }
@@ -1008,6 +1017,8 @@ export class Tenant {
    * the first: the file is already the database at that txid.
    */
   async snapshot(): Promise<SnapshotRef> {
+    // P5: a snapshot taken with records outstanding would be one the log cannot explain.
+    this.flushPending()
     this.#assertOpen()
     if (this.#leased > 0) {
       throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
@@ -1252,6 +1263,9 @@ export class Tenant {
   /** Flushes, saves the position and marks the tenant cleanly closed. */
   close(): void {
     if (this.#closed) return
+    // P5: anything outstanding is filed before the flag goes up, so a clean close leaves a log
+    // that explains every transaction this tenant acknowledged.
+    this.flushPending()
     this.#closed = true
     for (const waiter of this.#waiters) {
       clearTimeout(waiter.timer)
@@ -1359,29 +1373,81 @@ export class Tenant {
    * that no frame leaves the WAL before it has been recorded.
    */
   drain(): bigint {
-    return this.#capture()
+    const txid = this.#capture()
+    // A drain is "bring the log up to date now", which is what P5's deferral is the opposite of.
+    this.flushPending()
+    return txid
   }
 
   // -------------------------------------------------------------------------
 
   /** Steps 2–5 of design §4.3. Returns the tenant's txid afterwards. A replica records nothing. */
-  #capture(): bigint {
+  #capture(ack?: AckLevel): bigint {
     const recorder = this.recorder
     if (!recorder) return this.position.txid
     const records = recorder.poll()
     if (records.length === 0) return recorder.position.txid
+    const txid = recorder.position.txid
 
+    // P5: file it after the client has been answered. The data is already durable — SQLite
+    // committed before `#capture` was called — and everything the append serves is an
+    // asynchronous consumer, so the client waits for none of it.
+    //
+    // `ack: "local"` only. `"replica"` and `"quorum"` block on a record having *shipped*, which
+    // needs it encoded, so deferring would schedule work the caller is about to wait for.
+    if (this.#deferAppend && (ack ?? this.defaultAck) === "local") {
+      for (const record of records) this.#pending.push(record)
+      this.#scheduleFile()
+      // The rows are committed and visible, so a reader waiting on this txid may proceed now.
+      // What is outstanding is the *record*, which no reader of this database is waiting for.
+      this.#wake(txid)
+      return txid
+    }
+    // Nothing jumps the queue. A write that is not deferred — `ack: "replica"`, or the flag off —
+    // still has to go in *after* anything a deferred write left outstanding, or the log is asked
+    // to accept txid 2 while txid 1 is still pending and refuses, correctly.
+    this.flushPending()
+    this.#file(records)
+    return txid
+  }
+
+  /** Encode, append, save the position, and tell the subscribers. The deferred half of P5. */
+  #file(records: TxnRecordInput[]): void {
+    if (records.length === 0) return
     const events: CommitEvent[] = []
     for (const record of records) {
       const bytes = this.log.append(record)
       events.push({ txid: record.txid, record, bytes })
     }
-    const position = recorder.position
+    // Ordered after the append, and it must stay there: the reconcile takes the position from the
+    // log's last record, so a catalog position *ahead* of the log would make it skip records that
+    // were never written (`docs/p5-deferred-compression.md` §2.2).
     this.#positionDirty = true
     this.#savePosition(Date.now())
     for (const event of events) this.#publish(event)
-    this.#wake(position.txid)
-    return position.txid
+    this.#wake(this.position.txid)
+  }
+
+  #scheduleFile(): void {
+    if (this.#filing || this.#pending.length === 0) return
+    this.#filing = true
+    queueMicrotask(() => {
+      this.#filing = false
+      this.flushPending()
+    })
+  }
+
+  /**
+   * Everything polled but not yet filed, filed now.
+   *
+   * Called by the microtask, and **before anything reads the log as a file** — a snapshot, a
+   * drain, a close, a replica catching up over `log.iterate`. A snapshot taken with records
+   * outstanding would be one the log does not explain, which is the one way this can be got wrong.
+   */
+  flushPending(): void {
+    if (this.#pending.length === 0 || this.#closed) return
+    const records = this.#pending.splice(0, this.#pending.length)
+    this.#file(records)
   }
 
   /**

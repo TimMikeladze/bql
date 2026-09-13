@@ -51,6 +51,8 @@ export interface RegistryOptions {
   logFsync?: "never" | "each" | "interval"
   /** Compress record bodies with zstd. Default true; see `TenantOptions.compressLog`. */
   compressLog?: boolean
+  /** P5: file a committed transaction after the client is answered, for `ack: "local"`. */
+  deferAppend?: boolean
   /** Most statements one group commit folds; see `TenantOptions.maxGroupCommit`. */
   maxGroupCommit?: number
   /** Replica apply mechanism and its lock wait; see `TenantOptions.applyMechanism`. */
@@ -532,6 +534,7 @@ export class TenantRegistry {
         ? { segmentBytes: this.#options.segmentBytes }
         : {}),
       ...(this.#options.logFsync !== undefined ? { logFsync: this.#options.logFsync } : {}),
+      ...(this.#options.deferAppend !== undefined ? { deferAppend: this.#options.deferAppend } : {}),
       // The node's pragmas, with this database's own `foreign_keys` on top when it has one. A
       // null in the catalog means "follow the node", which is not the same fact as "off".
       ...(this.#options.sqlite !== undefined || row.foreignKeys !== null

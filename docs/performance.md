@@ -163,13 +163,21 @@ only has to be compressed before it ships, not before the client is answered. Th
 *and* moves the cost off the hot path, at the price of decoupling the log append from the commit —
 which is why it is not this change.
 
-**Designed, in `docs/p5-deferred-compression.md`, and not yet built.** The design's finding is that
-the win is not "compress later" but "answer before the log append", of which zstd is 80%: the data
-is already durable when `#capture` starts, because SQLite committed on the line above. What makes
-that safe is that a log record is *derived from the WAL* rather than authored — so a crash in the
-window is recovered by the reconcile that already exists, re-polling the WAL from the saved
-position. The document enumerates the four synchronous readers, settles that the catalog position
-must never lead the log, and names the three measurements that decide whether it ships.
+**Built: `[durability] deferAppend`, off by default** (`docs/p5-deferred-compression.md`). The
+finding was that the win is not "compress later" but "answer before the log append", of which zstd
+is 80% — the data is already durable when `#capture` starts, because SQLite committed on the line
+above. It is safe because a log record is *derived from the WAL* rather than authored, so a crash
+in the window is recovered by the reconcile that already runs after an unclean shutdown.
+
+| | write p50 | bytes/record |
+|---|---|---|
+| compress, append now | 21.1–22.0 µs | 1032 |
+| **compress, append deferred** | **8.7–9.5 µs** | **1032** |
+| no compress, append now | 14.1–14.7 µs | 4231 |
+
+**2.4x on a write with the 4.3x ratio kept** — and faster than `compress = false` at a quarter of
+its bytes, which retires the trade above rather than tuning it. Verified by `kill -9` mid-write:
+the rows, the tenant's txid and the log all agree on reopen.
 
 **D. Prefer the socket everywhere.** 28 µs against 48 µs for the same read before auth, 58 against
 78 for a write, and no per-request token verification. Nothing to build; it is a documentation and

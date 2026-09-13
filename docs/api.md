@@ -1499,6 +1499,20 @@ executor and the same depth and complexity limits the HTTP surface uses.
 upgrade and `?token=` both work too. The principal is settled once, at `connection_init`, and every
 operation on the socket runs as it; `ro` on the database is what a subscription needs.
 
+### `[durability] deferAppend`
+
+Off by default. On, a committed transaction is filed in the replication log **after** the client has
+been answered, for `ack: "local"` only — which takes a write from ~21 µs to ~9 µs while keeping
+compression's 4.3x ratio, faster than turning compression off and at a quarter of its bytes.
+
+It is safe because the data is already durable when the append starts: SQLite has committed, and a
+log record is *derived from the WAL* rather than authored, so a crash in the window is recovered by
+the reconcile that already runs after an unclean shutdown. `ack: "replica"` and `ack: "quorum"` are
+never deferred — they wait on a record having shipped, which needs it encoded.
+
+What it costs: a replica and the change feed see a transaction one microtask later, and a crash
+between the answer and the append is recovered rather than free. `docs/p5-deferred-compression.md`.
+
 ### Writes on a replica
 
 A replica **forwards** a write to its primary and serves reads locally, on both surfaces: the

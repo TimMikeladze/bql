@@ -254,6 +254,7 @@ export class ServerRuntime {
         defaultAck: options.config.durability.defaultAck,
         segmentBytes: options.config.durability.segmentBytes,
         compressLog: options.config.durability.compress,
+        deferAppend: options.config.durability.deferAppend,
         maxGroupCommit: options.config.limits.groupCommitMax,
         applyMechanism: options.config.replication.apply,
         applyBusyMs: options.config.replication.applyBusyMs,

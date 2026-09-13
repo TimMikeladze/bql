@@ -796,6 +796,10 @@ export class ReplicationServer {
       }
     }
 
+    // P5: a replica catching up reads the log as a file, so anything this node has committed but
+    // not yet filed has to be filed first — otherwise the catch-up stops at a gap that exists only
+    // because the append was deferred.
+    tenant.flushPending()
     const next = tenant.log.read(fromTxid + 1n)
     if (!next) {
       return {
@@ -928,6 +932,7 @@ export class ReplicationServer {
    * one, or the log has to still hold the record right after it.
    */
   #usableSnapshot(tenant: Tenant): SnapshotRef | null {
+    tenant.flushPending()
     const first = tenant.log.firstTxid
     const usable = listSnapshots(tenant.dir).filter((ref) => {
       const at = BigInt(ref.txid)
@@ -960,6 +965,7 @@ export class ReplicationServer {
     const attachTxid = tenant.txid
     try {
       if (attachTxid > fromTxid) {
+        tenant.flushPending()
         for (const record of tenant.log.iterate(fromTxid + 1n)) {
           if (stream.closed) return
           if (record.txid > attachTxid) break
