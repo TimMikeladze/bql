@@ -30,7 +30,9 @@ describe("loadConfig", () => {
     expect(config.server.cors).toBe(true)
     // C5: mechanism A is the default replica apply (`docs/c5-apply-pages.md`).
     expect(config.replication.apply).toBe("pages")
-    expect(config.replication.applyBusyMs).toBe(5000)
+    // R10 lowered it from 5000: the spin is `Bun.sleepSync`, and the patience it was buying already
+    // exists in the replica's asynchronous retry. `docs/r10-read-transactions.md` §2.3.
+    expect(config.replication.applyBusyMs).toBe(25)
   })
 
   test("[replication] apply takes only the two mechanisms design §4.5 names", () => {

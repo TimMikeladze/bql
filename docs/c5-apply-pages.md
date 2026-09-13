@@ -244,7 +244,11 @@ trade.
 `xShmLock` returns `SQLITE_BUSY` when a reader is mid-transaction. The applier:
 
 - **Retries with a bounded backoff** — 1 ms, doubling with jitter to 32 ms, until
-  `[replication] applyBusyMs` (default 5000, the same figure as `busy_timeout`) is spent.
+  `[replication] applyBusyMs` is spent. **R10 dropped that default from 5000 to 25**
+  (`docs/r10-read-transactions.md` §2.3): the spin is `Bun.sleepSync`, so it is this thread's event
+  loop, and the patience it was buying already exists in `ReplicaClient`'s asynchronous retry —
+  which now backs off 5 ms → 250 ms rather than retrying flat every 5 ms. 25 ms is longer than any
+  ordinary read, so a normal replica still applies inside the first attempt.
 - **Then throws `ApplyBusy`**, a new `WalError` whose whole purpose is to be *distinguishable from
   divergence*. `ChecksumMismatch` means "send me a snapshot". `ApplyBusy` means "nothing was
   written, the position has not moved, offer me the same record again". `ReplicaClient` treats it

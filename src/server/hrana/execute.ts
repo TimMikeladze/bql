@@ -15,7 +15,8 @@
 import type { QueryResult, Value } from "../../client/protocol.ts"
 import { applyPolicy, requireScope } from "../auth.ts"
 import { BunQLError } from "../errors.ts"
-import { executeInTx, executeStatement } from "../exec.ts"
+import { executeInReadTx, executeInTx, executeStatement } from "../exec.ts"
+import type { Database } from "../../sqlite/index.ts"
 import { cstr } from "../../sqlite/lib.ts"
 import { mapTenantError } from "../runtime.ts"
 import { toHranaError } from "./errors.ts"
@@ -99,14 +100,20 @@ function noTransaction(what: string): BunQLError {
 function assertReadOnly(service: HranaService, stream: HranaStream, sql: string): void {
   const runtime = service.runtime
   const tenant = runtime.tenant(stream.db)
-  const readonly = tenant.txExec((db) => {
+  const inspect = (db: Database): boolean => {
     const handle = applyPolicy(db, runtime.hubFor(db), stream.principal, stream.db)
     try {
       return db.prepare(sql).readonly
     } finally {
       handle.release()
     }
-  })
+  }
+  // R10: the read transaction lives on a leased reader, so the statement is compiled on that
+  // reader — the writer may be busy with somebody else's write, which is the point of the move.
+  const readTx = stream.readTx
+  const readonly = readTx
+    ? tenant.readTxExec(readTx.tx, inspect)
+    : tenant.txExec(inspect)
   if (!readonly) {
     throw new BunQLError(
       "SQLITE_READONLY",
@@ -135,7 +142,7 @@ export async function executeStmt(
 
   try {
     if (verb?.kind === "begin") {
-      if (stream.tx || stream.remoteTx) {
+      if (stream.tx || stream.remoteTx || stream.readTx) {
         throw new BunQLError("BAD_REQUEST", "cannot start a transaction within a transaction", 400)
       }
       requireScope(stream.principal, stream.db, verb.readonly ? "ro" : "rw")
@@ -149,7 +156,15 @@ export async function executeStmt(
       // writer belongs to the applier — a client holding it would stall the replication stream for
       // as long as the transaction lasted. §2.2 says what a consistent multi-statement read on a
       // replica uses instead.
-      if (!verb.readonly && runtime.forwarder.enabledFor(stream.db)) {
+      // R10: a read transaction lives on a leased *reader*, on either role — so it works on a
+      // replica, where the writer belongs to the applier, and on a primary it no longer blocks
+      // writes for as long as it is held. `docs/r10-read-transactions.md`.
+      if (verb.readonly) {
+        stream.readTx = runtime.beginReadTx(tenant, stream.principal, { owner: stream.owner })
+        stream.txReadonly = true
+        return emptyResult(tenant.txid, startedNs)
+      }
+      if (runtime.forwarder.enabledFor(stream.db)) {
         const opened = await runtime.forwarder.txBegin(tenant, stream.principal, {}, stream.owner)
         stream.remoteTx = runtime.forwarder.remoteTx(opened.tx) ?? null
         return emptyResult(tenant.txid, startedNs)
@@ -168,6 +183,15 @@ export async function executeStmt(
       return emptyResult(tenant.txid, startedNs)
     }
     if (verb?.kind === "commit" || verb?.kind === "rollback") {
+      const readTx = stream.readTx
+      if (readTx) {
+        stream.readTx = null
+        stream.txReadonly = false
+        // Both endings do the same thing: a read transaction has nothing to commit. One a timer
+        // already ended ends silently — the client asked for exactly the state it is now in.
+        if (readTx.tx.open) runtime.endReadTx(readTx)
+        return emptyResult(tenant.txid, startedNs)
+      }
       const remote = stream.remoteTx
       if (remote) {
         stream.remoteTx = null
@@ -182,7 +206,15 @@ export async function executeStmt(
       return emptyResult(txid, startedNs)
     }
 
-    if (stream.tx && stream.txReadonly) assertReadOnly(service, stream, sql)
+    // R10: an idle or long-lived read transaction is ended by a timer, so a stream can be holding
+    // one that is already over. The client is told rather than quietly served outside a
+    // transaction it still believes it is in — and the stream is cleared, so it recovers.
+    if (stream.readTx && !stream.readTx.tx.open) {
+      stream.readTx = null
+      stream.txReadonly = false
+      throw new BunQLError("TX_NOT_FOUND", `${stream.db}: the read transaction has ended`, 404)
+    }
+    if (stream.txReadonly && (stream.tx || stream.readTx)) assertReadOnly(service, stream, sql)
     const args = argsOf(stmt)
     const request = { sql, ...(args !== undefined ? { args } : {}) }
     const options = service.options()
@@ -192,6 +224,12 @@ export async function executeStmt(
     if (stream.remoteTx) {
       const result = await runtime.forwarder.txExec(stream.remoteTx, stream.principal, request)
       return toStmtResult(result, wantRows)
+    }
+    if (stream.readTx) {
+      return toStmtResult(
+        executeInReadTx(runtime, tenant, stream.readTx.tx, stream.principal, request, options),
+        wantRows,
+      )
     }
     const result: QueryResult = stream.tx
       ? await executeInTx(runtime, tenant, stream.principal, request, options)

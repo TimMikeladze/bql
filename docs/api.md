@@ -717,7 +717,7 @@ the header, let the next reader rebuild the index — and is the back-out.
   diverges raises `ChecksumMismatch`, sends `DIVERGED` and re-bootstraps from a snapshot. It never
   continues quietly.
 - A page apply cannot run while a local reader holds a read transaction: `xShmLock` answers
-  `SQLITE_BUSY`, the applier backs off for `[replication] applyBusyMs` (default 5000) and then
+  `SQLITE_BUSY`, the applier backs off for `[replication] applyBusyMs` (default 25) and then
   defers the record and retries. Nothing is written under a reader, and nothing is lost.
 - `GET /v1/db/{db}` on a replica reports `"apply"`, the mechanism actually running. It differs
   from the setting only when this VFS cannot offer `xShmLock`, in which case the applier falls
@@ -1521,10 +1521,32 @@ native `/v1/db/{db}/query` and `batch` (R2) and the libsql-compatible `/v2/pipel
 transaction opened on a replica runs on the primary, and every statement in it — reads included —
 goes there, so a read inside the transaction sees the transaction's own uncommitted writes.
 
-`BEGIN TRANSACTION READONLY` on a replica is refused. A tenant transaction takes the database's
-single writer whatever its mode, and a replica's writer belongs to the applier — a client holding it
-would stall replication. Every statement on a replica is already a snapshot read, and
-`BunQL-Min-Txid` pins which snapshot.
+`BEGIN TRANSACTION READONLY` — what `@libsql/client` emits for `transaction("read")` and
+`batch(…, "read")` — opens a read transaction on a **pooled reader**, on a primary and on a replica
+alike (`docs/r10-read-transactions.md`). Nothing about the writer is involved, which is what makes
+it work on a replica, where the writer belongs to the applier; on a primary it means a read
+transaction no longer blocks writes for as long as it is held.
+
+Inside one, a write is refused `SQLITE_READONLY` — classified by `sqlite3_stmt_readonly`, not by
+reading the SQL — and it is refused rather than forwarded, because a transaction that read locally
+and wrote remotely would not show a client its own writes.
+
+Three bounds, because a read transaction holds a connection and, on a replica, delays the applier:
+
+- `[limits] maxReadTx` (16) read transactions per database; the next is `409 TX_BUSY`.
+- `[limits] txIdleTimeoutMs` (5 s) ends one that has gone quiet.
+- `[limits] readTxTimeoutMs` (30 s) ends one however busy it is.
+
+All three end it as a rollback, and the next statement on that stream answers `404 TX_NOT_FOUND`
+rather than being served outside a transaction the client still believes it is in.
+
+On a replica an open read transaction makes the page applier defer and retry, so replication is
+**delayed** for as long as it is held and resumes when it ends. Nothing is lost and nothing
+diverges. A client that only wants a consistent read does not need a transaction at all: every
+statement on a replica is a snapshot read, and `BunQL-Min-Txid` pins which snapshot.
+
+The native `/v1/db/{db}/tx` keeps its three writer modes (`deferred`, `immediate`, `exclusive`) and
+has no read mode; `BunQL-Min-Txid` is its answer.
 
 With `[replication] forwardWrites = false` a replica is read-only and a write is refused with
 `503 NOT_PRIMARY` and `BunQL-Primary`.
@@ -1632,6 +1654,8 @@ the canonical one wins when both are set.
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
 | `[limits] groupCommit` | `false` | `BUNQL_LIMITS_GROUP_COMMIT` | — |
+| `[limits] maxReadTx` | `16` | `BUNQL_LIMITS_MAX_READ_TX` | — |
+| `[limits] readTxTimeoutMs` | `30000` | `BUNQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
 | `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |
 | `[auth] verifyCacheSize` | `1024` (`0` disables) | `BUNQL_AUTH_VERIFY_CACHE_SIZE` | — |
 | `[auth] adminKey` | generated on first start | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
@@ -1645,7 +1669,7 @@ the canonical one wins when both are set.
 | `[replication] secret` | `""` (replication off) | `BUNQL_REPLICATION_SECRET` | `BUNQL_CLUSTER_SECRET` |
 | `[replication] follow` | `["*"]` | `BUNQL_REPLICATION_FOLLOW` (comma-separated) | `BUNQL_FOLLOW` |
 | `[replication] apply` | `"pages"` (or `"wal"`) | `BUNQL_REPLICATION_APPLY` | — |
-| `[replication] applyBusyMs` | `5000` | `BUNQL_REPLICATION_APPLY_BUSY_MS` | — |
+| `[replication] applyBusyMs` | `25` | `BUNQL_REPLICATION_APPLY_BUSY_MS` | — |
 | `[replication] ackTimeoutMs` | `2000` | `BUNQL_REPLICATION_ACK_TIMEOUT_MS` | — |
 | `[replication] ackWithoutReplicas` | `"error"` (or `"allow"`) | `BUNQL_REPLICATION_ACK_WITHOUT_REPLICAS` | — |
 | `[replication] heartbeatMs` | `5000` | `BUNQL_REPLICATION_HEARTBEAT_MS` | — |

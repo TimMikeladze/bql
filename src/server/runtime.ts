@@ -47,6 +47,7 @@ import { parseRetentionMs, S3Store, ShipperPool } from "../storage/index.ts"
 import {
   type AckLevel,
   type ReaderLease,
+  type ReadTx,
   type Tenant,
   TenantError,
   TenantRegistry,
@@ -79,6 +80,25 @@ export interface TxSession {
   origin?: string
   startedAt: number
   rowsMode: "array" | "object"
+}
+
+/**
+ * An open read transaction and its baton (`docs/r10-read-transactions.md`).
+ *
+ * Deliberately not a `TxSession` with a flag on it: that type is the writer — one per database, a
+ * queue in front of it, a lease check at commit, a txid out of it — and a read transaction has
+ * none of those, so a shared type would be half meaningless whichever kind it held.
+ */
+export interface ReadTxSession {
+  baton: string
+  db: string
+  tenant: Tenant
+  principal: Principal
+  /** Set for one begun over a WebSocket, so closing the socket ends it. */
+  owner: object | null
+  startedAt: number
+  rowsMode: "array" | "object"
+  tx: ReadTx
 }
 
 /** What `beginTx` and `beginTxQueued` accept. */
@@ -211,6 +231,8 @@ export class ServerRuntime {
   #retiring = new Map<string, ReturnType<typeof setTimeout>>()
   #tx = new Map<string, TxSession>()
   #txByDb = new Map<string, TxSession>()
+  /** Open read transactions by baton. A separate space: these hold readers, not the writer. */
+  #readTx = new Map<string, ReadTxSession>()
   /** Transactions waiting for the writer, per database, in arrival order (R5's finding). */
   #txQueue = new Map<string, TxWaiter[]>()
   #publisher: Publisher | null = null
@@ -1109,6 +1131,81 @@ export class ServerRuntime {
     return total
   }
 
+  // ── read transactions (docs/r10-read-transactions.md) ────────────────────────────────────────
+
+  /**
+   * Opens a read transaction on a leased reader. Unlike `beginTx` there is no queue and no lease
+   * check, because no writer is taken — which is why it works on a replica, where the writer
+   * belongs to the applier, and why it does not block writes on a primary.
+   */
+  beginReadTx(
+    tenant: Tenant,
+    principal: Principal,
+    options: { owner?: object | null; rows?: "array" | "object" } = {},
+  ): ReadTxSession {
+    if (tenant.openReadTx >= this.config.limits.maxReadTx) {
+      throw new BunQLError(
+        "TX_BUSY",
+        `${tenant.name} already has ${tenant.openReadTx} read transactions open`,
+        409,
+      )
+    }
+    const baton = randomBaton()
+    const tx = tenant.readTxBegin({
+      idleTimeoutMs: this.config.limits.txIdleTimeoutMs,
+      maxMs: this.config.limits.readTxTimeoutMs,
+      onExpire: () => this.#forgetReadTx(baton),
+    })
+    const session: ReadTxSession = {
+      baton,
+      db: tenant.name,
+      tenant,
+      principal,
+      owner: options.owner ?? null,
+      startedAt: Date.now(),
+      rowsMode: options.rows ?? "array",
+      tx,
+    }
+    this.#readTx.set(baton, session)
+    this.registry.pin(tenant.name)
+    this.metrics.transaction()
+    return session
+  }
+
+  /** The read session behind a baton, or 404. */
+  readTxSession(baton: string): ReadTxSession {
+    const session = this.#readTx.get(baton)
+    if (!session) {
+      throw new BunQLError("TX_NOT_FOUND", "no such transaction, or it has already ended", 404)
+    }
+    return session
+  }
+
+  /**
+   * Ends a read transaction. `commit` and `rollback` do the same thing, because a read transaction
+   * has nothing to commit — the distinction only exists because the client says one or the other.
+   */
+  endReadTx(session: ReadTxSession): void {
+    try {
+      if (session.tx.open) session.tenant.readTxEnd(session.tx)
+    } finally {
+      this.#forgetReadTx(session.baton)
+    }
+  }
+
+  get openReadTxCount(): number {
+    return this.#readTx.size
+  }
+
+  #forgetReadTx(baton: string): void {
+    const session = this.#readTx.get(baton)
+    if (!session) return
+    this.#readTx.delete(baton)
+    if (!this.#subscribers.has(session.db) && !this.#txByDb.has(session.db)) {
+      this.registry.unpin(session.db)
+    }
+  }
+
   /** The session behind a baton, or 404. */
   txSession(baton: string): TxSession {
     const session = this.#tx.get(baton)
@@ -1147,6 +1244,14 @@ export class ServerRuntime {
       if (session.owner !== owner) continue
       try {
         this.endTx(session, "rollback")
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
+    for (const session of [...this.#readTx.values()]) {
+      if (session.owner !== owner) continue
+      try {
+        this.endReadTx(session)
       } catch (err) {
         this.#onError(err)
       }
@@ -1213,6 +1318,14 @@ export class ServerRuntime {
       }
       this.#forgetTx(session)
     }
+    for (const session of [...this.#readTx.values()]) {
+      if (session.db !== name) continue
+      try {
+        this.endReadTx(session)
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
     this.closeRealtime(name)
     this.#subscribers.delete(name)
     this.registry.unpin(name)
@@ -1228,6 +1341,14 @@ export class ServerRuntime {
         // Shutting down: an uncommitted transaction leaves nothing behind anyway.
       }
     }
+    for (const session of [...this.#readTx.values()]) {
+      try {
+        if (session.tx.open) session.tenant.readTxEnd(session.tx)
+      } catch {
+        // Same: a read transaction has nothing to lose.
+      }
+    }
+    this.#readTx.clear()
     this.#tx.clear()
     this.#txByDb.clear()
     for (const [db, queue] of this.#txQueue) {

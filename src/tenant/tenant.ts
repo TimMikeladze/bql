@@ -225,6 +225,38 @@ export interface TxBeginOptions extends WriteOptions {
   onExpire?: () => void
 }
 
+/** What `readTxBegin` accepts. */
+export interface ReadTxBeginOptions {
+  /** Roll the transaction back after this long with no statement. 0 (default) never expires. */
+  idleTimeoutMs?: number
+  /** Roll it back after this long however busy it is. 0 (default) never expires. */
+  maxMs?: number
+  /** Called after a timer ended it, so the route layer can drop its baton. */
+  onExpire?: () => void
+}
+
+/**
+ * An open read transaction: a leased reader with `BEGIN DEFERRED` on it (`docs/r10-read-transactions.md`).
+ *
+ * Nothing about the writer is involved, which is what makes it work on a replica — where the
+ * writer belongs to the applier — and what makes it not block writes on a primary.
+ */
+export interface ReadTx {
+  readonly db: Database
+  /** False once it has ended, however it ended. */
+  open: boolean
+}
+
+/** A read transaction and the lease and timers that belong to it. */
+interface OpenReadTx {
+  tx: ReadTx
+  lease: ReaderLease
+  idleTimeoutMs: number
+  onExpire: (() => void) | null
+  idleTimer: ReturnType<typeof setTimeout> | null
+  maxTimer: ReturnType<typeof setTimeout> | null
+}
+
 export interface ReadOptions {
   /** Refuse (or wait) until the tenant has reached this txid — design §5.4, read-your-writes. */
   minTxid?: bigint
@@ -358,6 +390,8 @@ export class Tenant {
 
   #options: TenantOptions
   #free: Database[] = []
+  /** Open read transactions, each holding a reader lease (`docs/r10-read-transactions.md`). */
+  #readTx = new Set<OpenReadTx>()
   #openReaders = 0
   #leased = 0
   #listeners = new Set<CommitListener>()
@@ -920,6 +954,106 @@ export class Tenant {
     })
   }
 
+  // ── read transactions (docs/r10-read-transactions.md) ────────────────────────────────────────
+
+  /**
+   * Opens a read transaction on a leased reader. Works on a replica, because the writer — which on
+   * a replica belongs to the applier — is not involved; and on a primary it does not block writes,
+   * which the writer-based `txBegin` does.
+   *
+   * `BEGIN DEFERRED`: the snapshot is taken at the first read, which is SQLite's own behaviour for
+   * a read transaction and what `BEGIN TRANSACTION READONLY` means to `@libsql/client`.
+   */
+  readTxBegin(options: ReadTxBeginOptions = {}): ReadTx {
+    this.#assertOpen()
+    const lease = this.acquireReader()
+    try {
+      lease.db.exec("begin deferred")
+    } catch (err) {
+      this.releaseReader(lease)
+      throw translateWriteError(err, this.name)
+    }
+    const entry: OpenReadTx = {
+      tx: { db: lease.db, open: true },
+      lease,
+      idleTimeoutMs: options.idleTimeoutMs ?? 0,
+      onExpire: options.onExpire ?? null,
+      idleTimer: null,
+      maxTimer: null,
+    }
+    if (options.maxMs && options.maxMs > 0) {
+      entry.maxTimer = setTimeout(() => this.#expireReadTx(entry), options.maxMs)
+      entry.maxTimer.unref?.()
+    }
+    this.#readTx.add(entry)
+    this.#armReadTxIdle(entry)
+    return entry.tx
+  }
+
+  /** Runs one statement inside an open read transaction and restarts its idle timer. */
+  readTxExec<T>(tx: ReadTx, fn: (db: Database) => T): T {
+    const entry = this.#findReadTx(tx)
+    this.#lastActivityMs = Date.now()
+    this.#armReadTxIdle(entry)
+    return fn(entry.tx.db)
+  }
+
+  /**
+   * Ends a read transaction. Always a rollback: a read transaction has nothing to commit, and
+   * rolling back is the only ending that is correct whether or not it ever read anything.
+   */
+  readTxEnd(tx: ReadTx): void {
+    const entry = this.#findReadTx(tx)
+    this.#closeReadTx(entry)
+  }
+
+  /** Read transactions open on this tenant right now. */
+  get openReadTx(): number {
+    return this.#readTx.size
+  }
+
+  #findReadTx(tx: ReadTx): OpenReadTx {
+    for (const entry of this.#readTx) {
+      if (entry.tx === tx) return entry
+    }
+    throw noTx(this.name)
+  }
+
+  #armReadTxIdle(entry: OpenReadTx): void {
+    if (entry.idleTimer !== null) clearTimeout(entry.idleTimer)
+    entry.idleTimer = null
+    if (entry.idleTimeoutMs <= 0) return
+    const timer = setTimeout(() => this.#expireReadTx(entry), entry.idleTimeoutMs)
+    timer.unref?.()
+    entry.idleTimer = timer
+  }
+
+  #expireReadTx(entry: OpenReadTx): void {
+    if (!entry.tx.open) return
+    const onExpire = entry.onExpire
+    this.#closeReadTx(entry)
+    onExpire?.()
+  }
+
+  #closeReadTx(entry: OpenReadTx): void {
+    if (entry.idleTimer !== null) clearTimeout(entry.idleTimer)
+    if (entry.maxTimer !== null) clearTimeout(entry.maxTimer)
+    entry.idleTimer = null
+    entry.maxTimer = null
+    entry.tx.open = false
+    this.#readTx.delete(entry)
+    let clean = true
+    try {
+      if (entry.lease.db.inTransaction) entry.lease.db.exec("rollback")
+    } catch {
+      // A connection still inside a transaction must not go back in the pool: the next borrower
+      // would inherit its snapshot. Release it as unpooled, which closes it.
+      clean = false
+    }
+    this.releaseReader(clean ? entry.lease : { db: entry.lease.db, pooled: false })
+    if (!clean && entry.lease.pooled) this.#openReaders -= 1
+  }
+
   /**
    * Borrows a reader. The lease is what keeps a TRUNCATE checkpoint or a snapshot from taking the
    * exclusive WAL locks underneath an open read transaction (design §4.5).
@@ -1272,6 +1406,13 @@ export class Tenant {
       waiter.reject(new TenantError("CLOSED", `${this.name} was closed while waiting for a txid`))
     }
     this.#waiters = []
+    for (const entry of [...this.#readTx]) {
+      try {
+        this.#closeReadTx(entry)
+      } catch {
+        // Closing must not throw; a read transaction leaves nothing behind anyway.
+      }
+    }
     if (this.#txOpen) {
       this.#clearTxTimer()
       try {

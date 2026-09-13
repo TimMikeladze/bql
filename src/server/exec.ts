@@ -23,7 +23,7 @@ import {
 } from "../client/protocol.ts"
 import type { Database, Statement } from "../sqlite/index.ts"
 import type { SqliteValue } from "../sqlite/values.ts"
-import type { AckLevel, Tenant } from "../tenant/index.ts"
+import type { AckLevel, ReadTx, Tenant } from "../tenant/index.ts"
 import { applyPolicy, type Principal, requireScope } from "./auth.ts"
 import type { ServerConfig } from "./config.ts"
 import { BunQLError } from "./errors.ts"
@@ -421,6 +421,35 @@ export function executeInTx(
   })
   const result = toResult(stepped, options.rows, tenant.txid, startedNs)
   runtime.metrics.statement(stepped.writes ? "write" : "read", result.vmSteps)
+  return result
+}
+
+/**
+ * One statement inside an open **read** transaction (`docs/r10-read-transactions.md`).
+ *
+ * The same shape as `executeInTx` with two differences that both follow from it being on a leased
+ * reader rather than the writer: the timeout is always the read one, because a write here has
+ * already been refused by `assertReadOnly`, and the statement is always counted as a read.
+ */
+export function executeInReadTx(
+  runtime: ServerRuntime,
+  tenant: Tenant,
+  tx: ReadTx,
+  principal: Principal,
+  request: StatementRequest,
+  options: ResolvedOptions,
+): QueryResult {
+  const startedNs = Bun.nanoseconds()
+  const stepped = tenant.readTxExec(tx, (db) => {
+    const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
+    try {
+      return step(db, request, options.readTimeoutMs, options.maxRows)
+    } finally {
+      handle.release()
+    }
+  })
+  const result = toResult(stepped, options.rows, tenant.txid, startedNs)
+  runtime.metrics.statement("read", result.vmSteps)
   return result
 }
 

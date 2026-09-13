@@ -90,8 +90,21 @@ const META_VERSION = 1
 /** Which of design §4.5's two mechanisms an applier uses. */
 export type ApplyMechanism = "pages" | "wal"
 
-/** Default for `[replication] applyBusyMs`, and the `busy_timeout` every connection already has. */
-export const DEFAULT_APPLY_BUSY_MS = 5000
+/**
+ * Default for `[replication] applyBusyMs`: how long **one** apply attempt spins for the WAL lock
+ * set before deferring.
+ *
+ * 25 ms, not the 5000 it was. The spin is `Bun.sleepSync`, so every millisecond of it is a
+ * millisecond of this thread's event loop — and the patience it was buying already exists, without
+ * the block: `ReplicaClient.#apply` puts a deferred record back on the queue and retries, for as
+ * long as it takes. Five seconds of spinning was therefore not five seconds of extra tolerance, it
+ * was five seconds of a stalled node, and R10 turned that from a rare condition into one a client
+ * can hold open on purpose (`docs/r10-read-transactions.md` §2.3).
+ *
+ * 25 ms is comfortably longer than any ordinary read, so a normal replica still applies inside the
+ * first attempt and never reaches the retry path at all.
+ */
+export const DEFAULT_APPLY_BUSY_MS = 25
 
 const BACKOFF_START_MS = 1
 const BACKOFF_MAX_MS = 32
@@ -117,7 +130,7 @@ export interface WalApplierOptions {
    * cannot offer `xShmLock`; `mechanism` reports what is actually running.
    */
   mechanism?: ApplyMechanism
-  /** How long an apply waits for the WAL lock set before `ApplyBusy`. Default 5000. */
+  /** How long one apply attempt spins for the WAL lock set before `ApplyBusy`. Default 25. */
   busyMs?: number
   /** Where the one-line notice about falling back to mechanism B goes. Default `console.warn`. */
   warn?: (message: string) => void
@@ -560,6 +573,9 @@ export class WalApplier {
    * Spins for the lock set with a bounded backoff. `SQLITE_BUSY` here means a local reader is
    * mid-transaction, which is expected rather than exceptional; `ApplyBusy` is raised only when it
    * outlasts `busyMs`, and it is raised before a single byte has been written.
+   *
+   * The spin is synchronous — `xShmLock` has no other form — so `busyMs` is deliberately short and
+   * the real patience is the caller's asynchronous retry. See `DEFAULT_APPLY_BUSY_MS`.
    */
   #acquire(locks: WalLocks, txid: bigint): void {
     if (locks.tryLock()) return

@@ -16,7 +16,7 @@
 import { requireScope, type Principal } from "../auth.ts"
 import { BunQLError } from "../errors.ts"
 import { resolveOptions, type ResolvedOptions } from "../exec.ts"
-import type { ServerRuntime, TxSession } from "../runtime.ts"
+import type { ReadTxSession, ServerRuntime, TxSession } from "../runtime.ts"
 import type { RemoteTx } from "../forward.ts"
 import { BatonSigner } from "./baton.ts"
 
@@ -53,6 +53,12 @@ export class HranaStream {
    * replica. Exactly one of `tx` and `remoteTx` is ever set. `docs/r4b-hrana-forward.md` §2.
    */
   remoteTx: RemoteTx | null = null
+  /**
+   * R10: the read transaction this stream opened, on a leased reader rather than on the writer.
+   * `BEGIN TRANSACTION READONLY` opens one of these; at most one of `tx`, `remoteTx` and `readTx`
+   * is ever set. `docs/r10-read-transactions.md`.
+   */
+  readTx: ReadTxSession | null = null
   /** Set when the open transaction began as `BEGIN TRANSACTION READONLY`, so writes are refused. */
   txReadonly = false
   closed = false
@@ -202,6 +208,16 @@ export class HranaService {
     if (tx) {
       try {
         this.runtime.endTx(tx, "rollback")
+      } catch (err) {
+        this.runtime.report(err)
+      }
+    }
+    const readTx = stream.readTx
+    stream.readTx = null
+    stream.txReadonly = false
+    if (readTx) {
+      try {
+        this.runtime.endReadTx(readTx)
       } catch (err) {
         this.runtime.report(err)
       }

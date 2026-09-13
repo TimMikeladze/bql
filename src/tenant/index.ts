@@ -27,6 +27,8 @@ export {
   type CommitEvent,
   type CommitListener,
   type ReaderLease,
+  type ReadTx,
+  type ReadTxBeginOptions,
   type ReadOptions,
   type ReconcileOutcome,
   type RetainOptions,

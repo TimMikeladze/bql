@@ -97,6 +97,10 @@ export class ReplicaUnfollowed extends ReplicaNotice {
 /** Who this module pins tenants as, so it never releases the realtime engine's pin. */
 const PIN_OWNER = "replication"
 
+/** First retry delay for a record a busy tenant deferred, and the ceiling it doubles to. */
+const RETRY_START_MS = 5
+const RETRY_MAX_MS = 250
+
 /** Ceiling for the reconnect backoff, per `plan-phase1.md`. */
 const MAX_RECONNECT_MS = 10_000
 
@@ -308,6 +312,8 @@ interface Stream {
   /** Records that arrived while the tenant was busy; retried on the next tick. */
   deferred: { record: TxnRecord; bytes: Uint8Array }[]
   retrying: boolean
+  /** Current retry delay for deferred records, in ms. 0 is "not backing off". */
+  retryMs: number
 }
 
 export class ReplicaClient {
@@ -1343,6 +1349,7 @@ export class ReplicaClient {
         bootstrap: null,
         deferred: [],
         retrying: false,
+        retryMs: 0,
       }
       this.#streams.set(id, stream)
       this.#byDb.set(db, stream)
@@ -1363,6 +1370,7 @@ export class ReplicaClient {
       bootstrap: null,
       deferred: [],
       retrying: false,
+      retryMs: 0,
     }
     this.#streams.set(id, stream)
     this.#byDb.set(db, stream)
@@ -1597,20 +1605,29 @@ export class ReplicaClient {
       return
     }
     this.recordsApplied += 1
+    stream.retryMs = 0
     if (stream.primaryTxid < record.txid) stream.primaryTxid = record.txid
     this.#ack(stream, record.txid, true)
   }
 
-  /** Retries records deferred by a busy tenant, in order. */
+  /**
+   * Retries records deferred by a busy tenant, in order, backing off as the tenant stays busy.
+   *
+   * The backoff is what keeps a long-lived local reader — a client's read transaction, since R10 —
+   * from costing this thread a spin every 5 ms for as long as it is held. It resets on the first
+   * record that applies, so a momentary read costs one 5 ms wait and nothing more.
+   */
   #scheduleRetry2(stream: Stream): void {
     if (stream.retrying) return
     stream.retrying = true
+    const delay = stream.retryMs || RETRY_START_MS
+    stream.retryMs = Math.min(delay * 2, RETRY_MAX_MS)
     const timer = setTimeout(() => {
       stream.retrying = false
       const pending = stream.deferred
       stream.deferred = []
       for (const item of pending) this.#apply(stream, item.record, item.bytes)
-    }, 5)
+    }, delay)
     timer.unref?.()
   }
 

@@ -197,6 +197,22 @@ export interface LimitsSection {
   groupCommit: boolean
   /** Most statements one group commit folds. Default 64. */
   groupCommitMax: number
+  /**
+   * Read transactions open at once, per database (`docs/r10-read-transactions.md`). Each holds a
+   * SQLite connection for its whole life and `acquireReader` opens one past the pool rather than
+   * failing, so without a bound one client can exhaust the node's file descriptors. Past this,
+   * `409 TX_BUSY`.
+   */
+  maxReadTx: number
+  /**
+   * How long a read transaction may live however busy it is, in milliseconds. `txIdleTimeoutMs`
+   * already closes one that has gone quiet; this closes one that has not.
+   *
+   * It matters most on a replica, where an open read transaction makes the page applier answer
+   * `ApplyBusy` and defer — replication is delayed rather than broken, but the deferred queue grows
+   * while it is held. Thirty seconds of one snapshot is past any honest use.
+   */
+  readTxTimeoutMs: number
 }
 
 /** Which half of a primary/replica pair this node is (design §5.2). */
@@ -436,6 +452,8 @@ export const DEFAULT_CONFIG: ServerConfig = {
     maxImportBytes: 1024 * 1024 * 1024,
     groupCommit: false,
     groupCommitMax: 64,
+    maxReadTx: 16,
+    readTxTimeoutMs: 30_000,
   },
   auth: {
     adminKey: null,
