@@ -75,3 +75,18 @@ export {
   type SchemaOptions,
   type TenantGraphQL,
 } from "./schema.ts"
+export { prepareDocument } from "./handler.ts"
+export {
+  type ChangeFeedHost,
+  pushIterator,
+  type SubscriptionContext,
+  withSubscription,
+} from "./subscription.ts"
+export {
+  GRAPHQL_WS_PROTOCOL,
+  GraphQLSocket,
+  type GraphQLSocketHost,
+  type GraphQLSocketLike,
+  type PreparedOperation,
+  WS_CLOSE,
+} from "./ws.ts"

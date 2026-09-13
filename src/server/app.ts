@@ -6,6 +6,7 @@
 // before the `fetch` fallback runs, which is what keeps the query path free of URL parsing.
 
 import { HEADERS, WS_PROTOCOL } from "../client/protocol.ts"
+import { GRAPHQL_WS_PROTOCOL, GraphQLSocket } from "../graphql/index.ts"
 import {
   type ClusterLink,
   RAFT_PATH,
@@ -194,7 +195,12 @@ export interface ReplicationSocketData {
   replication: true
 }
 
-type AppSocketData = SocketData | ReplicationSocketData | RaftSocketData | RelaySocketData
+type AppSocketData =
+  | SocketData
+  | ReplicationSocketData
+  | RaftSocketData
+  | RelaySocketData
+  | GraphQLSocketData
 
 function isReplication(data: AppSocketData): data is ReplicationSocketData {
   return (data as ReplicationSocketData).replication === true
@@ -281,15 +287,29 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
   for (const operation of registry.operations()) {
     // With workers, a route that names a database is not served here at all: it is forwarded to
     // the worker that owns it, whose own app has already applied `wrap()`. `docs/c4-workers.md`.
+    // H7: `GET` on the GraphQL path with the `graphql-transport-ws` subprotocol is an upgrade, not
+    // a request. It is handled here rather than in `fetch` below because Bun matches `routes`
+    // first, so a registered path never reaches the fallback.
+    const graphqlSocketRoute =
+      operation.id === "databaseGraphiql"
+        ? async (request: Request, server: unknown): Promise<Response | undefined> => {
+            const url = new URL(request.url)
+            if (isGraphQLUpgrade(runtime, request, url)) {
+              return upgradeGraphQL(runtime, surfaces, request, server, url)
+            }
+            return wrap(runtime, asHandler(operation, http))(request as never, server)
+          }
+        : null
     const handler =
-      pool && isSharded(operation.path)
+      graphqlSocketRoute ??
+      (pool && isSharded(operation.path)
         ? forwardByPath(runtime, pool)
         : pool && operation.id === "createDatabase"
           ? forwardByBody(runtime, pool)
           : pool && operation.id === "metrics"
             ? () => routerMetrics(runtime, pool, replRouter)
-            : wrap(runtime, asHandler(operation, http))
-    mountOperation(routes, operation, handler)
+            : wrap(runtime, asHandler(operation, http)))
+    mountOperation(routes, operation, handler as never)
   }
   // One preflight per path the registry claims, exactly as the hand-written table wrote by hand.
   for (const entry of Object.values(routes)) {
@@ -365,6 +385,13 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
           hranaWsOpen(ws as never)
           return
         }
+        if (isGraphQLSocket(ws.data)) {
+          ws.data.bind(
+            ws as unknown as { send(data: string): unknown; close(code?: number, reason?: string): void },
+          )
+          runtime.metrics.wsOpened()
+          return
+        }
         runtime.metrics.wsOpened()
         if (ws.data.principal) greet(ws, runtime.node)
       },
@@ -376,6 +403,13 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
         }
         if (isCluster(ws.data as AppSocketData)) {
           runtime.cluster?.socket?.onMessage(ws as unknown as RaftSocket, message as Uint8Array)
+          return
+        }
+        if (isGraphQLSocket(ws.data)) {
+          runtime.metrics.wsMessage()
+          void ws.data.graphql
+            .message(typeof message === "string" ? message : message.toString("utf8"))
+            .catch((err: unknown) => runtime.report(err))
           return
         }
         if (isReplication(ws.data as AppSocketData)) {
@@ -418,6 +452,14 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
         if (isReplication(ws.data as AppSocketData)) {
           if (replRouter) replRouter.close(ws as unknown as ReplicationSocket)
           else runtime.replication?.close(ws as unknown as ReplicationSocket)
+          return
+        }
+        if (isGraphQLSocket(ws.data)) {
+          // Every subscription this socket opened, ended — the engine's subscriber count is where
+          // a leak would show, and a client that vanished never sent `complete`.
+          ws.data.graphql.close()
+          ws.data.bind(null)
+          runtime.metrics.wsClosed()
           return
         }
         if (isHranaSocket(ws.data)) {
@@ -550,6 +592,93 @@ function upgradeReplication(
     )
   }
   const ok = (server as UpgradeHost).upgrade(request, { data: { replication: true } })
+  if (ok) return undefined
+  return new Response("expected a WebSocket upgrade", { status: 426 })
+}
+
+/**
+ * H7: a socket speaking `graphql-transport-ws`, held while it is open.
+ *
+ * `bind` is a late binding: Bun does not hand back the `ServerWebSocket` until `open`, and the
+ * protocol object has to exist before then so that a frame arriving in the same tick has somewhere
+ * to go.
+ */
+interface GraphQLSocketData {
+  graphql: GraphQLSocket
+  bind(socket: { send(data: string): unknown; close(code?: number, reason?: string): void } | null): void
+}
+
+function isGraphQLSocket(data: unknown): data is GraphQLSocketData {
+  return (data as GraphQLSocketData | null)?.graphql instanceof GraphQLSocket
+}
+
+/**
+ * `GET /v1/db/{db}/{graphql path}` with the `graphql-transport-ws` subprotocol (H7,
+ * `docs/h7-subscriptions.md` §4). Anything else on that path is the HTTP GraphQL route.
+ *
+ * The credential may come from the upgrade — a header, or `?token=`, which is what a browser has —
+ * and `connection_init` may present one instead or as well. The principal is settled there, once,
+ * and every operation on the socket runs as it.
+ */
+function isGraphQLUpgrade(runtime: ServerRuntime, request: Request, url: URL): boolean {
+  if (request.method !== "GET") return false
+  if (!request.headers.get("upgrade")?.toLowerCase().includes("websocket")) return false
+  const wanted = request.headers.get("sec-websocket-protocol") ?? ""
+  if (!wanted.split(",").some((one) => one.trim() === GRAPHQL_WS_PROTOCOL)) return false
+  const parts = url.pathname.split("/").filter((one) => one.length > 0)
+  return (
+    parts[0] === "v1" &&
+    parts[1] === "db" &&
+    parts.length === 4 &&
+    parts[3] === runtime.config.graphql.path
+  )
+}
+
+async function upgradeGraphQL(
+  runtime: ServerRuntime,
+  surfaces: Surfaces,
+  request: Request,
+  server: unknown,
+  url: URL,
+): Promise<Response | undefined> {
+  const parts = url.pathname.split("/").filter((one) => one.length > 0)
+  let db = parts[2] as string
+  try {
+    db = decodeURIComponent(db)
+  } catch {
+    // A name that is not valid percent-encoding is passed through; the tenant lookup refuses it.
+  }
+  const token =
+    request.headers.get("authorization")?.replace(/^[Bb]earer\s+/, "") ?? url.searchParams.get("token")
+  let principal = null
+  if (token) {
+    try {
+      principal = await runtime.auth.authenticateToken(token)
+    } catch (err) {
+      return errorResponse(err)
+    }
+  }
+  // The socket object is not available until `upgrade` returns, so the sender is a late binding
+  // over `ws`, which Bun hands back to `open`.
+  let live: { send(data: string): unknown; close(code?: number, reason?: string): void } | null = null
+  const graphql = surfaces.graphqlSocket(
+    {
+      send: (data: string) => live?.send(data),
+      close: (code?: number, reason?: string) => live?.close(code, reason),
+    },
+    db,
+    principal,
+  )
+  const data: GraphQLSocketData = {
+    graphql,
+    bind: (socket) => {
+      live = socket
+    },
+  }
+  const ok = (server as UpgradeHost).upgrade(request, {
+    data,
+    headers: { "sec-websocket-protocol": GRAPHQL_WS_PROTOCOL },
+  })
   if (ok) return undefined
   return new Response("expected a WebSocket upgrade", { status: 426 })
 }

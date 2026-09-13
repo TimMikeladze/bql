@@ -31,9 +31,16 @@ import {
   type Execute,
 } from "../dataapi/index.ts"
 import {
+  type ChangeFeedHost,
   graphqlAvailable,
   type GraphQLHandler,
   graphqlHandler,
+  GraphQLSocket,
+  type GraphQLSocketHost,
+  type GraphQLSocketLike,
+  loadPeers,
+  type PreparedOperation,
+  prepareDocument,
   tenantDocument,
 } from "../graphql/index.ts"
 import { createDispatcher, type Dispatcher } from "../http/index.ts"
@@ -73,6 +80,17 @@ interface Call {
  * document and GraphQL between them, so a database is introspected once per schema version however
  * it is asked about.
  */
+/** `connection_init`'s payload, as every GraphQL client spells the credential in it. */
+function tokenFrom(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null
+  const bag = payload as Record<string, unknown>
+  for (const key of ["authorization", "Authorization", "token", "accessToken"]) {
+    const value = bag[key]
+    if (typeof value === "string" && value.length > 0) return value.replace(/^[Bb]earer\s+/, "")
+  }
+  return null
+}
+
 export class Surfaces {
   readonly #runtime: ServerRuntime
   readonly #cache: DataApiCache
@@ -290,6 +308,117 @@ export class Surfaces {
       return await this.#graphqlHandler()(ctx.request)
     } finally {
       this.#calls.delete(ctx.request)
+    }
+  }
+
+  /**
+   * A GraphQL socket speaking `graphql-transport-ws` (H7, `docs/h7-subscriptions.md` §4).
+   *
+   * The principal is established **once**, from `connection_init`'s payload or from the upgrade's
+   * own credential, and every operation on the socket runs as it — a browser cannot set
+   * `Authorization` on a WebSocket, which is why the protocol has a payload at all.
+   */
+  graphqlSocket(
+    socket: GraphQLSocketLike,
+    db: string,
+    initial: Principal | null,
+  ): GraphQLSocket {
+    const runtime = this.#runtime
+    const config = runtime.config
+    let principal: Principal | null = initial
+    const host: GraphQLSocketHost = {
+      authenticate: async (payload: unknown): Promise<void> => {
+        const token = tokenFrom(payload)
+        if (token) principal = await runtime.auth.authenticateToken(token)
+        if (!principal) {
+          throw new BunQLError("UNAUTHENTICATED", "this socket presented no credential", 401)
+        }
+        // The same gate the HTTP surface applies before it generates anything.
+        requireScope(principal, db, "ro")
+      },
+      peers: () => loadPeers(),
+      prepare: async (
+        query: string,
+        variables: Record<string, unknown> | undefined,
+        operationName: string | undefined,
+      ): Promise<PreparedOperation> => {
+        const who = principal
+        if (!who) throw new BunQLError("UNAUTHENTICATED", "connection_init has not run", 401)
+        const peers = await loadPeers()
+        const tenant = await this.#graphqlHandler().schemas.for(db)
+        const prepared = prepareDocument(peers, tenant.schema, query, {
+          variables: variables ?? null,
+          operationName: operationName ?? null,
+          maxDepth: config.graphql.maxDepth,
+          maxComplexity: config.graphql.maxComplexity,
+          defaultRows: config.api.defaultLimit,
+        })
+        if (prepared.problems) {
+          const why = prepared.problems.map((problem) => problem.message).join("; ")
+          throw new BunQLError("BAD_REQUEST", why, 400)
+        }
+        const options = resolveOptions(undefined, null, config)
+        return {
+          document: prepared.document,
+          schema: tenant.schema,
+          context: { db, host: this.#feedHost(who) },
+          ...(variables ? { variables } : {}),
+          ...(operationName ? { operationName } : {}),
+          ambient: { db, context: { db, exec: this.#execFor(db, who, options, null) } },
+        }
+      },
+      onError: (err: unknown) => runtime.report(err),
+    }
+    return new GraphQLSocket(socket, host)
+  }
+
+  /**
+   * Opening a change feed, as one principal, under **exactly** the rule the `bunql.v1` socket and
+   * the SSE feed apply: `ro` on the database.
+   *
+   * There is deliberately no per-table check here, because there is none on the other two surfaces
+   * either — a token with `ro` on a database sees every table's changes on all three. Enforcing a
+   * narrower rule on this surface alone would be a difference between surfaces rather than a
+   * defence, and the place to fix it, if it is to be fixed, is the engine all three share.
+   */
+  #feedHost(principal: Principal): ChangeFeedHost {
+    const runtime = this.#runtime
+    return {
+      open: (db, options, emit) => {
+        requireScope(principal, db, "ro")
+        const tenant = runtime.tenant(db)
+        runtime.retain(db)
+        let realtime: ReturnType<ServerRuntime["realtimeFor"]>
+        try {
+          realtime = runtime.realtimeFor(tenant)
+        } catch (err) {
+          runtime.releaseSubscription(db)
+          throw err
+        }
+        let sub: string | null = null
+        try {
+          const opened = realtime.subscribeChanges(options, (event) => emit(event))
+          sub = opened.sub
+          // The backlog goes out before anything live, in order, with `reset` on the first event
+          // when the ring could not serve `since` — the same signal the native feed sends.
+          let first = true
+          for (const event of opened.backlog) {
+            emit(first && opened.reset ? ({ ...event, reset: true } as never) : event)
+            first = false
+          }
+          if (opened.backlog.length === 0 && opened.reset) {
+            emit({ txid: Number(tenant.txid), atMs: Date.now(), changes: [], reset: true } as never)
+          }
+        } catch (err) {
+          runtime.releaseSubscription(db)
+          throw err
+        }
+        return () => {
+          if (sub) realtime.unsubscribe(sub)
+          sub = null
+          runtime.releaseSubscription(db)
+        }
+      },
     }
   }
 

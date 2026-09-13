@@ -1470,6 +1470,35 @@ down, converted into the worker's own monotonic clock, because each worker threa
 `Map.get` and `performance.now()` it is on one thread and costs no message at all.
 `bun run bench/workers.ts --cluster`.
 
+### GraphQL subscriptions
+
+`GET /v1/db/{db}/{graphql path}` upgraded with the **`graphql-transport-ws`** subprotocol is a
+GraphQL socket — the protocol `graphql-ws`, Apollo and urql all speak. One root field:
+
+```graphql
+subscription {
+  changes(tables: ["todos"], since: 41, include: row) {
+    txid
+    atMs
+    reset
+    changes { op table pk row old }
+  }
+}
+```
+
+It carries the **change feed**, the same events SSE `GET /v1/db/{db}/changes` and the `bunql.v1`
+socket carry, with the same `tables` filter and the same `since` replay. `reset` is true on the
+first event when `since` was older than the ring could serve: there is a gap, so re-query rather
+than trust the feed. A client that wants a live *result* re-runs its query when an event arrives.
+
+A `query` or a `mutation` sent over the same socket is answered and completed, through the same
+executor and the same depth and complexity limits the HTTP surface uses.
+
+**Authentication is `connection_init`'s payload** — `{"authorization": "Bearer …"}` or
+`{"token": "…"}` — because a browser cannot set a header on a WebSocket. `Authorization` on the
+upgrade and `?token=` both work too. The principal is settled once, at `connection_init`, and every
+operation on the socket runs as it; `ro` on the database is what a subscription needs.
+
 ### Writes on a replica
 
 A replica **forwards** a write to its primary and serves reads locally, on both surfaces: the

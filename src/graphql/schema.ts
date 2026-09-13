@@ -31,6 +31,7 @@ import {
   tenantDocument,
 } from "./document.ts"
 import { loadPeers, type PeerLoaders } from "./peers.ts"
+import { withSubscription } from "./subscription.ts"
 
 /** Tenants whose schema is kept. */
 export const DEFAULT_MAX_SCHEMAS = 64
@@ -146,7 +147,16 @@ export class SchemaCache {
         fetch: nullOnNotFound(dispatch) as unknown as typeof globalThis.fetch,
       },
     )
-    const built: TenantGraphQL = { db, schemaVersion: version, schema, document, dispatch, warnings }
+    // H7: the one root that is not generated. A REST document cannot describe a subscription, so
+    // `Subscription` is written by hand and added here — `docs/h7-subscriptions.md` §1.
+    const built: TenantGraphQL = {
+      db,
+      schemaVersion: version,
+      schema: withSubscription(schema, peers),
+      document,
+      dispatch,
+      warnings,
+    }
     this.#tenants.delete(db)
     this.#tenants.set(db, built)
     while (this.#tenants.size > this.#max) {

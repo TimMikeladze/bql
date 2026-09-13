@@ -219,7 +219,7 @@ Tim's constraint: OpenAPI before GraphQL. Each is one Opus subagent with its own
 | H4 | dataapi: introspection, resource operations, filter grammar, `GET /v1/db/{db}/openapi.json` | `src/dataapi/*`, `test/dataapi/*` | H2, H3 |
 | H5 | graphql: schema from the document, in-process fetch, GraphiQL, optional peers | `src/graphql/*`, `test/graphql/*` | H4 |
 | H6 | ~~port the existing `/v1` routes onto the operation model; `scripts/routes.ts --check` reads the registry instead of guessing~~ **Done**, `docs/h6-mount.md` | `src/server/registry.ts`, `src/server/surfaces.ts`, `scripts/routes.ts` | H5 |
-| H7 | GraphQL subscriptions over the existing change feed | `src/graphql/*`, `src/realtime/*` | H5 |
+| H7 | GraphQL subscriptions over the existing change feed ✅ **Built** (`docs/h7-subscriptions.md`) | `src/graphql/*`, `src/realtime/*` | H5 |
 
 H3 and H4's *emitter* half are independent enough to run beside each other; H4 cannot finish
 without H3.

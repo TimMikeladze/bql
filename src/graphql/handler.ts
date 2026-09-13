@@ -24,7 +24,7 @@
 // `200` whose errors are per field, which is GraphQL's own rule.
 
 import type { DataApiContext } from "../dataapi/index.ts"
-import type { DocumentNode, ExecutionResult, GraphQLError } from "graphql"
+import type { DocumentNode, ExecutionResult, GraphQLError, GraphQLSchema } from "graphql"
 import { type FormattedGraphQLError, liftBunQLError } from "./errors.ts"
 import { runInCall } from "./ambient.ts"
 import {
@@ -34,7 +34,7 @@ import {
   DEFAULT_ROWS,
   type LimitProblem,
 } from "./limits.ts"
-import { loadPeers } from "./peers.ts"
+import { loadPeers, type Peers } from "./peers.ts"
 import { SchemaCache, type SchemaOptions } from "./schema.ts"
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const
@@ -120,28 +120,15 @@ export function graphqlHandler(options: GraphQLHandlerOptions): GraphQLHandler {
     const context = await options.context(request, db)
     const tenant = await schemas.for(db)
 
-    let document: DocumentNode
-    try {
-      document = peers.graphql.parse(payload.query)
-    } catch (err) {
-      return errors([formatted(err as GraphQLError)], 400)
-    }
-    const invalid = peers.graphql.validate(tenant.schema, document, peers.graphql.specifiedRules)
-    if (invalid.length > 0) {
-      return errors(
-        invalid.map((error) => formatted(error)),
-        400,
-      )
-    }
-
-    const limits = checkLimits(peers.graphql, tenant.schema, document, {
-      maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
-      maxComplexity: options.maxComplexity ?? DEFAULT_MAX_COMPLEXITY,
-      defaultRows: options.defaultRows ?? DEFAULT_ROWS,
+    const prepared = prepareDocument(peers, tenant.schema, payload.query, {
       variables: payload.variables ?? null,
       operationName: payload.operationName ?? null,
+      ...(options.maxDepth !== undefined ? { maxDepth: options.maxDepth } : {}),
+      ...(options.maxComplexity !== undefined ? { maxComplexity: options.maxComplexity } : {}),
+      ...(options.defaultRows !== undefined ? { defaultRows: options.defaultRows } : {}),
     })
-    if (limits.problems.length > 0) return errors(limits.problems.map(refused), 400)
+    if (prepared.problems) return errors(prepared.problems, 400)
+    const document = prepared.document
 
     const operation = peers.graphql.getOperationAST(document, payload.operationName ?? undefined)
     if (method !== "POST" && operation?.operation !== "query") {
@@ -167,6 +154,48 @@ export function graphqlHandler(options: GraphQLHandlerOptions): GraphQLHandler {
   }
 
   return Object.assign(handler, { schemas })
+}
+
+/**
+ * Parse, validate, and measure against the limits — the three things that must happen to a
+ * document before anything dispatches, in that order.
+ *
+ * Shared by the HTTP handler above and by `src/graphql/ws.ts`, so a socket and a request refuse
+ * the same documents for the same reasons. H7's rule: one execution path, one set of limits
+ * (`docs/h7-subscriptions.md` §5). The two callers differ only in how they render a refusal — an
+ * HTTP `400` with a GraphQL error body, or an `error` message on the socket — which is why this
+ * returns the problems rather than a `Response`.
+ */
+export function prepareDocument(
+  peers: Peers,
+  schema: GraphQLSchema,
+  query: string,
+  options: {
+    variables?: Record<string, unknown> | null
+    operationName?: string | null
+    maxDepth?: number
+    maxComplexity?: number
+    defaultRows?: number
+  } = {},
+): { document: DocumentNode; problems?: undefined } | { document?: undefined; problems: FormattedGraphQLError[] } {
+  let document: DocumentNode
+  try {
+    document = peers.graphql.parse(query)
+  } catch (err) {
+    return { problems: [formatted(err as GraphQLError)] }
+  }
+  const invalid = peers.graphql.validate(schema, document, peers.graphql.specifiedRules)
+  if (invalid.length > 0) return { problems: invalid.map((error) => formatted(error)) }
+
+  const limits = checkLimits(peers.graphql, schema, document, {
+    maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
+    maxComplexity: options.maxComplexity ?? DEFAULT_MAX_COMPLEXITY,
+    defaultRows: options.defaultRows ?? DEFAULT_ROWS,
+    variables: options.variables ?? null,
+    operationName: options.operationName ?? null,
+  })
+  if (limits.problems.length > 0) return { problems: limits.problems.map(refused) }
+  return { document }
 }
 
 /** `/v1/db/acme/graphql` → `acme`. */
