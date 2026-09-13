@@ -19,16 +19,24 @@ import { SQLITE_OK, SQLITE_ROW } from "./constants.ts"
  */
 export const MIN_VERSION = "3.37.0"
 
+/** The file `bun run sqlite:build` produces on this platform. One definition, used by both. */
+export function vendoredName(): string | null {
+  if (process.platform === "darwin") return "libsqlite3.dylib"
+  if (process.platform === "linux") return "libsqlite3.so"
+  if (process.platform === "win32") return "sqlite3.dll"
+  return null
+}
+
 /** Where `bun run sqlite:build` puts its artefact, relative to the package root. */
 function vendoredPath(): string | null {
-  const name =
-    process.platform === "darwin"
-      ? "libsqlite3.dylib"
-      : process.platform === "linux"
-        ? "libsqlite3.so"
-        : null
+  const name = vendoredName()
   if (!name) return null
-  return new URL(`../../vendor/sqlite/${name}`, import.meta.url).pathname
+  const url = new URL(`../../vendor/sqlite/${name}`, import.meta.url)
+  // `URL.pathname` on Windows is `/C:/…`, which no file API accepts. `fileURLToPath` is the only
+  // thing that knows that, and it is a no-op everywhere else.
+  return process.platform === "win32"
+    ? (require("node:url") as typeof import("node:url")).fileURLToPath(url)
+    : url.pathname
 }
 
 /** Candidate paths tried in order when `BUNQL_SQLITE_LIB` is unset. */
@@ -54,6 +62,10 @@ export function candidatePaths(): string[] {
     // /usr/lib is absent or unreadable; the fixed candidates still apply.
   }
   out.push("/usr/lib/libsqlite3.so.0", "libsqlite3.so", "/usr/lib/libsqlite3.dylib")
+  // Windows ships no libsqlite3 at all and has no system path worth guessing, so the vendored
+  // build above is the only candidate; `winsqlite3.dll` exists but exports a private subset and
+  // is not a SQLite anything should link against.
+  if (process.platform === "win32") out.push("sqlite3.dll")
   return out
 }
 

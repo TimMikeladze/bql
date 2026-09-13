@@ -30,6 +30,16 @@
 #include <stdint.h>
 #include <string.h>
 
+/*
+** A DLL exports nothing unless it is told to, so `scripts/sqlite.ts` defines this to
+** `__declspec(dllexport)` on Windows — exactly as it defines SQLITE_API for the amalgamation
+** beside this file. Everywhere else a shared object exports every non-static symbol and this is
+** nothing at all.
+*/
+#ifndef BUNQL_API
+#define BUNQL_API
+#endif
+
 /* Declared rather than included: this file is compiled beside the amalgamation, which defines
 ** both, and forward-declaring keeps it free of a 9 MB header it needs two lines of. */
 struct sqlite3;
@@ -43,7 +53,7 @@ extern int sqlite3_db_config(struct sqlite3 *, int op, ...);
 ** -1 to leave unchanged and only read back; `*out` receives the setting as it stands afterwards,
 ** which is how the caller learns whether the build honoured it at all.
 */
-int bunql_db_config_int(struct sqlite3 *db, int op, int v, int *out) {
+BUNQL_API int bunql_db_config_int(struct sqlite3 *db, int op, int v, int *out) {
   int settled = 0;
   int rc = sqlite3_db_config(db, op, v, &settled);
   if (out) *out = settled;
@@ -79,7 +89,7 @@ static void bunql_sum(const uint8_t *a, uint32_t n, int native, uint32_t *s0io, 
 }
 
 /* Continues the chain over `n` bytes. io[0] and io[1] are the chain, in and out. */
-void bunql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io) {
+BUNQL_API void bunql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io) {
   bunql_sum(a, n, native, &io[0], &io[1]);
 }
 
@@ -92,7 +102,7 @@ void bunql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io) 
 **
 ** On an invalid frame the chain is returned unadvanced, as the JavaScript does, so a caller that
 ** ignores `out[0]` cannot silently walk past a torn tail. */
-void bunql_wal_check_frame(const uint8_t *frame, uint32_t pageSize, uint32_t salt1, uint32_t salt2,
+BUNQL_API void bunql_wal_check_frame(const uint8_t *frame, uint32_t pageSize, uint32_t salt1, uint32_t salt2,
                            uint32_t s0, uint32_t s1, int native, uint32_t *out) {
   /* Every field of a frame header is big-endian, whatever the checksum word order is. */
   uint32_t pgno = ((uint32_t)frame[0] << 24) | ((uint32_t)frame[1] << 16) |

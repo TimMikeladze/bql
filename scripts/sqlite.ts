@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { inflateRawSync } from "node:zlib"
 import { join, resolve } from "node:path"
-import { loadFrom } from "../src/sqlite/lib.ts"
+import { loadFrom, vendoredName } from "../src/sqlite/lib.ts"
 
 // ── the pins ─────────────────────────────────────────────────────────────────────────────────
 
@@ -156,8 +156,8 @@ function currentStamp(): string {
 }
 
 function libraryName(): string {
-  if (process.platform === "darwin") return "libsqlite3.dylib"
-  if (process.platform === "linux") return "libsqlite3.so"
+  const name = vendoredName()
+  if (name) return name
   throw new Error(
     `${process.platform} is not a platform this script knows how to build for. ` +
       "Build libsqlite3 by hand with the flags in `bun run sqlite:build --explain` and point " +
@@ -197,6 +197,15 @@ function compile(sources: string[], artefact: string, quiet: boolean): void {
   const args = [cc, ...FLAGS.map((f) => f.flag)]
   if (process.platform === "darwin") {
     args.push("-dynamiclib", "-install_name", `@rpath/${libraryName()}`)
+  } else if (process.platform === "win32") {
+    // A DLL exports nothing unless it is told to. SQLite routes every public function through
+    // `SQLITE_API`, so defining that is the whole of it; `walsum.c` marks its own with
+    // `BUNQL_API`, defined the same way here and to nothing elsewhere.
+    args.push(
+      "-shared",
+      "-DSQLITE_API=__declspec(dllexport)",
+      "-DBUNQL_API=__declspec(dllexport)",
+    )
   } else {
     // -lm for the math functions, -lpthread for THREADSAFE=1, -ldl for load_extension. All three
     // are inside libc on a current glibc and harmless to ask for anyway.
@@ -210,7 +219,13 @@ function compile(sources: string[], artefact: string, quiet: boolean): void {
 }
 
 function compiler(): string {
-  for (const cc of [process.env.CC, "cc", "clang", "gcc"]) {
+  // `clang` first on Windows: the image ships LLVM on PATH, `cc` does not exist, and `gcc` there
+  // is a MinGW one whose CRT is not the one Bun's `dlopen` loads the DLL into.
+  const order =
+    process.platform === "win32"
+      ? [process.env.CC, "clang", "gcc"]
+      : [process.env.CC, "cc", "clang", "gcc"]
+  for (const cc of order) {
     if (!cc) continue
     if (Bun.spawnSync([cc, "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0) {
       return cc
@@ -221,6 +236,7 @@ function compiler(): string {
       "  macOS          xcode-select --install\n" +
       "  Debian/Ubuntu  apt-get install -y build-essential\n" +
       "  Alpine         apk add build-base\n" +
+      "  Windows        winget install LLVM.LLVM\n" +
       "Or set CC to the compiler you want used.",
   )
 }

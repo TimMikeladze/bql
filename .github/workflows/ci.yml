@@ -68,3 +68,51 @@ jobs:
 
       - name: docs/api.md covers every route
         run: bun run scripts/routes.ts --check
+
+  # Windows has never run BunQL. `docs/c5-apply-pages.md` predicts the worst case — `winShmLock`
+  # takes the same eight slots and the code checks `pMethods->iVersion`, so a VFS that cannot
+  # offer them falls back to mechanism B with a warning — but that is a prediction, and this job
+  # exists to replace it with an observation (`docs/e1-windows.md`).
+  #
+  # `continue-on-error` on purpose, and it is not a way of ignoring the result: the job's output is
+  # the deliverable, and making main red on a platform nothing claims to support yet would only
+  # train people to ignore a red tick. It becomes a gate when it passes, and the line to delete is
+  # this one.
+  windows:
+    name: windows-latest (exploratory)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vendor/sqlite
+          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sqlite.ts', 'scripts/native/walsum.c') }}
+
+      - run: bun install --frozen-lockfile
+
+      # Each step reports rather than gates, so one failure does not hide the next: the question
+      # this job answers is *how far* Windows gets, and a job that stopped at the first error would
+      # answer it one step at a time across a dozen pushes.
+      - name: build libsqlite3
+        continue-on-error: true
+        run: bun run sqlite:build
+
+      - name: report the library under test
+        continue-on-error: true
+        run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
+
+      - name: typecheck
+        continue-on-error: true
+        run: bun run typecheck
+
+      - name: the suite
+        continue-on-error: true
+        run: bun test
