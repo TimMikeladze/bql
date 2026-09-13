@@ -157,7 +157,7 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `POST` | `/api/messages/:seq/requeue` | republish a dead letter onto its original subject |
 | `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
 | `POST` | `/api/tokens` | mint (admin) |
-| `GET` | `/metrics` | Prometheus text (read token) |
+| `GET` | `/metrics` | Prometheus text (admin — it spans every workspace) |
 | `GET` | `/health` · `/ready` | no token; `/ready` is 503 while draining |
 
 ## Operating it
@@ -167,7 +167,7 @@ how a backup is taken and restored, and what the fleet does afterwards. The shor
 
 ```sh
 agenticbus serve --log-level info --log-format json
-curl -H "Authorization: Bearer $READER" localhost:4317/metrics
+curl -H "Authorization: Bearer $ADMIN" localhost:4317/metrics
 agenticbus backup /backups/$(date +%F)
 ```
 

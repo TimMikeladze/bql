@@ -4,13 +4,12 @@ One process owns one SQLite file. Everything below follows from that.
 
 ## Metrics
 
-`GET /metrics` renders Prometheus text. It needs a **read-capable token** — `admin` or `reader` —
-because subject and subscription names are tenant information, so give Prometheus a long-lived
-reader token rather than the admin one:
+`GET /metrics` renders Prometheus text, and it is **admin-only**.
 
-```sh
-agenticbus token --consumer prometheus --reader --ttl 31536000
-```
+That is not an oversight to be relaxed later: a scrape is an install-wide view. The gauges cover
+every workspace and the counters are not workspace-tagged at all, so there is no honest way to
+serve a tenant-scoped one — and handing a workspace-pinned reader token the whole picture would
+be a quiet tenancy leak. Give Prometheus the admin token, on a network where that is acceptable.
 
 ```yaml
 scrape_configs:

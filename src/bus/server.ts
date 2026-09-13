@@ -6,7 +6,7 @@ import type {
 } from "../shared/protocol";
 import { ANY, DEFAULT_WORKSPACE } from "../shared/protocol";
 import { type Logger, silentLogger } from "./log";
-import type { PrometheusMetrics } from "./metrics";
+import { type PrometheusMetrics, prometheusMetrics } from "./metrics";
 import { BusError, BusStore } from "./store";
 import { SubjectError } from "./subjects";
 import {
@@ -164,7 +164,10 @@ export function createServer(options: ServerOptions): BusServer {
     if (claims.scope === "admin") return;
     if (claims.scope === "reader")
       throw new BusError("a reader token may not cancel", 403);
-    if (publisher === null || publisher !== claims.sub)
+    // `*` is the subject an *admin* token publishes under. A non-admin token
+    // minted with `sub: "*"` would otherwise match it and inherit the right to
+    // cancel anything an admin published.
+    if (publisher === null || publisher === ANY || publisher !== claims.sub)
       throw new BusError("only the publisher or an admin may cancel this", 403);
   };
 
@@ -220,9 +223,12 @@ export function createServer(options: ServerOptions): BusServer {
         }
         if (path === "/metrics" && req.method === "GET") {
           if (!options.metrics) return json({ error: "not found" }, 404);
-          // Subject and subscription names are tenant information, so a scrape
-          // needs the same read credential every other data route needs.
-          requireRead(authenticate(req, url));
+          // Admin, not merely read access. A scrape is an install-wide view:
+          // the gauges cover every workspace, and the counters are not
+          // workspace-tagged at all, so there is no honest way to serve a
+          // tenant-scoped one. Handing a workspace-pinned reader token the
+          // whole picture would have been a quiet tenancy leak.
+          requireAdmin(authenticate(req, url));
           return new Response(renderMetrics(store, options.metrics), {
             headers: { "Content-Type": "text/plain; version=0.0.4" },
           });
@@ -661,14 +667,20 @@ export function createServer(options: ServerOptions): BusServer {
  * matters — an idle subscription with a thousand pending deliveries would keep
  * reporting whatever it last reported. So depth, lag and consumer counts are
  * read from the store here, per workspace, on every scrape.
+ *
+ * They go into a **fresh registry** each time rather than the long-lived one:
+ * a gauge written once stays in a registry forever, so a deleted subscription
+ * would have gone on reporting its final lag until the process restarted.
+ * Counters are cumulative and stay where they are.
  */
-function renderMetrics(store: BusStore, metrics: PrometheusMetrics): string {
+function renderMetrics(store: BusStore, counters: PrometheusMetrics): string {
+  const gauges = prometheusMetrics();
   for (const workspace of store.workspaces()) {
     const stats = store.stats(workspace);
-    metrics.gauge("agenticbus.messages", stats.messages, { workspace });
-    metrics.gauge("agenticbus.last_seq", stats.lastSeq, { workspace });
-    metrics.gauge("agenticbus.consumers", stats.consumers.length, { workspace });
-    metrics.gauge(
+    gauges.gauge("agenticbus.messages", stats.messages, { workspace });
+    gauges.gauge("agenticbus.last_seq", stats.lastSeq, { workspace });
+    gauges.gauge("agenticbus.consumers", stats.consumers.length, { workspace });
+    gauges.gauge(
       "agenticbus.consumers_live",
       stats.consumers.filter((c) => !c.paused && stats.now - c.lastSeen < 60_000)
         .length,
@@ -676,16 +688,16 @@ function renderMetrics(store: BusStore, metrics: PrometheusMetrics): string {
     );
     for (const subscription of stats.subscriptions) {
       const tags = { workspace, subscription: subscription.name };
-      metrics.gauge("agenticbus.subscription.lag", subscription.lag, tags);
-      metrics.gauge("agenticbus.subscription.paused", subscription.paused ? 1 : 0, tags);
+      gauges.gauge("agenticbus.subscription.lag", subscription.lag, tags);
+      gauges.gauge("agenticbus.subscription.paused", subscription.paused ? 1 : 0, tags);
       for (const status of ["pending", "leased", "acked", "dead", "cancelled"] as const)
-        metrics.gauge("agenticbus.subscription.deliveries", subscription[status], {
+        gauges.gauge("agenticbus.subscription.deliveries", subscription[status], {
           ...tags,
           status,
         });
     }
   }
-  return metrics.render();
+  return `${counters.render()}${gauges.render()}`;
 }
 
 /** SSE: a sequence number, not a durable subscription. Re-read after it moves. */

@@ -83,22 +83,26 @@ test("metrics counters and gauges reach the scrape, and it needs a read token", 
     'agenticbus_subscription_deliveries{status="pending",subscription="work",workspace="default"} 1',
   );
 
-  // A consumer token can claim but must not read the shape of the install.
-  const consumer = mint(
-    {
-      sub: "worker-1",
-      scope: "consumer",
-      workspace: "default",
-      publish: [],
-      subscribe: ["work"],
-      exp: 0,
-    },
-    signingKey,
-  );
-  expect(
-    (await fetch(`${url}/metrics`, { headers: { Authorization: `Bearer ${consumer}` } }))
-      .status,
-  ).toBe(403);
+  // A scrape covers every workspace, so it is admin-only: a reader token
+  // pinned to one workspace must not be handed the whole install's
+  // subscription names and depths.
+  for (const scope of ["consumer", "reader"] as const) {
+    const token = mint(
+      {
+        sub: "worker-1",
+        scope,
+        workspace: "default",
+        publish: [],
+        subscribe: ["work"],
+        exp: 0,
+      },
+      signingKey,
+    );
+    expect(
+      (await fetch(`${url}/metrics`, { headers: { Authorization: `Bearer ${token}` } }))
+        .status,
+    ).toBe(403);
+  }
   expect((await fetch(`${url}/metrics`)).status).toBe(401);
 
   server.stop(true);
@@ -214,5 +218,39 @@ test("shutdown is idempotent, and still drains after a bare stop()", async () =>
   await server.shutdown({ timeoutMs: 1000 });
   await server.shutdown({ timeoutMs: 1000 });
   expect(server.draining).toBe(true);
+  store.close();
+});
+
+test("a gauge for a deleted subscription does not linger in the scrape", async () => {
+  const metrics = prometheusMetrics();
+  const store = new BusStore(":memory:", { metrics });
+  const adminToken = generateKey();
+  const server = createServer({
+    store,
+    signingKey: generateKey(),
+    adminToken,
+    metrics,
+    port: 0,
+    hostname: "127.0.0.1",
+  });
+  const url = `http://127.0.0.1:${server.port}`;
+  const admin = new BusClient({ url, token: adminToken });
+  const scrape = async () =>
+    (await fetch(`${url}/metrics`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })).text();
+
+  await admin.subscribe({ name: "doomed", pattern: "doomed.>" });
+  await admin.publish({ subject: "doomed.a", body: 1 });
+  expect(await scrape()).toContain('subscription="doomed"');
+
+  await admin.call("/api/subscriptions/doomed", undefined, { method: "DELETE" });
+  const after = await scrape();
+  // Gauges are rebuilt per scrape, so the series disappears with the
+  // subscription. Counters are cumulative and stay.
+  expect(after).not.toContain('subscription="doomed"');
+  expect(after).toContain("agenticbus_messages_published");
+
+  server.stop(true);
   store.close();
 });

@@ -90,8 +90,10 @@ never depend on dagr, and a 120-line sink is a cheaper price than that dependenc
 
 Counters are incremented as things happen; gauges are computed at scrape time from `stats()` for
 every workspace, because a gauge that is only written when something moves is stale exactly when
-you need it. `/metrics` **requires a read-capable token** like every other data route — subject
-and subscription names are tenant information — and is not exposed to `reader`-less consumers.
+you need it. `/metrics` is **admin-only**: the gauges span every workspace and the counters carry
+no workspace label at all, so a tenant-scoped scrape is not something this metric set can honestly
+serve, and giving a workspace-pinned reader token the whole install would have been a quiet
+tenancy leak.
 
 **Graceful shutdown.** `createServer` now returns a `BusServer` with `shutdown()`. SIGTERM:
 set `draining`, at which point `claim` returns `[]` immediately rather than long-polling, wait

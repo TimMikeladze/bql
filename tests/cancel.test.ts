@@ -129,3 +129,30 @@ test("cancelling a message nobody published is a 404, not a silent success", asy
     status: 404,
   } satisfies Partial<BusRequestError>);
 });
+
+test("a consumer token minted as '*' cannot cancel what an admin published", async () => {
+  // `*` is the subject an admin token publishes under, so a non-admin token
+  // minted with that subject would otherwise match every admin-published
+  // message and inherit the right to cancel it.
+  const wildcard = new BusClient({
+    url,
+    token: mint(
+      {
+        sub: "*",
+        scope: "consumer",
+        workspace: "default",
+        publish: ["jobs.>"],
+        subscribe: ["jobs"],
+        exp: 0,
+      },
+      signingKey,
+    ),
+  });
+  const byAdmin = await admin.publish({ subject: "jobs.admin", body: 1 });
+  expect(store.messageMeta("default", byAdmin.seq).publisher).toBe("*");
+
+  await expect(wildcard.cancelMessage(byAdmin.seq)).rejects.toThrow(
+    /only the publisher/,
+  );
+  expect(store.messageMeta("default", byAdmin.seq).cancelledAt).toBeNull();
+});

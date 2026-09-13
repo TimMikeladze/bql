@@ -131,6 +131,27 @@ $ agenticbus request rpc.upper '"hello from a laptop"' --url https://agenticbus-
 It is still running and costs money. `fly apps destroy agenticbus-demo` removes it; `fly scale
 count 0 --app agenticbus-demo` just stops the machine.
 
+## Found in review, after the first pass
+
+Two review passes over the diff turned up seven defects. The ones worth naming:
+
+- **SIGTERM could hang forever.** An SSE stream is a response that never completes, and
+  `server.stop(false)` waits for in-flight requests — so one open dashboard turned a drain into an
+  indefinite wait. The request/reply long polls had the same shape for up to `maxWaitMs`.
+- **A filtered log page could come back empty while matches waited behind it.** The SQL glob
+  over-matches, and a single bounded read filtered the first `limit * 4` hits. A hundred
+  near-misses in front of the real ones looked like "no dead letters".
+- **`/metrics` leaked across workspaces.** It required only read access but rendered every
+  workspace's subscription names and depths. It is admin-only now, and the reason is structural:
+  the counters carry no workspace label, so a tenant-scoped scrape is not something this metric
+  set can honestly serve.
+- **A consumer token minted with `sub: "*"` could cancel anything an admin published**, because
+  `*` is the subject an admin token publishes under.
+- **Gauges for deleted subscriptions lingered forever**, because a gauge written once stays in a
+  registry. They are rebuilt per scrape now.
+
+Each has a regression test that fails against the code as it was.
+
 ## Still trusted least
 
 Honest successors to the list in `FINISHING.md`:
