@@ -24,7 +24,7 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | 1 | replica streaming and bootstrap, write forwarding, `ack` levels, read-your-writes across nodes, S3 shipper and restore, Hrana, Kysely and Drizzle | built |
 | 2 | Raft control plane, per-database leases, promotion and failover, Linux packaging and CI, `workers: N` | built |
 | 2 | placement, replica apply mechanism A | open |
-| — | one operation model rendered as REST + OpenAPI + GraphQL (`bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
+| — | one operation model rendered as REST + OpenAPI + GraphQL (`@bunql/db/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
 1346 tests across 107 files, green on macOS (arm64) and Linux (x64).
@@ -67,7 +67,7 @@ statement's metadata, subscriptions that are both emitters and async iterables. 
 and Workers — no Bun or Node imports in it.
 
 ```ts
-import { createClient } from "bunql/client"
+import { createClient } from "@bunql/db/client"
 
 const client = createClient({ url: "http://localhost:4321", token })
 const db = client.db("acme")
@@ -103,7 +103,7 @@ integer beyond 2^53 becomes; the default refuses to round it. A write answered `
 ## Embedded
 
 ```ts
-import { BunQL } from "bunql"
+import { BunQL } from "@bunql/db"
 
 const bq = await BunQL.open({ dir: "./data" })
 const db = await bq.create("acme")                   // or bq.db("acme") for one that exists
@@ -124,12 +124,12 @@ start applying at `serve()`.
 
 ## ORMs
 
-`bunql/kysely` is a Kysely dialect, `bunql/drizzle` a Drizzle driver. Both take a client `Db`, an
+`@bunql/db/kysely` is a Kysely dialect, `@bunql/db/drizzle` a Drizzle driver. Both take a client `Db`, an
 embedded `Db`, or `{url, token, db}`. `kysely` and `drizzle-orm` are optional peers.
 
 ```ts
 import { Kysely, type Generated } from "kysely"
-import { BunQLDialect } from "bunql/kysely"
+import { BunQLDialect } from "@bunql/db/kysely"
 
 interface Database {
   todos: { id: Generated<number>; title: string; done: Generated<number> }
@@ -153,7 +153,7 @@ await db.transaction().execute(async (trx) => {        // one BunQL transaction,
 ```ts
 import { eq } from "drizzle-orm"
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { drizzle } from "bunql/drizzle"
+import { drizzle } from "@bunql/db/drizzle"
 
 const todos = sqliteTable("todos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -340,7 +340,7 @@ introspects a tenant's own tables into such a registry; `src/graphql/` generates
 schema from the OpenAPI document, resolving in-process through the same dispatcher.
 
 ```ts
-import { DataApiCache } from "bunql/dataapi"
+import { DataApiCache } from "@bunql/db/dataapi"
 
 const cache = new DataApiCache({ defaultLimit: 100, maxLimit: 1000 })
 const { schema, registry } = await cache.for("acme", exec)   // exec closes over src/server/exec.ts
@@ -352,8 +352,8 @@ deadline, the row cap, the quota, the txid, the ack level and write forwarding a
 `src/server/exec.ts` rather than reimplemented. `graphql` and `openapi-x-graphql` are optional
 peers, loaded through `import()` at the first request that needs a schema.
 
-The package publishes them as `bunql/core`, `bunql/http`, `bunql/openapi`, `bunql/dataapi` and
-`bunql/graphql`, and the server mounts all three surfaces:
+The package publishes them as `@bunql/db/core`, `@bunql/db/http`, `@bunql/db/openapi`, `@bunql/db/dataapi` and
+`@bunql/db/graphql`, and the server mounts all three surfaces:
 
 ```http
 GET    /v1/db/acme/api/users?name=like.ann*&order=name.asc&limit=20
@@ -375,7 +375,7 @@ change feed are H7 in [docs/plan-surfaces.md](docs/plan-surfaces.md).
 ## The driver
 
 ```ts
-import { Database } from "bunql/sqlite"
+import { Database } from "@bunql/db/sqlite"
 
 const db = Database.open("app.db")
 db.exec("create table t(id integer primary key, v text)")
@@ -412,8 +412,8 @@ replication, no `_bunql` bookkeeping table: the pages SQLite wrote are the pages
 Snapshots, point-in-time restore and O(1) forks are built on the same log.
 
 ```ts
-import { Database } from "bunql/sqlite"
-import { computeFull, decode, TxnLog, TxnRecorder, WalApplier } from "bunql/wal"
+import { Database } from "@bunql/db/sqlite"
+import { computeFull, decode, TxnLog, TxnRecorder, WalApplier } from "@bunql/db/wal"
 
 const db = Database.open("primary/main.db")
 db.exec("pragma wal_autocheckpoint = 0")            // we own checkpoints

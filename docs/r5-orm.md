@@ -1,4 +1,4 @@
-# R5 — ORM adapters: `bunql/kysely` and `bunql/drizzle`
+# R5 — ORM adapters: `@bunql/db/kysely` and `@bunql/db/drizzle`
 
 Companion to `plan-phase1.md` R5 and `design.md` §9.1. What the two adapters are, how to use them,
 which route the Drizzle one takes and why, and everything they cannot do.
@@ -24,7 +24,7 @@ Every adapter takes the same three sources:
 
 ```ts
 import { Kysely, type Generated } from "kysely"
-import { BunQLDialect } from "bunql/kysely"
+import { BunQLDialect } from "@bunql/db/kysely"
 
 interface Database {
   todos: {
@@ -104,7 +104,7 @@ connection here is a wrapper over the one multiplexed `Db`, so they are free.
 ```ts
 import { eq, sql } from "drizzle-orm"
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { drizzle } from "bunql/drizzle"
+import { drizzle } from "@bunql/db/drizzle"
 
 const todos = sqliteTable("todos", {
   id: integer("id").primaryKey({ autoIncrement: true }),

@@ -10,7 +10,7 @@ cosmetic — `operationId`, component names, `$ref`s, descriptions — are the p
 the generated GraphQL schema is *called*, and a shortcut here becomes a missing field there.
 
 ```ts
-import { buildDocument } from "bunql/openapi"
+import { buildDocument } from "@bunql/db/openapi"
 
 const document = buildDocument(registry, {
   servers: [{ url: "https://sql.example.com" }],

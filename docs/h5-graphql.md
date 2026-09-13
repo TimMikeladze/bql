@@ -4,7 +4,7 @@ Milestone H5 of `docs/plan-surfaces.md`. A tenant's OpenAPI document in, an exec
 schema out, with resolvers that dispatch **in this process**.
 
 ```ts
-import { graphqlHandler } from "bunql/graphql"
+import { graphqlHandler } from "@bunql/db/graphql"
 
 const handler = graphqlHandler({
   // The server's own rights. Introspection only, and its result is shared by every caller.

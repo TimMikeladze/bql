@@ -11,15 +11,25 @@ import { VERSION } from "../../src/server/surfaces.ts"
 
 const root = join(import.meta.dir, "..", "..")
 
-const exports = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).exports as Record<
-  string,
-  string
->
-
-/** `bunql`, `bunql/client`, … — what an import specifier for each export entry looks like. */
-function specifierOf(key: string): string {
-  return key === "." ? "bunql" : `bunql${key.slice(1)}`
+const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+  name: string
+  version: string
+  exports: Record<string, string>
 }
+const exports = manifest.exports
+
+/**
+ * `@bunql/db`, `@bunql/db/client`, … — what an import specifier for each export entry looks like.
+ *
+ * Read from `name` rather than written out, so that renaming the package is one edit in
+ * `package.json` and this file keeps checking the docs against whatever it is now.
+ */
+function specifierOf(key: string): string {
+  return key === "." ? manifest.name : `${manifest.name}${key.slice(1)}`
+}
+
+/** `manifest.name` as a regular expression: the scope's `@` and `/` are both meaningful here. */
+const NAME_PATTERN = manifest.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 describe("package exports", () => {
   for (const [key, target] of Object.entries(exports)) {
@@ -31,7 +41,7 @@ describe("package exports", () => {
     })
   }
 
-  test("every bunql/… import in the docs is a published subpath", () => {
+  test("every @bunql/db/… import in the docs is a published subpath", () => {
     const published = new Set(Object.keys(exports).map(specifierOf))
     const files = [
       join(root, "README.md"),
@@ -42,7 +52,8 @@ describe("package exports", () => {
     const missing: string[] = []
     for (const file of files) {
       const text = readFileSync(file, "utf8")
-      for (const match of text.matchAll(/from "(bunql(?:\/[a-z0-9-]+)?)"/g)) {
+      const imports = new RegExp(`from "(${NAME_PATTERN}(?:/[a-z0-9-]+)?)"`, "g")
+      for (const match of text.matchAll(imports)) {
         const specifier = match[1] as string
         if (!published.has(specifier)) missing.push(`${file.slice(root.length + 1)}: ${specifier}`)
       }
@@ -53,7 +64,6 @@ describe("package exports", () => {
   // `GET /v1/openapi.json` publishes an `info.version`, and a document that claims a version the
   // package does not have is a small lie that a generated client carries everywhere.
   test("the version the OpenAPI documents publish is the package's", () => {
-    const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version as string
-    expect(VERSION).toBe(version)
+    expect(VERSION).toBe(manifest.version)
   })
 })

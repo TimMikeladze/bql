@@ -1160,13 +1160,13 @@ the client must re-query.
 
 ## Client SDK
 
-`bunql/client`. Runs in browsers, Bun, Node and Workers: it imports nothing from Bun or Node, and
+`@bunql/db/client`. Runs in browsers, Bun, Node and Workers: it imports nothing from Bun or Node, and
 uses only `fetch`, `WebSocket`, `ReadableStream`, `TextDecoder`, `AbortController` and base64.
 One-shot statements go over HTTP; the socket is opened lazily, for subscriptions and interactive
 transactions.
 
 ```ts
-import { createClient } from "bunql/client"
+import { createClient } from "@bunql/db/client"
 
 const client = createClient({
   url: "https://sql.example.com",   // ws(s):// is accepted and rewritten
@@ -1270,7 +1270,7 @@ are optional peers. `docs/r5-orm.md` is the as-built note, with the mapping tabl
 limitation.
 
 ```ts
-import { BunQLDialect } from "bunql/kysely"
+import { BunQLDialect } from "@bunql/db/kysely"
 import { Kysely } from "kysely"
 
 const db = new Kysely<Schema>({
@@ -1279,7 +1279,7 @@ const db = new Kysely<Schema>({
 ```
 
 ```ts
-import { drizzle } from "bunql/drizzle"
+import { drizzle } from "@bunql/db/drizzle"
 
 const db = drizzle({ url: "http://127.0.0.1:4321", token, db: "acme" }, { schema: { todos } })
 db.$client.bunql // the BunQL `Db` underneath
@@ -1310,7 +1310,7 @@ an ORM that throws on an integer past 2^53 is worse than one that hands back a b
 `bunql`. The engine in this process, over the same `Db` interface, plus a synchronous escape hatch.
 
 ```ts
-import { BunQL } from "bunql"
+import { BunQL } from "@bunql/db"
 
 const bq = await BunQL.open({
   dir: "./data",        // shorthand for data: { dir }
@@ -1794,7 +1794,7 @@ document is not edited; this is the list.
 | §9.4 `[s3]` | R3, with every key taking a `BUNQL_S3_*` override |
 | `next.md`: `src/wal/log.ts` cold open walks every record header | R3. A sidecar segment index; 2.69 ms → 0.36 ms at 6k records |
 | §6.7 Hrana compatibility (`/v2/pipeline`, `/v3/pipeline`, `/v3/cursor`, `hrana3`/`hrana2` sockets) | R4. No protobuf and no Hrana 1; see [Hrana](#hrana--the-libsql-compatible-surface) |
-| §9.2 `bunql/kysely`, `bunql/drizzle` | R5, both optional peers; see [ORM adapters](#orm-adapters) |
+| §9.2 `@bunql/db/kysely`, `@bunql/db/drizzle` | R5, both optional peers; see [ORM adapters](#orm-adapters) |
 | `docs/r4-hrana.md` §4: `lastInsertRowid` was null when a rowid repeated | fixed. The statement answers for itself, from SQLite's authorizer at prepare time |
 
 The as-built notes are `docs/r1-replication.md` (transport), `docs/r2-durability.md`

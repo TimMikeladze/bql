@@ -11,7 +11,7 @@ adds, in build order, with the wire protocol decided up front so every milestone
 | R2 | durability and routing: `ack: replica\|quorum`, write forwarding from replica to primary, read-your-writes across nodes, `BunQL-Role`/`BunQL-Primary`, a server-side transaction queue | `src/replication/ack.ts`, `src/server/exec.ts`, `routes.ts`, `ws.ts` | R1 |
 | R3 | S3 shipper and restore over `Bun.S3Client`, retention and compaction, `bunql restore --from s3://…` | `src/storage/`, CLI | R1 (shares the log iterator, not the transport) |
 | R4 | Hrana compat: `GET /v2` + `POST /v2/pipeline`, then `/v3/pipeline`, `/v3/cursor`, WS subprotocols | `src/server/hrana/` | — |
-| R5 | ORM adapters `bunql/kysely` and `bunql/drizzle` | `src/kysely.ts`, `src/drizzle.ts` | — |
+| R5 | ORM adapters `@bunql/db/kysely` and `@bunql/db/drizzle` | `src/kysely.ts`, `src/drizzle.ts` | — |
 
 R5 and R4 do not touch replication and can run beside R1. R2 must follow R1.
 

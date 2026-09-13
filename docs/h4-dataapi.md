@@ -6,7 +6,7 @@ registry is a plain one: `src/http/` mounts it, `src/openapi/` describes it and 
 operations were generated rather than written by hand. One introspection, three surfaces.
 
 ```ts
-import { DataApiCache } from "bunql/dataapi"
+import { DataApiCache } from "@bunql/db/dataapi"
 
 const cache = new DataApiCache({ defaultLimit: 100, maxLimit: 1000 })
 const { schema, registry } = await cache.for("acme", exec)   // exec closes over src/server/exec.ts

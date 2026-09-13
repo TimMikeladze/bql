@@ -34,7 +34,7 @@ src/graphql/   GraphQL from the OpenAPI document       optional peers; in-proces
 Dependency direction is strictly downward. `src/core/` imports nothing from the rest of BunQL —
 it is the piece another project could take whole, which is what "a bun http" means.
 
-Package exports: `bunql/core`, `bunql/http`, `bunql/openapi`, `bunql/graphql`.
+Package exports: `@bunql/db/core`, `@bunql/db/http`, `@bunql/db/openapi`, `@bunql/db/graphql`.
 
 ## `src/core/` — the schema, and why it is a JSON Schema node
 
@@ -42,7 +42,7 @@ A zero-dependency type builder, because the house rule is zero runtime dependenc
 the alternative (Zod, TypeBox, ArkType) is a dependency in every consumer's tree:
 
 ```ts
-import { s, type Infer } from "bunql/core"
+import { s, type Infer } from "@bunql/db/core"
 
 const User = s.object({
   id: s.int(),
@@ -191,7 +191,7 @@ The generator also adds an `_info` field to `Query` describing the source docume
 worth knowing about before someone reports it as a bug.
 
 `graphql` and `openapi-x-graphql` are **optional peer dependencies**, the arrangement `kysely` and
-`drizzle-orm` already have in `package.json`: BunQL keeps zero runtime dependencies, `bunql/graphql`
+`drizzle-orm` already have in `package.json`: BunQL keeps zero runtime dependencies, `@bunql/db/graphql`
 throws a message naming the two packages if they are absent, and the GraphQL route is not mounted
 unless they resolve.
 

@@ -25,7 +25,7 @@ nodes, and a server-side transaction queue (R2). Continuous backup to any S3-com
 over `Bun.S3Client`, with a specified bucket layout, retention and point-in-time restore onto a
 node that has never seen the database (R3). The libsql-compatible Hrana surface — `/v2/pipeline`,
 `/v3/pipeline`, `/v3/cursor` and the `hrana3`/`hrana2` sockets — so `@libsql/client`,
-`drizzle-orm/libsql` and `kysely-libsql` work unmodified (R4). `bunql/kysely` and `bunql/drizzle`,
+`drizzle-orm/libsql` and `kysely-libsql` work unmodified (R4). `@bunql/db/kysely` and `@bunql/db/drizzle`,
 both optional peers, with no runtime dependency added (R5).
 
 | path | budget (§10) | measured | verdict |
@@ -194,7 +194,7 @@ using `dlopen` + `CFunction`. Why:
 - One SQLite instance per process → no cross-instance POSIX-lock footguns.
 - We choose compile flags and can add a VFS shim later without waiting on Bun.
 
-Driver shape (internal, but `bunql/sqlite` is exported for people who just want a faster
+Driver shape (internal, but `@bunql/db/sqlite` is exported for people who just want a faster
 bun:sqlite):
 
 ```ts
@@ -638,14 +638,14 @@ body`. Bodies are TxnRecords or small CBOR-free fixed structs.
 
 ## 9. Library surfaces (TypeScript)
 
-### 9.1 Client (`bunql/client`) — runs in browsers, Bun, Node, Workers
+### 9.1 Client (`@bunql/db/client`) — runs in browsers, Bun, Node, Workers
 
 Modelled on `Bun.SQL` (which has had a SQLite adapter since Bun 1.3) so the tagged-template
 shape, `.values()`, `.raw()`, `sql.unsafe()`, `sql.begin()` and the result array's `.count`,
 `.command`, `.lastInsertRowid`, `.affectedRows` are already familiar; we add `.txid`.
 
 ```ts
-import { createClient } from "bunql/client"
+import { createClient } from "@bunql/db/client"
 
 const client = createClient({ url: "https://sql.example.com", token, consistency: "ryw" })
 const db = client.db("acme")
@@ -673,7 +673,7 @@ for subscriptions and transactions.
 ### 9.2 Embedded (`bunql`) — in-process on Bun, same interface plus a sync escape hatch
 
 ```ts
-import { BunQL } from "bunql"
+import { BunQL } from "@bunql/db"
 
 const bq = await BunQL.open({ dir: "./data", s3: { bucket: "backups" } })
 const db = bq.db("acme")                            // implements the same Db interface as the client
@@ -685,7 +685,7 @@ bq.on("commit", ({ db, txid }) => ...)
 bq.serve({ port: 4321, hrana: true })               // expose the same engine over HTTP/WS/SSE
 ```
 
-Adapters shipped: `bunql/kysely` (Dialect), `bunql/drizzle` (via Hrana or native). Both work
+Adapters shipped: `@bunql/db/kysely` (Dialect), `@bunql/db/drizzle` (via Hrana or native). Both work
 against the client and the embedded `Db`.
 
 ### 9.3 CLI

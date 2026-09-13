@@ -16,21 +16,20 @@
 # field and `test/package/exports.test.ts` holds the two together, so the tag, the package and
 # every generated client agree by construction.
 #
-# **Two things have to be settled before the first tag, and neither is a code change this
-# workflow can make:**
+# The package is **`@bunql/db`**, under an npm org this project owns. Unscoped `bunql` is somebody
+# else's (a query builder, last published 2026-02-12 with a `github.com/yourusername/` placeholder
+# for a repository), and the scope is wanted for its own sake: `docs/c6-packaging.md` §6 plans
+# `@bunql/sqlite-darwin-arm64` and friends, which need it.
 #
-#   - **The published name.** `package.json` says `bunql`, and `bunql` on npm is somebody else's
-#     package (a query builder, last published as 1.0.1-dev.5). A scope — `@you/bunql` — is the
-#     usual answer, and it is not a one-line change: every example in `README.md` and `docs/` says
-#     `from "bunql/client"`, and `test/package/exports.test.ts` checks that each of those
-#     specifiers is a published subpath. Renaming means rewriting those imports in the same commit.
-#   - **`private: true` in package.json**, which npm honours by refusing to publish at all. It is
-#     still there on purpose: it is the last thing standing between this workflow and a package
-#     going out under a name nobody chose.
+# The product is still called BunQL. `BUNQL_*`, `bunql.toml`, the `bunql:` log prefix and the
+# `bunql` binary are all unchanged — only the name it is *published* under is scoped, and
+# `test/package/exports.test.ts` derives every specifier it checks from `package.json` so the docs
+# cannot drift from it.
 #
-# And one secret: `NPM_TOKEN`, an automation token for the account that owns the name. The
-# `id-token: write` permission below is what lets npm attach a provenance attestation, which is
-# why the publish does not need `--access` spelled out beyond `publishConfig`.
+# **One thing is still needed before the first tag**, and it is not a code change: `NPM_TOKEN`, an
+# automation token for the org, in this repository's secrets. The `id-token: write` permission
+# below is what lets npm attach a provenance attestation, which is why the publish does not need
+# `--access` spelled out beyond `publishConfig`.
 
 name: release
 

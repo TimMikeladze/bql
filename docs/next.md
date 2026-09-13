@@ -166,7 +166,7 @@ legs and the wrong one for the busiest. `docs/c4c-replication-follow.md` §9.
 
 | landed in the performance session | commit | what it is |
 |---|---|---|
-| README rewritten from `src/`, surface subpaths exported | `ebf5555` | `bunql/core`, `/http`, `/openapi`, `/dataapi`, `/graphql` now resolve; `test/package/exports.test.ts` fails if a doc imports a subpath the package does not publish |
+| README rewritten from `src/`, surface subpaths exported | `ebf5555` | `@bunql/db/core`, `/http`, `/openapi`, `/dataapi`, `/graphql` now resolve; `test/package/exports.test.ts` fails if a doc imports a subpath the package does not publish |
 | Apple libsqlite3 correction | `724eb97` | it *has* preupdate/session/snapshot on macOS 26; what differs is its page-cache default, and six tests fail on it. `docs/c6-packaging.md` §1.1 |
 | performance audit | `12f94a1` `cbe1cd8` | `bench/profile.ts`, `docs/performance.md`, and the SQLite settings audit read off live connections |
 | `[sqlite]` + token cache | `c020766` | pragmas stated rather than inherited; EdDSA verification cached, so an HTTP read with a real token went 76.4 µs → 45.3 |
@@ -503,16 +503,16 @@ and §6. **CI is green on macOS, Linux and Windows.**
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a restart. Spill it to
   disk or serve old positions from the log. This is the last of the realtime gaps — schema events
   now reach the SSE feed as well as the socket.
-- **The npm release flow exists and cannot be used yet.** `.github/workflows/release.yml` runs the
-  full gate on a `v*` tag and publishes with provenance. Two things block a first tag and neither
-  is a code change: **`bunql` on npm is somebody else's package**, so a name has to be chosen — and
-  a scope is not a one-line change, because every example in `README.md` and `docs/` imports
-  `from "bunql/client"` and `test/package/exports.test.ts` checks each of those — and
-  `private: true` is still in `package.json` on purpose, as the last thing between that workflow
-  and a package going out under a name nobody picked. MIT and the copyright line are a default,
-  not a decision.
+- **The npm release flow is ready and has never been run.** `.github/workflows/release.yml` runs
+  the full gate on a `v*` tag — refusing to go on if the tag and `package.json` disagree about the
+  version — and publishes with provenance. The package is **`@bunql/db`**: unscoped `bunql` is
+  somebody else's, and the scope is wanted anyway for the `@bunql/sqlite-*` binaries below. **The
+  product is still BunQL** — `BUNQL_*`, `bunql.toml`, the `bunql:` log prefix and the `bunql`
+  binary are untouched; only the published name is scoped. **What is left is one secret**,
+  `NPM_TOKEN` in the repository's settings, and then setting `version` and pushing a `v` tag. MIT
+  and the copyright line are a default, not a decision.
 - **`@bunql/sqlite-*` prebuilt libraries** are still unbuilt and still the right idea;
-  `docs/c6-packaging.md` §6 says what it would take.
+  `docs/c6-packaging.md` §6 says what it would take. The scope is held, so the names are there.
 
 ### Closed since the last edition, so stop looking for them
 

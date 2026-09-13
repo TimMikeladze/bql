@@ -167,7 +167,7 @@ design §4.1 lists it, and `DBPAGE_VTAB` because raw page access is the obvious 
 
 **One default**, `SQLITE_DEFAULT_WAL_SYNCHRONOUS=1`: design §4.1 asks for it, and
 `src/tenant/tenant.ts` already runs `pragma synchronous = normal` on every connection. Setting the
-compile default to match means a bare `Database.open()` through `bunql/sqlite` has the same
+compile default to match means a bare `Database.open()` through `@bunql/db/sqlite` has the same
 durability as one the server opened, instead of silently differing.
 
 **Dropped from the flag list in the brief**, each for a reason:
