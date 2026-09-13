@@ -6,9 +6,9 @@ bucket, with realtime subscriptions driven by SQLite's own `preupdate`/`update` 
 triggers or SQL parsing. It speaks its own API and libsql's Hrana, so `@libsql/client`, Drizzle and
 Kysely reach it unmodified.
 
-The engine is a `bun:ffi` driver over a shared libsqlite3. It measures about twice as fast as
-`bun:sqlite` on point reads and exposes what `bun:sqlite` does not: hooks, the authorizer, query
-cancellation, per-connection limits, session changesets.
+The engine is a `bun:ffi` driver over a shared libsqlite3. It matches or beats `bun:sqlite` on
+every operation the benchmark measures, and exposes what `bun:sqlite` does not: hooks, the
+authorizer, query cancellation, per-connection limits, session changesets.
 
 Zero runtime dependencies.
 
@@ -22,22 +22,42 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 |---|---|---|
 | 0 | engine, tenancy, HTTP/WS/SSE, tokens, WAL log, snapshots, PITR, realtime, client, embedded, CLI | built |
 | 1 | replica streaming and bootstrap, write forwarding, `ack` levels, read-your-writes across nodes, S3 shipper and restore, Hrana, Kysely and Drizzle | built |
-| 2 | Raft control plane, per-database leases, promotion and failover, Linux packaging and CI, `workers: N` | built |
-| 2 | placement, replica apply mechanism A | open |
+| 2 | Raft control plane, per-database leases, promotion and failover, placement, replica apply mechanism A, `workers: N`, packaging and CI | built |
 | — | one operation model rendered as REST + OpenAPI + GraphQL (`@bunql/db/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1346 tests across 107 files, green on macOS (arm64) and Linux (x64).
+1486 tests across 124 files, gating on macOS (arm64), Linux (x64) and Windows (x64).
 
-## Quickstart
+## Install
+
+BunQL needs **Bun 1.4 or newer** and a C compiler — the compiler once, to build the libsqlite3 the
+driver loads (see [The driver](#the-driver) for why a system one will not do).
+
+The package is `@bunql/db`. It is **not on npm yet**; until the first release, use it from a clone:
 
 ```sh
-bun run sqlite:build    # once per machine: builds the libsqlite3 the driver wants
-bun start               # or: bun run src/cli.ts serve --dir ./data --port 4321
+git clone https://github.com/TimMikeladze/bunql && cd bunql
+bun install
+bun run sqlite:build        # once per machine → vendor/sqlite/libsqlite3.{dylib,so,dll}
+bun test                    # optional, and the fastest way to know the build is good
 ```
 
-The first start generates an admin key and an Ed25519 signing key into `<dataDir>/keys.json`, and
-prints the admin key once.
+Once published, `bun add @bunql/db` and `bun run sqlite:build` in your own project.
+
+## Getting started
+
+Start a server. The first start generates an admin key and an Ed25519 signing key into
+`<dataDir>/keys.json`, and prints the admin key once — copy it.
+
+```sh
+bun start                   # or: bun run src/cli.ts serve --dir ./data --port 4321
+# bunql: generated an admin key and wrote it to ./data/keys.json
+# bunql: admin key: <43 url-safe base64 characters, printed this once and never again>
+# bunql http://localhost:4321  node=bunql-f22305a8  data=./data
+# bunql: 0 database(s), maxOpen 1024, ack fsync
+```
+
+Create a database and write to it. Every response carries the `txid` the write landed in.
 
 ```sh
 KEY=<the admin key it printed>
@@ -47,18 +67,40 @@ curl -sX POST localhost:4321/v1/db -H "authorization: Bearer $KEY" \
 curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
      -H 'content-type: application/json' \
      -d '{"sql":"create table todos(id integer primary key, title text)"}'
+# {"columns":[],"types":[],"rows":[],"rowsAffected":0,"lastInsertRowid":null,"txid":1,...}
 
 curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
      -H 'content-type: application/json' \
      -d '{"sql":"insert into todos(title) values (?)","args":["write it"]}'
 # {"columns":[],"types":[],"rows":[],"rowsAffected":1,"lastInsertRowid":1,"txid":2,...}
+```
 
-# A scoped token safe to hand to a browser, and the change feed it can subscribe to.
+Mint a scoped token — safe to hand to a browser, unlike the admin key — and watch the change feed.
+Every commit arrives as one `change` event; DDL arrives as a `schema` event on the same stream.
+
+```sh
 TOKEN=$(curl -sX POST localhost:4321/v1/tokens -H "authorization: Bearer $KEY" \
         -H 'content-type: application/json' \
         -d '{"dbs":["acme"],"scope":"ro","ttl":86400}' | jq -r .token)
+
 curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
+# retry: 1000
+# : open
+#
+# id: 3
+# event: change
+# data: {"txid":3,"changes":[{"table":"todos","op":"insert","rowid":2,"pk":{"id":2},"row":{…}}]}
 ```
+
+`?wait=30000` turns the same route into a long poll for a client that cannot hold a stream open,
+and `Last-Event-ID` resumes it without a gap. From here, [the client](#the-client) is the nicer way
+to do all of the above, and [embedded](#embedded) skips the server entirely.
+
+**A note on the default durability.** A write is answered once it is on this machine's disk
+(`[durability] defaultAck = "fsync"`, the equivalent of Postgres's `synchronous_commit = on`). That
+costs about 2.7x on a single write against `ack: "local"`, and concurrent writes more than earn it
+back because group commit folds them — 64 clients writing at once go *faster* than they did before
+the default changed. `ack: "local"` is the opt-out, per request or per node.
 
 ## The client
 
@@ -69,7 +111,7 @@ and Workers — no Bun or Node imports in it.
 ```ts
 import { createClient } from "@bunql/db/client"
 
-const client = createClient({ url: "http://localhost:4321", token })
+const client = createClient({ url: "http://localhost:4321", token })   // token, or the admin key
 const db = client.db("acme")
 
 await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
@@ -94,6 +136,10 @@ for await (const event of db.changes({ tables: ["todos"] })) {
 }
 ```
 
+A subscription is an emitter *and* an async iterable, so either style works. `db.changes()` also
+delivers a `schema` event when DDL runs — a `tables` filter does not hide it, because the shape you
+decode rows into has moved whether or not it was your table that changed.
+
 `consistency: "ryw"` (the default) remembers the highest txid it has seen per database and sends it
 as `BunQL-Min-Txid`, so a read never goes backwards. `intMode: "bigint" | "string"` decides what an
 integer beyond 2^53 becomes; the default refuses to round it. A write answered `307` or
@@ -101,6 +147,9 @@ integer beyond 2^53 becomes; the default refuses to round it. A write answered `
 [docs/c2-promotion.md](docs/c2-promotion.md#retrying-a-write--the-sharp-edge).
 
 ## Embedded
+
+The same engine in your own process — no server, no socket, no HTTP. `bq.serve()` puts the server
+in front of it later without changing a line of the code above it.
 
 ```ts
 import { BunQL } from "@bunql/db"
@@ -248,7 +297,7 @@ impossible.
 `[cluster]` puts a node in a small built-in Raft group holding membership, per-database placement
 and per-database leases. Control plane only: **the write path never waits on it**. A write checks
 the lease its own node already holds, in memory, against a monotonic clock — a `Map.get`, a
-`performance.now()` and two comparisons. A single-row write is still 28.2 µs with it on.
+`performance.now()` and two comparisons. A single-row write at `ack: "local"` is still 24 µs with it on.
 
 ```sh
 bun run src/cli.ts serve --dir ./n1 --port 4321 --cluster-secret $SECRET \
@@ -305,6 +354,9 @@ verifier a replica uses — so it either reproduces the target txid checksum for
 loudly. The bucket layout is a documented contract ([docs/r3-storage.md](docs/r3-storage.md)).
 
 ## The CLI
+
+`bunql` is the package's `bin`. From a clone, `bun run src/cli.ts <command>` is the same thing, or
+`bun link` once to put `bunql` on your `PATH`.
 
 ```sh
 bunql serve --dir ./data --port 4321
@@ -444,49 +496,54 @@ Byte layouts are in [docs/m3-wal.md](docs/m3-wal.md).
 
 ## Measured
 
-`bun run bench` on an M5 Pro, SQLite 3.53.4. The driver against `bun:sqlite`, 100k-row table, µs
-per operation:
+`bun run bench` on an M5 Pro, SQLite 3.53.4. The driver against `bun:sqlite`, 100k-row table.
+**Ratios rather than microseconds**, because the ratio is what holds still — see
+[docs/performance.md §8](docs/performance.md) for how much a busy machine moves an absolute number
+here, and [docs/benchmarks.md](docs/benchmarks.md) for one coherent run's worth of them.
 
-| op | bunql | bun:sqlite |
-|---|---|---|
-| point read by primary key | 0.77 | 1.77 |
-| 100-row scan to objects | 8.98 | 6.86 |
-| insert inside a transaction | 0.28 | 0.22 |
-| the same insert with an update hook installed | 0.36 | not available |
+| op | bunql vs `bun:sqlite` |
+|---|---|
+| point read by primary key | 1.02 – 1.14x |
+| 100-row scan to objects | 1.17 – 1.39x |
+| insert inside a transaction | 0.84 – 0.95x |
+| the same insert with an update hook installed | not available in `bun:sqlite` |
 
-Point reads win because the per-statement overhead is much lower. Wide scans lose because every
-column costs one extra FFI call for `sqlite3_column_type`, which bun:sqlite does in native code.
+Point reads win on per-statement overhead. **Scans used to lose and no longer do** — this README
+carried "wide scans lose because every column costs one extra FFI call for `sqlite3_column_type`"
+for months after it stopped being true. Writes inside a transaction are the one place `bun:sqlite`
+is still slightly ahead.
 
 A primary and a replica as two whole servers on loopback:
 
 | leg | p50 | p90 |
 |---|---|---|
-| write on the primary over HTTP | 303 µs | 374 µs |
-| commit → applied on the replica | 220 µs | 256 µs |
-| write forwarded through the replica | 353 µs | 380 µs |
-| write, `ack: "replica"` | 407 µs | 446 µs |
-| write, `ack: "quorum"` | 383 µs | 410 µs |
+| write on the primary over HTTP | 374 µs | 492 µs |
+| commit → applied on the replica | 265 µs | 323 µs |
+| write forwarded through the replica | 404 µs | 494 µs |
+| write, `ack: "replica"` | 379 µs | 442 µs |
+| write, `ack: "quorum"` | 359 µs | 417 µs |
 
-Forwarding costs 49 µs over a write on the primary; waiting for a replica to have the record on
-disk costs 104 µs. On one node over HTTP a point read is 48 µs and a write 79 µs, and the Hrana
-pipeline is within a microsecond of both. Everything, read against the design §10 budget, is in
-[docs/benchmarks.md](docs/benchmarks.md) — including the one missed target, 130k msg/s against a
-150k WebSocket budget, which is writes serialising on the single writer.
+Forwarding costs about 30 µs over a write on the primary. On one node over HTTP a point read is
+54 µs and a write 137 µs at the default `ack: "fsync"` (96 µs at `ack: "local"`), and the Hrana
+pipeline is within a few microseconds of both. Everything, read against the design §10 budget, is
+in [docs/benchmarks.md](docs/benchmarks.md).
 
-Throughput on one thread: ~220k reads/s on a socket, ~50k/s over HTTP, and 25–30k writes/s no
-matter how many databases they are spread over — the bound is the thread, not the database.
-`[server] workers = N` shards databases across worker threads behind one port and lifts exactly
-that: 8 databases, 64 sockets, single-row writes go from **28 809 writes/s at one worker to
-72 817 at six**, 2.67x (`bun run bench/workers.ts`, [docs/c4-workers.md](docs/c4-workers.md)).
-[docs/performance.md](docs/performance.md) takes both hot paths apart stage by stage — SQLite is
-29% of a write and 0.79 µs of a read — and says what to do about each ceiling and how the thing
-scales.
+Throughput on one thread: ~220k reads/s on a socket, ~50k/s over HTTP, and **~49k writes/s at 64
+concurrent clients** — up from ~29k before the durability defaults changed, because group commit
+folds concurrent writes into one transaction and one `fdatasync`. A *serial* writer is still bound
+by one transaction at a time, around 42k/s. `[server] workers = N` shards databases across worker
+threads behind one port and lifts the thread bound as well: 8 databases, 64 sockets, single-row
+writes went from 28 809 writes/s at one worker to 72 817 at six, 2.67x
+(`bun run bench/workers.ts`, [docs/c4-workers.md](docs/c4-workers.md)) — **that ladder predates the
+default change and has not been re-measured**, and `docs/performance.md` §5 says why.
+[docs/performance.md](docs/performance.md) takes both hot paths apart stage by stage and says what
+to do about each ceiling.
 
 ## Tests
 
 ```sh
 bun run sqlite:build  # the libsqlite3 everything below runs on; once per machine
-bun test              # 1249 tests across 97 files
+bun test              # 1486 across 124 files; BUNQL_WAL_NATIVE=0 proves the JavaScript fallback
 bun run typecheck
 bun run bytes         # no raw control bytes in source
 bun run routes:check  # docs/api.md covers every route
@@ -495,5 +552,5 @@ bun run bench         # every benchmark, then the design §10 table (--quick for
 
 `test/e2e/scenario.test.ts` is the single-node story end to end; `test/e2e/phase1.test.ts` is the
 cluster one — a primary, two replicas, a bucket and a `@libsql/client` over real sockets. CI runs
-all of it on `macos-latest` (arm64) and `ubuntu-latest` (x64) for every push and pull request to
-`main`.
+all of it on `macos-latest` (arm64), `ubuntu-latest` (x64) and `windows-latest` (x64) for every
+push and pull request to `main`. All three gate; none is advisory.

@@ -392,7 +392,7 @@ nothing else — a plain `*/*` gets the stream.
 GET /v1/db/acme/changes?tables=users,orders&since=4800&include=row
 
 retry: 1000
-: bunql
+: open
 
 id: 4813
 event: change
