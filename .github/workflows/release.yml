@@ -1,0 +1,101 @@
+# Publishing, on a tag and only on a tag.
+#
+# Invariant: nothing reaches npm that has not passed the same gate `ci.yml` runs, on the same
+# pinned Bun and against a libsqlite3 built here from the pinned source. The publish step is the
+# last one, and every check is a hard failure — this workflow has no `continue-on-error` anywhere,
+# deliberately, because a half-verified package is worse than no package.
+#
+# How a release happens:
+#
+#   1. Set `version` in package.json to the version being released.
+#   2. `git tag v<that version> && git push --tags`.
+#
+# The tag is the trigger and the tag must match `package.json`; `verify the tag` below refuses the
+# release otherwise, so a tag pushed against the wrong commit cannot publish a version that
+# claims to be something else. `GET /v1/openapi.json` publishes `info.version` from the same
+# field and `test/package/exports.test.ts` holds the two together, so the tag, the package and
+# every generated client agree by construction.
+#
+# **Two things have to be settled before the first tag, and neither is a code change this
+# workflow can make:**
+#
+#   - **The published name.** `package.json` says `bunql`, and `bunql` on npm is somebody else's
+#     package (a query builder, last published as 1.0.1-dev.5). A scope — `@you/bunql` — is the
+#     usual answer, and it is not a one-line change: every example in `README.md` and `docs/` says
+#     `from "bunql/client"`, and `test/package/exports.test.ts` checks that each of those
+#     specifiers is a published subpath. Renaming means rewriting those imports in the same commit.
+#   - **`private: true` in package.json**, which npm honours by refusing to publish at all. It is
+#     still there on purpose: it is the last thing standing between this workflow and a package
+#     going out under a name nobody chose.
+#
+# And one secret: `NPM_TOKEN`, an automation token for the account that owns the name. The
+# `id-token: write` permission below is what lets npm attach a provenance attestation, which is
+# why the publish does not need `--access` spelled out beyond `publishConfig`.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  # npm provenance: the attestation is signed with this workflow's OIDC identity.
+  id-token: write
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      # npm itself does the publishing: `bun publish` does not yet emit provenance, and provenance
+      # is the point of publishing from CI rather than from a laptop.
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: verify the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME says $tag, package.json says $pkg" >&2
+            exit 1
+          fi
+          echo "releasing $pkg"
+
+      - run: bun install --frozen-lockfile
+
+      - name: build libsqlite3
+        run: bun run sqlite:build
+
+      - name: report the library under test
+        run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
+
+      - run: bun run scripts/bytes.ts --check
+
+      - run: bun run typecheck
+
+      - run: bun test
+
+      - name: docs/api.md covers every route
+        run: bun run scripts/routes.ts --check
+
+      # `--dry-run` first, so a packing failure — a missing file, a name npm will not accept — is
+      # reported before anything is uploaded rather than halfway through.
+      - name: pack
+        run: npm publish --dry-run --provenance
+
+      - name: publish
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

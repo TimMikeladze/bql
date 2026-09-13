@@ -4,6 +4,30 @@
   "type": "module",
   "private": true,
   "description": "SQLite as a multi-tenant database server for Bun, with WAL shipping and hook-driven realtime.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TimMikeladze/bunql.git"
+  },
+  "homepage": "https://github.com/TimMikeladze/bunql#readme",
+  "bugs": {
+    "url": "https://github.com/TimMikeladze/bunql/issues"
+  },
+  "keywords": [
+    "bun",
+    "sqlite",
+    "database",
+    "multi-tenant",
+    "wal",
+    "replication",
+    "realtime",
+    "libsql",
+    "hrana"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "bin": {
     "bunql": "src/cli.ts"
   },
@@ -25,6 +49,7 @@
     "./graphql": "./src/graphql/index.ts"
   },
   "files": [
+    "LICENSE",
     "src",
     "docs/design.md",
     "docs/api.md",
