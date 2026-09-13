@@ -56,8 +56,13 @@ should pass its own `MetricsSink` to `BusStore`.
 | `GET /health` | the process is answering. `{ok, draining}` |
 | `GET /ready` | it is answering **and** a consumer has checked in recently, and it is not draining |
 
-Neither needs a token. `/ready` is what a load balancer should poll: it returns 503 while
-draining, so traffic stops arriving before the process stops answering.
+Neither needs a token.
+
+`/ready` is the one a **load balancer** should poll, because it returns 503 while draining, so
+traffic stops arriving before the process stops answering. It is the wrong check for a platform
+that **restarts** on failure: "no consumer has checked in" is true of a freshly deployed bus that
+is working perfectly. Give the platform `/health`, and alert on `/ready` from your own
+monitoring, where "nobody is consuming" is the thing you actually want to hear about.
 
 ## Logging
 
@@ -130,7 +135,8 @@ unprivileged user, and takes SIGTERM as a drain signal.
 ```sh
 fly apps create my-bus
 fly volumes create agenticbus_data --size 1 --region sjc --app my-bus
-fly secrets set BUS_SIGNING_KEY=$(openssl rand -base64 32)                 BUS_ADMIN_TOKEN=$(openssl rand -base64 32) --app my-bus
+fly secrets set BUS_SIGNING_KEY=$(openssl rand -base64 32) \
+                BUS_ADMIN_TOKEN=$(openssl rand -base64 32) --app my-bus
 fly deploy --app my-bus
 ```
 
@@ -152,7 +158,9 @@ only way to read the admin token is to shell into the machine.
 A remote consumer needs only the URL and a scoped token:
 
 ```sh
-BUS_URL=https://my-bus.fly.dev BUS_TOKEN=$(agenticbus token --consumer laptop-1 --subscribe rpc)   agenticbus consume rpc --exec ./handle.sh
+BUS_URL=https://my-bus.fly.dev \
+BUS_TOKEN=$(agenticbus token --consumer laptop-1 --subscribe rpc) \
+  agenticbus consume rpc --exec ./handle.sh
 ```
 
 ## Capacity, honestly
