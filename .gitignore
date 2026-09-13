@@ -1,12 +1,21 @@
-experiments/wp/
-experiments/*.db
-experiments/*.db-wal
-experiments/*.db-shm
-experiments/*.dylib
-experiments/*.so
-experiments/big.bin*
 node_modules/
-data/
+.DS_Store
+.env
+*.log
 
+# @bunql/db
+packages/db/experiments/wp/
+packages/db/experiments/*.db
+packages/db/experiments/*.db-wal
+packages/db/experiments/*.db-shm
+packages/db/experiments/*.dylib
+packages/db/experiments/*.so
+packages/db/experiments/big.bin*
+packages/db/data/
 # the vendored libsqlite3 built by `bun run sqlite:build`
-vendor/
+packages/db/vendor/
+
+# @bunql/bus
+packages/bus/dist/
+packages/bus/.agenticbus/
+packages/bus/package.json.orig
