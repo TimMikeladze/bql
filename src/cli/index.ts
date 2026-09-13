@@ -209,7 +209,7 @@ switch (command) {
       // Without --exec the message is printed. With it, the message goes to the
       // command's stdin and its stdout becomes the reply — which is the whole
       // integration story for a language the bus has no SDK for.
-      handle: async ({ message }) => {
+      handle: async ({ message }, api) => {
         if (!exec) {
           console.log(JSON.stringify(message));
           return undefined;
@@ -224,8 +224,22 @@ switch (command) {
             BUS_SEQ: String(message.seq),
           },
         });
+        // Cancellation and the handler timeout both arrive as an abort, and
+        // neither means anything if the child keeps running: kill it, and let
+        // the consume loop decide what to tell the bus.
+        const kill = () => {
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (child.exitCode === null) child.kill("SIGKILL");
+          }, 2000).unref?.();
+        };
+        if (api.signal.aborted) kill();
+        else api.signal.addEventListener("abort", kill, { once: true });
+
         const output = await new Response(child.stdout).text();
         const code = await child.exited;
+        api.signal.removeEventListener("abort", kill);
+        api.signal.throwIfAborted();
         if (code !== 0) throw new Error(`handler exited ${code}`);
         const trimmed = output.trim();
         if (trimmed.length === 0) return undefined;
@@ -238,6 +252,15 @@ switch (command) {
     });
     shutdown(() => consumer.stop());
     await consumer.start();
+    break;
+  }
+
+  case "cancel": {
+    const bus = await client();
+    const seq = Number(flag("seq", argv[1]));
+    if (!Number.isInteger(seq))
+      throw new Error("cancel wants a message sequence number");
+    console.log(JSON.stringify(await bus.cancelMessage(seq)));
     break;
   }
 
@@ -292,6 +315,7 @@ switch (command) {
   subscribe   <name> <pattern>            create a durable subscription
   consume     <subscription> --exec CMD   consume; message is stdin, stdout is the reply
               --exec-timeout <ms>          abort and nack a handler that hangs
+  cancel      <seq>                       stop a message: in-flight handlers abort
   tail        follow the log
   stats       subscriptions, consumers, lag
 

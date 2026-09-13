@@ -1,13 +1,16 @@
 import { Database } from "bun:sqlite";
 import type {
+  CancelResult,
   Consumer,
   DeliverFrom,
   Delivery,
   DeliveryStatus,
   Envelope,
+  ExtendResult,
   Headers,
   Json,
   Message,
+  MessageMeta,
   PublishRequest,
   PublishResult,
   RegisterConsumer,
@@ -113,6 +116,16 @@ export const MIGRATIONS: Migration[] = [
         data TEXT NOT NULL)`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      // Cancellation. `cancelled_at` on the message is what stops a
+      // subscription whose cursor has not reached it yet from materializing a
+      // delivery *after* the cancel; `publisher` is who may cancel it.
+      "ALTER TABLE messages ADD COLUMN cancelled_at INTEGER",
+      "ALTER TABLE messages ADD COLUMN publisher TEXT",
+    ],
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
@@ -140,6 +153,8 @@ interface MessageRow {
   published_at: number;
   expires_at: number | null;
   dedupe_key: string | null;
+  cancelled_at: number | null;
+  publisher: string | null;
 }
 
 interface SubscriptionRow {
@@ -324,12 +339,22 @@ export class BusStore {
       publishedAt: row.published_at,
       expiresAt: row.expires_at,
       dedupeKey: row.dedupe_key,
+      cancelledAt: row.cancelled_at,
+      publisher: row.publisher,
     };
   }
 
+  /**
+   * Publish.
+   *
+   * `publisher` is the token subject the bus saw, not something the caller put
+   * in the payload: it is what `cancel` authorizes against, so a field a
+   * publisher could choose for itself would authorize nothing.
+   */
   async publish(
     workspace: string,
     request: PublishRequest,
+    publisher: string | null = null,
   ): Promise<PublishResult> {
     assertSubject(request.subject);
     const { inline, blob } = await this.writeBody(request.body ?? null);
@@ -366,8 +391,8 @@ export class BusStore {
       const id = uuid();
       const now = this.now();
       this.db.run(
-        `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key, publisher)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         [
           id,
           workspace,
@@ -379,6 +404,7 @@ export class BusStore {
           now,
           request.ttlMs ? now + request.ttlMs : null,
           request.dedupeKey ?? null,
+          publisher,
         ],
       );
       const seq = Number(
@@ -568,7 +594,7 @@ export class BusStore {
   purge(workspace: string, name: string, fromSeq = 0) {
     const row = this.subscriptionRow(workspace, name);
     const result = this.db.run(
-      "DELETE FROM deliveries WHERE subscription_id=? AND message_seq>=? AND status IN ('acked','dead')",
+      "DELETE FROM deliveries WHERE subscription_id=? AND message_seq>=? AND status IN ('acked','dead','cancelled')",
       [row.id, fromSeq],
     );
     return { removed: result.changes };
@@ -606,8 +632,13 @@ export class BusStore {
     const glob = narrowingGlob(subscription.pattern);
     const rows = this.db
       .query(
+        // A cancelled message is skipped here rather than filtered at claim
+        // time: a subscription whose cursor has not reached it yet would
+        // otherwise materialize a delivery for it *after* it was cancelled.
+        // The cursor still advances over it, because the ceiling below is
+        // computed from the log, not from this result.
         `SELECT seq, subject, key FROM messages
-         WHERE workspace = ? AND seq > ? AND subject GLOB ?
+         WHERE workspace = ? AND seq > ? AND subject GLOB ? AND cancelled_at IS NULL
          ORDER BY seq LIMIT ?`,
       )
       .all(
@@ -707,8 +738,8 @@ export class BusStore {
       "dlq-attempts": String(row.attempt),
     };
     this.db.run(
-      `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key)
-       VALUES (?,?,?,?,?,?,?,?,NULL,NULL)`,
+      `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key, publisher)
+       VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?)`,
       [
         uuid(),
         subscription.workspace,
@@ -718,6 +749,9 @@ export class BusStore {
         original.body,
         original.body_blob,
         now,
+        // The dead letter belongs to whoever published the original, so the
+        // same party can still act on it.
+        original.publisher,
       ],
     );
   }
@@ -877,12 +911,29 @@ export class BusStore {
     })();
   }
 
+  /**
+   * Renew a lease — and tell the consumer if the work has been cancelled.
+   *
+   * The renewal is the cancellation channel. A consumer that is running a long
+   * handler is already talking to the bus on a timer, so cancellation needs no
+   * second mechanism and no push: the next `extend` answers
+   * `{cancelled: true}` instead of failing as a stale lease, and the consumer
+   * aborts its handler's signal.
+   */
   extend(
     workspace: string,
     deliveryId: string,
     consumerId: string,
     generation: number,
-  ) {
+  ): ExtendResult {
+    const cancelled = this.db
+      .query(
+        `SELECT d.status FROM deliveries d JOIN subscriptions s ON s.id = d.subscription_id
+          WHERE d.id=? AND s.workspace=? AND d.consumer_id=? AND d.status='cancelled'`,
+      )
+      .get(deliveryId, workspace, consumerId) as { status: string } | null;
+    if (cancelled) return { leaseUntil: null, cancelled: true };
+
     const { row, subscription } = this.owned(
       workspace,
       deliveryId,
@@ -895,7 +946,92 @@ export class BusStore {
       [leaseUntil, this.now(), row.id],
     );
     this.touchConsumer(workspace, consumerId);
-    return { leaseUntil };
+    return { leaseUntil, cancelled: false };
+  }
+
+  // --------------------------------------------------------- cancellation
+
+  /** Enough of a message to decide who may cancel it, without reading a blob. */
+  messageMeta(workspace: string, seq: number): MessageMeta {
+    const row = this.db
+      .query(
+        "SELECT seq, subject, publisher, cancelled_at FROM messages WHERE seq=? AND workspace=?",
+      )
+      .get(seq, workspace) as {
+      seq: number;
+      subject: string;
+      publisher: string | null;
+      cancelled_at: number | null;
+    } | null;
+    if (!row) throw new BusError("message not found", 404);
+    return {
+      seq: row.seq,
+      subject: row.subject,
+      publisher: row.publisher,
+      cancelledAt: row.cancelled_at,
+    };
+  }
+
+  /** One delivery, by id, within a workspace. */
+  delivery(workspace: string, deliveryId: string): Delivery {
+    const row = this.db
+      .query("SELECT * FROM deliveries WHERE id=?")
+      .get(deliveryId) as DeliveryRow | null;
+    if (!row) throw new BusError("delivery not found", 404);
+    const subscription = this.db
+      .query("SELECT * FROM subscriptions WHERE id=?")
+      .get(row.subscription_id) as SubscriptionRow;
+    if (subscription.workspace !== workspace)
+      throw new BusError("delivery not found", 404);
+    return this.toDelivery(row, subscription);
+  }
+
+  /**
+   * Cancel every unfinished delivery of a message, and stop new ones.
+   *
+   * `cancelled` is a fourth terminal status rather than a flag beside the
+   * status, because a flag means every query that filters on status has to
+   * remember to check it too — and the one that forgets re-delivers cancelled
+   * work. As a status it is simply not leasable.
+   */
+  cancelMessage(workspace: string, seq: number): CancelResult {
+    return this.db.transaction(() => {
+      const meta = this.messageMeta(workspace, seq);
+      const now = this.now();
+      if (meta.cancelledAt === null)
+        this.db.run("UPDATE messages SET cancelled_at=? WHERE seq=?", [
+          now,
+          seq,
+        ]);
+      const result = this.db.run(
+        // `consumer_id` is kept, not cleared: it is how `extend` recognises
+        // the consumer still running this work and answers it with
+        // `{cancelled: true}` instead of a stale-lease error — and it is the
+        // only record of who was holding it when the cancel landed.
+        `UPDATE deliveries SET status='cancelled', lease_until=NULL,
+           error='cancelled', updated_at=?
+         WHERE message_seq=? AND status IN ('pending','leased')`,
+        [now, seq],
+      );
+      return { cancelled: result.changes, alreadyCancelled: meta.cancelledAt !== null };
+    })();
+  }
+
+  /** Cancel one subscription's copy of a message, leaving the others alone. */
+  cancelDelivery(workspace: string, deliveryId: string): CancelResult {
+    return this.db.transaction(() => {
+      const delivery = this.delivery(workspace, deliveryId);
+      const result = this.db.run(
+        `UPDATE deliveries SET status='cancelled', lease_until=NULL,
+           error='cancelled', updated_at=?
+         WHERE id=? AND status IN ('pending','leased')`,
+        [this.now(), deliveryId],
+      );
+      return {
+        cancelled: result.changes,
+        alreadyCancelled: delivery.status === "cancelled",
+      };
+    })();
   }
 
   deliveries(workspace: string, limit = 200): Delivery[] {

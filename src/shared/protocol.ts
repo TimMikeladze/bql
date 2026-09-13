@@ -23,6 +23,10 @@ export interface Message {
   publishedAt: number;
   expiresAt: number | null;
   dedupeKey: string | null;
+  /** Set once cancelled: no subscription will materialize a delivery for it. */
+  cancelledAt: number | null;
+  /** The token subject that published it. `*` for an admin token. */
+  publisher: string | null;
 }
 
 export interface PublishRequest {
@@ -126,6 +130,26 @@ export interface NackRequest extends AckRequest {
   fatal?: boolean;
   /** Hold the delivery back this long before it becomes claimable again. */
   delayMs?: number;
+}
+
+/** What `extend` answers: a renewed lease, or the news that it was cancelled. */
+export interface ExtendResult {
+  leaseUntil: number | null;
+  cancelled: boolean;
+}
+
+export interface CancelResult {
+  /** Deliveries moved to `cancelled` by this call. */
+  cancelled: number;
+  alreadyCancelled: boolean;
+}
+
+/** Enough of a message to decide who may act on it. */
+export interface MessageMeta {
+  seq: number;
+  subject: string;
+  publisher: string | null;
+  cancelledAt: number | null;
 }
 
 export interface Response {

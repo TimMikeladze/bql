@@ -117,6 +117,19 @@ export function createServer(options: ServerOptions) {
     if (claims.scope === "consumer")
       throw new BusError("read access required", 403);
   };
+  /**
+   * Cancelling is the publisher's call, or an admin's.
+   *
+   * Not the consumer's: a consumer that could cancel its own work could make a
+   * message it did not like disappear, which is a very quiet way to lose work.
+   */
+  const requireCancel = (claims: TokenClaims, publisher: string | null) => {
+    if (claims.scope === "admin") return;
+    if (claims.scope === "reader")
+      throw new BusError("a reader token may not cancel", 403);
+    if (publisher === null || publisher !== claims.sub)
+      throw new BusError("only the publisher or an admin may cancel this", 403);
+  };
 
   /**
    * The workspace a request acts in. An admin token may name any; every other
@@ -186,19 +199,23 @@ export function createServer(options: ServerOptions) {
         if (req.method === "POST" && path === "/api/publish") {
           const subject = str(body.subject, "subject", 512);
           authorizePublish(claims, subject);
-          const result = await store.publish(workspace, {
-            subject,
-            body: (body.body ?? null) as Json,
-            key: optionalStr(body.key, "key", 200),
-            headers: headerMap(body.headers, "headers"),
-            dedupeKey: optionalStr(body.dedupeKey, "dedupeKey", 400),
-            replyTo: optionalStr(body.replyTo, "replyTo", 512),
-            correlation: optionalStr(body.correlation, "correlation", 200),
-            ttlMs:
-              body.ttlMs === undefined || body.ttlMs === null
-                ? null
-                : int(body.ttlMs, "ttlMs"),
-          });
+          const result = await store.publish(
+            workspace,
+            {
+              subject,
+              body: (body.body ?? null) as Json,
+              key: optionalStr(body.key, "key", 200),
+              headers: headerMap(body.headers, "headers"),
+              dedupeKey: optionalStr(body.dedupeKey, "dedupeKey", 400),
+              replyTo: optionalStr(body.replyTo, "replyTo", 512),
+              correlation: optionalStr(body.correlation, "correlation", 200),
+              ttlMs:
+                body.ttlMs === undefined || body.ttlMs === null
+                  ? null
+                  : int(body.ttlMs, "ttlMs"),
+            },
+            claims.sub,
+          );
           // A reply is recorded against its correlation so the caller can
           // collect it after a restart. It has to say so explicitly: inferring
           // it from "carries a correlation but no reply-to" would silently turn
@@ -317,6 +334,24 @@ export function createServer(options: ServerOptions) {
           }
         }
 
+        // ---------------------------------------------------- cancellation
+        const cancelDelivery = /^\/api\/deliveries\/([^/]+)\/cancel$/.exec(path);
+        if (req.method === "POST" && cancelDelivery) {
+          const id = cancelDelivery[1]!;
+          const target = store.delivery(workspace, id);
+          requireCancel(
+            claims,
+            store.messageMeta(workspace, target.messageSeq).publisher,
+          );
+          return json(store.cancelDelivery(workspace, id));
+        }
+        const cancelMessage = /^\/api\/messages\/(\d+)\/cancel$/.exec(path);
+        if (req.method === "POST" && cancelMessage) {
+          const seq = Number(cancelMessage[1]!);
+          requireCancel(claims, store.messageMeta(workspace, seq).publisher);
+          return json(store.cancelMessage(workspace, seq));
+        }
+
         // ------------------------------------------------------ deliveries
         const delivery = /^\/api\/deliveries\/([^/]+)\/(ack|nack|extend)$/.exec(
           path,
@@ -354,19 +389,23 @@ export function createServer(options: ServerOptions) {
             maxWaitMs,
             Math.max(0, int(body.waitMs, "waitMs", 0)),
           );
-          const published = await store.publish(workspace, {
-            subject,
-            body: (body.body ?? null) as Json,
-            key: optionalStr(body.key, "key", 200),
-            headers: headerMap(body.headers, "headers"),
-            dedupeKey: optionalStr(body.dedupeKey, "dedupeKey", 400),
-            replyTo: optionalStr(body.replyTo, "replyTo", 512) ?? "reply",
-            correlation: optionalStr(body.correlation, "correlation", 200),
-            ttlMs:
-              body.ttlMs === undefined || body.ttlMs === null
-                ? null
-                : int(body.ttlMs, "ttlMs"),
-          });
+          const published = await store.publish(
+            workspace,
+            {
+              subject,
+              body: (body.body ?? null) as Json,
+              key: optionalStr(body.key, "key", 200),
+              headers: headerMap(body.headers, "headers"),
+              dedupeKey: optionalStr(body.dedupeKey, "dedupeKey", 400),
+              replyTo: optionalStr(body.replyTo, "replyTo", 512) ?? "reply",
+              correlation: optionalStr(body.correlation, "correlation", 200),
+              ttlMs:
+                body.ttlMs === undefined || body.ttlMs === null
+                  ? null
+                  : int(body.ttlMs, "ttlMs"),
+            },
+            claims.sub,
+          );
           const correlation = published.correlation!;
           const deadline = Date.now() + waitMs;
           for (;;) {

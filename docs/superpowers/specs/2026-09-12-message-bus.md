@@ -60,6 +60,8 @@ At-least-once, with effectively-once effects available to anyone who wants them:
 
 **Ordering.** A subscription may set `ordered: true`, which stops the broker from leasing a delivery whose message `key` already has an in-flight delivery in that subscription. Per-key FIFO, with unrelated keys still moving in parallel. Off by default, because ordering costs throughput and most work does not need it.
 
+**Cancellation.** `cancelled` is a fourth terminal delivery status, and `messages.cancelled_at` stops a subscription materializing a delivery for a message it has not reached yet. A consumer learns on its next `extend`, which answers `{cancelled: true}`; the consume loop aborts the handler's signal and neither acks nor nacks, because the delivery is already terminal. Cancelling is the publisher's or an admin's — `messages.publisher` records the token subject, so it is the credential that published, not a field the payload can claim. See [the finishing spec](2026-09-13-finishing.md).
+
 ### Request/reply
 
 A message published with `reply_to` and a `correlation` header is a request. The consumer that handles it publishes a response; the broker records it in `responses` keyed by `(workspace, correlation)`. The caller collects it with `GET /api/requests/:correlation`, which long-polls.
@@ -113,7 +115,8 @@ Retention and TTL deletion are both guarded by "no unfinished delivery of this m
 | `POST` | `/api/subscriptions` | create or update `{name, pattern, ackWaitMs?, maxAttempts?, ordered?, deliverFrom?}` |
 | `GET` `DELETE` | `/api/subscriptions[/:name]` | list, inspect, remove |
 | `POST` | `/api/subscriptions/:name/claim` | `{consumer, max?, waitMs?}` — long-polls |
-| `POST` | `/api/deliveries/:id/ack` `/nack` `/extend` | `{consumer, generation, …}` |
+| `POST` | `/api/deliveries/:id/ack` `/nack` `/extend` | `{consumer, generation, …}`; `extend` also answers `{cancelled}` |
+| `POST` | `/api/messages/:seq/cancel`, `/api/deliveries/:id/cancel` | stop work; publisher or admin |
 | `POST` | `/api/subscriptions/:name/replay` | `{fromSeq}` — rewind the cursor |
 | `POST` | `/api/requests` | publish and wait for the response |
 | `GET` | `/api/requests/:correlation` | collect a response, long-polling |

@@ -72,6 +72,12 @@ At-least-once, with effectively-once effects available to anyone who wants them.
 
 **Ordering.** `ordered: true` stops the bus leasing a delivery whose message `key` already has one in flight on that subscription. Per-key FIFO, with unrelated keys still moving in parallel. Off by default, because ordering costs throughput and most work does not need it.
 
+**Cancellation.** `agenticbus cancel <seq>` stops a message: every unfinished delivery of it moves to a fourth terminal status, `cancelled`, and no subscription will create a new one — including a subscription whose cursor has not reached it yet.
+
+A consumer already running the work learns on its **next lease renewal**, which answers `{cancelled: true}` rather than failing. `BusConsumer` aborts the handler's `signal`, and `--exec` passes that signal to the child process, so the work actually stops rather than a row merely changing colour. Cancelled deliveries are neither acked nor nacked and are never retried.
+
+Cancelling is the **publisher's** call, or an admin's — the bus records which token published each message. A consumer cannot cancel its own work, because a consumer that could make a message it disliked disappear is a very quiet way to lose work.
+
 ## Writing a consumer
 
 ```ts
@@ -114,6 +120,7 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `agenticbus request <subject> <json>` | publish and wait for a reply |
 | `agenticbus subscribe <name> <pattern>` | create a durable subscription |
 | `agenticbus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
+| `agenticbus cancel <seq>` | stop a message; in-flight handlers abort |
 | `agenticbus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
 ## HTTP API
@@ -124,7 +131,8 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `POST` `GET` | `/api/subscriptions` | create; list |
 | `POST` | `/api/subscriptions/:name/claim` | `{consumer, max, waitMs}` — long-polls |
 | `POST` | `/api/subscriptions/:name/replay` `/purge` `/pause` | operator actions |
-| `POST` | `/api/deliveries/:id/ack` `/nack` `/extend` | |
+| `POST` | `/api/deliveries/:id/ack` `/nack` `/extend` | `/extend` answers `{cancelled}` too |
+| `POST` | `/api/messages/:seq/cancel` · `/api/deliveries/:id/cancel` | stop work; publisher or admin |
 | `POST` `GET` | `/api/requests[/:correlation]` | request/reply, both long-polling |
 | `GET` | `/api/messages/:seq` · `/api/log` · `/api/stream` | the log; SSE refresh signal |
 | `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
@@ -160,7 +168,18 @@ ok   killed worker-a while it held the slow message
 ok   a surviving consumer recovered the expired lease — attempt 2, now on worker-b
 ok   the poison message reached the dead-letter subject with its reason — unsupported payload
 ok   a request was answered by a consumer in another process — "HELLO BUS"
+ok   a long handler is running as a real child process — pid 86892
+ok   cancelling the message cancelled its in-flight delivery — 1 delivery
+ok   the consumer's child process actually stopped
 ok   a repeated dedupe key does not publish twice
+```
+
+And `bun run soak` is the contention check the unit tests cannot be: eight consumer processes racing on one subscription, 5000 messages, consumers SIGKILLed throughout, asserting every message was handled at least once and acked exactly once with nothing left pending. `--ordered` adds per-key FIFO under kills; `--kill-bus` kills the broker itself mid-flight.
+
+```sh
+bun run soak
+bun run soak --ordered
+bun run soak --kill-bus --repeat 10
 ```
 
 ## dagr

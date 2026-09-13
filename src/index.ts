@@ -28,6 +28,7 @@ export {
   BusClient,
   BusConsumer,
   BusRequestError,
+  CancelledError,
   FatalError,
   type ClientOptions,
   type ConsumerOptions,

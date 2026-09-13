@@ -240,6 +240,78 @@ try {
   const again = await admin.response(answered.correlation!);
   check("the response is still collectable afterwards", again?.body === "HELLO BUS");
 
+  // ---- cancellation actually stops the work ----
+  //
+  // The point of the check is the *process*, not the delivery row: a bus that
+  // marks something cancelled while the handler keeps burning CPU on another
+  // machine has not cancelled anything.
+  await admin.subscribe({
+    name: "slow",
+    pattern: "slow.>",
+    ackWaitMs: 3000,
+    maxAttempts: 1,
+  });
+  const pidFile = `${scratch}/child.pid`;
+  spawn(
+    "slowpoke",
+    [
+      "src/cli/index.ts",
+      "consume",
+      "slow",
+      "--id",
+      "slowpoke",
+      // `exec` replaces the shell, so the pid written here is the pid of the
+      // thing that has to die — not a shell whose child could outlive it.
+      "--exec",
+      `echo $$ > ${pidFile}; exec sleep 120`,
+    ],
+    { BUS_TOKEN: consumerToken("slowpoke", "slow") },
+  );
+  const longRunning = await admin.publish({ subject: "slow.sleep", body: {} });
+  const childPid = await waitFor("the handler to start a child process", async () => {
+    const file = Bun.file(pidFile);
+    if (!(await file.exists())) return null;
+    const pid = Number((await file.text()).trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  });
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  check("a long handler is running as a real child process", alive(childPid), `pid ${childPid}`);
+
+  const cancelled = await admin.cancelMessage(longRunning.seq);
+  check(
+    "cancelling the message cancelled its in-flight delivery",
+    cancelled.cancelled === 1,
+    `${cancelled.cancelled} delivery`,
+  );
+  await waitFor(
+    "the child process to stop",
+    async () => (alive(childPid) ? null : true),
+    20_000,
+  );
+  check("the consumer's child process actually stopped", !alive(childPid));
+
+  const settled = await waitFor("the delivery to settle", async () => {
+    const deliveries = (await admin.call("/api/deliveries")) as {
+      messageSeq: number;
+      status: string;
+      attempt: number;
+    }[];
+    const same = deliveries.find((d) => d.messageSeq === longRunning.seq);
+    return same?.status === "cancelled" ? same : null;
+  });
+  check(
+    "a cancelled delivery is terminal, not retried",
+    settled.attempt === 1,
+    `attempt ${settled.attempt}`,
+  );
+
   // ---- dedupe ----
   const first = await admin.publish({
     subject: "work.echo",

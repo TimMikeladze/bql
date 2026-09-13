@@ -1,6 +1,8 @@
 import type {
+  CancelResult,
   Delivery,
   Envelope,
+  ExtendResult,
   Json,
   Message,
   PublishRequest,
@@ -52,8 +54,13 @@ export class BusClient {
   async call<T>(
     path: string,
     body?: unknown,
-    { method, extraWaitMs = 0 }: { method?: string; extraWaitMs?: number } = {},
+    {
+      method,
+      extraWaitMs = 0,
+      signal,
+    }: { method?: string; extraWaitMs?: number; signal?: AbortSignal } = {},
   ): Promise<T> {
+    const timeout = AbortSignal.timeout(this.timeoutMs + extraWaitMs);
     const response = await this.doFetch(`${this.base}${path}`, {
       method: method ?? (body === undefined ? "GET" : "POST"),
       headers: {
@@ -64,7 +71,10 @@ export class BusClient {
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(this.timeoutMs + extraWaitMs),
+      // A caller's signal composes with the timeout rather than replacing it:
+      // a long poll that is abandoned should end now, and one that is merely
+      // slow should still end eventually.
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
     });
     const payload = (await response.json().catch(() => ({}))) as {
       error?: string;
@@ -94,12 +104,13 @@ export class BusClient {
   async response(
     correlation: string,
     waitMs = 0,
+    signal?: AbortSignal,
   ): Promise<BusResponse | null> {
     try {
       return await this.call<BusResponse>(
         `/api/requests/${encodeURIComponent(correlation)}?waitMs=${waitMs}`,
         undefined,
-        { extraWaitMs: waitMs },
+        { extraWaitMs: waitMs, ...(signal ? { signal } : {}) },
       );
     } catch (error) {
       if (error instanceof BusRequestError && error.status === 404) return null;
@@ -137,6 +148,9 @@ export class BusClient {
   }
   log(after = 0, limit = 100): Promise<Message[]> {
     return this.call<Message[]>(`/api/log?after=${after}&limit=${limit}`);
+  }
+  message(seq: number): Promise<Message> {
+    return this.call<Message>(`/api/messages/${seq}`);
   }
   replay(subscription: string, fromSeq: number) {
     return this.call(`/api/subscriptions/${subscription}/replay`, { fromSeq });
@@ -177,11 +191,26 @@ export class BusClient {
       ...options,
     });
   }
-  extend(delivery: Delivery, consumer: string): Promise<{ leaseUntil: number }> {
-    return this.call(`/api/deliveries/${delivery.id}/extend`, {
+  extend(delivery: Delivery, consumer: string): Promise<ExtendResult> {
+    return this.call<ExtendResult>(`/api/deliveries/${delivery.id}/extend`, {
       consumer,
       generation: delivery.generation,
     });
+  }
+
+  /**
+   * Cancel a message: every unfinished delivery of it stops, and no
+   * subscription will create a new one. Admin, or the token that published it.
+   */
+  cancelMessage(seq: number): Promise<CancelResult> {
+    return this.call<CancelResult>(`/api/messages/${seq}/cancel`, {});
+  }
+  /** Cancel one subscription's copy, leaving every other subscription alone. */
+  cancelDelivery(deliveryId: string): Promise<CancelResult> {
+    return this.call<CancelResult>(
+      `/api/deliveries/${encodeURIComponent(deliveryId)}/cancel`,
+      {},
+    );
   }
 }
 
@@ -229,6 +258,20 @@ export interface HandlerApi {
 export class FatalError extends Error {}
 
 /**
+ * The abort reason when the publisher — or an operator — cancelled this work.
+ *
+ * Distinguishable from every other abort on purpose: a cancelled delivery is
+ * already terminal on the bus, so the loop must not nack it, and a handler that
+ * wants to tell cancellation apart from a timeout can.
+ */
+export class CancelledError extends Error {
+  constructor(message = "cancelled") {
+    super(message);
+    this.name = "CancelledError";
+  }
+}
+
+/**
  * A consume loop: claim, run, ack.
  *
  * A handler that returns normally acks. A handler that throws nacks, and the
@@ -268,14 +311,27 @@ export class BusConsumer {
       250,
       Math.min(this.options.maxExtendMs ?? 10_000, Math.floor(granted / 3)),
     );
+    // The lease renewal is also the cancellation channel: a consumer running a
+    // long handler is already talking to the bus on a timer, so cancellation
+    // needs no push and no second connection.
+    const cancelled = () => abort.signal.reason instanceof CancelledError;
     const timer = setInterval(() => {
       void client
         .extend(envelope.delivery, id)
-        .catch(() => abort.abort("lease lost"));
+        .then((result) => {
+          if (result.cancelled)
+            abort.abort(new CancelledError("cancelled by the publisher"));
+        })
+        .catch(() => abort.abort(new Error("lease lost")));
     }, extendMs);
     const api: HandlerApi = {
       extend: async () => {
-        await client.extend(envelope.delivery, id);
+        const result = await client.extend(envelope.delivery, id);
+        if (result.cancelled) {
+          const error = new CancelledError("cancelled by the publisher");
+          abort.abort(error);
+          throw error;
+        }
       },
       reply: async (body, headers) => {
         await client.reply(envelope.message, body, headers);
@@ -303,10 +359,25 @@ export class BusConsumer {
             );
         }),
       ]);
+      // A handler that swallows its abort signal and returns normally has
+      // still been cancelled: the delivery is already terminal, so replying or
+      // acking would only fail as a stale lease.
+      if (cancelled()) {
+        this.log(`[${id}] ${envelope.message.subject} cancelled`);
+        return;
+      }
       if (envelope.message.headers.correlation && result !== undefined)
         await client.reply(envelope.message, result as Json);
       await client.ack(envelope.delivery, id);
     } catch (error) {
+      // Cancelled work is neither acked nor nacked. The bus has already moved
+      // the delivery to `cancelled`, which is terminal: a nack would be
+      // rejected as a stale lease, and a retry would be the opposite of what
+      // was asked for.
+      if (error instanceof CancelledError || cancelled()) {
+        this.log(`[${id}] ${envelope.message.subject} cancelled`);
+        return;
+      }
       const message = String(
         error instanceof Error ? error.message : error,
       ).slice(0, 4000);
