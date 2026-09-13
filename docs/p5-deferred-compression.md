@@ -161,3 +161,46 @@ would and the reason this is safe at all.
 still outstanding, so the log was handed txid 2 while txid 1 was pending and refused it, correctly
 and loudly. Every direct path now flushes first. It is the obvious failure in hindsight and it is
 exactly what a queue with two producers does when one of them is allowed to skip.
+
+## 6. The checkpoint that outran the log (2026-09-13)
+
+The crash case in `test/tenant/defer-append.test.ts` failed about one run in seven, and
+`docs/next.md` carried it as "a test that fails one run in six". It was not the test.
+
+```
+TenantError: acme: recovering 61 transaction(s) after txid 60607 produced checksum
+1752325333277876507 but the database is at 9815593959770940557.
+```
+
+`#maybeCheckpoint` carried this comment since before P5:
+
+> The write path has just drained, so every committed frame is already in the log — the
+> precondition design §4.3 puts on checkpointing ("the log has shipped past mxFrame").
+
+P5 made it false. `#capture` no longer appends before it returns; with `deferAppend` it pushes the
+record onto `#pending` and schedules a microtask. The very next statement in the write path is
+`#maybeCheckpoint()`, so a write that crosses `checkpointWalBytes` checkpoints frames the log has
+never seen — and a PASSIVE checkpoint folds them into the database file.
+
+Nothing is lost while the process lives: the microtask still runs and the log still catches up.
+**A `kill -9` in that window is unrecoverable**, and it is the one state §2.2's reconcile cannot
+repair. The database is ahead of its log, and the frames that would let the tail re-derive the
+missing transactions are gone into the database file. The reconcile polls the WAL from the saved
+position, gets a generation that starts after the checkpoint, folds it onto a checksum from before
+it, and correctly refuses the result as `LOG_DIVERGED`. P5's premise — "anything derived can be
+re-derived" — holds only while the WAL still holds what it was derived from.
+
+The fix is one line and it is the same rule `snapshot()` and `drain()` already follow:
+`#maybeCheckpoint` flushes what is pending before it checkpoints. Checkpoints are governed by
+`checkpointWalBytes`, so this costs the write path nothing it was not about to pay, and the
+invariant is restored to the one the comment claimed: **nothing leaves the WAL before it has been
+recorded.**
+
+`close()` had a narrower version of the same hole. It sets `#closed` and *then* captures and
+TRUNCATEs, while `flushPending` refused to file anything once `#closed` was up — so a record that
+last capture produced would be dropped and its frames checkpointed away. Filing now stops on its
+own flag, set after that final capture rather than before it, and `#capture` does not defer at all
+during a close, where the microtask would run after the log had been put away.
+
+Pinned by "a size checkpoint files what is outstanding before it empties the WAL", which fails on
+the old code in one run out of one rather than one out of seven.

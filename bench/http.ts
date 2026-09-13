@@ -25,8 +25,11 @@ const IN_PROCESS = Bun.argv.includes("--in-process")
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-http-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
+// The environment is honoured so that a default can be benchmarked against its alternative
+// without editing this file — `BUNQL_DEFAULT_ACK=local bun run bench:http` is how the cost of the
+// 2026-09-13 defaults was attributed (`docs/performance.md` §1).
 const config = loadConfig({
-  env: {},
+  env: process.env as Record<string, string | undefined>,
   overrides: { server: { port: 0, host: "127.0.0.1", node: "bench" }, data: { dir: root } },
 })
 const handle = await startServer(config, { log: () => {} })

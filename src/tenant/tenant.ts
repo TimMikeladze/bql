@@ -413,6 +413,12 @@ export class Tenant {
   #pending: TxnRecordInput[] = []
   /** A flush is already queued for this turn. */
   #filing = false
+  /**
+   * Set once nothing may be filed again — at the end of `close()`, after its last capture, and at
+   * the start of `abandon()`. `#closed` is too early: `close()` sets it and *then* captures and
+   * checkpoints, and a flush refused there would lose the records that capture produced.
+   */
+  #filingStopped = false
   /** `[durability] deferAppend`, resolved once. */
   readonly #deferAppend: boolean
   #lastActivityMs = Date.now()
@@ -1441,6 +1447,9 @@ export class Tenant {
       // Closing must not throw: whatever could not be captured is still in the WAL and the next
       // open reconciles it.
     }
+    // Past this point the log is being put away, so nothing may be filed again — including by a
+    // microtask `#scheduleFile` queued before the close began.
+    this.#filingStopped = true
     this.log.flush()
     if (!this.catalog.closed) {
       const position = this.position
@@ -1470,6 +1479,9 @@ export class Tenant {
   abandon(): void {
     if (this.#closed) return
     this.#closed = true
+    // A hard drop files nothing by definition: what is outstanding stays in the WAL, which is
+    // exactly what the reconcile is written to find.
+    this.#filingStopped = true
     for (const waiter of this.#waiters) {
       clearTimeout(waiter.timer)
       waiter.reject(new TenantError("CLOSED", `${this.name} was abandoned while waiting`))
@@ -1536,7 +1548,7 @@ export class Tenant {
     //
     // `ack: "local"` only. `"replica"` and `"quorum"` block on a record having *shipped*, which
     // needs it encoded, so deferring would schedule work the caller is about to wait for.
-    if (this.#deferAppend && (ack ?? this.defaultAck) === "local") {
+    if (this.#deferAppend && !this.#closed && (ack ?? this.defaultAck) === "local") {
       for (const record of records) this.#pending.push(record)
       this.#scheduleFile()
       // The rows are committed and visible, so a reader waiting on this txid may proceed now.
@@ -1586,7 +1598,7 @@ export class Tenant {
    * outstanding would be one the log does not explain, which is the one way this can be got wrong.
    */
   flushPending(): void {
-    if (this.#pending.length === 0 || this.#closed) return
+    if (this.#pending.length === 0 || this.#filingStopped) return
     const records = this.#pending.splice(0, this.#pending.length)
     this.#file(records)
   }
@@ -1696,8 +1708,15 @@ export class Tenant {
   #maybeCheckpoint(): void {
     const walBytes = WAL_HEADER_SIZE + this.#walFrames * (24 + this.pageSize)
     if (walBytes <= this.checkpointWalBytes) return
-    // The write path has just drained, so every committed frame is already in the log — the
-    // precondition design §4.3 puts on checkpointing ("the log has shipped past mxFrame").
+    // **Nothing leaves the WAL before it has been recorded** — design §4.3's precondition on
+    // checkpointing ("the log has shipped past mxFrame"), and since P5 it has to be *made* true
+    // here rather than assumed. `#capture` used to append before returning; with `deferAppend` it
+    // may have left the record in `#pending` instead, and a checkpoint would then fold frames the
+    // log cannot explain into the database file. A crash there leaves a database ahead of its log
+    // with no WAL left to re-derive from, which is the one state the reconcile cannot repair —
+    // it reads as `LOG_DIVERGED`. Checkpoints are rare (`checkpointWalBytes`), so the flush costs
+    // the write path nothing it was not about to pay.
+    this.flushPending()
     this.#openWal()
     this.writer.walCheckpoint("PASSIVE")
     this.#afterCheckpoint()

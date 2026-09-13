@@ -25,9 +25,13 @@ afterEach(() => {
   }
 })
 
-function registryIn(deferAppend: boolean, dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-p5-"))): TenantRegistry {
+function registryIn(
+  deferAppend: boolean,
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-p5-")),
+  extra: { checkpointWalBytes?: number } = {},
+): TenantRegistry {
   if (!dirs.includes(dir)) dirs.push(dir)
-  const registry = TenantRegistry.open({ dir, compressLog: true, deferAppend })
+  const registry = TenantRegistry.open({ dir, compressLog: true, deferAppend, ...extra })
   open.push(registry)
   return registry
 }
@@ -97,6 +101,56 @@ describe("deferred append", () => {
     tenant.write((db) => db.exec("create table t (id integer primary key, v text)"))
     tenant.write((db) => db.prepare("insert into t (v) values ('x')").run())
     expect(Number(tenant.log.lastTxid)).toBe(Number(tenant.txid))
+  })
+
+  test("a size checkpoint files what is outstanding before it empties the WAL", async () => {
+    // The bug this pins: `#maybeCheckpoint` assumed the write path had already appended, which
+    // `deferAppend` made false. A PASSIVE checkpoint then folded frames into the database file
+    // that the log had never seen, and a crash there left a database ahead of a log with no WAL
+    // left to re-derive from — `LOG_DIVERGED` on the next open, one run in seven.
+    const registry = registryIn(true, undefined, { checkpointWalBytes: 64 * 1024 })
+    const tenant = await registry.create("acme", {})
+    tenant.write((db) => db.exec("create table t (id integer primary key, v text)"))
+    const insert = tenant.writer.prepare("insert into t (v) values (?)")
+
+    // A PASSIVE checkpoint backfills and reuses the WAL in place rather than shrinking the file,
+    // so the tell is the size crossing the threshold, not falling.
+    const threshold = 64 * 1024
+    let crossed = -1
+    for (let i = 0; i < 400 && crossed < 0; i++) {
+      tenant.write(() => insert.run(`v${i}`.padEnd(400, "x")))
+      if (tenant.walBytes > threshold) crossed = i
+    }
+    expect(crossed).toBeGreaterThan(0)
+    // The write that crossed it checkpointed, so every txid the WAL held is in the log: nothing
+    // is allowed to be outstanding across a checkpoint. Before the fix this lagged by the whole
+    // run, because the records were still sitting in `#pending`.
+    expect(Number(tenant.log.lastTxid)).toBe(Number(tenant.txid))
+  })
+
+  test("a close files what is outstanding, so the log explains the database it leaves", async () => {
+    // `close()` sets `#closed` and *then* captures and checkpoints. A flush refused on `#closed`
+    // dropped exactly the records that last capture produced, and the TRUNCATE that follows took
+    // their frames with them.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-p5-close-"))
+    dirs.push(dir)
+    const registry = registryIn(true, dir)
+    const tenant = await registry.create("acme", {})
+    tenant.write((db) => db.exec("create table t (id integer primary key, v text)"))
+    const insert = tenant.writer.prepare("insert into t (v) values (?)")
+    for (let i = 0; i < 30; i++) tenant.write(() => insert.run(`v${i}`))
+    const txid = Number(tenant.txid)
+    // Outstanding on purpose: the microtask has not run.
+    expect(Number(tenant.log.lastTxid)).toBeLessThan(txid)
+    registry.close()
+    open.splice(open.indexOf(registry), 1)
+
+    const reopened = registryIn(true, dir)
+    const again = reopened.open("acme")
+    expect(Number(again.txid)).toBe(txid)
+    let replayed = 0
+    for (const record of again.log.iterate(1n)) replayed = Number(record.txid)
+    expect(replayed).toBe(txid)
   })
 
   test("a kill -9 in the window is recovered from the WAL", async () => {
