@@ -146,8 +146,35 @@ export class BusClient {
   stats(): Promise<Stats> {
     return this.call<Stats>("/api/stats");
   }
-  log(after = 0, limit = 100): Promise<Message[]> {
-    return this.call<Message[]>(`/api/log?after=${after}&limit=${limit}`);
+  log(
+    after = 0,
+    limit = 100,
+    options: { subject?: string; newest?: boolean } = {},
+  ): Promise<Message[]> {
+    const query = new URLSearchParams({
+      after: String(after),
+      limit: String(limit),
+      ...(options.subject ? { subject: options.subject } : {}),
+      ...(options.newest ? { newest: "true" } : {}),
+    });
+    return this.call<Message[]>(`/api/log?${query}`);
+  }
+  /** Dead letters for a subscription, newest first. */
+  async deadLetters(subscription: string, limit = 50): Promise<Message[]> {
+    const { dlqSubject } = await this.call<Subscription>(
+      `/api/subscriptions/${subscription}`,
+    );
+    return this.log(0, limit, { subject: dlqSubject, newest: true });
+  }
+  /** Republish a dead letter onto the subject it originally failed on. */
+  requeue(seq: number): Promise<PublishResult> {
+    return this.call<PublishResult>(`/api/messages/${seq}/requeue`, {});
+  }
+  pause(subscription: string, paused: boolean): Promise<Subscription> {
+    return this.call<Subscription>(
+      `/api/subscriptions/${subscription}/pause`,
+      { paused },
+    );
   }
   message(seq: number): Promise<Message> {
     return this.call<Message>(`/api/messages/${seq}`);

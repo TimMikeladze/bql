@@ -6,12 +6,19 @@ import {
   CheckCircle2,
   CircleDashed,
   Inbox,
+  KeyRound,
   Layers,
   Loader2,
+  Pause,
+  Play,
   Radio,
+  RotateCcw,
   Server,
   Skull,
+  Trash2,
+  Undo2,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import type {
   Delivery,
   Message,
@@ -36,6 +43,54 @@ async function read<T>(path: string): Promise<T> {
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json() as Promise<T>;
+}
+
+/**
+ * Operator actions use a token the page is *given*, never the one it was
+ * served with.
+ *
+ * The injected token is deliberately read-only — a page that can be opened is
+ * not a page that can dispatch work — so pausing, replaying, purging and
+ * requeueing ask for an admin token and keep it in `sessionStorage`, which
+ * dies with the tab. The alternative, a fourth "operator" scope, would add a
+ * permission axis to every route to save one paste.
+ */
+const OPERATOR_KEY = "agenticbus.operator";
+
+function useOperator() {
+  const [operator, setOperator] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(OPERATOR_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const save = useCallback((value: string | null) => {
+    try {
+      if (value) sessionStorage.setItem(OPERATOR_KEY, value);
+      else sessionStorage.removeItem(OPERATOR_KEY);
+    } catch {}
+    setOperator(value);
+  }, []);
+  return { operator, save };
+}
+
+async function act(path: string, operator: string, body: unknown = {}) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${operator}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+    };
+    throw new Error(payload.error ?? `HTTP ${response.status}`);
+  }
+  return response.json() as Promise<unknown>;
 }
 
 function relative(time: number, now: number) {
@@ -92,13 +147,79 @@ function Metric({
   );
 }
 
-function SubscriptionRow({ subscription }: { subscription: SubscriptionStats }) {
+function OperatorBar({
+  operator,
+  save,
+}: {
+  operator: string | null;
+  save: (value: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  if (operator)
+    return (
+      <span className="flex items-center gap-2 text-xs">
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700">
+          <KeyRound className="size-3" />
+          operator
+        </span>
+        <Button variant="ghost" size="sm" onClick={() => save(null)}>
+          forget
+        </Button>
+      </span>
+    );
+  if (!open)
+    return (
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+        <KeyRound />
+        Operator actions
+      </Button>
+    );
+  return (
+    <form
+      className="flex items-center gap-1.5"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (draft.trim()) save(draft.trim());
+        setDraft("");
+        setOpen(false);
+      }}
+    >
+      <input
+        autoFocus
+        type="password"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder="admin token"
+        className="h-8 w-56 rounded-md border border-border px-2 text-xs outline-none focus:border-[var(--blue)]"
+      />
+      <Button size="sm" type="submit">
+        Use
+      </Button>
+      <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+        Cancel
+      </Button>
+    </form>
+  );
+}
+
+function SubscriptionRow({
+  subscription,
+  operator,
+  onAction,
+}: {
+  subscription: SubscriptionStats;
+  operator: string | null;
+  onAction: (label: string, run: () => Promise<unknown>) => void;
+}) {
   const bars: [string, number, string][] = [
     ["pending", subscription.pending, "bg-amber-500"],
     ["leased", subscription.leased, "bg-blue-500"],
     ["dead", subscription.dead, "bg-red-500"],
+    ["cancelled", subscription.cancelled, "bg-neutral-400"],
   ];
   const total = Math.max(1, bars.reduce((sum, [, n]) => sum + n, 0));
+  const base = `/api/subscriptions/${encodeURIComponent(subscription.name)}`;
   return (
     <div className="border-b border-border px-3.5 py-3 last:border-b-0">
       <div className="flex items-baseline justify-between gap-3">
@@ -134,17 +255,81 @@ function SubscriptionRow({ subscription }: { subscription: SubscriptionStats }) 
           <span className="text-amber-700">paused</span>
         ) : null}
       </div>
+      {operator ? (
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              onAction(
+                `${subscription.paused ? "resumed" : "paused"} ${subscription.name}`,
+                () =>
+                  act(`${base}/pause`, operator, {
+                    paused: !subscription.paused,
+                  }),
+              )
+            }
+          >
+            {subscription.paused ? <Play /> : <Pause />}
+            {subscription.paused ? "Resume" : "Pause"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const from = window.prompt(
+                `Replay '${subscription.name}' from which sequence number? Messages already settled are not delivered again — purge first for that.`,
+                "0",
+              );
+              if (from === null) return;
+              onAction(`replayed ${subscription.name} from ${from}`, () =>
+                act(`${base}/replay`, operator, { fromSeq: Number(from) || 0 }),
+              );
+            }}
+          >
+            <RotateCcw />
+            Replay
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  `Drop every settled delivery on '${subscription.name}'? A later replay will then deliver those messages again.`,
+                )
+              )
+                return;
+              onAction(`purged ${subscription.name}`, () =>
+                act(`${base}/purge`, operator, { fromSeq: 0 }),
+              );
+            }}
+          >
+            <Trash2 />
+            Purge
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
+
+type Tab = "log" | "deliveries" | "dead";
 
 export function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [log, setLog] = useState<Message[]>([]);
+  const [dead, setDead] = useState<Message[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"log" | "deliveries">("log");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("log");
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Read inside `refresh` so switching tabs does not tear down the SSE
+  // connection just to change what the next poll fetches.
+  const tabRef = useRef<Tab>(tab);
+  tabRef.current = tab;
+  const { operator, save } = useOperator();
 
   const refresh = useCallback(async () => {
     try {
@@ -156,11 +341,41 @@ export function App() {
       setStats(nextStats);
       setDeliveries(nextDeliveries);
       setLog(nextLog.reverse());
+      if (tabRef.current === "dead") {
+        // A dead-letter queue is an ordinary subject, so this is a filtered
+        // log read — one per distinct DLQ subject, only while the tab is open.
+        const subjects = [
+          ...new Set(nextStats.subscriptions.map((s) => s.dlqSubject)),
+        ];
+        const pages = await Promise.all(
+          subjects.map((subject) =>
+            read<Message[]>(
+              `/api/log?after=0&limit=25&newest=true&subject=${encodeURIComponent(subject)}`,
+            ).catch(() => [] as Message[]),
+          ),
+        );
+        setDead(pages.flat().sort((a, b) => b.seq - a.seq).slice(0, 50));
+      }
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
+
+  const onAction = useCallback(
+    (label: string, run: () => Promise<unknown>) => {
+      void run()
+        .then(() => {
+          setNotice(label);
+          setTimeout(() => setNotice(null), 4000);
+          return refresh();
+        })
+        .catch((cause: unknown) =>
+          setError(cause instanceof Error ? cause.message : String(cause)),
+        );
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     void refresh();
@@ -179,6 +394,10 @@ export function App() {
       clearTimeout(timer.current);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    void refresh();
+  }, [tab, refresh]);
 
   const totals = useMemo(() => {
     const subscriptions = stats?.subscriptions ?? [];
@@ -207,16 +426,24 @@ export function App() {
             same bus.
           </p>
         </div>
-        {error ? (
-          <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs text-red-700">
-            {error}
-          </span>
-        ) : (
-          <span className="flex items-center gap-1.5 text-xs text-[var(--muted-text)]">
-            <Activity className="size-3.5" />
-            live
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {notice ? (
+            <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs text-emerald-700">
+              {notice}
+            </span>
+          ) : null}
+          {error ? (
+            <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs text-red-700">
+              {error}
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 text-xs text-[var(--muted-text)]">
+              <Activity className="size-3.5" />
+              live
+            </span>
+          )}
+          <OperatorBar operator={operator} save={save} />
+        </div>
       </header>
 
       <section className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -240,10 +467,20 @@ export function App() {
         <div className="overflow-hidden rounded-md border border-border bg-white">
           <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5">
             <h2 className="text-sm font-medium">
-              {tab === "log" ? "Log" : "Deliveries"}
+              {tab === "log"
+                ? "Log"
+                : tab === "deliveries"
+                  ? "Deliveries"
+                  : "Dead letters"}
             </h2>
             <div className="flex gap-1">
-              {(["log", "deliveries"] as const).map((option) => (
+              {(
+                [
+                  ["log", "log"],
+                  ["deliveries", "deliveries"],
+                  ["dead", "dead letters"],
+                ] as const
+              ).map(([option, label]) => (
                 <button
                   key={option}
                   type="button"
@@ -254,7 +491,7 @@ export function App() {
                       : "text-[var(--muted-text)] hover:bg-muted"
                   }`}
                 >
-                  {option}
+                  {label}
                 </button>
               ))}
             </div>
@@ -280,6 +517,11 @@ export function App() {
                   <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
                     {JSON.stringify(message.body)}
                   </span>
+                  {message.cancelledAt ? (
+                    <span className="shrink-0 rounded border border-neutral-300 bg-neutral-100 px-1.5 text-[11px] text-neutral-600">
+                      cancelled
+                    </span>
+                  ) : null}
                   {message.key ? (
                     <span className="shrink-0 rounded border border-border bg-muted px-1.5 font-mono text-[11px]">
                       {message.key}
@@ -288,34 +530,80 @@ export function App() {
                 </div>
               ))
             )
-          ) : deliveries.length === 0 ? (
+          ) : tab === "deliveries" ? (
+            deliveries.length === 0 ? (
+              <p className="px-3.5 py-8 text-center text-xs text-[var(--muted-text)]">
+                No deliveries yet.
+              </p>
+            ) : (
+              deliveries.slice(0, 40).map((delivery) => (
+                <div
+                  key={delivery.id}
+                  className="flex items-center gap-3 border-b border-border px-3.5 py-2 last:border-b-0"
+                >
+                  <Status status={delivery.status} />
+                  <span className="w-28 shrink-0 truncate text-xs">
+                    {delivery.subscription}
+                  </span>
+                  <span className="w-12 shrink-0 text-right font-mono text-[11px] text-[var(--muted-text)]">
+                    #{delivery.messageSeq}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-[var(--muted-text)]">
+                    {delivery.error ?? delivery.key ?? ""}
+                  </span>
+                  {delivery.attempt > 1 ? (
+                    <span className="shrink-0 text-xs text-amber-700">
+                      attempt {delivery.attempt}/{delivery.maxAttempts}
+                    </span>
+                  ) : null}
+                  <span className="w-24 shrink-0 truncate text-right text-xs text-[var(--muted-text)]">
+                    {delivery.consumerId ?? "—"}
+                  </span>
+                </div>
+              ))
+            )
+          ) : dead.length === 0 ? (
             <p className="px-3.5 py-8 text-center text-xs text-[var(--muted-text)]">
-              No deliveries yet.
+              No dead letters. A message that exhausts its attempts is
+              republished onto its subscription&rsquo;s dead-letter subject and
+              shows up here.
             </p>
           ) : (
-            deliveries.slice(0, 40).map((delivery) => (
+            dead.map((message) => (
               <div
-                key={delivery.id}
+                key={message.id}
                 className="flex items-center gap-3 border-b border-border px-3.5 py-2 last:border-b-0"
               >
-                <Status status={delivery.status} />
-                <span className="w-28 shrink-0 truncate text-xs">
-                  {delivery.subscription}
-                </span>
                 <span className="w-12 shrink-0 text-right font-mono text-[11px] text-[var(--muted-text)]">
-                  #{delivery.messageSeq}
+                  {message.seq}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-xs text-[var(--muted-text)]">
-                  {delivery.error ?? delivery.key ?? ""}
+                <span className="w-44 shrink-0 truncate font-mono text-xs text-[var(--blue)]">
+                  {message.headers["dlq-subject"] ?? message.subject}
                 </span>
-                {delivery.attempt > 1 ? (
-                  <span className="shrink-0 text-xs text-amber-700">
-                    attempt {delivery.attempt}/{delivery.maxAttempts}
-                  </span>
+                <span
+                  className="min-w-0 flex-1 truncate text-xs text-red-700"
+                  title={message.headers["dlq-reason"]}
+                >
+                  {message.headers["dlq-reason"] ?? "no reason recorded"}
+                </span>
+                <span className="shrink-0 text-[11px] text-[var(--muted-text)]">
+                  {message.headers["dlq-subscription"]} ·{" "}
+                  {message.headers["dlq-attempts"]} attempts
+                </span>
+                {operator ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      onAction(`requeued ${message.seq}`, () =>
+                        act(`/api/messages/${message.seq}/requeue`, operator),
+                      )
+                    }
+                  >
+                    <Undo2 />
+                    Requeue
+                  </Button>
                 ) : null}
-                <span className="w-24 shrink-0 truncate text-right text-xs text-[var(--muted-text)]">
-                  {delivery.consumerId ?? "—"}
-                </span>
               </div>
             ))
           )}
@@ -331,6 +619,8 @@ export function App() {
                 <SubscriptionRow
                   key={subscription.id}
                   subscription={subscription}
+                  operator={operator}
+                  onAction={onAction}
                 />
               ))
             ) : (

@@ -494,13 +494,28 @@ export function createServer(options: ServerOptions): BusServer {
         }
         if (req.method === "GET" && path === "/api/log") {
           requireRead(claims);
+          const subject = url.searchParams.get("subject");
           return json(
             await store.log(
               workspace,
               Number(url.searchParams.get("after") ?? 0),
               Number(url.searchParams.get("limit") ?? 100),
+              {
+                ...(subject ? { subject } : {}),
+                ...(url.searchParams.get("newest") === "true"
+                  ? { newest: true }
+                  : {}),
+              },
             ),
           );
+        }
+        // Requeueing a dead letter is an ordinary publish onto the subject it
+        // failed on, so it is admin like every other operator action — not the
+        // publisher's, whose token may not even grant that subject any more.
+        const requeue = /^\/api\/messages\/(\d+)\/requeue$/.exec(path);
+        if (req.method === "POST" && requeue) {
+          requireAdmin(claims);
+          return json(store.requeue(workspace, Number(requeue[1]!)), 201);
         }
         if (req.method === "GET" && path === "/api/stream") {
           requireRead(claims);

@@ -310,6 +310,44 @@ switch (command) {
     break;
   }
 
+  // `dlq <subscription>` lists; `dlq requeue <seq…>` republishes onto the
+  // subject each message originally failed on. A DLQ is an ordinary
+  // subscription over an ordinary subject, so this is a filtered log read and
+  // a publish — no special storage, and nothing to keep in sync.
+  case "dlq": {
+    const bus = await client();
+    if (argv[1] === "requeue") {
+      const seqs = argv.slice(2).filter((entry) => /^\d+$/.test(entry));
+      if (seqs.length === 0)
+        throw new Error("dlq requeue wants one or more message sequence numbers");
+      for (const seq of seqs) {
+        const result = await bus.requeue(Number(seq));
+        console.log(`${seq} → ${result.seq}`);
+      }
+      break;
+    }
+    const subscription = flag("subscription", argv[1]) as string;
+    if (!subscription) throw new Error("dlq wants a subscription name");
+    const dead = await bus.deadLetters(
+      subscription,
+      Number(flag("limit", "50")),
+    );
+    if (dead.length === 0) {
+      console.log(`no dead letters for '${subscription}'`);
+      break;
+    }
+    for (const message of dead)
+      console.log(
+        `${String(message.seq).padStart(6)}  ${(
+          message.headers["dlq-subject"] ?? message.subject
+        ).padEnd(24)} ${(message.headers["dlq-reason"] ?? "").slice(0, 60).padEnd(60)} ${JSON.stringify(
+          message.body,
+        ).slice(0, 60)}`,
+      );
+    console.log(`\nrequeue with: agenticbus dlq requeue <seq>`);
+    break;
+  }
+
   case "tail": {
     const bus = await client();
     let after = has("after")
@@ -362,6 +400,8 @@ switch (command) {
   consume     <subscription> --exec CMD   consume; message is stdin, stdout is the reply
               --exec-timeout <ms>          abort and nack a handler that hangs
   cancel      <seq>                       stop a message: in-flight handlers abort
+  dlq         <subscription>              list dead letters
+  dlq requeue <seq...>                    republish onto the original subject
   backup      <dir>                       consistent copy of the database and blobs
   tail        follow the log
   stats       subscriptions, consumers, lag

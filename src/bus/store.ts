@@ -436,13 +436,107 @@ export class BusStore {
     return this.hydrate(row);
   }
 
-  async log(workspace: string, after = 0, limit = 100): Promise<Message[]> {
+  /**
+   * Read the log.
+   *
+   * `subject` is a pattern, narrowed in SQL and decided in JavaScript — the
+   * same two-step `materialize` uses, for the same reason: `GLOB` cannot
+   * express "`*` is exactly one token". `newest` reverses the order, which is
+   * what an operator looking at a dead-letter queue actually wants.
+   */
+  async log(
+    workspace: string,
+    after = 0,
+    limit = 100,
+    options: { subject?: string; newest?: boolean } = {},
+  ): Promise<Message[]> {
+    const capped = Math.min(1000, limit);
+    if (options.subject === undefined) {
+      const rows = this.db
+        .query(
+          `SELECT * FROM messages WHERE workspace = ? AND seq > ?
+            ORDER BY seq ${options.newest ? "DESC" : "ASC"} LIMIT ?`,
+        )
+        .all(workspace, after, capped) as MessageRow[];
+      return Promise.all(rows.map((row) => this.hydrate(row)));
+    }
+    assertPattern(options.subject);
     const rows = this.db
       .query(
-        "SELECT * FROM messages WHERE workspace = ? AND seq > ? ORDER BY seq LIMIT ?",
+        `SELECT * FROM messages WHERE workspace = ? AND seq > ? AND subject GLOB ?
+          ORDER BY seq ${options.newest ? "DESC" : "ASC"} LIMIT ?`,
       )
-      .all(workspace, after, Math.min(1000, limit)) as MessageRow[];
-    return Promise.all(rows.map((row) => this.hydrate(row)));
+      .all(
+        workspace,
+        after,
+        narrowingGlob(options.subject),
+        // The glob over-matches, so read more than asked and cut after the
+        // exact match — otherwise a page could come back short.
+        capped * 4,
+      ) as MessageRow[];
+    const exact = rows
+      .filter((row) => matches(options.subject!, row.subject))
+      .slice(0, capped);
+    return Promise.all(exact.map((row) => this.hydrate(row)));
+  }
+
+  /**
+   * Republish a dead letter onto the subject it originally failed on.
+   *
+   * A new message with its own sequence number, not a resurrection of the old
+   * delivery: if it fails again it dead-letters again, which is the honest
+   * outcome. The blob handle is shared rather than copied, which `collectBlobs`
+   * already understands — "no message references it" is the only safe test.
+   */
+  requeue(workspace: string, seq: number): PublishResult {
+    return this.db.transaction(() => {
+      const row = this.db
+        .query("SELECT * FROM messages WHERE seq=? AND workspace=?")
+        .get(seq, workspace) as MessageRow | null;
+      if (!row) throw new BusError("message not found", 404);
+      const headers = parse<Headers>(row.headers, {});
+      const original = headers["dlq-subject"];
+      if (!original)
+        throw new BusError(
+          "that message is not a dead letter: it carries no 'dlq-subject'",
+          409,
+        );
+      assertSubject(original);
+      const carried: Headers = {};
+      for (const [key, value] of Object.entries(headers))
+        if (!key.startsWith("dlq-")) carried[key] = value;
+      carried["requeued-from"] = String(seq);
+
+      const id = uuid();
+      const now = this.now();
+      this.db.run(
+        `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key, publisher)
+         VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?)`,
+        [
+          id,
+          workspace,
+          original,
+          row.key,
+          JSON.stringify(carried),
+          row.body,
+          row.body_blob,
+          now,
+          row.publisher,
+        ],
+      );
+      const next = Number(
+        (this.db.query("SELECT last_insert_rowid() AS seq").get() as {
+          seq: number;
+        }).seq,
+      );
+      this.metrics.counter("agenticbus.messages.requeued", 1);
+      return {
+        seq: next,
+        id,
+        duplicate: false,
+        correlation: carried.correlation ?? null,
+      };
+    })();
   }
 
   lastSeq(): number {

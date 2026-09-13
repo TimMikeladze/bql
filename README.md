@@ -39,6 +39,11 @@ bun src/cli/index.ts stats
 
 ![The dashboard](docs/images/dashboard.png)
 
+**The dashboard is read-only until you hand it a token.** The one the bus injects is a `reader`
+token — a page that can be opened is not a page that can dispatch work. Pausing, replaying,
+purging and requeueing appear once you paste an admin token into **Operator actions**, which is
+kept in `sessionStorage` and dies with the tab.
+
 ## Subjects
 
 Dot-separated tokens. `*` matches exactly one token, `>` matches one or more trailing tokens — the NATS convention, because people already know it.
@@ -66,7 +71,7 @@ At-least-once, with effectively-once effects available to anyone who wants them.
 
 - A delivery is leased to one consumer for the subscription's `ackWaitMs`, with a monotonic `generation`. An ack or nack from a stale generation is rejected.
 - An expired lease returns the delivery to the queue for another consumer, up to `maxAttempts`.
-- Exhausting attempts **dead-letters onto an ordinary subject** (`dlq.<subscription>` by default) with the reason in the headers — so a DLQ is just another subscription, and a replay is just another publish.
+- Exhausting attempts **dead-letters onto an ordinary subject** (`dlq.<subscription>` by default) with the reason in the headers — so a DLQ is just another subscription, and a replay is just another publish. `agenticbus dlq <subscription>` lists them and `dlq requeue <seq>` republishes one onto the subject it failed on, with the `dlq-*` headers stripped and `requeued-from` added. A requeued message is an ordinary new message with its own sequence number: if it fails again it dead-letters again, which is the honest outcome.
 - `dedupeKey` is unique per workspace: publishing the same key twice returns the first message, and a deduplicated *request* is handed back the original correlation, so it waits on the answer that will actually arrive.
 - Every envelope carries `idempotencyKey` (`<subscription>:<seq>`), stable across redeliveries, for consumers making external effects.
 
@@ -121,6 +126,7 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `agenticbus subscribe <name> <pattern>` | create a durable subscription |
 | `agenticbus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
 | `agenticbus cancel <seq>` | stop a message; in-flight handlers abort |
+| `agenticbus dlq <subscription>` · `dlq requeue <seq…>` | inspect and requeue dead letters |
 | `agenticbus backup <dir>` | a consistent copy of the database and blobs |
 | `agenticbus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
@@ -135,7 +141,8 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `POST` | `/api/deliveries/:id/ack` `/nack` `/extend` | `/extend` answers `{cancelled}` too |
 | `POST` | `/api/messages/:seq/cancel` · `/api/deliveries/:id/cancel` | stop work; publisher or admin |
 | `POST` `GET` | `/api/requests[/:correlation]` | request/reply, both long-polling |
-| `GET` | `/api/messages/:seq` · `/api/log` · `/api/stream` | the log; SSE refresh signal |
+| `GET` | `/api/messages/:seq` · `/api/log[?subject=&newest=]` · `/api/stream` | the log; SSE refresh signal |
+| `POST` | `/api/messages/:seq/requeue` | republish a dead letter onto its original subject |
 | `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
 | `POST` | `/api/tokens` | mint (admin) |
 | `GET` | `/metrics` | Prometheus text (read token) |
