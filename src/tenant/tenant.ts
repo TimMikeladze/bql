@@ -2002,7 +2002,28 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
   }
 
   if (!base || base.txid === 0n) {
-    return { recorder: TxnRecorder.open({ dbPath, epoch }), applier: null, outcome: "clean" }
+    // **At txid 0 the catalog is the position, not the file.** A database SQLite has merely
+    // *opened* holds the header page it writes on entering WAL mode, and that page belongs to no
+    // transaction — so a database created, closed and reopened without a write stands at "0 pages,
+    // checksum 0" while `computeFull` of its file says 1 page and a non-zero checksum. Letting the
+    // file decide made record 1 carry that checksum as its `preChecksum`, and a replica
+    // bootstrapping from nothing refused it, correctly:
+    //
+    //   ChecksumMismatch: pre-transaction checksum mismatch at txid 1:
+    //     expected 80adc3c53d5dd66b, computed 0
+    //
+    // `openApplier` above already states this rule for the replica half; this is the primary half,
+    // and `snapshot()` and `restoreFromBucket` each carry their own copy of it. Only when there is
+    // no catalog row at all does the file get a say, because then there is nothing else to ask.
+    return {
+      recorder: TxnRecorder.open({
+        dbPath,
+        epoch,
+        ...(base ? { txid: 0n, checksum: base.checksum, dbSizePages: base.dbSizePages } : {}),
+      }),
+      applier: null,
+      outcome: "clean",
+    }
   }
 
   /** A zeroed WAL position is the marker a TRUNCATE checkpoint leaves: the file is the state. */

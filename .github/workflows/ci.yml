@@ -107,7 +107,12 @@ jobs:
 
       - run: bun run typecheck
 
-      - run: bun test
+      # `--timeout 20000` rather than bun's default 5000, and it is scaling the clock rather than
+      # the assertions. Creating a file and opening SQLite on it are both several times dearer on
+      # Windows: sibling tests in the two files that timed out here take 3.6 s and 0.95 s on the
+      # same runner, so 5 s is a limit the platform crosses doing legitimate work. A hang still
+      # fails, four times slower than it would elsewhere.
+      - run: bun test --timeout 20000
 
       - name: docs/api.md covers every route
         run: bun run scripts/routes.ts --check

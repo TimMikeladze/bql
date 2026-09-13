@@ -226,6 +226,44 @@ describe("checkpoint policy", () => {
   })
 })
 
+describe("a database at txid 0", () => {
+  test("stands at zero pages and checksum zero even after SQLite has opened its file", async () => {
+    // The trap the whole tree keeps warning about, on the one path that did not guard against it.
+    // SQLite writes a header page when it first opens a database in WAL mode, and that page
+    // belongs to no transaction — so a database created, closed and reopened without a write has
+    // a file `computeFull` scores as one page and a non-zero checksum, while the database itself
+    // has no history at all. `openRecorder` used to let the file decide, and record 1 then carried
+    // that checksum as its `preChecksum`. A replica bootstrapping from nothing refuses such a
+    // record — correctly, and with the checksum in the message:
+    //
+    //   ChecksumMismatch: pre-transaction checksum mismatch at txid 1:
+    //     expected 80adc3c53d5dd66b, computed 0
+    //
+    // Which is how it showed up: a sharded cluster test failing on CI roughly one run in three,
+    // depending on whether a worker happened to open the tenant before its first write.
+    const { dir } = registry()
+    let reg = TenantRegistry.open({ dir })
+    await reg.create("acme")
+    reg.close()
+
+    reg = TenantRegistry.open({ dir })
+    const tenant = reg.open("acme")
+    // The file says otherwise, and the file is not the position.
+    expect(computeFull(tenant.dbPath).pages).toBeGreaterThan(0)
+    expect(tenant.position.txid).toBe(0n)
+    expect(tenant.position.checksum).toBe(0n)
+    expect(tenant.position.dbSizePages).toBe(0)
+
+    tenant.write((db) => db.exec("create table t(v text)"))
+    tenant.flushPending()
+    const first = tenant.log.read(1n)
+    // What a replica starting from nothing has to be able to apply.
+    expect(first?.txid).toBe(1n)
+    expect(first?.preChecksum).toBe(0n)
+    reg.close()
+  })
+})
+
 describe("crash reconcile", () => {
   test("tails transactions the log never got (database ahead of log)", async () => {
     const { dir, registry: reg } = registry()

@@ -139,3 +139,34 @@ table — because a gate that proves less than its peers is a gate with a hole i
 
 E1 §2 said it becomes a gate on the day it passes. This is that day: **macos-latest, ubuntu-latest
 and windows-latest all green on the same commit, all three gating.**
+
+## 7. What the gate caught in its first week
+
+Two runs after the flip, and both failures were worth having.
+
+**Windows crossed bun's 5 s default test timeout doing real work.** Two tests — the segment index's
+manifest growth and a mechanism-B replica checkpoint — ran 7 s where sibling tests in the same
+files take 3.6 s and 0.95 s on the same runner. Nothing hung; the platform is several times dearer
+per file operation and the clock was set for a faster one. The Windows job runs
+`bun test --timeout 20000`, which scales the clock and not the assertions: a real hang still fails,
+four times slower than it would elsewhere.
+
+**A macOS run found a bug that had nothing to do with macOS.** `ChecksumMismatch: pre-transaction
+checksum mismatch at txid 1: expected 80adc3c53d5dd66b, computed 0` — a replica refusing record 1
+of a database that should have had no history. It looked like a bootstrap race in a sharded
+cluster, failing about one CI run in three and never locally.
+
+It is not a race. `openRecorder` let `computeFull` of the *file* decide the position of a database
+at txid 0, and a database SQLite has merely opened holds the header page it writes on entering WAL
+mode — a page that belongs to no transaction. So a database created, closed and reopened without a
+write stood at "1 page, checksum 9272282459731252843" instead of "0 pages, checksum 0", and its
+first record carried that as its `preChecksum`. Reproducing it takes three lines and no cluster;
+the checksum in the local repro is the same number the CI log printed.
+
+The rule was already written down three times — `openApplier` states it for the replica half,
+`snapshot()` and `restoreFromBucket` each carry their own copy — and `openRecorder` was the one
+place that did not have it. **At txid 0 the catalog is the position; the file is not.**
+
+Worth keeping in mind about what a third platform is for. Neither of these is a Windows bug, and
+one of them is not even a platform bug: a slower machine and a differently-ordered worker pool are
+instruments, and what they measure is the assumptions nobody knew they had made.
