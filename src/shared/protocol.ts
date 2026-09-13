@@ -1,53 +1,130 @@
-export type Role = "creator" | "reviewer" | "tester";
-export type Mode = "demo" | "live";
+/** Wire contracts between the dagr engine host, the broker, and remote workers. */
+
+export type Labels = Record<string, string>;
+
 export type TaskStatus =
-  "blocked" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type RunStatus =
-  "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled";
-export interface Run {
-  id: string;
-  title: string;
-  brief: string;
-  mode: Mode;
-  status: RunStatus;
-  createdAt: number;
-  updatedAt: number;
-  requestKey: string;
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+export const TERMINAL: TaskStatus[] = ["succeeded", "failed", "cancelled"];
+export const isTerminal = (status: TaskStatus) => TERMINAL.includes(status);
+
+/**
+ * Usage mirrors dagr's `ResourceUsage` field for field, so a remote step
+ * accounts against the run's resource grant exactly as a local one does.
+ */
+export interface Usage {
+  providerUnits?: number;
+  requests?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreateTokens?: number;
+  costMicros?: number;
 }
+
+export interface ProviderGrant {
+  unit: string;
+  units: number;
+}
+
+/** What the engine hands the broker. Deduplicated on `idempotencyKey`. */
+export interface DispatchRequest {
+  idempotencyKey: string;
+  runtime: string;
+  selector: Labels;
+  input: unknown;
+  uses?: string;
+  script?: string;
+  runId: string;
+  stepKey: string;
+  attempt: number;
+  maxAttempts: number;
+  /** Absolute epoch ms; the worker refuses to start past it and stops at it. */
+  deadlineAt: number | null;
+  provider: ProviderGrant | null;
+  workspace: string;
+}
+
 export interface Task {
   id: string;
+  idempotencyKey: string;
+  runtime: string;
+  selector: Labels;
+  input: unknown;
+  uses: string | null;
+  script: string | null;
   runId: string;
-  role: Role;
+  stepKey: string;
+  workspace: string;
   status: TaskStatus;
+  /** dagr's attempt number for the dispatching step, carried for correlation. */
+  engineAttempt: number;
+  /** Broker-side attempts: how many workers have claimed this task. */
+  attempt: number;
+  maxAttempts: number;
+  deadlineAt: number | null;
+  provider: ProviderGrant | null;
   workerId: string | null;
   generation: number;
   leaseUntil: number | null;
-  attempt: number;
-  inputArtifactId: string | null;
-  outputArtifactId: string | null;
+  /** Opaque worker scratch, handed back to the next attempt (agent session ids). */
+  checkpoint: unknown;
+  value: unknown;
+  usage: Usage | null;
   error: string | null;
+  cancelRequested: boolean;
   createdAt: number;
   updatedAt: number;
 }
+
+/** The task as an unprivileged reader sees it: no input, no result payload. */
+export type TaskSummary = Omit<Task, "input" | "value" | "checkpoint">;
+
+export interface Claim {
+  task: Task;
+  /**
+   * How long the granted lease lasts. The worker paces its heartbeat off this
+   * rather than a constant of its own: an operator who shortens the lease must
+   * not silently break every worker in the fleet.
+   */
+  leaseMs: number;
+}
+
+export interface Completion {
+  workerId: string;
+  generation: number;
+  ok: boolean;
+  value?: unknown;
+  usage?: Usage;
+  error?: string;
+  /** Retryable failures return to the queue; fatal ones fail the task outright. */
+  fatal?: boolean;
+}
+
 export interface Worker {
   id: string;
   name: string;
-  role: Role;
   host: string;
-  mode: Mode;
+  runtimes: string[];
+  labels: Labels;
   lastSeen: number;
   paused: boolean;
+  registeredAt: number;
 }
-export interface Artifact {
+
+export interface RegisterWorker {
   id: string;
-  runId: string;
-  taskId: string;
   name: string;
-  mediaType: string;
-  content: string;
-  digest: string;
-  createdAt: number;
+  host: string;
+  runtimes: string[];
+  labels: Labels;
 }
+
+export type LogChannel = "info" | "warn" | "error" | "stdout" | "stderr";
+
 export interface BusEvent {
   seq: number;
   id: string;
@@ -55,36 +132,30 @@ export interface BusEvent {
   source: string;
   type: string;
   subject: string;
-  time: string;
+  taskId: string | null;
   runId: string | null;
+  time: string;
   data: Record<string, unknown>;
 }
+
 export interface Snapshot {
-  runs: Run[];
-  tasks: Task[];
+  tasks: TaskSummary[];
   workers: Worker[];
-  artifacts: Omit<Artifact, "content">[];
   events: BusEvent[];
+  queueDepth: Record<string, number>;
   now: number;
 }
-export interface Claim {
-  task: Task;
-  run: Run;
-  artifact: Artifact | null;
+
+/** Token claims. Signed by the broker; verified statelessly on every request. */
+export interface TokenClaims {
+  /** Worker identity this token may register and claim as; `*` for admin. */
+  sub: string;
+  /** `reader` may only read fleet state; `admin` may also dispatch and mint. */
+  scope: "worker" | "reader" | "admin";
+  runtimes: string[];
+  labels: Labels;
+  /** Epoch seconds; 0 means no expiry. */
+  exp: number;
 }
-export interface Completion {
-  generation: number;
-  ok: boolean;
-  name: string;
-  mediaType: string;
-  content: string;
-  error?: string;
-}
-export interface NewRun {
-  title: string;
-  brief: string;
-  mode: Mode;
-  requestKey: string;
-}
-export const DEFAULT_BRIEF =
-  "Build a slugify(text: string): string utility. Lowercase, trim whitespace, normalize accents, replace non-alphanumeric runs with one hyphen, and remove leading/trailing hyphens. Export a named slugify function.";
+
+export const ANY = "*";

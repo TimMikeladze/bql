@@ -1,137 +1,296 @@
+/**
+ * End-to-end proof, with real processes and no mocks.
+ *
+ * Starts the engine host and two worker processes, runs a workflow whose steps
+ * execute remotely, kills the worker holding a step mid-flight, and checks that
+ * a different machine finishes the work and the run still settles. Then drives
+ * the human gate over HTTP.
+ */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { BusStore } from "../src/server/store";
-import { createServer } from "../src/server/server";
-import { DEFAULT_BRIEF, type Snapshot } from "../src/shared/protocol";
-import assert from "node:assert/strict";
+import { generateKey, mint } from "../src/broker";
 
-const dir = await mkdtemp(`${tmpdir()}/agenticbus-e2e-`),
-  token = crypto.randomUUID();
-let store = new BusStore(`${dir}/bus.sqlite`, Date.now, 1000);
-let server = createServer({ store, port: 0, token });
-const port = server.port!;
-const base = `http://127.0.0.1:${port}`;
+const scratch = await mkdtemp(`${tmpdir()}/agenticbus-e2e-`);
+const signingKey = generateKey();
+const adminToken = generateKey();
+/** Take a free port rather than gambling on a random one. */
+async function freePort(start: number): Promise<number> {
+  for (let candidate = start; candidate < start + 200; candidate++) {
+    try {
+      const probe = Bun.listen({
+        hostname: "127.0.0.1",
+        port: candidate,
+        socket: { data() {} },
+      });
+      probe.stop(true);
+      return candidate;
+    } catch {}
+  }
+  throw new Error(`no free port from ${start}`);
+}
+
+const brokerPort = await freePort(4400);
+const enginePort = await freePort(brokerPort + 1);
+const brokerUrl = `http://127.0.0.1:${brokerPort}`;
+const engineUrl = `http://127.0.0.1:${enginePort}`;
+
 const children: ReturnType<typeof Bun.spawn>[] = [];
-const spawn = (role: string, id: string, delay = "0") => {
-  const p = Bun.spawn(
+const env = {
+  ...process.env,
+  BUS_SIGNING_KEY: signingKey,
+  BUS_ADMIN_TOKEN: adminToken,
+};
+const spawn = (args: string[], extra: Record<string, string> = {}) => {
+  const child = Bun.spawn([process.execPath, ...args], {
+    env: { ...env, ...extra },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  children.push(child);
+  return child;
+};
+
+const failures: string[] = [];
+const check = (label: string, ok: boolean, detail = "") => {
+  console.log(`${ok ? "ok  " : "FAIL"} ${label}${detail ? ` — ${detail}` : ""}`);
+  if (!ok) failures.push(label);
+};
+
+const api = async (
+  base: string,
+  path: string,
+  body?: unknown,
+): Promise<Record<string, unknown>> => {
+  const response = await fetch(`${base}${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "x-dagr-workspace": "default",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok)
+    throw new Error(`${path} -> HTTP ${response.status} ${JSON.stringify(payload)}`);
+  return payload as Record<string, unknown>;
+};
+
+async function waitFor<T>(
+  label: string,
+  read: () => Promise<T | null>,
+  timeoutMs = 45_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read().catch(() => null);
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await Bun.sleep(250);
+  }
+}
+
+const workerToken = (id: string) =>
+  mint(
+    {
+      sub: id,
+      scope: "worker",
+      runtimes: ["bun"],
+      labels: { pool: "general" },
+      exp: 0,
+    },
+    signingKey,
+  );
+
+const workers = new Map<string, ReturnType<typeof Bun.spawn>>();
+const startWorker = (id: string) => {
+  const child = spawn(
     [
-      process.execPath,
-      "src/worker/runner.ts",
-      "--role",
-      role,
-      "--mode",
-      "demo",
+      "src/cli/index.ts",
+      "worker",
       "--id",
       id,
+      "--broker",
+      brokerUrl,
+      "--runtimes",
+      "bun",
+      "--labels",
+      "pool=general",
+      "--jobs",
+      "./tests/fixtures/jobs",
+      "--spool",
+      `${scratch}/outbox-${id}`,
     ],
-    {
-      env: {
-        ...process.env,
-        BUS_URL: base,
-        BUS_TOKEN: token,
-        BUS_SPOOL: `${dir}/spool`,
-        DEMO_DELAY_MS: delay,
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
+    { BUS_TOKEN: workerToken(id) },
   );
-  children.push(p);
-  return p;
+  workers.set(id, child);
+  return child;
 };
-async function post(path: string, data: unknown) {
-  const r = await fetch(`${base}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(data),
-  });
-  const body = await r.json();
-  assert.ok(r.ok, JSON.stringify(body));
-  return body;
-}
-async function until(predicate: (s: Snapshot) => boolean, label: string) {
-  for (let i = 0; i < 200; i++) {
-    store.recover();
-    const s = (await (await fetch(`${base}/api/snapshot`)).json()) as Snapshot;
-    if (predicate(s)) return s;
-    await Bun.sleep(100);
-  }
-  throw new Error(`Timed out: ${label}`);
-}
+
 try {
-  const run = await post("/api/runs", {
-    title: "End-to-end recovery check",
-    brief: DEFAULT_BRIEF,
-    mode: "demo",
-    requestKey: "e2e-request",
+  spawn([
+    "src/cli/index.ts",
+    "serve",
+    "--state",
+    scratch,
+    "--port",
+    String(brokerPort),
+    "--engine-port",
+    String(enginePort),
+    "--workflows",
+    "./tests/fixtures/workflows",
+    "--lease-ms",
+    "2500",
+    "--engine-db",
+    `${scratch}/dagr.db`,
+    "--broker-db",
+    `${scratch}/bus.db`,
+  ]);
+
+  await waitFor("the host to listen", async () =>
+    (await fetch(`${brokerUrl}/health`)).ok ? true : null,
+  );
+  await waitFor("the control plane to listen", async () =>
+    (await fetch(`${engineUrl}/health`)).ok ? true : null,
+  );
+  check("engine host and broker are up", true);
+
+  startWorker("worker-a");
+  startWorker("worker-b");
+  const fleet = await waitFor("both workers to register", async () => {
+    const snapshot = (await api(brokerUrl, "/api/snapshot")) as {
+      workers: { id: string }[];
+    };
+    return snapshot.workers.length === 2 ? snapshot.workers : null;
   });
-  const dying = spawn("creator", "creator-interrupted", "5000");
-  await until(
-    (s) => s.tasks.some((t) => t.role === "creator" && t.status === "running"),
-    "creator claim",
+  check("two independent worker processes registered", fleet.length === 2);
+
+  const run = await api(engineUrl, "/runs", {
+    workflow: "e2e",
+    // Long enough that the worker is genuinely mid-step when it is killed.
+    input: { text: "Crème brûlée", ms: 8000 },
+    idempotencyKey: `e2e-${Date.now()}`,
+  });
+  const runId = String(run.id);
+
+  // Kill whichever worker takes the first step, mid-flight.
+  const firstTask = await waitFor("a worker to claim the first step", async () => {
+    const snapshot = (await api(brokerUrl, "/api/snapshot")) as {
+      tasks: { id: string; status: string; workerId: string | null; stepKey: string }[];
+    };
+    return (
+      snapshot.tasks.find(
+        (task) => task.status === "running" && task.workerId !== null,
+      ) ?? null
+    );
+  });
+  const victim = workers.get(firstTask.workerId ?? "");
+  victim?.kill("SIGKILL");
+  check(
+    `killed ${firstTask.workerId} while it held ${firstTask.stepKey}`,
+    victim !== undefined,
   );
-  dying.kill("SIGKILL");
-  await dying.exited;
-  console.log("PASS: creator claimed via HTTP, then process was killed");
-  spawn("creator", "creator-replacement");
-  spawn("reviewer", "reviewer-e2e");
-  spawn("tester", "tester-e2e");
-  const ready = await until(
-    (s) => s.runs.find((r) => r.id === run.id)?.status === "waiting_approval",
-    "review/test join",
+
+  const recovered = await waitFor(
+    "the lease to expire and another worker to finish the step",
+    async () => {
+      const snapshot = (await api(brokerUrl, "/api/snapshot")) as {
+        tasks: { id: string; status: string; workerId: string | null; attempt: number }[];
+        events: { type: string }[];
+      };
+      const task = snapshot.tasks.find((entry) => entry.id === firstTask.id);
+      return task?.status === "succeeded" && task.workerId !== firstTask.workerId
+        ? { task, events: snapshot.events }
+        : null;
+    },
   );
-  const tasks = ready.tasks.filter((t) => t.runId === run.id);
-  assert.ok(tasks.every((t) => t.status === "succeeded"));
-  assert.equal(tasks.find((t) => t.role === "creator")!.attempt, 2);
-  assert.equal(
-    tasks.find((t) => t.role === "reviewer")!.inputArtifactId,
-    tasks.find((t) => t.role === "tester")!.inputArtifactId,
+  check(
+    "a surviving worker recovered the expired lease",
+    recovered.task.attempt >= 2,
+    `attempt ${recovered.task.attempt}, now on ${recovered.task.workerId}`,
   );
-  const testArtifact = store.artifact(
-    tasks.find((t) => t.role === "tester")!.outputArtifactId!,
+  check(
+    "the journal recorded the lease expiry",
+    recovered.events.some((event) => event.type.includes("lease_expired")),
   );
-  assert.match(testArtifact.content, /6 pass/);
-  console.log(
-    "PASS: lease recovered, replacement finished, review and six executable tests joined on the same artifact",
+
+  // The workflow's gate is a dagr approval step: the run parks until signalled.
+  await waitFor("the run to reach its human gate", async () => {
+    const steps = (await api(engineUrl, `/runs/${runId}/steps`)) as {
+      steps?: { stepKey: string; status: string }[];
+    };
+    const gate = steps.steps?.find((step) => step.stepKey === "gate");
+    return gate && ["waiting", "parked", "running"].includes(gate.status)
+      ? gate
+      : null;
+  });
+  check("the run parked on its approval gate", true);
+
+  await api(engineUrl, "/signals", {
+    name: "e2e.approved",
+    correlation: runId,
+    payload: { approvedBy: "e2e" },
+  });
+
+  const settled = await waitFor("the run to settle", async () => {
+    const current = (await api(engineUrl, `/runs/${runId}`)) as {
+      run?: { status?: string; output?: unknown };
+    };
+    const status = current.run?.status;
+    return status && !["running", "queued", "pending"].includes(String(status))
+      ? current.run!
+      : null;
+  });
+  check(
+    "the run succeeded end to end",
+    settled.status === "succeeded",
+    String(settled.status),
   );
-  const hook = {
-    id: "same-observation",
-    source: "urn:e2e:hook",
-    type: "PostToolUse",
-    data: { tool_name: "Bash", tool_result: "ok" },
+  check(
+    "the workflow output carries the remote result",
+    JSON.stringify(settled.output ?? {}).includes("creme-brulee"),
+    JSON.stringify(settled.output ?? null),
+  );
+
+  const steps = (await api(engineUrl, `/runs/${runId}/steps`)) as {
+    steps?: { stepKey: string; status: string; result?: unknown }[];
   };
-  await post("/api/hooks", hook);
-  const duplicate = await post("/api/hooks", hook);
-  assert.equal(duplicate.duplicate, true);
-  console.log("PASS: duplicate hook observation deduplicated");
-  server.stop(true);
-  store.close();
-  store = new BusStore(`${dir}/bus.sqlite`);
-  server = createServer({ store, port, token });
-  const persisted = (await (
-    await fetch(`${base}/api/snapshot`)
-  ).json()) as Snapshot;
-  assert.equal(persisted.runs[0].status, "waiting_approval");
-  const accepted = await post(`/api/runs/${run.id}/approve`, {});
-  assert.equal(accepted.status, "succeeded");
-  console.log(
-    "PASS: coordinator reopened persisted state; approval completed over HTTP",
+  const slug = steps.steps?.find((step) => step.stepKey === "slow");
+  check(
+    "the remote handler produced the expected artifact",
+    JSON.stringify(slug?.result ?? {}).includes("creme-brulee"),
+    JSON.stringify(slug?.result ?? null),
   );
-  console.log("End-to-end prototype checks passed.");
+
+  const redispatch = await api(brokerUrl, "/api/tasks", {
+    idempotencyKey: `${runId}:slow`,
+    runtime: "bun",
+    selector: { pool: "general" },
+    input: {},
+    runId,
+    stepKey: "slow",
+    attempt: 9,
+    maxAttempts: 3,
+    deadlineAt: null,
+    provider: null,
+    workspace: "default",
+  });
+  check(
+    "re-dispatching a finished key reattaches instead of duplicating",
+    redispatch.id === firstTask.id || redispatch.status === "succeeded",
+  );
+} catch (error) {
+  check("e2e completed without an unexpected error", false, String(error));
 } finally {
+  for (const child of children) child.kill("SIGTERM");
+  await Bun.sleep(600);
   for (const child of children)
-    if (child.exitCode === null) child.kill("SIGTERM");
-  await Promise.all(
-    children.map(async (p) => {
-      await Promise.race([p.exited, Bun.sleep(2500)]);
-      if (p.exitCode === null) p.kill("SIGKILL");
-      await p.exited;
-    }),
-  );
-  server.stop(true);
-  store.close();
-  await rm(dir, { recursive: true, force: true });
+    if (child.exitCode === null) child.kill("SIGKILL");
+  await rm(scratch, { recursive: true, force: true });
 }
+
+if (failures.length > 0) {
+  console.error(`\n${failures.length} check(s) failed:\n  ${failures.join("\n  ")}`);
+  process.exit(1);
+}
+console.log("\nall end-to-end checks passed");

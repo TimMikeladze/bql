@@ -1,32 +1,65 @@
 {
-  "name": "agenticbus-prototype",
-  "private": true,
+  "name": "agenticbus",
+  "version": "0.1.0",
+  "description": "Distributed execution for dagr workflows \u2014 run any step on any machine, with claim, lease and fencing",
+  "license": "MIT",
   "type": "module",
+  "bin": {
+    "agenticbus": "./src/cli/index.ts"
+  },
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./src/index.ts",
+        "default": "./src/index.ts"
+      }
+    },
+    "./broker": {
+      "import": {
+        "types": "./src/broker/index.ts",
+        "default": "./src/broker/index.ts"
+      }
+    },
+    "./worker": {
+      "import": {
+        "types": "./src/worker/index.ts",
+        "default": "./src/worker/index.ts"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
   "scripts": {
     "dev": "bun scripts/dev.ts",
-    "server": "bun src/server/server.ts",
-    "worker": "bun src/worker/runner.ts",
+    "serve": "bun src/cli/index.ts serve",
+    "broker": "bun src/cli/index.ts broker",
+    "worker": "bun src/cli/index.ts worker",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
-    "test:e2e": "bun scripts/e2e.ts"
+    "test:e2e": "bun scripts/e2e.ts && bun scripts/e2e-split.ts"
   },
   "dependencies": {
-    "@base-ui/react": "^1.8.0",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^1.41.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "tailwind-merge": "^3.6.0"
+    "dagr": "file:../dagr/packages/dagr"
   },
   "devDependencies": {
+    "@base-ui/react": "^1.8.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.4.2",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.41.0",
     "prettier": "^3.9.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"

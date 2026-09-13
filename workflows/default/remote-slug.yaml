@@ -1,0 +1,37 @@
+version: 1
+name: remote-slug
+description: Two steps on remote workers, joined by the engine that never ran them.
+inputs:
+  text: { type: string, required: true }
+steps:
+  slug:
+    kind: task
+    runtime: remote
+    with:
+      run: bun
+      select: { pool: general }
+      uses: ./slugify.ts:slugify
+      input:
+        text: ${{ inputs.text }}
+
+  verify:
+    kind: task
+    runtime: remote
+    needs: [slug]
+    with:
+      run: bun
+      select: { pool: general }
+      uses: ./slugify.ts:check
+      input:
+        slug: ${{ steps.slug.output.slug }}
+
+  gate:
+    kind: approval
+    needs: [verify]
+    event: slug.approved
+    correlation: ${{ run.id }}
+    timeout: 24h
+    on_timeout: skip
+
+outputs:
+  slug: ${{ steps.slug.output.slug }}

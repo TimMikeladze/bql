@@ -1,0 +1,25 @@
+version: 1
+name: e2e
+description: One slow remote step and a human gate, for the recovery check.
+inputs:
+  text: { type: string, required: true }
+  ms: { type: number, required: false }
+steps:
+  slow:
+    kind: task
+    runtime: remote
+    with:
+      run: bun
+      select: { pool: general }
+      uses: ./steps.ts:slow
+      input:
+        text: ${{ inputs.text }}
+        ms: ${{ inputs.ms }}
+  gate:
+    kind: approval
+    needs: [slow]
+    event: e2e.approved
+    correlation: ${{ run.id }}
+    timeout: 5m
+outputs:
+  slug: ${{ steps.slow.output.slug }}

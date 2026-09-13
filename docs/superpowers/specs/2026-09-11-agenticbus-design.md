@@ -1,3 +1,5 @@
+> **Superseded (2026-09-12).** This described a standalone coordinator with its own fixed workflow. That design is gone: the graph now belongs to [dagr](https://github.com/TimMikeladze/dagr) and AgenticBus is the distributed execution layer around it. See [2026-09-12-distributed-execution.md](2026-09-12-distributed-execution.md). Kept for the reasoning on contracts, delivery semantics and recovery, which carried forward.
+
 # AgenticBus: Bun architecture proposal
 
 Status: long-term architecture proposal, with an end-to-end prototype now implemented. See the [prototype plan](../plans/2026-09-11-e2e-prototype.md) and [README](../../../README.md) for its narrower implemented contracts and runnable commands.

@@ -1,1390 +1,384 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type FormEvent,
-  type ReactNode,
-} from "react";
-import { Dialog } from "@base-ui/react/dialog";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
-  ArrowRight,
-  ArrowUpRight,
-  Blocks,
-  Braces,
-  Check,
+  AlertTriangle,
+  Boxes,
   CheckCircle2,
-  ChevronRight,
-  Circle,
-  CircleDot,
-  Code2,
-  FileCode2,
-  FileText,
-  GitBranch,
-  Inbox,
-  LayoutDashboard,
-  LoaderCircle,
-  Menu,
-  Network,
-  Pause,
-  Play,
-  Plus,
-  Radio,
-  RefreshCw,
-  Search,
+  CircleDashed,
+  Clock,
+  Cpu,
+  Layers,
+  Loader2,
   Server,
-  ShieldCheck,
-  Terminal,
-  TestTube2,
-  X,
   XCircle,
 } from "lucide-react";
-import {
-  DEFAULT_BRIEF,
-  type Artifact,
-  type BusEvent,
-  type Mode,
-  type Role,
-  type Run,
-  type Snapshot,
-  type Task,
+import type {
+  BusEvent,
+  Snapshot,
+  TaskSummary,
+  Worker,
 } from "../shared/protocol";
-import { Button } from "./components/ui/button";
 
-type Section = "overview" | "journal" | "workers" | "artifacts";
-const navigation = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "journal", label: "Event journal", icon: Activity },
-  { id: "workers", label: "Workers", icon: Server },
-  { id: "artifacts", label: "Artifacts", icon: FileCode2 },
-] as const;
-const labels: Record<string, string> = {
-  running: "Running",
-  waiting_approval: "Needs approval",
-  succeeded: "Succeeded",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  blocked: "Waiting",
-  queued: "Queued",
-  online: "Online",
-  offline: "Offline",
-  paused: "Paused",
-};
-const roleMeta = {
-  creator: { name: "Create artifact", icon: Code2 },
-  reviewer: { name: "Review code", icon: ShieldCheck },
-  tester: { name: "Run tests", icon: TestTube2 },
-};
-function relative(time: number, now = Date.now()) {
-  const seconds = Math.max(0, Math.floor((now - time) / 1000));
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return new Date(time).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
+declare global {
+  interface Window {
+    __BUS_TOKEN?: string;
+  }
+}
+
+const token = () =>
+  window.__BUS_TOKEN ??
+  new URLSearchParams(window.location.search).get("token") ??
+  "";
+
+async function read<T>(path: string): Promise<T> {
+  const response = await fetch(path, {
+    headers: { Authorization: `Bearer ${token()}` },
   });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json() as Promise<T>;
 }
-function clock(time: string | number) {
-  return new Date(time).toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+
+function relative(time: number, now: number) {
+  const seconds = Math.max(0, Math.round((now - time) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
 }
-function modeLabel(mode: Mode) {
-  return mode === "demo" ? "Scripted demo" : "Live agents";
-}
-function shortId(id: string) {
-  return id.slice(0, 8);
-}
-async function api<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(
-    path,
-    body === undefined
-      ? undefined
-      : {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-  );
-  const result = await response.json();
-  if (!response.ok)
-    throw new Error(result.error || `Request failed (${response.status})`);
-  return result as T;
-}
-function Status({ status }: { status: string }) {
-  const Icon =
-    status === "succeeded"
-      ? CheckCircle2
-      : status === "failed"
-        ? XCircle
-        : status === "running"
-          ? LoaderCircle
-          : status === "waiting_approval"
-            ? ShieldCheck
-            : status === "paused"
-              ? Pause
-              : Circle;
+
+const STATUS = {
+  queued: { icon: CircleDashed, tone: "text-amber-600 bg-amber-50 border-amber-200" },
+  running: { icon: Loader2, tone: "text-blue-700 bg-blue-50 border-blue-200" },
+  succeeded: { icon: CheckCircle2, tone: "text-emerald-700 bg-emerald-50 border-emerald-200" },
+  failed: { icon: XCircle, tone: "text-red-700 bg-red-50 border-red-200" },
+  cancelled: { icon: AlertTriangle, tone: "text-neutral-600 bg-muted border-border" },
+} as const;
+
+function Status({ status }: { status: TaskSummary["status"] }) {
+  const meta = STATUS[status] ?? STATUS.cancelled;
+  const Icon = meta.icon;
   return (
-    <span className={`status status-${status}`}>
-      <Icon className={status === "running" ? "spin" : undefined} />
-      {labels[status] || status}
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium ${meta.tone}`}
+    >
+      <Icon className={`size-3 ${status === "running" ? "animate-spin" : ""}`} />
+      {status}
     </span>
-  );
-}
-function Empty({
-  icon,
-  title,
-  children,
-  action,
-}: {
-  icon: ReactNode;
-  title: string;
-  children: ReactNode;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="empty">
-      <div className="empty-icon">{icon}</div>
-      <h3>{title}</h3>
-      <p>{children}</p>
-      {action}
-    </div>
-  );
-}
-function Modal({
-  open,
-  onOpenChange,
-  title,
-  description,
-  children,
-  wide = false,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  title: string;
-  description: string;
-  children: ReactNode;
-  wide?: boolean;
-}) {
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="modal-backdrop" />
-        <Dialog.Popup className={`modal ${wide ? "modal-wide" : ""}`}>
-          <div className="modal-heading">
-            <div>
-              <Dialog.Title>{title}</Dialog.Title>
-              <Dialog.Description>{description}</Dialog.Description>
-            </div>
-            <Dialog.Close
-              render={
-                <Button variant="ghost" size="icon" aria-label="Close dialog" />
-              }
-            >
-              <X />
-            </Dialog.Close>
-          </div>
-          {children}
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
-export function App() {
-  const [section, setSection] = useState<Section>("overview");
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [connectionError, setConnectionError] = useState("");
-  const [actionError, setActionError] = useState("");
-  const [pending, setPending] = useState<string | null>(null);
-  const [newRunOpen, setNewRunOpen] = useState(false);
-  const [artifactId, setArtifactId] = useState<string | null>(null);
-  const [mobileNav, setMobileNav] = useState(false);
-  const refresh = useCallback(async () => {
-    try {
-      const value = await api<Snapshot>("/api/snapshot");
-      setSnapshot((previous) =>
-        previous && previous.now > value.now ? previous : value,
-      );
-      setConnectionError("");
-    } catch (error) {
-      setConnectionError(
-        error instanceof Error ? error.message : "Cannot reach coordinator",
-      );
-    }
-  }, []);
-  useEffect(() => {
-    void refresh();
-    const stream = new EventSource("/api/events/stream");
-    stream.onopen = () => {
-      setConnected(true);
-      void refresh();
-    };
-    stream.onerror = () => setConnected(false);
-    stream.addEventListener("update", () => void refresh());
-    const timer = window.setInterval(refresh, 10000);
-    return () => {
-      stream.close();
-      window.clearInterval(timer);
-    };
-  }, [refresh]);
-  const mutate = async (key: string, path: string, body: unknown = {}) => {
-    if (pending) return false;
-    setPending(key);
-    setActionError("");
-    try {
-      const result = await api<Run | null>(path, body);
-      if (key === "retry" && result?.id) setSelectedId(result.id);
-      await refresh();
-      return true;
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Action failed");
-      return false;
-    } finally {
-      setPending(null);
-    }
-  };
-  const runs = snapshot?.runs ?? [];
-  const selected = runs.find((run) => run.id === selectedId) || runs[0];
-  const busy = runs.filter((run) => run.status === "running").length;
-  const approval = runs.filter(
-    (run) => run.status === "waiting_approval",
-  ).length;
-  const online =
-    snapshot?.workers.filter(
-      (worker) => !worker.paused && snapshot.now - worker.lastSeen < 30000,
-    ).length ?? 0;
-  const goTo = (next: Section) => {
-    setSection(next);
-    setMobileNav(false);
-  };
-  return (
-    <div className="app-shell">
-      <a className="skip-link" href="#main">
-        Skip to content
-      </a>
-      <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
-        <a
-          className="brand"
-          href="#"
-          onClick={(event) => {
-            event.preventDefault();
-            goTo("overview");
-          }}
-        >
-          <span className="brand-mark">
-            <Network size={18} />
-          </span>
-          <span>
-            agenticbus<span className="brand-tag">PROTOTYPE</span>
-          </span>
-        </a>
-        <div className="workspace-select">
-          <span className="workspace-icon">
-            <Blocks size={15} />
-          </span>
-          <div>
-            <strong>Local workspace</strong>
-            <span>Development environment</span>
-          </div>
-          <span className="live-dot" />
-        </div>
-        <Button className="sidebar-cta" onClick={() => setNewRunOpen(true)}>
-          <Plus />
-          Run workflow
-        </Button>
-        <div className="nav-label">WORKSPACE</div>
-        <nav aria-label="Workspace">
-          {navigation.map((item) => (
-            <button
-              type="button"
-              key={item.id}
-              onClick={() => goTo(item.id)}
-              aria-current={section === item.id ? "page" : undefined}
-              className={`nav-item ${section === item.id ? "active" : ""}`}
-            >
-              <item.icon size={16} />
-              {item.label}
-              {item.id === "overview" && approval > 0 && (
-                <span className="nav-count">{approval}</span>
-              )}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="sidebar-note">
-            <GitBranch size={17} />
-            <strong>One workflow. Every handoff.</strong>
-            <p>
-              Create, review, test, and approve an artifact with a durable
-              record.
-            </p>
-          </div>
-          <div className="local-profile">
-            <div className="avatar">L</div>
-            <div>
-              <strong>Local operator</strong>
-              <span>Bun · SQLite coordinator</span>
-            </div>
-          </div>
-        </div>
-      </aside>
-      <div className="workspace-main">
-        <header className="topbar">
-          <div className="breadcrumb">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="mobile-toggle"
-              aria-label="Toggle navigation"
-              onClick={() => setMobileNav(!mobileNav)}
-            >
-              <Menu />
-            </Button>
-            <span>Workspace</span>
-            <ChevronRight size={13} />
-            <strong>
-              {navigation.find((item) => item.id === section)?.label}
-            </strong>
-          </div>
-          <div className="topbar-right">
-            <span
-              className={`connection ${connected && !connectionError ? "is-connected" : "is-offline"}`}
-            >
-              <span />
-              {connected && !connectionError ? "Connected" : "Reconnecting"}
-            </span>
-            <span className="topbar-divider" />
-            <span className="prototype-tag">Local prototype</span>
-          </div>
-        </header>
-        <main id="main" tabIndex={-1}>
-          <div className="page-heading">
-            <div>
-              <div className="eyebrow">AGENT COORDINATION</div>
-              <h1>
-                {section === "overview"
-                  ? "Workflow overview"
-                  : section === "journal"
-                    ? "Event journal"
-                    : section === "workers"
-                      ? "Workers"
-                      : "Artifact library"}
-              </h1>
-              <p>
-                {section === "overview"
-                  ? "A shared place for your agents to work, and for you to see what happened."
-                  : section === "journal"
-                    ? "Every handoff, decision, and result, in the order it was recorded."
-                    : section === "workers"
-                      ? "Independent runners, connected through the same durable bus."
-                      : "The code and evidence your workflows leave behind."}
-              </p>
-            </div>
-            <Button onClick={() => setNewRunOpen(true)}>
-              <Plus />
-              New run
-            </Button>
-          </div>
-          {(connectionError || !connected) && (
-            <div className="notice connection-notice" role="status">
-              <Radio size={15} />
-              <span>
-                {connectionError
-                  ? `Coordinator unavailable: ${connectionError}.`
-                  : "Connecting to the event stream."}{" "}
-                {snapshot
-                  ? "Showing the last received state. Reconnecting automatically."
-                  : "Make sure the local coordinator is running."}
-              </span>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void refresh()}
-              >
-                <RefreshCw />
-                Refresh
-              </Button>
-            </div>
-          )}
-          {actionError && (
-            <div className="notice error-notice" role="alert">
-              <XCircle size={16} />
-              <span>{actionError}</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Dismiss error"
-                onClick={() => setActionError("")}
-              >
-                <X />
-              </Button>
-            </div>
-          )}
-          {!snapshot ? (
-            <div className="loading-state">
-              <LoaderCircle className="spin" size={20} />
-              <span>Loading workspace…</span>
-            </div>
-          ) : (
-            <>
-              {section === "overview" && (
-                <>
-                  <div className="metrics">
-                    <Metric
-                      label="Workflow runs"
-                      value={runs.length}
-                      note="All recorded runs"
-                      icon={<GitBranch />}
-                    />
-                    <Metric
-                      label="In progress"
-                      value={busy}
-                      note="Work moving through the bus"
-                      icon={<Activity />}
-                    />
-                    <Metric
-                      label="Needs approval"
-                      value={approval}
-                      note="Ready for a human decision"
-                      icon={<ShieldCheck />}
-                      accent={approval > 0}
-                    />
-                    <Metric
-                      label="Online workers"
-                      value={online}
-                      note={`${snapshot.workers.length} registered in this workspace`}
-                      icon={<Server />}
-                    />
-                  </div>
-                  <div className="overview-grid">
-                    <section className="panel run-panel">
-                      <div className="panel-heading">
-                        <h2>
-                          Workflow runs{" "}
-                          <span className="count">{runs.length}</span>
-                        </h2>
-                        <span className="muted text-xs">Most recent first</span>
-                      </div>
-                      {runs.length === 0 ? (
-                        <Empty
-                          icon={<GitBranch />}
-                          title="Your first handoff starts here"
-                          action={
-                            <Button
-                              variant="outline"
-                              onClick={() => setNewRunOpen(true)}
-                            >
-                              <Plus />
-                              Create a run
-                            </Button>
-                          }
-                        >
-                          Give a creator a brief. Let a reviewer and a test
-                          worker check the result.
-                        </Empty>
-                      ) : (
-                        <div className="run-list">
-                          {[...runs]
-                            .sort((a, b) => b.createdAt - a.createdAt)
-                            .map((run) => (
-                              <button
-                                key={run.id}
-                                type="button"
-                                className={`run-row ${selected?.id === run.id ? "selected" : ""}`}
-                                onClick={() => setSelectedId(run.id)}
-                                aria-pressed={selected?.id === run.id}
-                              >
-                                <div className="run-row-title">
-                                  <span className="run-icon">
-                                    <GitBranch size={15} />
-                                  </span>
-                                  <strong>{run.title}</strong>
-                                  <ChevronRight size={14} />
-                                </div>
-                                <div className="run-row-meta">
-                                  <Status status={run.status} />
-                                  <time
-                                    title={new Date(
-                                      run.createdAt,
-                                    ).toLocaleString()}
-                                  >
-                                    {relative(run.createdAt, snapshot.now)}
-                                  </time>
-                                </div>
-                                <div className="run-row-mode">
-                                  <span>{modeLabel(run.mode)}</span>
-                                  <code>{shortId(run.id)}</code>
-                                </div>
-                              </button>
-                            ))}
-                        </div>
-                      )}
-                      <div className="panel-foot">
-                        <span className="tiny-dot" />
-                        Runs are persisted locally
-                      </div>
-                    </section>
-                    {selected ? (
-                      <RunDetail
-                        run={selected}
-                        snapshot={snapshot}
-                        pending={pending}
-                        mutate={mutate}
-                        inspect={setArtifactId}
-                      />
-                    ) : (
-                      <section className="panel intro-panel">
-                        <div className="intro-illustration">
-                          <div>
-                            <Code2 />
-                            <span>Create</span>
-                          </div>
-                          <ArrowRight />
-                          <div>
-                            <ShieldCheck />
-                            <span>Review</span>
-                          </div>
-                          <ArrowRight />
-                          <div>
-                            <CheckCircle2 />
-                            <span>Approve</span>
-                          </div>
-                        </div>
-                        <span className="eyebrow">FROM BRIEF TO EVIDENCE</span>
-                        <h2>
-                          Let agents do the work.
-                          <br />
-                          Keep the whole picture.
-                        </h2>
-                        <p>
-                          Start with a small, real workflow: create a TypeScript
-                          utility, review its code, run executable tests, and
-                          approve the exact artifact.
-                        </p>
-                        <div className="intro-points">
-                          <span>
-                            <Check size={14} />
-                            Separate worker processes
-                          </span>
-                          <span>
-                            <Check size={14} />A durable event journal
-                          </span>
-                          <span>
-                            <Check size={14} />A human at the final step
-                          </span>
-                        </div>
-                        <Button onClick={() => setNewRunOpen(true)}>
-                          Run your first workflow
-                          <ArrowRight />
-                        </Button>
-                      </section>
-                    )}
-                  </div>
-                </>
-              )}
-              {section === "journal" && (
-                <Journal events={snapshot.events} runs={runs} />
-              )}
-              {section === "workers" && (
-                <section className="panel">
-                  <div className="panel-heading">
-                    <h2>
-                      Registered workers{" "}
-                      <span className="count">{snapshot.workers.length}</span>
-                    </h2>
-                    <span className="muted text-xs">
-                      Heartbeat within 30 seconds = online
-                    </span>
-                  </div>
-                  {snapshot.workers.length === 0 ? (
-                    <Empty icon={<Server />} title="Waiting for workers">
-                      Start the development stack to connect the creator,
-                      reviewer, and test runners.
-                    </Empty>
-                  ) : (
-                    <div className="worker-grid">
-                      {snapshot.workers.map((worker) => {
-                        const status =
-                          snapshot.now - worker.lastSeen > 30000
-                            ? "offline"
-                            : worker.paused
-                              ? "paused"
-                              : "online";
-                        const Icon = roleMeta[worker.role].icon;
-                        const task = snapshot.tasks.find(
-                          (task) =>
-                            task.workerId === worker.id &&
-                            task.status === "running",
-                        );
-                        return (
-                          <article key={worker.id} className="worker-card">
-                            <div className="worker-top">
-                              <span className="worker-icon">
-                                <Icon size={20} />
-                              </span>
-                              <Status status={status} />
-                            </div>
-                            <h3>{worker.name}</h3>
-                            <div className="worker-subtitle">
-                              {worker.role} <span>·</span>{" "}
-                              {modeLabel(worker.mode)}
-                            </div>
-                            <dl>
-                              <div>
-                                <dt>Host</dt>
-                                <dd>{worker.host}</dd>
-                              </div>
-                              <div>
-                                <dt>Last heartbeat</dt>
-                                <dd>
-                                  {relative(worker.lastSeen, snapshot.now)}
-                                </dd>
-                              </div>
-                              <div>
-                                <dt>Current task</dt>
-                                <dd>
-                                  {task ? shortId(task.id) : "No active task"}
-                                </dd>
-                              </div>
-                            </dl>
-                            <Button
-                              variant="outline"
-                              disabled={!!pending}
-                              onClick={() =>
-                                void mutate(
-                                  `worker-${worker.id}`,
-                                  `/api/workers/${worker.id}/pause`,
-                                  { paused: !worker.paused },
-                                )
-                              }
-                            >
-                              {pending === `worker-${worker.id}` ? (
-                                <LoaderCircle className="spin" />
-                              ) : worker.paused ? (
-                                <Play />
-                              ) : (
-                                <Pause />
-                              )}
-                              {worker.paused
-                                ? "Resume worker"
-                                : "Pause new claims"}
-                            </Button>
-                          </article>
-                        );
-                      })}
-                    </div>
-                  )}
-                  <div className="panel-foot">
-                    <CircleDot size={13} />
-                    Pausing stops new claims. An active task can still finish.
-                  </div>
-                </section>
-              )}
-              {section === "artifacts" && (
-                <section className="panel">
-                  <div className="panel-heading">
-                    <h2>
-                      Artifacts{" "}
-                      <span className="count">{snapshot.artifacts.length}</span>
-                    </h2>
-                    <span className="muted text-xs">
-                      Evidence with verified digests
-                    </span>
-                  </div>
-                  {snapshot.artifacts.length === 0 ? (
-                    <Empty
-                      icon={<FileCode2 />}
-                      title="A home for work that is done"
-                    >
-                      Code, reviews, and test output will appear here as workers
-                      finish their tasks.
-                    </Empty>
-                  ) : (
-                    <div className="artifact-library">
-                      {[...snapshot.artifacts].reverse().map((artifact) => (
-                        <button
-                          type="button"
-                          key={artifact.id}
-                          className="artifact-library-row"
-                          onClick={() => setArtifactId(artifact.id)}
-                        >
-                          <span className="file-icon">
-                            <FileCode2 size={18} />
-                          </span>
-                          <span>
-                            <strong>{artifact.name}</strong>
-                            <span className="muted">
-                              {runs.find((run) => run.id === artifact.runId)
-                                ?.title || shortId(artifact.runId)}
-                            </span>
-                          </span>
-                          <code className="artifact-digest">
-                            {artifact.digest.slice(0, 12)}
-                          </code>
-                          <span className="muted artifact-date">
-                            {relative(artifact.createdAt, snapshot.now)}
-                          </span>
-                          <ArrowUpRight size={15} />
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-            </>
-          )}
-          <footer className="page-footer">
-            <span>
-              <Network size={13} />
-              AgenticBus
-            </span>
-            <span>Durable handoffs. Inspectable evidence.</span>
-          </footer>
-        </main>
-      </div>
-      <NewRunModal
-        open={newRunOpen}
-        close={() => setNewRunOpen(false)}
-        created={async (run) => {
-          setSelectedId(run.id);
-          setSection("overview");
-          setNewRunOpen(false);
-          await refresh();
-        }}
-      />
-      <ArtifactModal id={artifactId} close={() => setArtifactId(null)} />
-    </div>
   );
 }
 
 function Metric({
+  icon: Icon,
   label,
   value,
-  note,
-  icon,
-  accent,
+  hint,
 }: {
+  icon: typeof Server;
   label: string;
-  value: number;
-  note: string;
-  icon: ReactNode;
-  accent?: boolean;
+  value: string | number;
+  hint?: string;
 }) {
   return (
-    <div className={`metric ${accent ? "metric-accent" : ""}`}>
-      <div className="metric-label">
+    <div className="rounded-md border border-border bg-white px-3.5 py-3">
+      <div className="flex items-center gap-1.5 text-xs text-[var(--muted-text)]">
+        <Icon className="size-3.5" />
         {label}
-        {icon}
       </div>
-      <strong>{value.toString().padStart(2, "0")}</strong>
-      <p>{note}</p>
+      <div className="mt-1.5 text-xl font-medium tabular-nums">{value}</div>
+      {hint ? (
+        <div className="mt-0.5 text-xs text-[var(--muted-text)]">{hint}</div>
+      ) : null}
     </div>
   );
 }
-function RunDetail({
-  run,
-  snapshot,
-  pending,
-  mutate,
-  inspect,
-}: {
-  run: Run;
-  snapshot: Snapshot;
-  pending: string | null;
-  mutate: (key: string, path: string, body?: unknown) => Promise<boolean>;
-  inspect: (id: string) => void;
-}) {
-  const tasks = snapshot.tasks.filter((task) => task.runId === run.id);
-  const events = snapshot.events
-    .filter((event) => event.runId === run.id)
-    .slice(-8)
-    .reverse();
-  const artifacts = snapshot.artifacts.filter(
-    (artifact) => artifact.runId === run.id,
-  );
-  const retryKeys = useRef<Record<string, string>>({});
+
+function WorkerRow({ worker, now }: { worker: Worker; now: number }) {
+  const stale = now - worker.lastSeen > 30_000;
   return (
-    <section className="panel run-detail">
-      <div className="detail-heading">
-        <div className="detail-kicker">
-          <code>{shortId(run.id)}</code>
-          <span>·</span>
-          <span>{modeLabel(run.mode)}</span>
-        </div>
-        <div className="detail-title">
-          <h2>{run.title}</h2>
-          <Status status={run.status} />
-        </div>
-        <p>{run.brief}</p>
-      </div>
-      <div className="detail-section">
-        <div className="section-heading">
-          <h3>Workflow</h3>
-          <span className="muted text-xs">
-            {tasks.filter((task) => task.status === "succeeded").length} of{" "}
-            {tasks.length} tasks complete
-          </span>
-        </div>
-        <div className="workflow" aria-label="Workflow progress">
-          <WorkflowNode
-            task={tasks.find((task) => task.role === "creator")}
-            role="creator"
+    <div className="flex items-start justify-between gap-4 border-b border-border px-3.5 py-3 last:border-b-0">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span
+            className={`size-1.5 rounded-full ${
+              worker.paused
+                ? "bg-amber-500"
+                : stale
+                  ? "bg-neutral-300"
+                  : "bg-emerald-500"
+            }`}
           />
-          <div className="graph-branch" aria-hidden="true">
-            <span />
-            <span />
-          </div>
-          <div className="parallel-nodes">
-            <WorkflowNode
-              task={tasks.find((task) => task.role === "reviewer")}
-              role="reviewer"
-            />
-            <WorkflowNode
-              task={tasks.find((task) => task.role === "tester")}
-              role="tester"
-            />
-          </div>
-          <div className="graph-join" aria-hidden="true">
-            <span />
-            <span />
-          </div>
-          <div
-            className={`workflow-node approval-node ${run.status === "succeeded" ? "node-succeeded" : run.status === "waiting_approval" ? "node-running" : ""}`}
-          >
-            <div className="node-top">
-              <ShieldCheck size={16} />
-              {run.status === "succeeded" && <CheckCircle2 size={13} />}
-            </div>
-            <strong>Human approval</strong>
-            <span>
-              {run.status === "succeeded"
-                ? "Accepted"
-                : run.status === "waiting_approval"
-                  ? "Your decision"
-                  : "Waiting for evidence"}
+          <span className="truncate font-medium">{worker.id}</span>
+          {worker.paused ? (
+            <span className="rounded border border-amber-200 bg-amber-50 px-1.5 text-xs text-amber-700">
+              paused
             </span>
-          </div>
+          ) : null}
         </div>
-      </div>
-      {tasks.some((task) => task.error) && (
-        <div className="task-errors">
-          {tasks
-            .filter((task) => task.error)
-            .map((task) => (
-              <div key={task.id} role="alert">
-                <XCircle size={15} />
-                <span>
-                  <strong>{roleMeta[task.role].name}: </strong>
-                  {task.error}
-                </span>
-              </div>
-            ))}
+        <div className="mt-1 truncate text-xs text-[var(--muted-text)]">
+          {worker.host} · {worker.runtimes.join(", ")}
         </div>
-      )}
-      {run.status === "waiting_approval" && (
-        <div className="approval-callout">
-          <div className="approval-callout-icon">
-            <ShieldCheck size={19} />
-          </div>
-          <div>
-            <h3>The evidence is in. Your call.</h3>
-            <p>
-              Review and tests passed for the same artifact. Inspect the
-              results, then accept this version. Approval records your decision
-              without publishing or merging.
-            </p>
-            <div className="action-row">
-              <Button
-                disabled={!!pending}
-                onClick={() =>
-                  void mutate("approve", `/api/runs/${run.id}/approve`)
-                }
-              >
-                {pending === "approve" ? (
-                  <LoaderCircle className="spin" />
-                ) : (
-                  <Check />
-                )}
-                Approve artifact
-              </Button>
-              <Button
-                variant="outline"
-                disabled={!!pending}
-                onClick={() =>
-                  void mutate("cancel", `/api/runs/${run.id}/cancel`)
-                }
-              >
-                Reject run
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-      {run.status === "succeeded" && (
-        <div className="accepted-callout">
-          <CheckCircle2 size={16} />
-          <span>
-            Artifact accepted. The decision and its evidence are recorded.
-          </span>
-        </div>
-      )}
-      <div className="detail-section">
-        <div className="section-heading">
-          <h3>Artifacts & evidence</h3>
-          <span className="count">{artifacts.length}</span>
-        </div>
-        {artifacts.length ? (
-          <div className="artifact-list">
-            {artifacts.map((artifact) => (
-              <button
-                type="button"
-                key={artifact.id}
-                className="artifact-row"
-                onClick={() => inspect(artifact.id)}
-              >
-                <FileCode2 size={16} />
-                <span>
-                  <strong>{artifact.name}</strong>
-                  <small>{artifact.mediaType}</small>
-                </span>
-                <ArrowUpRight size={14} />
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="inline-empty">
-            <Inbox size={15} />
-            Artifacts appear here when workers complete their tasks.
-          </p>
-        )}
-      </div>
-      <div className="detail-section">
-        <div className="section-heading">
-          <h3>Activity</h3>
-          <span className="muted text-xs">Latest {events.length} events</span>
-        </div>
-        <div className="timeline">
-          {events.map((event) => (
-            <div className="timeline-row" key={event.id}>
+        {Object.keys(worker.labels).length > 0 ? (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {Object.entries(worker.labels).map(([key, value]) => (
               <span
-                className={`timeline-dot ${event.type.includes("failed") ? "timeline-failed" : ""}`}
-              />
-              <div>
-                <strong>{humanEvent(event.type)}</strong>
-                <span>{event.source}</span>
-              </div>
-              <time>{clock(event.time)}</time>
-            </div>
-          ))}
-          {!events.length && (
-            <p className="muted">
-              No activity for this run in the recent event window.
-            </p>
-          )}
-        </div>
-      </div>
-      {(run.status === "running" ||
-        run.status === "failed" ||
-        run.status === "cancelled") && (
-        <div className="detail-actions">
-          <span className="muted text-xs">
-            Created {new Date(run.createdAt).toLocaleString()}
-          </span>
-          {run.status === "running" ? (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!!pending}
-              onClick={() =>
-                void mutate("cancel", `/api/runs/${run.id}/cancel`)
-              }
-            >
-              <X />
-              Cancel run
-            </Button>
-          ) : (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!!pending}
-              onClick={() => {
-                retryKeys.current[run.id] ??= crypto.randomUUID();
-                void mutate("retry", `/api/runs/${run.id}/retry`, {
-                  requestKey: retryKeys.current[run.id],
-                }).then((succeeded) => {
-                  if (succeeded) delete retryKeys.current[run.id];
-                });
-              }}
-            >
-              <RefreshCw />
-              Retry as new run
-            </Button>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-function WorkflowNode({ task, role }: { task?: Task; role: Role }) {
-  const { name, icon: Icon } = roleMeta[role];
-  return (
-    <div className={`workflow-node node-${task?.status || "blocked"}`}>
-      <div className="node-top">
-        <Icon size={16} />
-        {task?.status === "succeeded" ? (
-          <CheckCircle2 size={13} />
-        ) : task?.status === "running" ? (
-          <LoaderCircle className="spin" size={13} />
-        ) : task?.status === "failed" ? (
-          <XCircle size={13} />
+                key={key}
+                className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px]"
+              >
+                {key}={value}
+              </span>
+            ))}
+          </div>
         ) : null}
       </div>
-      <strong>{name}</strong>
-      <span>
-        {labels[task?.status || "blocked"]}
-        {task && task.attempt > 0 ? ` · attempt ${task.attempt}` : ""}
+      <span className="shrink-0 text-xs tabular-nums text-[var(--muted-text)]">
+        {relative(worker.lastSeen, now)} ago
       </span>
     </div>
   );
 }
-function humanEvent(type: string) {
-  const words = type
-    .replace(/^(dev\.)?agenticbus\./, "")
-    .replace(/\.v\d+$/, "")
-    .replace(/[._-]/g, " ");
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-function Journal({ events, runs }: { events: BusEvent[]; runs: Run[] }) {
-  const [query, setQuery] = useState("");
-  const filtered = [...events]
-    .reverse()
-    .filter((event) =>
-      `${event.type} ${event.source} ${event.runId} ${JSON.stringify(event.data)}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-    );
+
+function TaskRow({
+  task,
+  now,
+  selected,
+  onSelect,
+}: {
+  task: TaskSummary;
+  now: number;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   return (
-    <section className="panel">
-      <div className="panel-heading journal-heading">
-        <h2>
-          Recorded events <span className="count">{events.length}</span>
-        </h2>
-        <label className="search-field">
-          <Search size={15} />
-          <input
-            aria-label="Search events"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search events, sources, or run IDs…"
-          />
-          {query && (
-            <button
-              type="button"
-              aria-label="Clear search"
-              onClick={() => setQuery("")}
-            >
-              <X size={13} />
-            </button>
-          )}
-        </label>
-      </div>
-      {!filtered.length ? (
-        <Empty
-          icon={<Activity />}
-          title={query ? "No matching events" : "The journal is ready"}
-        >
-          {query
-            ? "Try another event name, source, or run ID."
-            : "Start a workflow to see its handoffs and results arrive here."}
-        </Empty>
-      ) : (
-        <div className="table-scroll">
-          <table className="journal-table">
-            <thead>
-              <tr>
-                <th>Sequence / time</th>
-                <th>Event</th>
-                <th>Run</th>
-                <th>Source & payload</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((event) => (
-                <tr key={event.id}>
-                  <td>
-                    <code>#{event.seq.toString().padStart(4, "0")}</code>
-                    <span className="muted">{clock(event.time)}</span>
-                  </td>
-                  <td>
-                    <span className="event-type">
-                      <span className="tiny-dot" />
-                      {event.type}
-                    </span>
-                  </td>
-                  <td>
-                    {runs.find((run) => run.id === event.runId)?.title ||
-                      (event.runId ? shortId(event.runId) : "Workspace")}
-                  </td>
-                  <td>
-                    <details>
-                      <summary>
-                        {event.source}
-                        <ChevronRight size={12} />
-                      </summary>
-                      <pre>{JSON.stringify(event.data, null, 2)}</pre>
-                    </details>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <div className="panel-foot">
-        <Radio size={13} />
-        Live updates · latest {events.length} events in the workspace snapshot
-      </div>
-    </section>
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`flex w-full items-center gap-3 border-b border-border px-3.5 py-2.5 text-left last:border-b-0 hover:bg-muted ${
+        selected ? "bg-muted" : ""
+      }`}
+    >
+      <Status status={task.status} />
+      <span className="w-20 shrink-0 truncate font-mono text-xs text-[var(--muted-text)]">
+        {task.runtime}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{task.stepKey}</span>
+      {task.attempt > 1 ? (
+        <span className="shrink-0 text-xs text-amber-700">
+          attempt {task.attempt}/{task.maxAttempts}
+        </span>
+      ) : null}
+      <span className="w-24 shrink-0 truncate text-right text-xs text-[var(--muted-text)]">
+        {task.workerId ?? "—"}
+      </span>
+      <span className="w-10 shrink-0 text-right text-xs tabular-nums text-[var(--muted-text)]">
+        {relative(task.updatedAt, now)}
+      </span>
+    </button>
   );
 }
-function NewRunModal({
-  open,
-  close,
-  created,
-}: {
-  open: boolean;
-  close: () => void;
-  created: (run: Run) => Promise<void>;
-}) {
-  const [title, setTitle] = useState("Build a slugify utility");
-  const [brief, setBrief] = useState(DEFAULT_BRIEF);
-  const [mode, setMode] = useState<Mode>("demo");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const request = useRef<{ signature: string; key: string } | null>(null);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (pending) return;
-    setPending(true);
-    setError("");
-    // An unchanged submission retries the same operation after a lost response.
-    // Editing the payload is explicit new intent; it gets a fresh request key.
-    const payload = { title: title.trim(), brief: brief.trim(), mode };
-    const signature = JSON.stringify(payload);
-    if (request.current?.signature !== signature)
-      request.current = { signature, key: crypto.randomUUID() };
-    try {
-      const run = await api<Run>("/api/runs", {
-        ...payload,
-        requestKey: request.current.key,
-      });
-      request.current = null;
-      await created(run);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Could not create run");
-    } finally {
-      setPending(false);
-    }
-  }
+
+function TaskDetail({ task, events }: { task: TaskSummary; events: BusEvent[] }) {
+  const mine = events.filter((event) => event.taskId === task.id);
   return (
-    <Modal
-      open={open}
-      onOpenChange={(value) => {
-        if (!value && !pending) close();
-      }}
-      title="Start a workflow"
-      description="One brief. Three workers. A decision backed by evidence."
-    >
-      <form onSubmit={submit} className="run-form">
-        <label>
-          Run name
-          <input
-            required
-            maxLength={120}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="Give this workflow a name"
-          />
-        </label>
-        <fieldset>
-          <legend>Execution mode</legend>
-          <div className="mode-options">
-            {(["demo", "live"] as const).map((value) => (
-              <label
-                className={`mode-option ${mode === value ? "mode-selected" : ""}`}
-                key={value}
-              >
-                <input
-                  type="radio"
-                  name="mode"
-                  value={value}
-                  checked={mode === value}
-                  onChange={() => setMode(value)}
-                />
-                <span>
-                  {value === "demo" ? (
-                    <Play size={16} />
-                  ) : (
-                    <Terminal size={16} />
-                  )}
-                  <strong>{modeLabel(value)}</strong>
-                  <small>
-                    {value === "demo"
-                      ? "Deterministic agents, real tests"
-                      : "Claude creates, Codex reviews"}
-                  </small>
-                </span>
-                {mode === value && <CheckCircle2 size={15} />}
-              </label>
-            ))}
+    <div className="border-t border-border bg-muted/40 px-3.5 py-3">
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-4">
+        {[
+          ["run", task.runId],
+          ["step", task.stepKey],
+          ["idempotency key", task.idempotencyKey],
+          ["generation", String(task.generation)],
+          ["selector", JSON.stringify(task.selector)],
+          [
+            "lease",
+            task.leaseUntil ? new Date(task.leaseUntil).toLocaleTimeString() : "—",
+          ],
+        ].map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="text-[var(--muted-text)]">{label}</dt>
+            <dd className="truncate font-mono text-[11px]">{value}</dd>
           </div>
-        </fieldset>
-        <div className="mode-explanation">
-          {mode === "demo"
-            ? "No model calls. Scripted creator and reviewer produce inspectable artifacts; the test worker executes real Bun tests."
-            : "Uses your installed, authenticated Claude and Codex CLIs. Live runs make model calls and consume provider usage. Live workers must be connected."}
-        </div>
-        <label>
-          Brief
-          <textarea
-            required
-            rows={5}
-            maxLength={4000}
-            value={brief}
-            onChange={(event) => setBrief(event.target.value)}
-          />
-        </label>
-        <p className="form-help">
-          This prototype builds a named TypeScript <code>slugify</code> export.
-          You can add instructions while keeping that artifact contract.
+        ))}
+      </dl>
+      {task.error ? (
+        <p className="mt-2.5 rounded-md border border-red-200 bg-red-50 px-2.5 py-2 font-mono text-[11px] whitespace-pre-wrap text-red-800">
+          {task.error}
         </p>
-        <div className="form-workflow">
-          <span>
-            <Code2 size={13} />
-            Create
-          </span>
-          <ArrowRight size={12} />
-          <span>
-            <ShieldCheck size={13} />
-            Review + test
-          </span>
-          <ArrowRight size={12} />
-          <span>
-            <CheckCircle2 size={13} />
-            Approve
-          </span>
-        </div>
-        {error && (
-          <div className="notice error-notice" role="alert">
-            <XCircle size={15} />
-            {error}
-          </div>
-        )}
-        <div className="modal-actions">
-          <Button
-            variant="outline"
-            disabled={pending}
-            onClick={close}
-            type="button"
-          >
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            disabled={pending || !title.trim() || !brief.trim()}
-          >
-            {pending ? <LoaderCircle className="spin" /> : <Play />}
-            {pending ? "Starting…" : "Start workflow"}
-          </Button>
-        </div>
-      </form>
-    </Modal>
+      ) : null}
+      {mine.length > 0 ? (
+        <ul className="mt-2.5 space-y-1">
+          {mine.slice(-12).map((event) => (
+            <li key={event.id} className="flex gap-2 font-mono text-[11px]">
+              <span className="shrink-0 text-[var(--muted-text)]">
+                {new Date(event.time).toLocaleTimeString()}
+              </span>
+              <span className="shrink-0 text-[var(--blue)]">
+                {event.type.replace("dev.agenticbus.", "").replace(".v1", "")}
+              </span>
+              <span className="truncate">
+                {typeof event.data.message === "string"
+                  ? event.data.message
+                  : JSON.stringify(event.data)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
-function ArtifactModal({
-  id,
-  close,
-}: {
-  id: string | null;
-  close: () => void;
-}) {
-  const [artifact, setArtifact] = useState<Artifact | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    setArtifact(null);
-    setError("");
-    if (!id) return;
-    let ignore = false;
-    api<Artifact>(`/api/artifacts/${id}`)
-      .then((value) => {
-        if (!ignore) setArtifact(value);
-      })
-      .catch((error) => {
-        if (!ignore) setError(error.message);
-      });
-    return () => {
-      ignore = true;
-    };
-  }, [id]);
-  let content = artifact?.content || "";
-  if (artifact?.mediaType.includes("json")) {
+
+export function App() {
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "active" | "failed">("active");
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const refresh = useCallback(async () => {
     try {
-      content = JSON.stringify(JSON.parse(content), null, 2);
-    } catch {
-      /* Show original content when JSON is malformed. */
+      setSnapshot(await read<Snapshot>("/api/snapshot"));
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    // SSE is a refresh signal, not a subscription: on any sequence change we
+    // re-read the snapshot, which is the only thing that is authoritative.
+    const source = new EventSource(`/api/events/stream?token=${token()}`);
+    source.addEventListener("update", () => {
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => void refresh(), 120);
+    });
+    source.onerror = () => {};
+    const poll = setInterval(() => void refresh(), 5000);
+    return () => {
+      source.close();
+      clearInterval(poll);
+      clearTimeout(timer.current);
+    };
+  }, [refresh]);
+
+  const tasks = useMemo(() => {
+    if (!snapshot) return [];
+    if (filter === "active")
+      return snapshot.tasks.filter((task) =>
+        ["queued", "running"].includes(task.status),
+      );
+    if (filter === "failed")
+      return snapshot.tasks.filter((task) => task.status === "failed");
+    return snapshot.tasks;
+  }, [snapshot, filter]);
+
+  const queued = snapshot
+    ? Object.values(snapshot.queueDepth).reduce((sum, n) => sum + n, 0)
+    : 0;
+  const running = snapshot
+    ? snapshot.tasks.filter((task) => task.status === "running").length
+    : 0;
+  const live = snapshot
+    ? snapshot.workers.filter(
+        (worker) => !worker.paused && snapshot.now - worker.lastSeen < 30_000,
+      ).length
+    : 0;
+
   return (
-    <Modal
-      open={!!id}
-      onOpenChange={(value) => {
-        if (!value) close();
-      }}
-      title={artifact?.name || "Inspect artifact"}
-      description={
-        artifact
-          ? `${artifact.mediaType} · ${new Date(artifact.createdAt).toLocaleString()}`
-          : "Loading the recorded artifact and its evidence."
-      }
-      wide
-    >
-      {error ? (
-        <div className="notice error-notice" role="alert">
-          {error}
+    <div className="mx-auto max-w-6xl px-5 py-7">
+      <header className="flex items-center justify-between gap-4">
+        <div>
+          <h1 className="flex items-center gap-2 text-base font-semibold">
+            <Boxes className="size-4" />
+            AgenticBus
+          </h1>
+          <p className="mt-0.5 text-xs text-[var(--muted-text)]">
+            Remote execution fleet. Runs and steps live in dagr; this is the
+            machines underneath them.
+          </p>
         </div>
-      ) : !artifact ? (
-        <div className="loading-state">
-          <LoaderCircle className="spin" />
-          Loading artifact…
+        {error ? (
+          <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs text-red-700">
+            {error}
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 text-xs text-[var(--muted-text)]">
+            <Activity className="size-3.5" />
+            live
+          </span>
+        )}
+      </header>
+
+      <section className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Metric icon={Server} label="Workers" value={live} hint={`${snapshot?.workers.length ?? 0} registered`} />
+        <Metric icon={Layers} label="Queued" value={queued} />
+        <Metric icon={Cpu} label="Running" value={running} />
+        <Metric
+          icon={Clock}
+          label="Failed"
+          value={snapshot?.tasks.filter((t) => t.status === "failed").length ?? 0}
+          hint="recent window"
+        />
+      </section>
+
+      <section className="mt-6 grid gap-5 lg:grid-cols-[1fr_320px]">
+        <div className="overflow-hidden rounded-md border border-border bg-white">
+          <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5">
+            <h2 className="text-sm font-medium">Tasks</h2>
+            <div className="flex gap-1">
+              {(["active", "failed", "all"] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setFilter(option)}
+                  className={`rounded-md px-2 py-1 text-xs ${
+                    filter === option
+                      ? "bg-primary text-white"
+                      : "text-[var(--muted-text)] hover:bg-muted"
+                  }`}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          </div>
+          {tasks.length === 0 ? (
+            <p className="px-3.5 py-8 text-center text-xs text-[var(--muted-text)]">
+              Nothing here. Dispatch a step with <code>runtime: remote</code>.
+            </p>
+          ) : (
+            tasks.map((task) => (
+              <div key={task.id}>
+                <TaskRow
+                  task={task}
+                  now={snapshot?.now ?? Date.now()}
+                  selected={selected === task.id}
+                  onSelect={() =>
+                    setSelected(selected === task.id ? null : task.id)
+                  }
+                />
+                {selected === task.id ? (
+                  <TaskDetail task={task} events={snapshot?.events ?? []} />
+                ) : null}
+              </div>
+            ))
+          )}
         </div>
-      ) : (
-        <>
-          <div className="artifact-metadata">
-            <Braces size={14} />
-            <span>SHA-256</span>
-            <code>{artifact.digest}</code>
-          </div>
-          <pre
-            className="code-view"
-            tabIndex={0}
-            aria-label={`${artifact.name} content`}
-          >
-            <code>{content}</code>
-          </pre>
-          <div className="artifact-modal-foot">
-            <FileText size={14} />
-            Immutable evidence from run <code>{shortId(artifact.runId)}</code>
-          </div>
-        </>
-      )}
-    </Modal>
+
+        <div className="overflow-hidden rounded-md border border-border bg-white">
+          <h2 className="border-b border-border px-3.5 py-2.5 text-sm font-medium">
+            Workers
+          </h2>
+          {snapshot && snapshot.workers.length > 0 ? (
+            snapshot.workers.map((worker) => (
+              <WorkerRow key={worker.id} worker={worker} now={snapshot.now} />
+            ))
+          ) : (
+            <p className="px-3.5 py-8 text-center text-xs text-[var(--muted-text)]">
+              No worker has registered.
+            </p>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }

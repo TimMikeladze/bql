@@ -1,3 +1,5 @@
+> **Superseded (2026-09-12).** The prototype this plans was replaced by the distributed-execution design; see [../specs/2026-09-12-distributed-execution.md](../specs/2026-09-12-distributed-execution.md).
+
 # AgenticBus end-to-end prototype implementation plan
 
 **Goal:** Run a durable artifact creation, review, test, and human approval workflow through a Bun coordinator and independent HTTP workers, visible in a Reportable-inspired dashboard.
