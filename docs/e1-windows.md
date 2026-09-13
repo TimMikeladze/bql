@@ -47,17 +47,76 @@ It becomes a gate by deleting those lines, on the day it passes.
 
 ## 3. What was observed
 
-*Filled in from the run — see the commit that follows this document.*
+Three runs, each one answering a question the last one could not reach.
 
-## 4. What is known to be untested even when it is green
+**Run 1 — the build never happened, and the driver segfaulted.** `scripts/sqlite.ts` located
+`walsum.c` through `URL.pathname`, which is `/D:/a/bunql/…` on Windows and which no file API
+accepts, so there was no DLL. The driver then fell through to the candidate `"sqlite3.dll"` — and
+that is not a filename on Windows, it is a request to the loader to search System32 and every
+directory on `PATH`. It found something, resolved symbols from it, and Bun died at address 0 on the
+first call. Both fixed: `fileURLToPath` is now the only way this repo turns a module URL into a
+path, and Windows has **no** system candidate at all.
 
-Two classes of thing the suite exercises heavily and Windows treats differently, so a green run is
-the beginning of the evidence rather than the end of it:
+**Run 2 — `clang: error: unsupported option '-fPIC' for target 'x86_64-pc-windows-msvc'`.** PE code
+is position-independent by construction and clang refuses the flag rather than ignoring it. Worth
+recording for the shape of the failure it replaced: with no library and no bad candidate, the error
+is now the one the driver is written to give — "no library", the remedy, and the path the artefact
+will appear at.
+
+**Run 3 — it builds, it loads, and the suite runs.**
+
+```
+D:\a\bunql\bunql\vendor\sqlite\sqlite3.dll 3.53.4
+{"preupdate":true,"session":true,"snapshot":true,"walsum":true,"fts5":true,
+ "rtree":true,"dbstat":true,"json":true,"math":true,"threadsafe":1}
+```
+
+Every capability, including `snapshot` — which no distribution build on any platform ships
+(`docs/c6-packaging.md` §1) — and `walsum`, so the `__declspec(dllexport)` work is proven by the
+symbols resolving rather than by the DLL merely opening.
+
+**`bun test`: 1346 pass, 150 fail, across 1498 tests.** Roughly 90% of the suite passes on a
+platform nothing had ever run.
+
+### The prediction was wrong, and in the cheerful direction
+
+C5 expected the mechanism-B fallback with a warning. That is **not** what happened: `xShmLock` is
+reachable, the page applier runs, and the fourteen mechanism-A failures are not locking failures.
+
+### What the 150 actually are: one root cause, and a typo
+
+Grouped by message rather than by test, the failures collapse almost entirely into one:
+
+| | |
+|---|---|
+| `EBUSY: resource busy or locked, write` | 15 distinct sites |
+| `BUSY: <db> is taking a snapshot` | the same thing, seen by a client |
+| `timed out waiting for <replica> to reach <db>@N` | ~15 sites, all downstream of the above |
+
+**Windows refuses to write a file another handle has open.** POSIX allows it, and BunQL leans on
+that: `tenant.snapshot()` copies the database file while the tenant still holds it, which is what
+makes a snapshot nearly free (`src/wal/snapshot.ts`). On Windows that copy raises `EBUSY`, the
+snapshot fails, the tenant stays marked exclusive, clients get `503 BUSY`, and every replica that
+was waiting for a bootstrap snapshot times out. One cause, three layers of symptom, and it accounts
+for the replication, restore, bootstrap, segment-index and crash-reconcile clusters together.
+
+The one unrelated failure is `loadConfig` expecting `"/tmp/bunql-canonical"` — a POSIX path
+literal in a test, not a portability problem in the code.
+
+### So where Windows stands
+
+**Observed, characterised, and not supported.** The build is portable, the driver loads a fully
+capable library, and the single-node paths that do not snapshot largely work. Making it supported
+means opening files with Windows share modes that permit a concurrent read, or copying through a
+handle opened for sharing, and then re-running this job — which is now the instrument for saying
+whether that worked.
+
+## 4. The two things this job was built to ask about
 
 - **Deleting and renaming open files.** POSIX allows both; Windows refuses while a handle is open.
   The trash sweep (`docs/r6-retention.md`), log segment rotation and the snapshot reflink all move
-  or remove files a tenant may still hold.
-- **The WAL's shared-memory locks**, which is the original question. `xShmLock` through the Win32
-  VFS is `LockFileEx` rather than `fcntl`, and the mechanism-A applier takes all eight slots in one
-  call (`docs/c5-apply-pages.md` §4.3). The fallback to mechanism B is what protects a replica if
-  that is not reachable, and the job's log is where that warning would appear.
+  or remove files a tenant may still hold. **This is §3's root cause**, found first through the
+  snapshot copy rather than through any of those.
+- ~~**The WAL's shared-memory locks**, which is the original question.~~ **Answered in §3**:
+  `xShmLock` resolves through the Win32 VFS, mechanism A runs, and no fallback warning appears.
+  The question that replaced it is the one above.

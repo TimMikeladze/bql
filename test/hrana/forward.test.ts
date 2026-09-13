@@ -56,6 +56,11 @@ async function pair(): Promise<{ primary: Node; replica: Node }> {
   await createDb(primary, "acme", "create table t (id integer primary key, v text)")
   const replica = await startReplica(primary)
   await untilFollowing(replica, "acme")
+  // `untilFollowing` waits for the *database*, not for its contents, so the schema may not have
+  // been applied yet. Every test below reads `t`, and R10's read transactions pin a snapshot the
+  // moment they first read — so a schema that arrives a millisecond later is invisible to them for
+  // the whole transaction, which showed up as a flaky `no such table: t`.
+  await untilSynced(primary, replica, "acme")
   return { primary, replica }
 }
 

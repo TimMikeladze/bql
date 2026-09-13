@@ -409,6 +409,9 @@ and A gains it. Every other test in that file, and both e2e replication scenario
 - `sqlite3_file_control(SQLITE_FCNTL_FILE_POINTER)` and a raw call through `pMethods->xShmLock` are
   the only FFI in `src/wal/`, and they live in one file (`src/wal/shmlock.ts`) behind `tryLock` /
   `unlock`. A platform where that resolution fails gets mechanism B and a warning, not an error.
-- Windows is untested. The wal-index layout is the same (`winShmLock` takes the same eight slots)
-  and the code reads `iVersion` before it trusts the method table, so the worst case is the
-  fallback — but nothing here has run on it.
+- ~~Windows is untested.~~ **Tested now, and the prediction was wrong in the cheerful direction**
+  (`docs/e1-windows.md`). It was that `xShmLock` might be unreachable and the worst case was the
+  mechanism-B fallback with a warning. On `windows-latest` the vendored build reports every
+  capability, `xShmLock` resolves, and mechanism A runs. What fails there is not locking at all: it
+  is `EBUSY` on the snapshot's file copy, because Windows refuses to write a file another handle
+  has open. 1346 of 1498 tests pass; Windows is observed and characterised, not supported.

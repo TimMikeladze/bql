@@ -1,90 +1,87 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-12 at the end of the session that built C4c — *following* an upstream on a node
-with workers. Read this, then `docs/c4c-replication-follow.md`, then
-`docs/c4b-replication-workers.md`, then `docs/c4-workers.md`, then
-`docs/c5-apply-pages.md`, then `docs/p3-wal-checksum.md`, then `docs/performance.md`, then
-`docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the
-cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL), `docs/c4c-replication-follow.md`,
-`docs/c4b-replication-workers.md`,
-`docs/c5-apply-pages.md`,
-`docs/p3-wal-checksum.md`, `docs/c4-workers.md`, `docs/h6-mount.md`, `docs/h8-validated-requests.md`, `docs/p1-pragmas.md` and
-`docs/p2-group-commit.md`.
+Rewritten 2026-09-13 at the end of the session that closed the last five open items: per-database
+`ackWithoutReplicas` (R8), the S3 manifest's quadratic rewrite (R9), read transactions on a pooled
+reader (R10), the router's header clone (P6) and **Windows, observed for the first time** (E1).
+
+Read this, then the five documents above — `docs/r8-per-db-ack.md`, `docs/r9-segment-index.md`,
+`docs/r10-read-transactions.md`, `docs/p6-router-resolution.md`, `docs/e1-windows.md` — then
+`docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/performance.md`, `docs/design.md` §0, §11
+and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster) and
+`docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL).
 
 ## Where things stand
 
-Phases 0 and 1 are complete; phase 2 has its control plane, its failover, its packaging, its
-multi-core story, the apply mechanism its replicas were always meant to use, and — as of C4b and
-C4c — **both halves of replication working beside workers**. On `main`,
-pushed to **https://github.com/TimMikeladze/bunql** (private; `origin/main` current, tree clean).
-`bun test` → **1398 pass, 2 skip, 0 fail** across 114 files, and green again with
-`BUNQL_WAL_NATIVE=0` (**1396 / 4 / 0** — run it both ways; the second is what proves the JavaScript
-fallback).
-`bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. **CI green on macOS and
-Linux.** Zero runtime dependencies.
+**Phases 0, 1 and 2 are complete, and so is the surfaces track.** C1-C6, C3a/C3b, C4-C4e, H1-H8,
+P1-P6, R1-R10. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
+`bun test` → **1478 pass, 2 skip, 0 fail** across 124 files, and green again with
+`BUNQL_WAL_NATIVE=0` (**1476 / 4 / 0** — run it both ways; the second is what proves the JavaScript
+fallback). `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. **CI green on
+macOS and Linux**; Windows is exploratory and is described below. Zero runtime dependencies.
 
-**A node uses its cores.** `[server] workers = N` (`bunql serve --workers N`) shards databases
-across worker threads behind one port: **28 809 writes/s at one worker, 72 817 at six, 2.67x**, on
-the same eight databases and the same load the ceiling was measured on. `docs/c4-workers.md`.
+### What this session changed, newest first
 
-**And it can serve replicas while it does.** C4b (`docs/c4b-replication-workers.md`) lifted the
-refusal C4 left behind, and **not** with the `Tenant` proxy this file used to call for: **the
-*stream* crosses the worker channel, not the tenant.** The router owns the replication connection —
-the socket, the HMAC handshake, the frame reader, the one send queue and cut-off, the heartbeat and
-the node's announcement — and the worker that owns a database owns that database's stream, so
-`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()` and `registry.pin` are still called on
-the thread that holds the writer. Nothing about a `Tenant` is on the channel; the hot path is one
-`postMessage` per `TXN`. `src/replication/primary.ts` gained a `hosted` flag and four methods and
-**nothing below the connection changed**. A three-worker primary and a real replica, exercised by
-hand across a shard boundary, land on the primary's checksum byte for byte with a zero-byte `-wal`.
-Serving a replica costs **15%** of write throughput on a single-threaded node and **19%** on a
-sharded one — so the channel is about four points of it — and six workers with a replica attached
-still do **65 845 writes/s against one worker's 28 236**.
+**Windows has run, and it is not what C5 predicted (E1).** The prediction was that `xShmLock` might
+be unreachable and a replica would fall back to mechanism B with a warning. Instead the vendored
+build compiles on `windows-latest`, loads, and reports **every** capability — `snapshot` and
+`walsum` included — and mechanism A runs. **1346 of 1498 tests pass.** The 150 that fail are almost
+all one cause: `EBUSY`, because Windows refuses to write a file another handle has open, and
+`tenant.snapshot()` copies the database file while the tenant still holds it. That one failure
+cascades into every replication, restore and bootstrap timeout in the list. Windows is **observed
+and characterised, not supported**; the job is `continue-on-error` and becomes a gate by deleting
+those lines. Getting there also fixed two portability bugs — `URL.pathname` is `/D:/…` on Windows
+and no file API takes it, and a bare `"sqlite3.dll"` candidate is a request to the loader to search
+`PATH`, which found something and segfaulted.
 
-**And it can follow one.** C4c (`docs/c4c-replication-follow.md`) lifted the last replication
-refusal, with C4b's seam cut the other way: the router owns the one upstream connection — the
-socket, the reconnect and backoff, the HMAC proof, the frame reader, the generation ledger, R7's
-reconciliation and R2's forward queue — and the worker that owns a database owns that database's
-stream, so `registry.openReplica`, the snapshot file, `installSnapshot`, `registry.pin` and
-`tenant.applyRecord` all run on the thread that holds the writer. It is **one class in three
-modes** — `ReplicaClient` runs `"own"`, `"routed"` and `"hosted"` — rather than a second class, so
-`#resolveFollow`, the backoff and the ledger exist once; `src/server/workers/replica.ts` is 151
-lines of adapter with no protocol in it. The hot path is one `postMessage` per `TXN` down and one
-per `ACK` up.
+**The router's headers cross flat, and it is worth about 8% (P6).** P4 left two suspects and no
+instrument fine enough to choose. The instrument came first: `bench/router.ts` resolves **4%** and
+reports its own resolution before anything else — control against control, 40 interleaved rounds,
+median ratio 1.002. It also says where it cannot be trusted: the same *node* against itself is
+0.978 at four workers and **0.674 at one**, so a node A/B is run twice with the trees swapped and a
+single-worker comparison is not reportable at all. The finding: **it is the headers, not the body.**
+Removing the body clone is worth 6.6% of a hop; removing the header clone is worth 37.5%; and
+flattening the pairs to one `"key\nvalue"` string recovers 19.2%, split included. On a real
+four-worker node against its own parent tree, position cancelled: **1.076x, honest band 5-11%**,
+roughly 54 000 → 60 000 reads/s. Transferring the body instead of cloning it was tried and
+**reverted** — nothing, then slightly worse than nothing.
 
-**What C4c is worth is narrower than this file used to claim, and the measurement says so.** A
-replica's **HTTP** reads go **34 600/s at one worker to 55 300 at six — 1.60x, and flat past two**,
-because the router's accept-and-hop loop becomes the ceiling. Its **socket** reads go **259 700 to
-232 300 — 0.90x**, because every frame is relayed by the router and a point read (0.79 µs) is
-cheaper than the hop. The premise "~220k reads/s on one thread while six sit idle" was half wrong:
-the threads were idle, but that number was never thread-bound. **Shard a replica when its readers
-speak HTTP; leave it on one thread when they speak the socket protocol.** `bun run
-bench/workers.ts --follow [--transport http]`.
+**A read transaction lives on a pooled reader (R10).** `BEGIN TRANSACTION READONLY` — what
+`@libsql/client` emits for `transaction("read")` — was refused on a replica because `Tenant.txBegin`
+takes the *writer* whatever the mode. It now takes a leased reader, on **both** roles, so it works
+on a replica and no longer blocks writes on a primary. Bounded by `[limits] maxReadTx` (16),
+the existing idle timeout and `[limits] readTxTimeoutMs` (30 s). Building it found a five-second
+event-loop stall: `WalApplier.#acquire` spun with `Bun.sleepSync` for up to `applyBusyMs` = 5000,
+buying patience the replica's asynchronous retry already had. **`applyBusyMs` is now 25 ms** and the
+retry backs off 5 ms → 250 ms.
 
-**A replica reads at full speed.** Apply mechanism A is built and is the default
-(`[replication] apply = "pages"`): the primary's pages go straight into the replica's database file
-and the 136-byte wal-index header is rewritten under SQLite's own WAL lock set, so a replica's
-`-wal` is **always zero bytes** and a reader never rebuilds an index. **The replica read leg went
-47.2 µs → 6.4, and the apply leg 196 → 162**, end to end 291 → 211. Mechanism B is still there,
-behind the same switch, as the back-out and as the automatic fallback where `xShmLock` is
-unreachable. `docs/c5-apply-pages.md`.
+**The S3 manifest stopped being rewritten whole (R9).** The item this file carried since R3 — "the
+shipper re-uploads the open segment as it grows" — **was false**, and measuring it said so: no
+segment key is ever uploaded twice. What the measurement found instead was worse. The manifest is
+rewritten on every drain and carried an entry per segment ever shipped, so a database's backup cost
+O(n²) in its drains: at the defaults, a database committing once a second reaches a 650 MB manifest
+and re-uploads it every second. On 400 drains: **28.2 MB of manifest for 296 KB of records**. The
+inventory now lives in immutable chunks under `index/`, found by listing rather than named, and the
+manifest keeps only the tail — **2.26 MB for the same 400 drains, and bounded rather than growing.**
 
-**A write is 17% cheaper.** The WAL frame checksum runs in C — `scripts/native/walsum.c`, compiled
-into the vendored libsqlite3 and resolved as an optional symbol, so a node on a system library
-keeps the JavaScript and says so at startup. `recorder.poll` **7.67 µs → 3.17**, a single-row write
-**28.9 → 24.0**, write throughput over sockets **29 136 → 33 854/s at one worker and 78 393 →
-86 006 at four**. It also corrects `docs/performance.md` §3.6, which had blamed cache misses:
-four JavaScript rewrites were measured against the real tailer and none of them moved it at all.
-`docs/p3-wal-checksum.md`.
+**`ackWithoutReplicas` is per database (R8).** A node with ten databases and a replica on one of
+them no longer refuses `ack: "replica"` on the other nine. Same shape as per-database `foreignKeys`
+— a nullable catalog column and `PATCH /v1/db/{db}` — but read at ack time rather than held on a
+connection, so setting it closes nothing.
 
-**The surfaces are no longer dark.** `GET|POST|PATCH|DELETE /v1/db/{db}/api/*`,
-`GET /v1/db/{db}/openapi.json`, `POST /v1/db/{db}/graphql` (GraphiQL on `GET`) and
-`GET /v1/openapi.json` all serve, and the `Bun.serve` route table is now *built from* the same
-`Registry` the server document is emitted from (`src/server/registry.ts`) — so a route that no
-document describes cannot exist, and `bun run routes:check` fails on one. `docs/h6-mount.md`.
+### The three questions this session asked and did not get an answer to
 
-**Both open §13 decisions are settled:** **#11 built-in Raft**, control plane only; **#9 default
-`ack` stays `local`**.
+They are in the session's opening message and they are still open. Nothing was changed for any of
+them, so each is still one line:
+
+1. **Default `ack`** — still `local`. `replica` on a node that has replicas is the alternative; the
+   reason to leave it is that `NO_REPLICAS` then fires when the only replica is restarting. R8 makes
+   it per-database now, which is the blunt-instrument objection answered.
+2. **`[durability] deferAppend`** — built, verified, **still off**. 2.4x on a write (21 → 9 µs)
+   keeping compression's 4.3x ratio, suite green with it forced on, `kill -9` verified.
+   `docs/p5-deferred-compression.md`.
+3. **`[limits] groupCommit`** — **still off**. Folded writes share a txid, which coarsens the change
+   feed; two e2e tests assert one txid per write and are where that contract is written down.
+   `docs/p2-group-commit.md`.
 
 ### What the performance session established, and it still shapes where to look
 
@@ -155,14 +152,13 @@ in someone else's file.
 Tim has not overridden any of the eleven; phases 0 and 1 shipped the recommended default for each.
 Two now matter:
 
-- **#11, the cluster control plane** — built-in Raft, external (etcd/Postgres), or static topology
-  only. This is the first thing phase 2 needs, and nothing else in phase 2 can be designed around
-  it. The recommendation stands at built-in Raft, on the control plane only, never on the data
-  path.
-- **#9, the default `ack`** — still `local`. Replicas exist now, so `replica` as the default for a
-  node that has them is a real option. It is one line in `config.ts` and a paragraph in
-  `docs/api.md`; the reason to leave it is that `NO_REPLICAS` would then fire on a node whose
-  replica is restarting.
+- ~~**#11, the cluster control plane**~~ **Settled and built: built-in Raft**, on the control plane
+  only, never on the data path (C1, C2, C4d).
+- **#9, the default `ack`** — still `local`, and asked again this session without an answer.
+  `replica` as the default for a node that has replicas is a real option; it is one line in
+  `config.ts` and a paragraph in `docs/api.md`, and the reason to leave it is that `NO_REPLICAS`
+  would then fire on a node whose only replica is restarting. R8 answered the *blunt* half of the
+  objection — it is per database now.
 
 ## Phase 2 — what is left
 
@@ -174,8 +170,10 @@ C1, C2 and C6 are done (see the table above). What remains, in the order it make
    at all** still reads `BunQL-Role: replica` and refuses a write with `NOT_PRIMARY`, because the
    demotion is persisted rather than held in memory. No split brain in the one scenario where a
    node has every reason to believe it is still in charge.
-3. **Placement and the `[cluster]` config section**, so a database has a home node and a client
-   that lands on the wrong one is told where to go rather than answered slowly.
+3. ~~**Placement and the `[cluster]` config section**~~ **Done (C3, C3a, C3b).** A database has a
+   home node by rendezvous hashing over the replicated membership, a client that lands on the wrong
+   one is told where to go, and placement decides which node subscribes to which.
+   `docs/c3-placement.md`.
 4. ~~**`workers: N`.**~~ **Done (C4).** `docs/c4-workers.md`. The decision the milestone really made:
    a worker owns a **shard of databases**, not a shared listener via `reusePort` — which is dead on
    macOS (measured) and which would turn every per-process singleton into an N-way distributed
@@ -194,11 +192,11 @@ C1, C2 and C6 are done (see the table above). What remains, in the order it make
    = "wal"` is the back-out and the automatic fallback where `xShmLock` cannot be reached.
 6. ~~**Linux packaging and CI**~~ **Done (C6).** See `docs/c6-packaging.md`.
 
-Then the surfaces: ~~**H6**~~ **Done** (`docs/h6-mount.md`) — the `/v1` routes are now declared in
-one `Registry` that builds the route table *and* `GET /v1/openapi.json`, the generated data API,
-the per-database document and GraphQL are mounted, and `scripts/routes.ts --check` fails on a
-served route that is not in the registry. **H7** adds GraphQL subscriptions over the change feed
-`src/realtime/` already has. `docs/plan-surfaces.md` has both.
+Then the surfaces: ~~**H6**~~ and ~~**H7**~~ **both done.** `docs/h6-mount.md` — the `/v1` routes
+are declared in one `Registry` that builds the route table *and* `GET /v1/openapi.json`, and
+`scripts/routes.ts --check` fails on a served route the registry does not declare. **H7** added
+GraphQL subscriptions over the change feed `src/realtime/` already had. `docs/plan-surfaces.md` has
+both. **Phase 2 and the surfaces track are complete.**
 
 ## Known gaps worth fixing along the way
 
@@ -337,160 +335,80 @@ What phase 1 added to the list:
   generation would promote wrong data.
 - **A replica cannot be promoted.** Recovery from a lost primary today is a new node pointed at
   the bucket. This is the headline gap and it is phase-2 milestone 2.
-- **The Hrana surface does not forward writes.** A write to `/v2/pipeline` on a replica is
-  `NOT_PRIMARY`. Forwarding it means deciding what a baton opened on a replica means, which is why
-  R4 left it.
+- ~~**The Hrana surface does not forward writes.**~~ **Closed (R4b)**, and the read half with it:
+  `BEGIN TRANSACTION READONLY` on a replica is served on a pooled reader rather than refused
+  (R10, `docs/r10-read-transactions.md`). The native `/v1/db/{db}/tx` keeps its three writer modes
+  and has no read mode; `BunQL-Min-Txid` is its answer, and that is the one part of R10 not built.
 - **A replica's change feed is txid-only** (`changes: []`). Row-level CDC on a replica needs
   logical decoding of the WAL, which design §11 puts in phase 3.
 - **A forwarded write is not retried**, by design: `FORWARD_TIMEOUT` or a dropped socket means "may
   or may not have committed". A client that cares reads the txid back. If phase 2 adds idempotency
   keys, this is where they go.
-- **`ackWithoutReplicas` is a per-node switch, not a per-database one.** A node with ten databases
-  and a replica following one of them refuses `ack: "replica"` on the other nine, which is correct
-  but blunt.
+- ~~**`ackWithoutReplicas` is a per-node switch, not a per-database one.**~~ **Closed (R8,
+  `docs/r8-per-db-ack.md`).** A nullable catalog column and `PATCH /v1/db/{db}`, read at ack time
+  rather than held on a connection, so setting it closes nothing and the next write sees it.
 - **`maxOpenTx` is fixed at 1** by the tenant having one writer. `txWaitMs` is the knob that
   matters. Worth revisiting only with `workers: N`.
-- **The S3 shipper re-uploads an open segment as it grows.** Cheap here (633 bytes a record on the
-  bench), but a workload with large transactions pays for the same bytes more than once. Ship
-  closed segments only, or upload ranges.
+- ~~**The S3 shipper re-uploads an open segment as it grows.**~~ **False, and measuring it is what
+  said so (R9, `docs/r9-segment-index.md`): no segment key is ever uploaded twice.** What the
+  measurement found instead was the *manifest*, rewritten whole on every drain with an entry per
+  segment ever shipped — O(n²) in a database's drains, 28.2 MB of manifest for 296 KB of records
+  over 400 drains. **Closed**: the inventory moved into immutable chunks under `index/` and the
+  manifest keeps only the tail.
 
 ## Start here
 
-**A, B, C, C4b, C4c and C4d are all done, and C4 is finished: there is no combination
-`[server] workers > 1` refuses any more.** What is left, biggest first: **C3** (placement and
-`[cluster]`), **H7** (GraphQL subscriptions), **deferred compression** (now the largest single line
-item on a write), and — no longer — the router's accept-and-hop loop, which is now
-profiled (`docs/p4-router-hop.md`) and is **not** where the loss is. Each section below is written
-so it can be started cold.
+**Nothing milestone-sized is open.** Phases 0-2, the surfaces track and every item this file has
+carried as a gap are done, with two exceptions that are written down rather than forgotten:
 
-**What the hop profile found**, because it overturns what this file used to say. A sharded node's
-HTTP reads do stop scaling (1.56x for four times the workers, two load-client processes), but the
-channel is not the constraint: it does 239 000 round trips/s at four workers while the node does
-49 000 reads/s, five times the headroom. A do-nothing `Bun.serve` measured with the same client
-does **at least 152 000/s**, so roughly 14 µs per request is ours and it is on the router's single
-thread — which is what caps the ladder. Ruled out along the way, each with a measurement: batching
-(2.9x at one worker, *nothing* from two up), idle attached threads (free), and in-flight depth (no
-effect). Also: one load-client process tops out near 75 000/s, which is most of the 40% run-to-run
-variance this file's earlier "collapse at six workers" was reading as signal.
+### 1. Windows: one root cause away from being a gate
 
-### A. ~~`workers: N`~~ **Done (C4).** ~~C4b~~, ~~C4c~~ and ~~C4d~~ **Done too.** What is left
+`docs/e1-windows.md` is the whole story. The build is portable and the driver loads a fully capable
+vendored library; **1346 of 1498 tests pass**, and almost every failure is one cause: `EBUSY`,
+because Windows refuses to write a file another handle has open and `tenant.snapshot()` copies the
+database file while the tenant still holds it. Fix that — Windows share modes on the open, or a copy
+through a handle opened for sharing — and most of the 150 go with it. The `windows-latest` job is
+already in CI and is the instrument for saying whether it worked; it becomes a gate by deleting its
+`continue-on-error` lines. One test also hard-codes `/tmp/bunql-canonical`, which is just a typo.
 
-`docs/c4-workers.md` is the decision, the measurements that forced it and the as-built §9.
-**28 809 → 72 817 writes/s at six workers, one port.**
+### 2. The three defaults nobody has ruled on
 
-**C4b is built** (`docs/c4b-replication-workers.md`): a sharded node serves replicas. It is not the
-`Tenant` proxy this file used to call for, and rejecting that shape is the milestone's decision:
-**the *stream* crosses the channel, not the tenant.** The router owns the replication *connection*
-— the socket, the HMAC handshake, the frame reader, the one send queue and cut-off, the heartbeat
-and the node's announcement — and the worker that owns a database owns that database's *stream*, so
-`tenant.onCommit`, `tenant.log.iterate`, `tenant.snapshot()`, `tenant.epoch` and `registry.pin` are
-all still called on the thread that holds the writer. Nothing about a `Tenant` is on the channel;
-the hot path is one `postMessage` per `TXN`, which is what a socket on another thread costs and no
-more. A proxy would have turned `onCommit` and `log.iterate` into request/response per record,
-which is exactly how it would have got slow.
+`[durability] defaultAck`, `[durability] deferAppend` and `[limits] groupCommit` — see the section
+above. Each is one line plus a paragraph of `docs/api.md`, and each is a *decision* rather than a
+piece of work.
 
-**C4c is built too** (`docs/c4c-replication-follow.md`): a sharded node follows an upstream. The
-milestone's decision was *not* to write a second class. `#resolveFollow`, the reconnect backoff,
-the generation ledger, `#subscribed`'s identity check and R2's forward queue are the same logic a
-single-threaded node runs, so `ReplicaClient` gained a third mode instead — `"routed"` on the
-router, with the registry calls replaced by an injected `ShardHost`, and `"hosted"` on a worker,
-driven through a **virtual upstream socket** so `SUBSCRIBE`, `ACK`, `UNSUBSCRIBE` and the diverged
-`ERROR` cross with no new plumbing at all. `src/server/workers/replica.ts` is 151 lines of adapter.
-The four questions it had to answer, all in §3 of its document: the snapshot chunk crosses
-**compressed** and the worker decompresses it (zstd off the one thread that holds every socket);
-the ledger stays wholly on the router and the worker reports only *that* a copy now exists, ordered
-**before** the `ACK`; the worker builds the `SUBSCRIBE` body because the txid, epoch and checksum
-are its and the router sends the one field that is not; and `readyz` is still one fact and it is
-the router's.
+### One flaky test, observed
 
-**C4d is built too** (`docs/c4d-cluster-workers.md`), and it was the last refusal: `[cluster]
-enabled` beside `workers > 1` starts. The decision was *not* to move the control plane. The
-`ClusterNode` stays whole on the router — the Raft log, the socket, the timers, `propose`, the lease
-cache, renewal and failover — and the `Promoter` runs on the worker over its own shard, because
-every input to a claim, an ack and a promotion request is a tenant fact (`tenant.txid`,
-`tenant.epoch`, the generation ledger, the live stream) and `#flip` touches the tenant, the realtime
-engine and the replica client. What crosses for the write path is one thing, downward only: the
-lease **deadline**.
-
-The milestone's one genuinely new problem was in that word. A deadline is an instant on
-`performance.now()`, and **each Bun worker has its own `performance.timeOrigin`** — measured, not
-assumed: 2.465 ms apart on one run, −1.28 on another, constant to 64 µs over 2 s. So it cannot cross
-verbatim. Re-stamping a remaining duration on arrival was rejected, because its error is the transit
-time, unbounded when the worker's event loop is busy, and in the unsafe direction. It crosses as an
-instant converted with an offset the worker measures itself over a round trip on monotonic clocks
-only (`t2 − t3 ≤ offset`, the conservative bound, wrong by at most one round trip: 28–204 µs against
-a 500 ms guard). The write path then costs **no message at all** — `assertWritable` on a worker is
-one `Map.get` and one `performance.now()`, and **86 573 writes/s at six workers clustered against
-86 754 plain** is what that is worth.
-
-Nothing of C4 is refused any more, and **its reporting gaps are closed too** (C4e, in
-`docs/c4-workers.md` §9). `GET /v1/db` reports which databases are open and where they have got to,
-by gathering from the workers — an admin listing route, and a thread that holds its own tenants
-pays nothing. The `bunql_s3_*` gauges are back, merged across the shards by exactly the rule one
-node already applies across its own databases, which is exact rather than a convention because the
-shards hold disjoint databases. And a hopped body of a megabyte or more is transferred rather than
-copied, so an import no longer pays an extra copy.
-
-### B. ~~Replica apply mechanism A~~ **Done (C5).** What it measured, and what it left
-
-`docs/c5-apply-pages.md` is the decision, the probes that were run before any code, and the as-built
-§8. **Replica read 47.2 µs → 6.4 (7.4x), apply 196 → 162, end to end 291 → 211.** The locks are all
-eight wal-index slots taken in one `xShmLock` through the connection's own `sqlite3_file`, so a
-local reader mid-transaction makes the apply wait and then answer `ApplyBusy` — retryable, nothing
-written — instead of writing underneath it. Verified by hand on real nodes, including a replica
-`kill -9`'d mid-stream and one whose database file was scribbled over, which failed loudly and
-re-snapshotted.
-
-Two things it deliberately did not do:
-
-- **The primary's tailer was unchanged** — and **P3 has since dealt with that** by a different
-  route than §3.6 predicted: `docs/p3-wal-checksum.md`.
-- **Windows is untested.** `winShmLock` takes the same eight slots and the code checks
-  `pMethods->iVersion` before it trusts the table, so the worst case is the mechanism-B fallback
-  with a warning. Nothing here has run on it.
-
-### C. ~~H6~~ and ~~H8~~ **Done.** What is left of them
-
-The largest built-but-dark surface is lit (`docs/h6-mount.md`) and the two things it left behind
-are closed (`docs/h8-validated-requests.md`). One item remains:
-
-- **H7, GraphQL subscriptions over the change feed.** `src/realtime/` already has the ring, the
-  live-query engine and the SSE/WS transports; `src/graphql/` already has the schema cache and the
-  ambient per-request token. A REST document cannot describe a subscription, so this is the one
-  part of the surfaces work that is genuinely new code rather than wiring —
-  `docs/plan-surfaces.md` H7. `graphql-ws` over the socket BunQL already runs.
-- ~~**Put the hand-written handlers on the validated pipeline.**~~ **Done (H8).**
-- ~~**`NOT_FOUND: 404`.**~~ **Done (H8.)** Both are `docs/h8-validated-requests.md`.
+`deferred append > a kill -9 in the window is recovered from the WAL` (P5) failed once in six full
+runs of the suite and passed the other five. It kills a process and then asserts on what the
+reconcile recovered, so the race is in the test rather than in the recovery — but a test that fails
+one run in six is a test that will eventually be ignored. Worth pinning before it trains anyone.
 
 ### Smaller, if you want something bounded
 
-- ~~**Capture pages from SQLite directly**~~ **Superseded by P3, which found the premise wrong.**
-  The tail was not memory-bound; it was a JavaScript loop, and moving it to C took a write from
-  28.9 µs to 24.0 without touching how pages are read. What capturing pages would still save is the
-  `readSync` — **0.38 µs** — in exchange for a `sqlite3_vfs` built out of `JSCallback`s on every
-  write. Not worth it. `docs/p3-wal-checksum.md` §3.1.
+- **The rest of the router's header cost.** P6 flattened the pairs and recovered 19.2% of a hop
+  where removing the header clone entirely is worth 37.5%, so about half of it survives — the
+  string still crosses and both sides still build and parse it. A binary encoding, or caching the
+  flattened form of the header sets a node actually sends, is where that goes.
+  `docs/p6-router-resolution.md` §6.
 - **The other 0.75 µs of a poll.** `WalTailer.poll()` is 1.98 µs once the checksum is native, of
-  which two `fstatSync` calls and a separate 32-byte header read are 0.75. One `pread` that takes
-  the header and the first frame together would collapse them. Small, bounded, and the measurement
-  is already in `docs/p3-wal-checksum.md` §2.
-
-- **Deferred compression** (`docs/performance.md` §4C). zstd is 9.5 µs of a 28.4 µs write and is
-  *already* a setting; the better version compresses **after** the ack for `ack: "local"`, keeping
-  the 4.3x ratio and moving the CPU off the answer path. It decouples the log append from the
-  commit, which is why it was not done — the change feed, the replication stream and the position
-  save all read the log synchronously today.
-- **Per-database `foreignKeys`** — the node-level switch exists (`[sqlite] foreignKeys`); making it
-  per database needs a catalog column and a lifecycle route. `docs/p1-pragmas.md`.
+  which two `fstatSync` calls and a separate 32-byte header read are 0.75. One `pread` taking the
+  header and the first frame together would collapse them. `docs/p3-wal-checksum.md` §2.
+- **A read mode for the native `/v1/db/{db}/tx`.** R10 built the machinery and wired only Hrana to
+  it; the native surface would need a fourth mode and a baton dispatch across two session kinds.
+  `docs/r10-read-transactions.md` §4.
 - **`defensive` for the vendored build.** `SQLITE_DBCONFIG_DEFENSIVE` has no pragma and
-  `sqlite3_db_config` is variadic — binding it fixed-arity through bun:ffi ignores the value, never
-  writes the out-parameter, and **killed the process with SIGKILL**. The remedy is a non-variadic
-  shim compiled by `scripts/sqlite.ts` into `vendor/sqlite/`, declared optional exactly as
-  `sqlite3_snapshot_*` is. **P3 built exactly that machinery** — `scripts/native/walsum.c` rides
-  the same compile and `src/sqlite/lib.ts` resolves it optionally — so this is now a matter of
-  adding one function to a file that already exists. `docs/p1-pragmas.md`,
-  `docs/p3-wal-checksum.md`.
-- **Hrana write forwarding.** A write to `/v2/pipeline` on a replica is still `NOT_PRIMARY`;
-  forwarding means deciding what a baton opened on a replica means (R4 left it).
+  `sqlite3_db_config` is variadic. P3 built exactly the machinery this needs — `walsum.c` rides the
+  vendored compile and `src/sqlite/lib.ts` resolves it optionally — so this is now one function in
+  a file that already exists. `docs/p1-pragmas.md`.
+- **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a restart. Spill it to
+  disk or serve old positions from the log.
+- **`schema` events reach WebSocket subscribers only**, not the SSE change feed.
+- **Nothing is published to npm.** `package.json` has `exports`, `bin` and `engines` but no release
+  flow.
+- **`bench/http.ts` authenticates with the admin key**, a constant-time compare, so its numbers are
+  the best case rather than what a token-bearing client sees. The token path is cached (45.3 µs
+  against 44.2), so the gap is small — but the benchmark still does not measure what deployments do.
 
 ## House rules for this repo
 
