@@ -227,6 +227,8 @@ export interface ReplAnnounce {
 /** Follow `db` on the stream the router minted: open the copy, pin it, send `SUBSCRIBE`. */
 export interface FollowStart {
   kind: "follow.start"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   stream: number
   db: string
   /**
@@ -246,6 +248,8 @@ export interface FollowStart {
  */
 export interface FollowFrame {
   kind: "follow.frame"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   type: number
   body: Uint8Array
 }
@@ -253,6 +257,8 @@ export interface FollowFrame {
 /** End one stream. `drop` disposes of the local copy (R7); false is C2's detach, which keeps it. */
 export interface FollowStop {
   kind: "follow.stop"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   stream: number
   db: string
   drop: boolean
@@ -266,6 +272,8 @@ export interface FollowStop {
  */
 export interface FollowLink {
   kind: "follow.link"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   connected: boolean
   primary: string
   node: string | null
@@ -279,18 +287,24 @@ export interface FollowLink {
  */
 export interface FollowGenerations {
   kind: "follow.generations"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   entries: [string, string][]
 }
 
 /** The heartbeat tick: the upstream's positions down, this worker's up, once per `heartbeatMs`. */
 export interface FollowStatus {
   kind: "follow.status"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   id: number
   primary: [number, string][]
 }
 
 export interface FollowStatusReply {
   kind: "follow.status.reply"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   id: number
   streams: { stream: number; db: string; applied: string; bootstrapping: boolean }[]
 }
@@ -298,6 +312,8 @@ export interface FollowStatusReply {
 /** A finished frame for the upstream socket: `SUBSCRIBE`, `ACK`, `ERROR`. */
 export interface FollowOut {
   kind: "follow.out"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   bytes: Uint8Array
 }
 
@@ -308,6 +324,8 @@ export interface FollowOut {
  */
 export interface FollowInstalled {
   kind: "follow.installed"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   stream: number
   db: string
   txid: string
@@ -316,6 +334,8 @@ export interface FollowInstalled {
 /** A diverged apply wants a fresh stream from zero, and only the router may mint one. */
 export interface FollowAgain {
   kind: "follow.again"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   stream: number
   db: string
   reason: string
@@ -324,6 +344,8 @@ export interface FollowAgain {
 /** The local copy was disposed of; the trash path belongs in `ReplicaStatus.unfollowed`. */
 export interface FollowStopped {
   kind: "follow.stopped"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   db: string
   trash: string | null
 }
@@ -331,6 +353,8 @@ export interface FollowStopped {
 /** R2: a write this worker could not take, on its way to the one upstream socket. */
 export interface FollowForward {
   kind: "follow.forward"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   id: number
   db: string
   op: string
@@ -340,6 +364,8 @@ export interface FollowForward {
 /** R2: the upstream's answer, back to the worker that asked. The shape of `ResultBody`. */
 export interface FollowResult {
   kind: "follow.result"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   id: number
   ok: boolean
   result?: unknown
@@ -355,6 +381,8 @@ export interface FollowResult {
 /** C2 on a worker: a promotion detached a database, or a demotion re-attached one. */
 export interface FollowDetach {
   kind: "follow.detach" | "follow.attach"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   db: string
 }
 
@@ -365,6 +393,8 @@ export interface FollowDetach {
  */
 export interface FollowPrimary {
   kind: "follow.primary"
+  /** Which upstream this belongs to; 0 on a node with one. */
+  up: number
   url: string
 }
 

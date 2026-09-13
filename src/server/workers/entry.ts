@@ -19,6 +19,7 @@
 import { HEADERS } from "../../client/protocol.ts"
 import type {
   ClientSocket,
+  ReplicaClient,
   ReplicaHost,
   ReplicationSocket,
 } from "../../replication/index.ts"
@@ -247,6 +248,12 @@ class VirtualReplicationSocket {
  */
 class VirtualUpstreamSocket {
   binaryType = "arraybuffer"
+  readonly #up: number
+
+  /** C3b: which of the node's upstream sockets this frame is for. 0 on a node with one. */
+  constructor(up: number) {
+    this.#up = up
+  }
 
   send(data: string | ArrayBufferLike | ArrayBufferView): void {
     if (typeof data === "string") return
@@ -256,7 +263,7 @@ class VirtualUpstreamSocket {
         : ArrayBuffer.isView(data)
           ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
           : new Uint8Array(data as ArrayBuffer)
-    post({ kind: "follow.out", bytes })
+    post({ kind: "follow.out", up: this.#up, bytes })
   }
 
   close(): void {
@@ -268,26 +275,28 @@ class VirtualUpstreamSocket {
   }
 }
 
-/** Everything the hosted client reports that is not a frame. */
-const FOLLOW_HOST: ReplicaHost = {
-  installed(stream, db, txid) {
-    post({ kind: "follow.installed", stream, db, txid })
-  },
-  again(stream, db, reason) {
-    post({ kind: "follow.again", stream, db, reason })
-  },
-  stopped(db, trash) {
-    post({ kind: "follow.stopped", db, trash })
-  },
-  forward(id, request) {
-    post({ kind: "follow.forward", id, db: request.db, op: request.op, body: request.body })
-  },
-  detach(db) {
-    post({ kind: "follow.detach", db })
-  },
-  attach(db) {
-    post({ kind: "follow.attach", db })
-  },
+/** Everything the hosted client for one upstream reports that is not a frame. */
+function followHostFor(up: number): ReplicaHost {
+  return {
+    installed(stream, db, txid) {
+      post({ kind: "follow.installed", up, stream, db, txid })
+    },
+    again(stream, db, reason) {
+      post({ kind: "follow.again", up, stream, db, reason })
+    },
+    stopped(db, trash) {
+      post({ kind: "follow.stopped", up, db, trash })
+    },
+    forward(id, request) {
+      post({ kind: "follow.forward", up, id, db: request.db, op: request.op, body: request.body })
+    },
+    detach(db) {
+      post({ kind: "follow.detach", up, db })
+    },
+    attach(db) {
+      post({ kind: "follow.attach", up, db })
+    },
+  }
 }
 
 // ── start ──────────────────────────────────────────────────────────────────────────────────────
@@ -319,12 +328,13 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
   // C4b: `announce()` in a worker asks the router for one, because the announcement is a fact
   // about the whole node (`plan-phase1.md` finding 1 across threads).
   runtime.replication?.setAnnounceHandler(() => post({ kind: "repl.announce" }))
-  // C4c: this worker holds the streams, for the databases this shard owns, of the one upstream
-  // connection the router holds. `adopt` is what makes the hosted client's `#send` reach the real
+  // C4c: this worker holds the streams, for the databases this shard owns, of the upstream
+  // connections the router holds. `adopt` is what makes a hosted client's `#send` reach the real
   // socket; nothing below it knows a thread boundary exists.
-  runtime.setFollowPrimaryHandler((url) => post({ kind: "follow.primary", url }))
-  runtime.startReplication()
-  runtime.replica?.adopt(new VirtualUpstreamSocket() as unknown as ClientSocket, FOLLOW_HOST)
+  //
+  // C3b: one hosted client **per upstream**, created when the router first names that upstream.
+  // A statically configured replica has exactly one and every `up` is 0.
+  runtime.setFollowPrimaryHandler((url) => post({ kind: "follow.primary", up: 0, url }))
   // C4d: the `Promoter` runs here, over this shard, because a claim, an ack and a promotion
   // request are all made of tenant facts — `tenant.txid`, `tenant.epoch`, the generation ledger and
   // the live stream — and `#flip` touches the tenant, the realtime engine and the replica client.
@@ -345,6 +355,20 @@ async function start(index: number, workers: number, config: ServerConfig): Prom
 }
 
 // ── HTTP ───────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The hosted client for one upstream, created on first use. Its key is the upstream's index rather
+ * than a URL, because a hosted client opens no socket: the router holds the connection and this
+ * end of it is a stream table (C3b, `docs/c3-placement.md` §3.4).
+ */
+function hostedClient(current: WorkerState, up: number): ReplicaClient | null {
+  const key = `up:${up}`
+  const existing = current.runtime.upstreamClient(key)
+  if (existing) return existing
+  const client = current.runtime.ensureUpstream(key)
+  client?.adopt(new VirtualUpstreamSocket(up) as unknown as ClientSocket, followHostFor(up))
+  return client
+}
 
 /** The stub `RouteContext.server`: only `timeout` is ever called, and only by an SSE stream. */
 const NO_TIMEOUT = { timeout(): void {} }
@@ -593,7 +617,7 @@ self.onmessage = (event: MessageEvent): void => {
       return
     }
     case "follow.start": {
-      const client = current.runtime.replica
+      const client = hostedClient(current, message.up)
       if (!client) return
       // The router chose this worker from the database name; if the name does not hash here,
       // something has gone wrong on the other side and following it would open a file another
@@ -615,16 +639,21 @@ self.onmessage = (event: MessageEvent): void => {
     }
     case "follow.frame":
       try {
-        current.runtime.replica?.deliver(message.type, message.body)
+        hostedClient(current, message.up)?.deliver(message.type, message.body)
       } catch (err) {
         post({ kind: "error", message: String(err) })
       }
       return
     case "follow.stop":
-      current.runtime.replica?.unfollow(message.stream, message.db, message.drop, message.reason)
+      hostedClient(current, message.up)?.unfollow(
+        message.stream,
+        message.db,
+        message.drop,
+        message.reason,
+      )
       return
     case "follow.link":
-      current.runtime.replica?.link({
+      hostedClient(current, message.up)?.link({
         connected: message.connected,
         primary: message.primary,
         node: message.node,
@@ -632,17 +661,18 @@ self.onmessage = (event: MessageEvent): void => {
       })
       return
     case "follow.generations":
-      current.runtime.replica?.generations(message.entries)
+      hostedClient(current, message.up)?.generations(message.entries)
       return
     case "follow.status":
       post({
         kind: "follow.status.reply",
+        up: message.up,
         id: message.id,
-        streams: current.runtime.replica?.positions(message.primary) ?? [],
+        streams: hostedClient(current, message.up)?.positions(message.primary) ?? [],
       })
       return
     case "follow.result":
-      current.runtime.replica?.result({
+      hostedClient(current, message.up)?.result({
         id: message.id,
         ok: message.ok,
         ...(message.result !== undefined ? { result: message.result } : {}),

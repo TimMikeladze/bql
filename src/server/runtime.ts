@@ -62,6 +62,7 @@ import { BunQLError } from "./errors.ts"
 import { Forwarder, runForward } from "./forward.ts"
 import { FencedNotice, httpBase, type NodeRole, Promoter } from "./promote.ts"
 import { decodeArgs, encodeRows, type EncodedRows } from "./json.ts"
+import { FollowPlanner } from "./follow.ts"
 import { Metrics } from "./metrics.ts"
 import { shardOf } from "./workers/shard.ts"
 
@@ -154,6 +155,8 @@ export class ServerRuntime {
   readonly cluster: ClusterLink | null
   /** Which databases this node is the primary for, and the only thing that changes that. */
   readonly promoter: Promoter
+  /** C3b: which upstreams this node follows, as placement decides them. */
+  readonly follows: FollowPlanner
   /**
    * The primary's `/v1/replication` endpoint, or null when `[replication] secret` is empty —
    * which is what `403 REPLICATION_DISABLED` is answered from.
@@ -163,10 +166,22 @@ export class ServerRuntime {
   readonly replicationMode: "own" | "none" | "hosted"
   /** C4d: `"own"` on a single-threaded node, `"routed"` on a router, `"hosted"` in a worker. */
   readonly clusterMode: "own" | "routed" | "hosted"
-  /** The replica's client, or null on a primary. Started by `startServer`, stopped by `close`. */
+  /**
+   * The replica's client, or null on a primary. Started by `startServer`, stopped by `close`.
+   *
+   * C3b: on a node whose upstreams are chosen by placement there may be **several** — one per
+   * upstream *node*, not per database — and this is the statically configured one, or the first
+   * when there is no static one. Everything that asks about a particular database asks
+   * `replicaFor(db)`; everything that asks about the node asks `replicaClients`.
+   */
   replica: ReplicaClient | null = null
-  /** C4c: where a `"routed"` client's per-database work happens, on a node with workers. */
-  #shards: ShardHost | null = null
+  /**
+   * C3b: every upstream this node follows, by its `/v1/replication` URL. A node with
+   * `[replication] primary` and no cluster has exactly one entry and behaves as it always did.
+   */
+  readonly #clients = new Map<string, ReplicaClient>()
+  /** C4c/C3b: how a `"routed"` client's per-database work is reached, one host per upstream. */
+  #shards: ((url: string) => ShardHost) | null = null
   /** C4c: where a worker sends `followPrimary`, since the one client is on the router. */
   #onFollowPrimary: ((url: string) => void) | null = null
   /** C4d: this worker's shard, or null on a thread that owns every database it is asked about. */
@@ -175,6 +190,8 @@ export class ServerRuntime {
   #onRoleChanged: ((db: string, role: NodeRole) => void) | null = null
   /** C4e: how the router asks the workers which databases are open. Null on every other thread. */
   #openStates: (() => Promise<Map<string, bigint>>) | null = null
+  /** C3b: told when an upstream client is created, so a router can wire its `FollowHost`. */
+  #onUpstream: ((url: string, client: ReplicaClient) => void) | null = null
   /** R2: the waiter behind `ack: "replica" | "quorum"`. */
   readonly acks: AckTracker
   /** R2: the path a write takes off a replica. `enabled` is false everywhere else. */
@@ -294,6 +311,10 @@ export class ServerRuntime {
         : buildClusterNode(options.config, this.#onError)
     this.promoter = new Promoter(this)
     this.cluster?.onChange(() => this.promoter.onClusterChange())
+    // C3b: placement decides which node subscribes to which, and both a placement and a node's
+    // advertise can move — so the planner also sweeps on a tick of its own.
+    this.follows = new FollowPlanner(this)
+    this.cluster?.onChange(() => this.follows.plan())
     this.#startSweep()
   }
 
@@ -348,6 +369,9 @@ export class ServerRuntime {
     // ack and a promotion request are all made of tenant facts, and every tenant is on a worker.
     // It keeps `roleFor` and `primaryFor`, which the node-level routes read.
     if (this.clusterMode !== "routed") this.promoter.start()
+    // Never on a worker: the upstream connections are the router's, and a worker's hosted clients
+    // are created by the `follow.start` the router sends (C3b).
+    if (this.replicationMode !== "hosted") this.follows.start()
   }
 
   /**
@@ -366,8 +390,14 @@ export class ServerRuntime {
    */
   followPrimary(url: string): void {
     if (!url) return
-    if (this.replica) {
+    if (this.#clients.size === 1 && this.replica) {
+      // One upstream and it moved: retarget rather than opening a second socket to the same node.
       this.replica.retarget(url)
+      return
+    }
+    if (this.#clients.size > 1) {
+      // C3b: several upstreams, so this is one more rather than a move of the only one.
+      this.ensureUpstream(url)
       return
     }
     if (!this.config.replication.secret) return
@@ -617,34 +647,109 @@ export class ServerRuntime {
     if (this.replica) return
     const section = this.config.replication
     if (!section.primary) return
+    this.ensureUpstream(section.primary, section.follow)
+  }
+
+  /** One client for one upstream, in whichever of C4c's three modes this thread is. */
+  #buildReplica(url: string, follow: string[]): ReplicaClient | null {
+    const section = this.config.replication
+    if (!section.secret && this.replicationMode !== "hosted") return null
     // C4c: `"routed"` on a router that has shards to hand streams to, `"hosted"` in a worker, and
     // `"own"` on a single-threaded node. One class, three modes, one copy of every decision —
     // `docs/c4c-replication-follow.md` §5.
     const mode: ReplicaMode =
       this.replicationMode === "hosted" ? "hosted" : this.#shards ? "routed" : "own"
-    this.replica = new ReplicaClient({
+    return new ReplicaClient({
       registry: this.registry,
-      primary: section.primary,
+      primary: url,
       secret: section.secret,
       node: this.node,
-      follow: section.follow,
+      follow,
       reconnectMs: section.reconnectMs,
       heartbeatMs: section.heartbeatMs,
       forwardTimeoutMs: section.forwardTimeoutMs,
       maxForwards: section.maxForwards,
       onError: this.#onError,
       mode,
-      ...(this.#shards && mode === "routed" ? { host: this.#shards } : {}),
+      ...(this.#shards && mode === "routed" ? { host: this.#shards(url) } : {}),
     })
-    this.replica.start()
   }
 
   /**
    * C4c: where a `"routed"` client's per-database work happens. Set by `startServer` after the pool
    * exists and before `startReplication`, so the client is built knowing which mode it is in.
+   *
+   * C3b: a **factory**, because a node whose upstreams are chosen by placement holds one client
+   * per upstream and each needs its own host — the stream table on the worker side is keyed by the
+   * upstream a stream belongs to.
    */
-  setShardHost(host: ShardHost | null): void {
+  setShardHost(host: ((url: string) => ShardHost) | null): void {
     this.#shards = host
+  }
+
+  /** C3b: where a router learns that an upstream client now exists. */
+  setUpstreamHandler(handler: ((url: string, client: ReplicaClient) => void) | null): void {
+    this.#onUpstream = handler
+  }
+
+  /** C3b: every upstream this node follows. One entry on a statically configured replica. */
+  get replicaClients(): ReplicaClient[] {
+    return [...this.#clients.values()]
+  }
+
+  /**
+   * The client that follows `db`, or null when nothing does.
+   *
+   * Asked by everything that is about one database — the forwarder, the promotion request, the
+   * per-database replication route — because with placement the answer differs per database.
+   */
+  replicaFor(db: string): ReplicaClient | null {
+    if (this.#clients.size <= 1) return this.replica
+    for (const client of this.#clients.values()) {
+      if (client.status().streams.some((one) => one.db === db)) return client
+    }
+    return this.replica
+  }
+
+  /**
+   * Follows `url`, with `follow` as the database list, starting a client if there is none for it.
+   * Returns the client. C3b's entry point, and `followPrimary`'s.
+   */
+  ensureUpstream(url: string, follow?: string[]): ReplicaClient | null {
+    // A hosted client opens no socket and proves nothing — the router did both — so it needs no
+    // secret, and its `url` is a key rather than an address.
+    if (!url) return null
+    if (this.replicationMode !== "hosted" && !this.config.replication.secret) return null
+    const existing = this.#clients.get(url)
+    if (existing) {
+      if (follow) existing.setFollow(follow)
+      return existing
+    }
+    const client = this.#buildReplica(url, follow ?? this.config.replication.follow)
+    if (!client) return null
+    this.#clients.set(url, client)
+    this.replica ??= client
+    // C3b: a router has to wire this client's `FollowHost` before it can answer anything, and the
+    // client is built here rather than by `startServer`, so the wiring is told.
+    this.#onUpstream?.(url, client)
+    client.start()
+    return client
+  }
+
+  /** The client for one upstream key, or null. C3b's worker side looks its hosted clients up here. */
+  upstreamClient(url: string): ReplicaClient | null {
+    return this.#clients.get(url) ?? null
+  }
+
+  /** Stops following `url` and forgets its client. The copies it bootstrapped are left alone. */
+  dropUpstream(url: string): void {
+    const client = this.#clients.get(url)
+    if (!client) return
+    this.#clients.delete(url)
+    client.stop()
+    if (this.replica === client) {
+      this.replica = this.#clients.values().next().value ?? null
+    }
   }
 
   /** C4b §6's gap: where a worker sends a demotion's convergence, since the router holds the client. */
@@ -1140,7 +1245,9 @@ export class ServerRuntime {
     this.#subscribers.clear()
     this.promoter.close()
     void this.cluster?.close().catch(() => {})
-    this.replica?.stop()
+    this.follows.close()
+    for (const client of this.#clients.values()) client.stop()
+    this.#clients.clear()
     this.replica = null
     this.replication?.stop()
     this.registry.close()

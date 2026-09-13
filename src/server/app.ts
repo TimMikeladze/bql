@@ -268,7 +268,13 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
     pool.setReplicationHost({
       out: (conn, bytes) => replRouter.out(conn, bytes),
       shut: (conn, code, reason) => replRouter.shut(conn, code, reason),
-      announce: () => replRouter.announce(),
+      announce: () => {
+        // A worker's database set moved — a bootstrap created a replica row, a delete removed one.
+        // The router derives `BunQL-Role` and C3b's plan from its own read of that catalog, and a
+        // row another thread wrote reaches no `onChange` here.
+        runtime.promoter.refresh()
+        replRouter.announce()
+      },
     })
   }
   const surfaces = new Surfaces(runtime)
@@ -885,9 +891,25 @@ export async function startServer(
   // C4c: with workers, the one upstream connection is this thread's and every stream is a
   // worker's, so the client is built in `"routed"` mode over the pool. Set before
   // `startReplication` below, because which mode the client is in is decided at construction.
-  if (pool && config.replication.primary) {
-    const shards = new WorkerShards(pool, onError)
-    runtime.setShardHost(shards)
+  if (pool && config.replication.secret) {
+    // C3b: one host per upstream, because a node whose upstreams are chosen by placement holds a
+    // client per upstream and each worker keeps a hosted client per upstream to match. The index
+    // is what every `follow.*` envelope carries; a statically configured replica has one and it
+    // is 0.
+    const upstreams = new Map<string, number>()
+    const indexOf = (url: string): number => {
+      const known = upstreams.get(url)
+      if (known !== undefined) return known
+      const next = upstreams.size
+      upstreams.set(url, next)
+      return next
+    }
+    runtime.setShardHost((url: string) => new WorkerShards(pool, onError, indexOf(url)))
+    // The workers report what is not a frame — an install, a divergence, a disposed copy, a
+    // forwarded write, C2's detach — and each is a decision that upstream's `"routed"` client owns.
+    runtime.setUpstreamHandler((url, client) => {
+      pool.setFollowHost(indexOf(url), followHost(client, runtime, onError))
+    })
   }
   // C4d: the control plane is this thread's, and every `Promoter` that talks to it is a worker's.
   // The link is the view pushed on every commit that changed it — plus the clock probe, because
@@ -942,9 +964,6 @@ export async function startServer(
     clusterProbe.unref?.()
   }
   if (owned) runtime.startReplication()
-  // C4c: the workers report what is not a frame — an install, a divergence, a disposed copy, a
-  // forwarded write, C2's detach — and each is a decision the one `"routed"` client owns.
-  if (pool && runtime.replica) pool.setFollowHost(followHost(runtime.replica, runtime, onError))
   // Shipping starts with the listener for the same reason replication does: a snapshot taken from
   // a drain can be served over `/v1/db/:db/dump`, and a node that ships before it can answer is
   // a node whose backup and whose API disagree about what exists.
@@ -971,6 +990,7 @@ export async function startServer(
       runtime.setPublisher(null)
       runtime.setMovedHandler(null)
       runtime.setOpenStates(null)
+      runtime.setUpstreamHandler(null)
       // Every replica socket is closed before the workers go, so a stream is ended by a `1001` the
       // replica reconnects from rather than by a channel that stops answering under it.
       app.replication?.stop()
@@ -982,7 +1002,7 @@ export async function startServer(
       if (pool) {
         pool.setHost(null)
         pool.setReplicationHost(null)
-        pool.setFollowHost(null)
+        pool.clearFollowHosts()
         pool.setClusterHost(null)
         await pool.close()
       }

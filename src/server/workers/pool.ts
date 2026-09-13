@@ -129,7 +129,8 @@ export class WorkerPool {
   #seq = 0
   #host: RouterHost | null = null
   #replication: ReplicationHost | null = null
-  #follow: FollowHost | null = null
+  /** C3b: one `FollowHost` per upstream, because a node may follow several primaries at once. */
+  #follow = new Map<number, FollowHost>()
   #cluster: ClusterHost | null = null
   #onError: (err: unknown) => void
   #closed = false
@@ -338,24 +339,41 @@ export class WorkerPool {
   // ── following an upstream (C4c) ──────────────────────────────────────────────────────────────
 
   /** Follow `db` on the stream the router minted; the worker opens the copy and sends `SUBSCRIBE`. */
-  followStart(index: number, stream: number, db: string, generation: string | null, reset: boolean): void {
-    this.#post(index, { kind: "follow.start", stream, db, generation, reset })
+  followStart(
+    index: number,
+    up: number,
+    stream: number,
+    db: string,
+    generation: string | null,
+    reset: boolean,
+  ): void {
+    this.#post(index, { kind: "follow.start", up, stream, db, generation, reset })
   }
 
   /** One decoded frame — `SNAPSHOT_*` or `TXN` — for the worker that owns the stream it names. */
-  followFrame(index: number, type: number, body: Uint8Array): void {
-    this.#post(index, { kind: "follow.frame", type, body })
+  followFrame(index: number, up: number, type: number, body: Uint8Array): void {
+    this.#post(index, { kind: "follow.frame", up, type, body })
   }
 
-  followStop(index: number, stream: number, db: string, drop: boolean, reason: string): void {
-    this.#post(index, { kind: "follow.stop", stream, db, drop, reason })
+  followStop(
+    index: number,
+    up: number,
+    stream: number,
+    db: string,
+    drop: boolean,
+    reason: string,
+  ): void {
+    this.#post(index, { kind: "follow.stop", up, stream, db, drop, reason })
   }
 
   /** The connection-level facts, to every worker: they change on connect, close and retarget. */
-  followLink(state: { connected: boolean; primary: string; node: string | null; lastError: string | null }): void {
+  followLink(
+    up: number,
+    state: { connected: boolean; primary: string; node: string | null; lastError: string | null },
+  ): void {
     for (let index = 0; index < this.#workers.length; index++) {
       try {
-        this.#post(index, { kind: "follow.link", ...state })
+        this.#post(index, { kind: "follow.link", up, ...state })
       } catch (err) {
         this.#onError(err)
       }
@@ -363,10 +381,10 @@ export class WorkerPool {
   }
 
   /** The generation ledger, to every worker, after every save. */
-  followGenerations(entries: [string, string][]): void {
+  followGenerations(up: number, entries: [string, string][]): void {
     for (let index = 0; index < this.#workers.length; index++) {
       try {
-        this.#post(index, { kind: "follow.generations", entries })
+        this.#post(index, { kind: "follow.generations", up, entries })
       } catch (err) {
         this.#onError(err)
       }
@@ -382,6 +400,7 @@ export class WorkerPool {
    * pushed the other way in the same message. Once per `heartbeatMs` for the whole node.
    */
   async followStatus(
+    up: number,
     primary: [number, string][],
   ): Promise<{ stream: number; db: string; applied: string; bootstrapping: boolean }[]> {
     const out: { stream: number; db: string; applied: string; bootstrapping: boolean }[] = []
@@ -400,16 +419,22 @@ export class WorkerPool {
               out.push(...streams)
               resolve()
             })
-            this.#post(index, { kind: "follow.status", id, primary })
+            this.#post(index, { kind: "follow.status", up, id, primary })
           }),
       ),
     )
     return out
   }
 
-  /** Where the `"routed"` `ReplicaClient` plugs in, so this module never imports it. */
-  setFollowHost(host: FollowHost | null): void {
-    this.#follow = host
+  /** Where a `"routed"` `ReplicaClient` plugs in, so this module never imports it. */
+  setFollowHost(up: number, host: FollowHost | null): void {
+    if (host) this.#follow.set(up, host)
+    else this.#follow.delete(up)
+  }
+
+  /** Every upstream's host, forgotten. Called when the pool closes. */
+  clearFollowHosts(): void {
+    this.#follow.clear()
   }
 
   // ── the control plane (C4d) ──────────────────────────────────────────────────────────────────
@@ -661,32 +686,32 @@ export class WorkerPool {
         return
       }
       case "follow.out":
-        this.#follow?.out(message.bytes)
+        this.#follow.get(message.up)?.out(message.bytes)
         return
       case "follow.installed":
-        this.#follow?.installed(message.stream, message.db, message.txid)
+        this.#follow.get(message.up)?.installed(message.stream, message.db, message.txid)
         return
       case "follow.again":
-        this.#follow?.again(message.stream, message.db, message.reason)
+        this.#follow.get(message.up)?.again(message.stream, message.db, message.reason)
         return
       case "follow.stopped":
-        this.#follow?.stopped(message.db, message.trash)
+        this.#follow.get(message.up)?.stopped(message.db, message.trash)
         return
       case "follow.forward":
-        this.#follow?.forwardFrom(index, message.id, {
+        this.#follow.get(message.up)?.forwardFrom(index, message.id, {
           db: message.db,
           op: message.op,
           body: message.body,
         })
         return
       case "follow.detach":
-        this.#follow?.detach(message.db)
+        this.#follow.get(message.up)?.detach(message.db)
         return
       case "follow.attach":
-        this.#follow?.attach(message.db)
+        this.#follow.get(message.up)?.attach(message.db)
         return
       case "follow.primary":
-        this.#follow?.followPrimary(message.url)
+        this.#follow.get(message.up)?.followPrimary(message.url)
         return
       case "cluster.probe.reply":
         this.#cluster?.probed(index, message.t1, message.t2)

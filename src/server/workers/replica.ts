@@ -37,19 +37,25 @@ import type { FollowHost, WorkerPool } from "./pool.ts"
 export class WorkerShards implements ShardHost {
   #pool: WorkerPool
   #onError: (err: unknown) => void
+  /**
+   * C3b: which of the node's upstreams this host serves. A worker keeps one hosted client per
+   * upstream, so every envelope says which — a statically configured replica has one and it is 0.
+   */
+  readonly #up: number
   /** Worker that owns each open stream, learned from `start`. */
   #streams = new Map<number, number>()
 
-  constructor(pool: WorkerPool, onError: (err: unknown) => void) {
+  constructor(pool: WorkerPool, onError: (err: unknown) => void, up = 0) {
     this.#pool = pool
     this.#onError = onError
+    this.#up = up
   }
 
   start(stream: number, db: string, generation: string | null, reset: boolean): void {
     const index = this.#pool.shardOf(db)
     this.#streams.set(stream, index)
     try {
-      this.#pool.followStart(index, stream, db, generation, reset)
+      this.#pool.followStart(index, this.#up, stream, db, generation, reset)
     } catch (err) {
       this.#streams.delete(stream)
       this.#onError(err)
@@ -63,7 +69,7 @@ export class WorkerShards implements ShardHost {
     try {
       // Copied rather than forwarded: `FrameReader` hands back a view into the whole WebSocket
       // message, and structured clone would move that entire buffer rather than this frame.
-      this.#pool.followFrame(index, type, body.slice())
+      this.#pool.followFrame(index, this.#up, type, body.slice())
     } catch (err) {
       this.#streams.delete(stream)
       this.#onError(err)
@@ -74,27 +80,28 @@ export class WorkerShards implements ShardHost {
     const index = this.#streams.get(stream) ?? this.#pool.shardOf(db)
     this.#streams.delete(stream)
     try {
-      this.#pool.followStop(index, stream, db, drop, reason)
+      this.#pool.followStop(index, this.#up, stream, db, drop, reason)
     } catch (err) {
       this.#onError(err)
     }
   }
 
   link(state: LinkState): void {
-    this.#pool.followLink(state)
+    this.#pool.followLink(this.#up, state)
   }
 
   generations(entries: [string, string][]): void {
-    this.#pool.followGenerations(entries)
+    this.#pool.followGenerations(this.#up, entries)
   }
 
   async positions(primary: [number, string][]): Promise<StreamPosition[]> {
-    return this.#pool.followStatus(primary)
+    return this.#pool.followStatus(this.#up, primary)
   }
 
   result(shard: number, id: number, body: { id: number; ok: boolean; result?: unknown; error?: unknown }): void {
     try {
       this.#pool.followResult(shard, {
+        up: this.#up,
         id,
         ok: body.ok,
         ...(body.result !== undefined ? { result: body.result } : {}),

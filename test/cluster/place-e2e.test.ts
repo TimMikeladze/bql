@@ -52,9 +52,12 @@ describe("placement", () => {
     expect(created.status).toBe(201)
 
     // …and this is the hole that closes: the same name on another node is still refused, rather
-    // than producing a second file with the same name and different contents.
+    // than producing a second file with the same name and different contents. Which refusal it is
+    // depends on whether C3b has already given that node a replica copy — `503 NOT_PRIMARY` with
+    // a direction when it holds none, `409` "already exists" once it does. Never a second file.
     const again = await third.fetch("/v1/db", { method: "POST", body: JSON.stringify({ name }) })
-    expect(again.status).toBe(503)
+    expect(again.status).not.toBe(201)
+    expect([409, 503]).toContain(again.status)
   }, 30_000)
 
   test("a node with no copy says where the database is instead of answering 404", async () => {
@@ -71,7 +74,15 @@ describe("placement", () => {
       servers.every((s) => s.handle.runtime.cluster?.primaryOf(name) === first.id),
     )
 
-    for (const other of [second, third]) {
+    // C3b gives the database its `rf - 1` replicas, and a node that holds a copy serves the read
+    // locally — which is the point of a replica. The node this case is about is the one that holds
+    // **no** copy, and with `rf = 2` over three nodes there is exactly one.
+    await waitFor("the replica to bootstrap its copy", () =>
+      servers.filter((one) => one.handle.runtime.registry.has(name)).length >= 2,
+    )
+    const bystanders = [second, third].filter((one) => !one.handle.runtime.registry.has(name))
+    expect(bystanders.length).toBe(1)
+    for (const other of bystanders) {
       const response = await other.fetch(`/v1/db/${name}/query`, {
         method: "POST",
         body: JSON.stringify({ sql: "select 1" }),

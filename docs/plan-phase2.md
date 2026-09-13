@@ -144,7 +144,7 @@ SDK retries the request against the new primary once, transparently.
 Failover picks the replica with the highest acked txid, which the state machine already tracks.
 With `ack: "local"` that can still lose the tail; `docs/api.md` says so plainly.
 
-### C3 — placement and redirect — **C3a done (`docs/c3-placement.md`)**
+### C3 — placement and redirect — **done (`docs/c3-placement.md`)**
 
 Rendezvous hashing with zone awareness picks a database's home node and its `rf-1` replicas — not a
 ring: no virtual nodes, no structure to keep in step, and a pure function of the replicated

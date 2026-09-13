@@ -828,6 +828,22 @@ export class ReplicaClient {
    * node converges on the new primary without an operator; a URL it is already following is a
    * no-op, because reconnecting would only cost a re-handshake.
    */
+  /**
+   * Replaces the database list this client follows (C3b). Placement moves a database between
+   * upstreams without the connection changing, so the list has to be settable — and the next
+   * `#resolveFollow`, which every heartbeat runs, opens and closes streams to match it.
+   */
+  setFollow(follow: string[]): void {
+    const wanted = follow.length > 0 ? [...follow] : ["*"]
+    if (wanted.length === this.#follow.length && wanted.every((db, at) => this.#follow[at] === db)) {
+      return
+    }
+    this.#follow = wanted
+    // The next `HEARTBEAT` carries the upstream's announcement and runs `#resolveFollow` over it,
+    // which is what opens and closes streams to match. Applying it here would need a second copy
+    // of the announcement kept for the purpose, and a heartbeat is `heartbeatMs` away.
+  }
+
   retarget(url: string): void {
     if (this.mode === "hosted") return
     if (!url || url === this.#primary) return
@@ -1157,6 +1173,21 @@ export class ReplicaClient {
     // neither dropped (the copy is now this node's own primary copy) nor re-subscribed (that is
     // the two-writers case arriving through an announcement).
     for (const db of this.#detached) held.delete(db)
+
+    // C3b: the generation ledger is **node-level** — it records every copy this node has
+    // bootstrapped, from any upstream — while an announcement is one upstream's. On a node that
+    // follows several primaries that mismatch is R7 pointed at the wrong thing: upstream A does
+    // not announce a database upstream B is feeding, and the copy gets trashed underneath a live
+    // stream. Measured, not imagined: a three-node cluster with `rf = 2` did exactly that.
+    //
+    // So a client may only unfollow a database it is **responsible for**, which is its own follow
+    // list when that list is explicit. `["*"]` means "everything this upstream announces" and
+    // keeps today's behaviour exactly, which is every statically configured replica; C3b's planner
+    // always hands out explicit lists, so the two never overlap.
+    if (!this.#follow.includes("*")) {
+      const mine = new Set(this.#follow)
+      for (const db of [...held]) if (!mine.has(db)) held.delete(db)
+    }
 
     // An empty announcement is the one this client will not take at face value. A primary that is
     // the wrong node, or has restarted against an empty data directory, announces nothing from its

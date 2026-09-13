@@ -155,7 +155,7 @@ peer is exactly what it was built for. What changes is who owns the set, and eve
 `rf`/`zone` finally read. It is complete and useful on its own — it is what closes the two-`acme`
 hole and what stops a client being told `404` for a database the cluster can locate.
 
-**C3b** is §3.4: the client map, and placement driving who follows whom.
+**C3b** is §3.4: the client map, and placement driving who follows whom. **Built — §7.**
 
 ## 4. Files
 
@@ -233,4 +233,47 @@ that named it and no others, which is the whole reason rendezvous was chosen ove
 
 ## 7. As built — C3b
 
-*(written after the code)*
+Built 2026-09-12. `bun test` → **1454 pass, 2 skip, 0 fail**. `bun run typecheck`, `bun run bytes`
+and `bun run routes:check` clean.
+
+`ServerRuntime.replica` became `#clients: Map<url, ReplicaClient>` with `replicaFor(db)`,
+`replicaClients`, `ensureUpstream(url, follow)` and `dropUpstream(url)`; `replica` stays as the
+statically configured one (or the first), so every caller that asks about the *node* rather than a
+database is unchanged. `src/server/follow.ts` is the planner: it reads the placement, groups the
+databases this node should follow by the node that holds each, and reconciles the client map. It
+**plans, it does not place** — it proposes nothing, reads `claimDb`'s record first and falls back to
+`place()` only for a database nobody has claimed a copy of yet.
+
+`ReplicaClient` did not change shape, as §3.4 predicted: it is already three modes and already takes
+a follow list. It gained `setFollow`, because placement moves a database between upstreams without
+the connection changing.
+
+**A sharded node follows several upstreams too.** Every `follow.*` envelope carries `up`, the
+upstream it belongs to, and a worker keeps one hosted client per upstream — the mirror of the
+router, which keeps one `WorkerShards` per upstream. Verified on three sharded nodes at `rf = 3`:
+each holds exactly two upstreams, each connected, each carrying the right stream.
+
+### 7.1 Three bugs this milestone found, all of them from one thread's view being taken for the node's
+
+- **R7 trashed a copy another upstream was feeding.** `#resolveFollow` builds its held set from
+  `#byDb` *and the generation ledger*, and the ledger is **node-level** while an announcement is one
+  upstream's — so the client for A saw a database B was feeding, missed it in A's announcement, and
+  took the copy to the trash underneath a live stream. Measured, not imagined: a three-node cluster
+  at `rf = 2` did it on the first run. A client may now only unfollow a database it is responsible
+  for, which is its own follow list when that list is explicit; `["*"]` keeps today's behaviour
+  exactly and is every statically configured replica.
+- **Workers planned.** The guard was in `start()`, but the cluster's `onChange` reaches `plan()`
+  directly, so each worker opened its own socket to every upstream. The guard belongs where the
+  decision is.
+- **The router's `roleFor` is stale for a replica row a worker created.** C4d's `role` envelope
+  covers a *flip*; a bootstrap **creates** the row instead, and that reaches no `onChange` on the
+  router — so `roleFor` still answered "primary" for a database this node holds a replica copy of.
+  The planner now reads the catalog row, which is true on every thread, and the router refreshes its
+  `Promoter` when a worker's database set moves (`repl.announce`), which also fixes `BunQL-Role`.
+
+### 7.2 What C3b changed about C3a's tests, and why that is right
+
+Two `place-e2e` cases asserted a `503` from a node that now **holds a replica copy** — because C3b
+gives it one. A node with a copy answers a create with `409` (it exists) and serves a read locally,
+which is what a replica is for. The cases now target the node that holds nothing, and with `rf = 2`
+over three nodes there is exactly one.

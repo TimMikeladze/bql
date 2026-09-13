@@ -1549,6 +1549,13 @@ node computes the same home from the same replicated membership, so:
 `[cluster] enabled = false` places nothing — every node creates whatever it is asked for, which is
 the standalone product. `docs/c3-placement.md`.
 
+**Placement also decides who replicates what.** A node in a database's replica set follows the node
+that holds it, with no `[replication] primary` configured anywhere: `[cluster] rf` says how many
+copies there are and `[cluster] zone` spreads them. A node that is in the replica set of databases
+whose primaries are *different* nodes holds one connection to each — one client per upstream node,
+not per database. A statically configured `[replication] primary` is kept whatever the placement
+says: an operator who wrote it outranks the function.
+
 ## Configuration
 
 `bunql.toml` in the working directory, then `BUNQL_*` in the environment, which wins.
