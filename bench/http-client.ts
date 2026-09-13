@@ -55,6 +55,17 @@ async function measure(
 }
 
 // ── HTTP latency ───────────────────────────────────────────────────────────────────────────────
+//
+// **Warm the client before the first leg, not inside it.** `measure`'s own 50 iterations warm the
+// *server* — its prepared-statement cache, its policy memo — but not this process: Bun's `fetch`,
+// the JSON codec and the keep-alive socket are cold on the first leg and warm for every leg after
+// it. Measured: the identical point read is 94.8 µs as the first leg and 56.6 µs as the fourth,
+// which is 40 µs of warm-up being attributed to HTTP. That artefact is the whole of the difference
+// between the 48.2 µs this file once reported and the 87 µs it reported later, and it is why the
+// budget row for HTTP kept moving. `docs/performance.md` §2.
+for (let i = 0; i < 2000; i++) {
+  await post(`/v1/db/${db}/query`, { sql: "select v, n from t where id = ?", args: [(i % 1000) + 1] })
+}
 
 await measure(
   "point read, HTTP keep-alive",
@@ -66,6 +77,22 @@ await measure(
 await measure("single-row write, ack local, HTTP", ROUNDS, (i) =>
   post(`/v1/db/${db}/query`, { sql: "insert into t(v, n) values (?, ?)", args: [`h${i}`, i] }),
 )
+
+// The cost this benchmark was not paying. `--token` is the **admin key**, a constant-time compare;
+// every deployed client sends a signed token instead, which is a key-ring lookup and, on a miss,
+// an EdDSA verification. The verification is cached per token, so the gap should be small — this
+// leg is here so that it is measured rather than assumed (`docs/performance.md` §2).
+const minted = (await post("/v1/tokens", { dbs: [db], scope: "rw" })) as { token?: string }
+if (minted.token) {
+  const scoped = { authorization: `Bearer ${minted.token}`, "content-type": "application/json" }
+  await measure("point read, HTTP keep-alive, minted token", ROUNDS, (i) =>
+    fetch(`${base}/v1/db/${db}/query`, {
+      method: "POST",
+      headers: scoped,
+      body: JSON.stringify({ sql: "select v, n from t where id = ?", args: [(i % 1000) + 1] }),
+    }).then((r) => r.json()),
+  )
+}
 
 await measure("healthz, HTTP", ROUNDS, () => fetch(`${base}/healthz`).then((r) => r.json()))
 

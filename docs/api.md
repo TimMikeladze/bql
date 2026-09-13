@@ -398,6 +398,10 @@ id: 4813
 event: change
 data: {"txid":4813,"changes":[{"table":"users","op":"insert","rowid":13,"pk":{"id":13},"row":{"id":13,"name":"cy"}}]}
 
+id: 4814
+event: schema
+data: {"txid":4814,"changes":[{"op":"alter","object":"table","name":"users"}]}
+
 : ping
 ```
 
@@ -1131,13 +1135,18 @@ with `server.timeout(req, 0)` and owns its own `: ping` every 15 s. The first by
 | event | route | `data` |
 |---|---|---|
 | `change` | `/changes` | `{"txid": 4813, "changes": [RowChange, …]}` |
+| `schema` | `/changes` | `{"txid": 4818, "changes": [SchemaChange, …]}` |
 | `reset` | both | `{"txid": 4813, "reason": "the change ring no longer holds that position"}` |
 | `rows` | `/live` | `{"txid", "columns", "types", "rows", "truncated"?}` |
 | `diff` | `/live` | `{"txid", "added", "removed", "updated", "truncated"?}` |
 
-DDL is reported as a `schema` event, which **only the WebSocket carries** — it goes to the
-`db:{db}:schema` topic, which a socket joins along with `db:{db}:changes` when it subscribes to a
-whole database. The SSE `/changes` route delivers row changes and nothing else.
+DDL is reported as a `schema` event on **both** surfaces — the `db:{db}:schema` topic on the
+WebSocket, and a `schema` frame interleaved with the `change` frames on SSE. `tables` does not
+narrow it: the schema belongs to the database, and a subscriber watching one table still has to
+hear that the shape it decodes rows into has moved. There is no backlog for these — the change
+ring holds row changes, so a `since` replays those and nothing else, and a client that was away
+across a migration learns of it from the next schema event or by re-reading the schema. The long
+poll (`wait`) carries row changes only.
 
 A `RowChange` is `{table, op: "insert"|"update"|"delete", rowid, pk?, row?, old?}`. `rowid` is
 `null` for a `WITHOUT ROWID` table, where `pk` is the identity and is always filled. `row` and

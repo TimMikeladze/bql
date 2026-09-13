@@ -8,6 +8,7 @@ import type {
   LiveDiffEvent,
   LiveRowsEvent,
   ResetEvent,
+  SchemaEvent,
 } from "../../src/client/protocol.ts"
 import { collectSse, createDb, startTestServer, stopAll, type TestServer } from "./harness.ts"
 
@@ -55,6 +56,30 @@ describe("change feed over SSE", () => {
     expect(data.changes[0]).toMatchObject({ table: "todos", op: "insert", rowid: 1 })
     expect(data.changes[0]?.row).toEqual({ id: 1, title: "one", done: 0 })
     expect(event?.id).toBe(String(data.txid))
+  })
+
+  test("DDL arrives as a schema event, not only on the WebSocket", async () => {
+    await fresh("ddl")
+    const stream = await sse("/v1/db/ddl/changes")
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await write("ddl", "alter table todos add column note text")
+    const [event] = await collectSse(stream, 1)
+    expect(event?.event).toBe("schema")
+    const data = event?.data as SchemaEvent
+    expect(data.changes.length).toBeGreaterThan(0)
+    expect(data.changes[0]).toMatchObject({ op: "alter", object: "table", name: "todos" })
+    expect(event?.id).toBe(String(data.txid))
+  })
+
+  test("a table filter does not hide DDL: a migration reaches a subscriber watching one table", async () => {
+    await fresh("ddl-filtered")
+    const stream = await sse("/v1/db/ddl-filtered/changes?tables=todos")
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await write("ddl-filtered", "alter table other add column extra text")
+    const [event] = await collectSse(stream, 1)
+    // `other` is not the table being watched, but the schema of the database moved and a
+    // subscriber decoding rows has to hear about it.
+    expect(event?.event).toBe("schema")
   })
 
   test("Last-Event-ID replays what was missed while the client was away", async () => {

@@ -131,6 +131,16 @@ async function runInProcess(): Promise<BenchReport> {
     legs[name] = distribution(samples)
   }
 
+  // Warm this process before the first leg, for the reason `bench/http-client.ts` explains at
+  // length: `measure`'s 50 iterations warm the server, not the client, and the first leg then
+  // carries 40 µs of JIT that no later leg pays.
+  for (let i = 0; i < 2000; i++) {
+    await (await post("/v1/db/bench/query", {
+      sql: "select v, n from t where id = ?",
+      args: [(i % 1000) + 1],
+    })).json()
+  }
+
   await measure("point read, HTTP keep-alive", ROUNDS, async (i) => {
     const response = await post("/v1/db/bench/query", {
       sql: "select v, n from t where id = ?",
@@ -145,6 +155,26 @@ async function runInProcess(): Promise<BenchReport> {
     })
     await response.json()
   })
+  // The cost no benchmark was paying: every leg above authenticates with the **admin key**, which
+  // is a constant-time compare. A deployed client sends a signed token, which is a key-ring lookup
+  // and — on a cache miss — an EdDSA verification. The cache is what makes the gap small; this leg
+  // is here so the gap is measured rather than assumed (`docs/performance.md` §2).
+  const minted = (await (
+    await post("/v1/tokens", { dbs: ["bench"], scope: "rw" })
+  ).json()) as { token: string }
+  const tokenHeaders = {
+    authorization: `Bearer ${minted.token}`,
+    "content-type": "application/json",
+  }
+  await measure("point read, HTTP keep-alive, minted token", ROUNDS, async (i) => {
+    const response = await fetch(`${base}/v1/db/bench/query`, {
+      method: "POST",
+      headers: tokenHeaders,
+      body: JSON.stringify({ sql: "select v, n from t where id = ?", args: [(i % 1000) + 1] }),
+    })
+    await response.json()
+  })
+
   await measure("healthz, HTTP", ROUNDS, async () => {
     await (await fetch(`${base}/healthz`)).json()
   })

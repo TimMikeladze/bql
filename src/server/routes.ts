@@ -442,6 +442,12 @@ export const changes: Handler = async (ctx) => {
         ...(tables ? { tables } : {}),
         ...(since !== undefined ? { since } : {}),
         include,
+        // DDL reached WebSocket subscribers and nothing else until now. A `schema` frame is what
+        // tells an SSE consumer that the shape it decodes rows into has moved — the one event it
+        // cannot infer from the rows themselves.
+        schema: (event) => {
+          stream.send("schema", event, event.txid)
+        },
       },
       (event) => {
         stream.send("change", event, event.txid)

@@ -113,6 +113,16 @@ export interface ChangesSubscribeOptions {
   /** Replay from this txid. */
   since?: number
   include?: IncludeLevel
+  /**
+   * DDL on this database, delivered beside the row changes. A table filter does not narrow it:
+   * schema changes are a property of the database, and a subscriber watching one table still
+   * needs to hear that the table it is watching was altered.
+   *
+   * There is no backlog for these. The ring holds row changes, so a `since` that the ring can
+   * serve replays those and nothing else — a subscriber that was away across a migration learns
+   * of it from the first schema event after it reconnects, or by re-reading the schema.
+   */
+  schema?: (event: SchemaEvent) => void
 }
 
 export interface ChangesSubscription {
@@ -307,6 +317,12 @@ export class TenantRealtime {
     const removers = topics.map((topic) =>
       this.bus.subscribe(topic, (payload) => listener(payload as ChangeEvent)),
     )
+    const onSchema = options.schema
+    if (onSchema) {
+      removers.push(
+        this.bus.subscribe(schemaTopic(this.name), (payload) => onSchema(payload as SchemaEvent)),
+      )
+    }
     this.#changeSubs.set(id, {
       id,
       include: options.include ?? this.#defaultInclude,
