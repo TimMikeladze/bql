@@ -77,8 +77,30 @@ nothing to map.
   outlives the run is litter, not a failure, and reporting it as one hides the test that failed
   first.
 
-## 4. The gate
+## 4. What the run said
+
+**1479 pass, 2 skip, 6 fail**, against E1's 1346 / 150. One fix, 144 failures.
+
+The six that remained were not one cause and not, with one exception, about BunQL at all. Five are
+POSIX assumptions in *tests*:
+
+| | |
+|---|---|
+| `keys.json` mode is `0o600` | Windows has no POSIX mode bits; `stat` reports `0o666` whatever `chmod` asked for. The file's protection there is the directory ACL. Asserted only where it means something. |
+| `SQLITE_FCNTL_HAS_MOVED` returns `SQLITE_OK` | The unix VFS serves it; the Win32 one answers `SQLITE_NOTFOUND` — which is itself proof the opcode reached a VFS, so it is accepted rather than skipped. |
+| the vendored path contains `vendor/sqlite/libsqlite3.` | Two wrong things in one needle: the separator is `\` and the file is `sqlite3.dll`. Matched with `path.sep` and the platform's extension now. |
+| a library that is not SQLite is `libc.so.6` | Not a file on Windows, so the test proved the error message for "absent" rather than for "foreign". `kernel32.dll` is the Windows answer. |
+
+The sixth is real and is about speed rather than correctness: `evicts idle tenants and reopens
+them` created **2000** tenants against a `maxOpen` of 50 and took over two minutes, against 5
+seconds on macOS. Creating a file and opening SQLite on it are both far dearer on Windows, and a
+24x factor is what that buys. The test is about the LRU evicting nine tenants in ten and reopening
+any of them intact, which 500 tenants prove exactly as well as 2000 — and in 0.75 s rather than
+5.6.
+
+## 5. The gate
 
 `.github/workflows/ci.yml` loses `continue-on-error` from the `windows-latest` job and from its
-steps. E1 §2 said it becomes a gate on the day it passes; this is that day, or it is not and the
-job says so in the same breath.
+four steps, **after** a run with the fixes above comes back clean. E1 §2 said it becomes a gate on
+the day it passes; flipping it in the same push that tries to make it pass would only mean a red
+main if one of the six was more than it looked.

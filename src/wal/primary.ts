@@ -178,7 +178,17 @@ export class TxnRecorder {
       txid: this.#txid + 1n,
       prevTxid: this.#txid,
       epoch: this.#epoch,
-      timestampUs: BigInt(Math.round(performance.timeOrigin * 1000 + performance.now() * 1000)),
+      // **Wall clock, not the monotonic one.** Everything that reads this field compares it
+      // against a wall-clock instant: `restoreFromBucket({ at: { timestamp } })` takes a
+      // `Date.now()` from a human, and log and segment retention compare it against `Date.now()`
+      // too. `performance.timeOrigin + performance.now()` only *approximates* that — it is the
+      // wall clock as it stood when this process started, plus monotonic time since — so it
+      // drifts from `Date.now()` by every clock correction the machine makes while the process
+      // runs. A PITR restore is then off by the accumulated drift, and a CI runner under NTP
+      // correction made `restores to a timestamp` fail with a 25 ms guard on either side of the
+      // cut. Sub-millisecond resolution is not lost with it: the field was only ever read as a
+      // bound, and *ordering* is the txid's job.
+      timestampUs: BigInt(Date.now()) * 1000n,
       commitSizePages: txn.commitSize,
       frameCount: txn.frameCount,
       walSalt1: txn.walSalt1,

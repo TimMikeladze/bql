@@ -1,35 +1,77 @@
 # Resume here — state of BunQL and what to do next
 
-Rewritten 2026-09-13 at the end of the session that closed the last five open items: per-database
-`ackWithoutReplicas` (R8), the S3 manifest's quadratic rewrite (R9), read transactions on a pooled
-reader (R10), the router's header clone (P6) and **Windows, observed for the first time** (E1).
+Rewritten 2026-09-13, at the end of the session that went after the list the previous one left.
+**Three of the things on that list turned out to be bugs rather than chores**, and each was
+diagnosed wrongly before it was diagnosed rightly:
 
-Read this, then the five documents above — `docs/r8-per-db-ack.md`, `docs/r9-segment-index.md`,
-`docs/r10-read-transactions.md`, `docs/p6-router-resolution.md`, `docs/e1-windows.md` — then
-`docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/performance.md`, `docs/design.md` §0, §11
+- Windows was not failing on a file copy. It was failing because BunQL writes shared memory
+  through a file descriptor (E2).
+- P5's "flaky test" was not flaky. A checkpoint was folding away frames the log had never seen,
+  and a `kill -9` in that window was unrecoverable.
+- The retention test's "race" was the node refusing a client's write because it had decided, on
+  its own timer, to snapshot itself.
+
+Read this, then `docs/e2-windows-gate.md`, `docs/p5-deferred-compression.md` §6 and
+`docs/performance.md` §8 — the three above — then `docs/r8-per-db-ack.md`,
+`docs/r9-segment-index.md`, `docs/r10-read-transactions.md`, `docs/p6-router-resolution.md`,
+`docs/e1-windows.md`, `docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/design.md` §0, §11
 and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster) and
 `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL).
 
 ## Where things stand
 
 **Phases 0, 1 and 2 are complete, and so is the surfaces track.** C1-C6, C3a/C3b, C4-C4e, H1-H8,
-P1-P6, R1-R10. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
-`bun test` → **1478 pass, 2 skip, 0 fail** across 124 files, and green again with
-`BUNQL_WAL_NATIVE=0` (**1476 / 4 / 0** — run it both ways; the second is what proves the JavaScript
-fallback). `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. **CI green on
-macOS and Linux**; Windows is exploratory and is described below. Zero runtime dependencies.
+P1-P6, R1-R10, E1-E2. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
+`bun test` → **1485 pass, 2 skip, 0 fail** across 124 files, and green again with
+`BUNQL_WAL_NATIVE=0` (run it both ways; the second is what proves the JavaScript fallback).
+`bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. Zero runtime dependencies.
 
 ### What this session changed, newest first
+
+**A snapshot parks a write; it does not refuse one.** `test/server/retention.test.ts` failed about
+half the time with "expected 9, received 8": nine writes issued, eight landed, and the ninth came
+back `503 BUSY: acme is taking a snapshot` to a test that never checked a status. The snapshot was
+the node's own — `ServerRuntime.maybeSnapshot` takes one from the retention sweep — so a client
+doing nothing unusual was refused because the node had decided to snapshot itself. `#drain` was
+already written to wait a snapshot out; only the guard at the top of `writeQueued` disagreed, and
+neither `snapshot()` nor `fork()` scheduled the drain that would have released the wait. A baton
+transaction stays a refusal (it can hold the writer for `txIdleTimeoutMs`); a snapshot is a
+TRUNCATE checkpoint and a reflink. Bisected to the 2026-09-13 defaults, which widened the window
+rather than creating the race.
+
+**Nothing leaves the WAL before it has been recorded (P5 §6).** The "one run in six" crash test was
+not flaky. `#maybeCheckpoint` carried a comment saying the write path had already appended — true
+until P5 made `#capture` defer — so a write crossing `checkpointWalBytes` checkpointed frames the
+log had never seen. A `kill -9` there left a database ahead of its log with no WAL left to
+re-derive from: the one state the reconcile cannot repair, and it says so as `LOG_DIVERGED`. The
+fix is the rule `snapshot()` and `drain()` already follow. `close()` had the same hole one size
+smaller.
+
+**Windows: the wal-index is published through its mapping (E2).** E1 blamed `tenant.snapshot()`
+copying an open file. Grouping the job's `EBUSY` stacks by *frame* rather than by message puts 750
+of them at one site and none in `snapshot()`: mechanism A writes the `-shm` file through a
+descriptor while its own connection has that file mapped, which POSIX keeps coherent and Windows
+refuses outright (`ERROR_USER_MAPPED_FILE`, reported as `EBUSY`). `walIndexWriteHdr` stores into
+the mapping and fences with `xShmBarrier`; so does BunQL now, on every platform rather than behind
+a `win32` branch — a branch would leave the new path exercised only by the one job that cannot be
+run locally.
+
+**DDL reaches the SSE change feed**, not only the WebSocket, and a `tables` filter does not narrow
+it. **The HTTP benchmark stopped measuring its own warm-up** — 40 µs charged to the first leg it
+measured, which is the whole of the distance between the 48.2 µs and the 87 µs this repo has
+published for the same point read (`docs/performance.md` §8). **There is a release workflow**, and
+what it still needs is in its own header. **`docs/performance.md` §1 and §5 now describe a default
+node**, including the finding that the durable default is *1.69x faster* than the non-durable one
+it replaced once sixty-four clients are writing.
 
 **Windows has run, and it is not what C5 predicted (E1).** The prediction was that `xShmLock` might
 be unreachable and a replica would fall back to mechanism B with a warning. Instead the vendored
 build compiles on `windows-latest`, loads, and reports **every** capability — `snapshot` and
 `walsum` included — and mechanism A runs. **1346 of 1498 tests pass.** The 150 that fail are almost
-all one cause: `EBUSY`, because Windows refuses to write a file another handle has open, and
-`tenant.snapshot()` copies the database file while the tenant still holds it. That one failure
-cascades into every replication, restore and bootstrap timeout in the list. Windows is **observed
-and characterised, not supported**; the job is `continue-on-error` and becomes a gate by deleting
-those lines. Getting there also fixed two portability bugs — `URL.pathname` is `/D:/…` on Windows
+all one cause: `EBUSY`. **The cause E1 named for it was wrong** — see E2 above and
+`docs/e2-windows-gate.md` §1; it is a descriptor write to a mapped `-shm`, not a copy of an open
+database file — but "one cause, 150 symptoms" was right, and it is what made the fix a day's work
+rather than a month's. Getting there also fixed two portability bugs — `URL.pathname` is `/D:/…` on Windows
 and no file API takes it, and a bare `"sqlite3.dll"` candidate is a request to the loader to search
 `PATH`, which found something and segfaulted.
 
@@ -370,60 +412,84 @@ What phase 1 added to the list:
 
 ## Start here
 
-**Nothing milestone-sized is open.** Phases 0-2, the surfaces track and every item this file has
-carried as a gap are done, with two exceptions that are written down rather than forgotten:
+**Nothing milestone-sized is open**, and the three things the last edition of this file called
+chores turned out to be bugs and are fixed. What is left is genuinely optional, and it is listed in
+the order it is worth doing.
 
-### 1. Windows: one root cause away from being a gate
+### 1. Re-measure on a quiet machine
 
-`docs/e1-windows.md` is the whole story. The build is portable and the driver loads a fully capable
-vendored library; **1346 of 1498 tests pass**, and almost every failure is one cause: `EBUSY`,
-because Windows refuses to write a file another handle has open and `tenant.snapshot()` copies the
-database file while the tenant still holds it. Fix that — Windows share modes on the open, or a copy
-through a handle opened for sharing — and most of the 150 go with it. The `windows-latest` job is
-already in CI and is the instrument for saying whether it worked; it becomes a gate by deleting its
-`continue-on-error` lines. One test also hard-codes `/tmp/bunql-canonical`, which is just a typo.
+The one thing this session could not finish. `docs/performance.md` §5's worker ladder — the 2.67x
+table — still describes the old defaults, and it could not be re-taken: five-second runs at the
+*same* rung returned **11 721 and 49 507 writes/s** minutes apart, and a four-worker rung came back
+at 0.45x and then 1.21x of its own one-worker rung. A ladder is a comparison between rungs, so noise
+of that size does not average out, it inverts the answer.
 
-### 2. Re-measure the ladders against the new defaults
+`docs/performance.md` §8 is new and says how to tell whether a machine is quiet enough, and what
+two artefacts wasted a day of this session — a benchmark charging its own warm-up to the first leg
+it measured, and two runaway processes that had been eating two cores for eighteen hours. Read it
+before taking any number.
 
-Every throughput figure in this file and in `docs/performance.md` was taken with `defaultAck =
-local` and `groupCommit` off. Both defaults moved, in opposite directions and by more than the
-noise: a single write now pays an `fdatasync` (24.0 → 65.0 µs) and concurrent writes now fold (4.7x
-at 64 clients). **Nothing here is wrong, but the headline numbers no longer describe a default
-node.** `bun run bench --json` and a pass over `docs/performance.md` §1 and §5 is the honest
-follow-up, and `bench/router.ts` is the harness to trust for anything within 10%.
+What *was* re-measured and can be trusted: §1's stage table (unchanged), the ack ladder
+(23.7 µs `local` against 62 µs `fsync`), the group-commit ladder, and the defaults A/B at one
+worker — **27.7-30.4k writes/s on the old defaults against 46.0-53.6k on the new**, three
+interleaved rounds. `docs/benchmarks.md` is deliberately *not* restitched from parts; its contract
+is one coherent run and it says at the top which of its rows have moved under it.
 
-### One flaky test, observed
+### 2. Windows: whether it is a gate now depends on one CI run
 
-`deferred append > a kill -9 in the window is recovered from the WAL` (P5) failed once in six full
-runs of the suite and passed the other five. It kills a process and then asserts on what the
-reconcile recovered, so the race is in the test rather than in the recovery — but a test that fails
-one run in six is a test that will eventually be ignored. Worth pinning before it trains anyone.
+`docs/e2-windows-gate.md` is the fix and the reasoning. E1's 150 failures were one cause, and it
+was not the one E1 named: mechanism A published its wal-index header by writing the `-shm` file
+through a descriptor, and Windows refuses that while any connection has the file mapped. The
+wal-index is now written through `xShmMap`'s own mapping, with `xShmBarrier` between the two header
+copies, on every platform — so macOS and Linux prove the path on every push and Windows is the same
+code rather than the exception.
 
-### Smaller, if you want something bounded
+Two POSIX assumptions in the tests went with it: a TOML fixture wrote a Windows path into a basic
+string, where every separator is an escape sequence, and temp-dir teardown now retries and gives up
+quietly rather than failing the test that happened to run last.
+
+**If the `windows-latest` job passes, delete its `continue-on-error` lines** — the job level and
+the four step levels — and Windows is a gate. If it does not, the job output is still the
+instrument, and the next cause will be one cause again.
+
+### 3. The bounded ones
 
 - **The rest of the router's header cost.** P6 flattened the pairs and recovered 19.2% of a hop
   where removing the header clone entirely is worth 37.5%, so about half of it survives — the
   string still crosses and both sides still build and parse it. A binary encoding, or caching the
   flattened form of the header sets a node actually sends, is where that goes.
-  `docs/p6-router-resolution.md` §6.
+  `docs/p6-router-resolution.md` §6. **Do this one on a quiet machine or not at all**: it is a 5-11%
+  effect and this machine could not resolve 2x today.
 - **The other 0.75 µs of a poll.** `WalTailer.poll()` is 1.98 µs once the checksum is native, of
-  which two `fstatSync` calls and a separate 32-byte header read are 0.75. One `pread` taking the
-  header and the first frame together would collapse them. `docs/p3-wal-checksum.md` §2.
+  which an `fstat` and a separate 32-byte header read are 0.75. One `pread` taking the header and
+  the first frame together would collapse them. `docs/p3-wal-checksum.md` §2.
 - **A read mode for the native `/v1/db/{db}/tx`.** R10 built the machinery and wired only Hrana to
   it; the native surface would need a fourth mode and a baton dispatch across two session kinds.
   `docs/r10-read-transactions.md` §4.
-- **`defensive` for the vendored build.** `SQLITE_DBCONFIG_DEFENSIVE` has no pragma and
-  `sqlite3_db_config` is variadic. P3 built exactly the machinery this needs — `walsum.c` rides the
-  vendored compile and `src/sqlite/lib.ts` resolves it optionally — so this is now one function in
-  a file that already exists. `docs/p1-pragmas.md`.
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a restart. Spill it to
-  disk or serve old positions from the log.
-- **`schema` events reach WebSocket subscribers only**, not the SSE change feed.
-- **Nothing is published to npm.** `package.json` has `exports`, `bin` and `engines` but no release
-  flow.
-- **`bench/http.ts` authenticates with the admin key**, a constant-time compare, so its numbers are
-  the best case rather than what a token-bearing client sees. The token path is cached (45.3 µs
-  against 44.2), so the gap is small — but the benchmark still does not measure what deployments do.
+  disk or serve old positions from the log. This is the last of the realtime gaps — schema events
+  now reach the SSE feed as well as the socket.
+- **The npm release flow exists and cannot be used yet.** `.github/workflows/release.yml` runs the
+  full gate on a `v*` tag and publishes with provenance. Two things block a first tag and neither
+  is a code change: **`bunql` on npm is somebody else's package**, so a name has to be chosen — and
+  a scope is not a one-line change, because every example in `README.md` and `docs/` imports
+  `from "bunql/client"` and `test/package/exports.test.ts` checks each of those — and
+  `private: true` is still in `package.json` on purpose, as the last thing between that workflow
+  and a package going out under a name nobody picked. MIT and the copyright line are a default,
+  not a decision.
+- **`@bunql/sqlite-*` prebuilt libraries** are still unbuilt and still the right idea;
+  `docs/c6-packaging.md` §6 says what it would take.
+
+### Closed since the last edition, so stop looking for them
+
+- ~~**`defensive` for the vendored build.**~~ It is `[sqlite] defensive`, it is implemented through
+  `bunql_db_config_int`, and a node told to be defensive on a build that cannot be refuses to
+  start. `docs/p1-pragmas.md`.
+- ~~**`schema` events reach WebSocket subscribers only.**~~ The SSE feed carries them too.
+- ~~**`bench/http.ts` authenticates with the admin key**, so its numbers are the best case.~~
+  There is a minted-token leg now, and the answer is that the gap is about 5 µs rather than the
+  1.7x the old arithmetic implied — the verification cache is doing its job.
+- ~~**One flaky test.**~~ It was not flaky; see P5 §6.
 
 ## House rules for this repo
 

@@ -156,7 +156,13 @@ describe("key material", () => {
 
     const file = path.join(dir, "keys.json")
     expect(fs.existsSync(file)).toBe(true)
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+    // Owner-only, where that means anything. Windows has no POSIX mode bits: `chmod` there sets
+    // nothing but the read-only flag and `stat` reports 0o666 whatever was asked for, so asserting
+    // 0o600 would be asserting that the platform is POSIX. The file's protection on Windows is the
+    // directory ACL, which this test is not the place to check.
+    if (process.platform !== "win32") {
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+    }
     const stored = JSON.parse(fs.readFileSync(file, "utf8")) as {
       adminKey: string
       signing: { d?: string }

@@ -1,6 +1,7 @@
 // Finding the library, and failing usefully when it cannot be found. The messages here are what a
 // person on a fresh machine actually reads, so they are asserted rather than left to drift.
 
+import path from "node:path"
 import { describe, expect, test } from "bun:test"
 import {
   candidatePaths,
@@ -12,7 +13,23 @@ import {
 } from "../../src/sqlite/lib.ts"
 
 /** A shared library that exists on this platform and is definitely not a libsqlite3. */
-const NOT_SQLITE = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6"
+const NOT_SQLITE =
+  process.platform === "darwin"
+    ? "/usr/lib/libSystem.B.dylib"
+    : process.platform === "win32"
+      ? "C:\\Windows\\System32\\kernel32.dll"
+      : "libc.so.6"
+
+/**
+ * The vendored artefact as `vendoredName()` names it, matched the way a path can be matched on
+ * every platform: the separator is `\` on Windows and the file is `sqlite3.dll`, so neither the
+ * directory separator nor the `libsqlite3.` prefix can be written into the needle.
+ */
+const VENDOR_DIR = ["vendor", "sqlite"].join(path.sep)
+const isVendored = (candidate: string): boolean =>
+  candidate.includes(VENDOR_DIR) && candidate.endsWith(EXTENSION)
+const EXTENSION =
+  process.platform === "darwin" ? ".dylib" : process.platform === "win32" ? ".dll" : ".so"
 
 describe("the search path", () => {
   test("the vendored library is tried after BUNQL_SQLITE_LIB and before the system ones", () => {
@@ -21,11 +38,13 @@ describe("the search path", () => {
     try {
       const paths = candidatePaths()
       expect(paths[0]).toBe("/explicit/libsqlite3.so")
-      const vendored = paths.findIndex((p) => p.includes("vendor/sqlite/libsqlite3."))
+      const vendored = paths.findIndex(isVendored)
       expect(vendored).toBe(1)
-      // Every system candidate comes after it.
+      // Every system candidate comes after it — and on Windows there are none at all, which is
+      // deliberate (`candidatePaths`: a bare "sqlite3.dll" is a request to search PATH).
       const system = paths.findIndex((p) => p.includes("/usr/lib") || p.includes("/opt/"))
-      expect(system).toBeGreaterThan(vendored)
+      if (process.platform === "win32") expect(system).toBe(-1)
+      else expect(system).toBeGreaterThan(vendored)
     } finally {
       if (before === undefined) delete process.env.BUNQL_SQLITE_LIB
       else process.env.BUNQL_SQLITE_LIB = before
@@ -33,10 +52,10 @@ describe("the search path", () => {
   })
 
   test("the vendored path is absolute and named for this platform", () => {
-    const vendored = candidatePaths().find((p) => p.includes("vendor/sqlite/libsqlite3."))
+    const vendored = candidatePaths().find(isVendored)
     expect(vendored).toBeDefined()
-    expect(vendored!.startsWith("/")).toBe(true)
-    expect(vendored!.endsWith(process.platform === "darwin" ? ".dylib" : ".so")).toBe(true)
+    expect(path.isAbsolute(vendored as string)).toBe(true)
+    expect(vendored).toEndWith(EXTENSION)
   })
 })
 

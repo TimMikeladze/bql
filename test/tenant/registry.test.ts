@@ -70,7 +70,12 @@ describe("tenant registry", () => {
   test("evicts idle tenants and reopens them, never evicting one in flight", async () => {
     const dir = tempDir()
     const reg = TenantRegistry.open({ dir, maxOpen: 50, readers: 1 })
-    const count = 2000
+    // Ten times `maxOpen`, which is what the test is about — the LRU has to evict nine tenants
+    // out of ten and reopen any of them intact. It was 2000, and 2000 is 24x slower on Windows
+    // than on macOS (creating a file and opening SQLite on it are both far dearer there), which
+    // put this one test over a two-minute limit while proving nothing extra. `maxOpen` is the
+    // number that matters; `count` only has to comfortably exceed it.
+    const count = 500
 
     for (let i = 0; i < count; i++) {
       const tenant = await reg.create(`t${i}`)
@@ -84,7 +89,7 @@ describe("tenant registry", () => {
     expect(reg.stats().evictions).toBeGreaterThan(count - 60)
 
     // Every evicted tenant reopens with its own state intact.
-    for (const i of [0, 1, 7, 999, 1500, count - 1]) {
+    for (const i of [0, 1, 7, count >> 2, count >> 1, count - 1]) {
       const tenant = reg.open(`t${i}`)
       expect(tenant.txid).toBe(1n)
       expect(tenant.readSync((db) => db.prepare("select v from t").get())).toEqual({ v: i })
@@ -104,9 +109,10 @@ describe("tenant registry", () => {
     // And the whole catalog survives a restart of the process.
     const reopened = TenantRegistry.open({ dir, maxOpen: 8 })
     expect(reopened.list()).toHaveLength(count)
-    const tenant = reopened.open("t1234")
-    expect(tenant.readSync((db) => db.prepare("select v from t").get())).toEqual({ v: 1234 })
+    const last = count - 66
+    const tenant = reopened.open(`t${last}`)
+    expect(tenant.readSync((db) => db.prepare("select v from t").get())).toEqual({ v: last })
     expect(tenant.write((db) => db.run("insert into t values (0)")).txid).toBe(2n)
     reopened.close()
-  }, 120_000)
+  }, 180_000)
 })

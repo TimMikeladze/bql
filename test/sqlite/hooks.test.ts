@@ -359,8 +359,16 @@ describe("wal checkpoint and file control", () => {
   test("file control reaches the VFS", () => {
     const db = fresh()
     const out = new Int32Array(1)
-    expect(db.fileControl("SQLITE_FCNTL_HAS_MOVED", out)).toBe(0)
-    expect(out[0]).toBe(0)
+    // What is under test is that the call *reaches* the VFS and that its answer comes back
+    // unwrapped. `SQLITE_FCNTL_HAS_MOVED` is served by the unix VFS and not by the Win32 one,
+    // which answers SQLITE_NOTFOUND — and that answer is itself the proof the opcode reached a
+    // VFS, so it is accepted rather than skipped.
+    const moved = db.fileControl("SQLITE_FCNTL_HAS_MOVED", out)
+    if (process.platform === "win32") expect(moved).toBe(12)
+    else {
+      expect(moved).toBe(0)
+      expect(out[0]).toBe(0)
+    }
     // Unimplemented opcodes come back as SQLITE_NOTFOUND rather than throwing.
     expect(db.fileControl(999999)).toBe(12)
     db.close()
