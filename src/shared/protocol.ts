@@ -1,161 +1,185 @@
-/** Wire contracts between the dagr engine host, the broker, and remote workers. */
+/** Wire contracts for the bus. Nothing here knows what an agent is. */
 
-export type Labels = Record<string, string>;
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | Json[]
+  | { [key: string]: Json };
+export type Headers = Record<string, string>;
 
-export type TaskStatus =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "cancelled";
-export const TERMINAL: TaskStatus[] = ["succeeded", "failed", "cancelled"];
-export const isTerminal = (status: TaskStatus) => TERMINAL.includes(status);
+export const DEFAULT_WORKSPACE = "default";
 
-/**
- * Usage mirrors dagr's `ResourceUsage` field for field, so a remote step
- * accounts against the run's resource grant exactly as a local one does.
- */
-export interface Usage {
-  providerUnits?: number;
-  requests?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheCreateTokens?: number;
-  costMicros?: number;
-}
-
-export interface ProviderGrant {
-  unit: string;
-  units: number;
-}
-
-/** What the engine hands the broker. Deduplicated on `idempotencyKey`. */
-export interface DispatchRequest {
-  idempotencyKey: string;
-  runtime: string;
-  selector: Labels;
-  input: unknown;
-  uses?: string;
-  script?: string;
-  runId: string;
-  stepKey: string;
-  attempt: number;
-  maxAttempts: number;
-  /** Absolute epoch ms; the worker refuses to start past it and stops at it. */
-  deadlineAt: number | null;
-  provider: ProviderGrant | null;
-  workspace: string;
-}
-
-export interface Task {
+export interface Message {
+  seq: number;
   id: string;
-  idempotencyKey: string;
-  runtime: string;
-  selector: Labels;
-  input: unknown;
-  uses: string | null;
-  script: string | null;
-  runId: string;
-  stepKey: string;
   workspace: string;
-  status: TaskStatus;
-  /** dagr's attempt number for the dispatching step, carried for correlation. */
-  engineAttempt: number;
-  /** Broker-side attempts: how many workers have claimed this task. */
-  attempt: number;
+  subject: string;
+  /** Ordering key. Deliveries sharing one are serialized on ordered subscriptions. */
+  key: string | null;
+  headers: Headers;
+  body: Json;
+  publishedAt: number;
+  expiresAt: number | null;
+  dedupeKey: string | null;
+}
+
+export interface PublishRequest {
+  subject: string;
+  body?: Json;
+  key?: string | null;
+  headers?: Headers;
+  /** Publishing the same key twice in a workspace returns the first message. */
+  dedupeKey?: string | null;
+  /** Subject a reply should be published to; sets up a durable response. */
+  replyTo?: string | null;
+  correlation?: string | null;
+  ttlMs?: number | null;
+}
+
+export interface PublishResult {
+  seq: number;
+  id: string;
+  duplicate: boolean;
+  correlation: string | null;
+}
+
+export type DeliverFrom = "new" | "beginning" | number;
+
+export interface Subscription {
+  id: string;
+  workspace: string;
+  name: string;
+  pattern: string;
+  /** How far this subscription has read the log. */
+  cursorSeq: number;
+  ackWaitMs: number;
   maxAttempts: number;
-  deadlineAt: number | null;
-  provider: ProviderGrant | null;
-  workerId: string | null;
-  generation: number;
-  leaseUntil: number | null;
-  /** Opaque worker scratch, handed back to the next attempt (agent session ids). */
-  checkpoint: unknown;
-  value: unknown;
-  usage: Usage | null;
-  error: string | null;
-  cancelRequested: boolean;
+  /** Serialize deliveries that share a message key. */
+  ordered: boolean;
+  dlqSubject: string;
+  paused: boolean;
   createdAt: number;
   updatedAt: number;
 }
 
-/** The task as an unprivileged reader sees it: no input, no result payload. */
-export type TaskSummary = Omit<Task, "input" | "value" | "checkpoint">;
-
-export interface Claim {
-  task: Task;
-  /**
-   * How long the granted lease lasts. The worker paces its heartbeat off this
-   * rather than a constant of its own: an operator who shortens the lease must
-   * not silently break every worker in the fleet.
-   */
-  leaseMs: number;
+export interface SubscribeRequest {
+  name: string;
+  pattern: string;
+  ackWaitMs?: number;
+  maxAttempts?: number;
+  ordered?: boolean;
+  dlqSubject?: string;
+  deliverFrom?: DeliverFrom;
 }
 
-export interface Completion {
-  workerId: string;
-  generation: number;
-  ok: boolean;
-  value?: unknown;
-  usage?: Usage;
-  error?: string;
-  /** Retryable failures return to the queue; fatal ones fail the task outright. */
-  fatal?: boolean;
-}
+export type DeliveryStatus = "pending" | "leased" | "acked" | "dead";
 
-export interface Worker {
+export interface Delivery {
   id: string;
+  subscriptionId: string;
+  subscription: string;
+  messageSeq: number;
+  status: DeliveryStatus;
+  consumerId: string | null;
+  /** Monotonic per delivery; fences a lease that has moved on. */
+  generation: number;
+  attempt: number;
+  maxAttempts: number;
+  leaseUntil: number | null;
+  key: string | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A leased delivery with the message it carries. */
+export interface Envelope {
+  delivery: Delivery;
+  message: Message;
+  /** Stable `<subscription>:<seq>`, for consumers making external effects once. */
+  idempotencyKey: string;
+}
+
+export interface ClaimRequest {
+  consumer: string;
+  max?: number;
+  /** Long-poll window. The broker holds the request open this long for work. */
+  waitMs?: number;
+}
+
+export interface AckRequest {
+  consumer: string;
+  generation: number;
+}
+export interface NackRequest extends AckRequest {
+  error?: string;
+  /** Skip remaining attempts and dead-letter immediately. */
+  fatal?: boolean;
+  /** Hold the delivery back this long before it becomes claimable again. */
+  delayMs?: number;
+}
+
+export interface Response {
+  workspace: string;
+  correlation: string;
+  messageSeq: number;
+  body: Json;
+  headers: Headers;
+  createdAt: number;
+}
+
+export interface Consumer {
+  id: string;
+  workspace: string;
   name: string;
   host: string;
-  runtimes: string[];
-  labels: Labels;
+  subscriptions: string[];
+  labels: Record<string, string>;
   lastSeen: number;
   paused: boolean;
   registeredAt: number;
 }
 
-export interface RegisterWorker {
+export interface RegisterConsumer {
   id: string;
   name: string;
   host: string;
-  runtimes: string[];
-  labels: Labels;
+  subscriptions: string[];
+  labels?: Record<string, string>;
 }
 
-export type LogChannel = "info" | "warn" | "error" | "stdout" | "stderr";
-
-export interface BusEvent {
-  seq: number;
-  id: string;
-  specversion: "1.0";
-  source: string;
-  type: string;
-  subject: string;
-  taskId: string | null;
-  runId: string | null;
-  time: string;
-  data: Record<string, unknown>;
+export interface SubscriptionStats extends Subscription {
+  pending: number;
+  leased: number;
+  dead: number;
+  /** Messages in the log this subscription has not examined yet. */
+  lag: number;
 }
 
-export interface Snapshot {
-  tasks: TaskSummary[];
-  workers: Worker[];
-  events: BusEvent[];
-  queueDepth: Record<string, number>;
+export interface Stats {
+  subscriptions: SubscriptionStats[];
+  consumers: Consumer[];
+  messages: number;
+  lastSeq: number;
   now: number;
 }
 
-/** Token claims. Signed by the broker; verified statelessly on every request. */
+/** Token claims. Signed by the broker, verified statelessly on every request. */
 export interface TokenClaims {
-  /** Worker identity this token may register and claim as; `*` for admin. */
+  /** Consumer id this token may act as; `*` for admin and reader tokens. */
   sub: string;
-  /** `reader` may only read fleet state; `admin` may also dispatch and mint. */
-  scope: "worker" | "reader" | "admin";
-  runtimes: string[];
-  labels: Labels;
+  scope: "consumer" | "reader" | "admin";
+  workspace: string;
+  /** Subject patterns this token may publish to. */
+  publish: string[];
+  /** Subscription names this token may claim from. `*` for all. */
+  subscribe: string[];
   /** Epoch seconds; 0 means no expiry. */
   exp: number;
 }
 
 export const ANY = "*";
+export const isTerminal = (status: DeliveryStatus) =>
+  status === "acked" || status === "dead";

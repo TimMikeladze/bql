@@ -3,13 +3,13 @@ import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
-import { mint } from "./src/broker/tokens";
+import { mint } from "./src/bus/tokens";
 
 /**
- * In production the broker serves the dashboard and injects a read-only token
+ * In production the bus serves the dashboard and injects a read-only token
  * itself. The dev server has to do the same job, or every reload would be an
  * unauthenticated one — so it mints the same kind of token from the same
- * signing key the local broker is using.
+ * signing key the local bus is using.
  */
 function injectReaderToken(): Plugin {
   return {
@@ -22,14 +22,15 @@ function injectReaderToken(): Plugin {
           "utf8",
         ).trim();
       } catch {
-        return html; // No local broker yet; the page will report 401 plainly.
+        return html; // No local bus yet; the page will report 401 plainly.
       }
       const token = mint(
         {
           sub: "dashboard",
           scope: "reader",
-          runtimes: [],
-          labels: {},
+          workspace: "default",
+          publish: [],
+          subscribe: [],
           exp: Math.floor(Date.now() / 1000) + 12 * 3600,
         },
         key,
@@ -45,7 +46,7 @@ function injectReaderToken(): Plugin {
 export default defineConfig({
   plugins: [react(), tailwindcss(), injectReaderToken()],
   resolve: {
-    alias: { "@": fileURLToPath(new URL("./src/client", import.meta.url)) },
+    alias: { "@": fileURLToPath(new URL("./src/dashboard", import.meta.url)) },
   },
   server: {
     host: "127.0.0.1",

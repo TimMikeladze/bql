@@ -1,151 +1,144 @@
 # AgenticBus
 
-Distributed execution for [dagr](https://github.com/TimMikeladze/dagr) workflows. dagr owns the graph — twelve step kinds, status-aware joins, human gates, questions, resource governance — and runs one process against one SQLite journal. AgenticBus moves the *handlers* off that machine: a step declares `runtime: remote`, a worker on another host claims it, and the engine gets the result back with leases, heartbeats and generation fencing in between.
+A durable message bus for agents and ordinary work. Bun, SQLite, no runtime dependencies.
 
-```yaml
-review:
-  kind: task
-  runtime: remote
-  with:
-    run: agent                      # the runtime the remote worker executes
-    select: { pool: gpu }           # must match that worker's labels
-    input:
-      prompt_file: ./prompts/review.md
-      model: claude-opus-5
+Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and a dead-letter path. Nothing in the core knows what an agent is — agent patterns are conventions over subjects, which is what keeps a plain background job queue a first-class use rather than an afterthought.
+
+```sh
+agenticbus serve &
+agenticbus subscribe work 'work.>'
+agenticbus consume work --exec ./handle.sh &
+agenticbus publish work.resize '{"src":"a.png"}'
 ```
 
-That step now runs on a box with a GPU, and everything else about the workflow is unchanged.
+Three things at once, from one set of primitives:
 
-## Why this exists
-
-dagr's spec is explicit that multi-process execution is not coming:
-
-> Running a second OS process against the same database file is **not supported** … There is no cross-process claim arbitration, no distributed lock, and no leader election.
-
-That is the right call for dagr — the single writer is load-bearing for three separate invariants — and it leaves a real gap. AgenticBus fills exactly that gap and nothing else. The engine stays the only writer of its journal; remote workers never open it. They hold leases over HTTP, which is a problem the broker is allowed to solve because it is the broker's own database.
-
-The result is that **every dagr step kind works**, because the graph is executed by dagr's engine. Nothing here re-implements joins, retries, gates, `foreach`, sub-workflows, or the expression language.
+| | |
+| --- | --- |
+| **Work queue** | Competing consumers on one subscription, at-least-once, leases and fencing |
+| **Pub/sub** | Many subscriptions on one subject, each with its own cursor, so a message fans out |
+| **Request/reply** | A durable response addressed by correlation — ask now, collect after a restart |
 
 ## Install
 
-Bun 1.4+. dagr is not on npm yet, so it resolves from a sibling checkout:
+Bun 1.4 or newer.
 
 ```sh
-git clone https://github.com/TimMikeladze/dagr ../dagr && (cd ../dagr && bun install)
 bun install
-bun run build          # the fleet dashboard
-```
-
-## Run it
-
-```sh
+bun run build      # the dashboard
 bun run dev
 ```
 
-That starts the engine host, the broker, two worker processes and the dashboard, choosing free ports rather than fighting for taken ones. Then:
+`bun run dev` starts the bus, three consumer processes and the dashboard, choosing free ports rather than fighting for taken ones.
 
 ```sh
-ENGINE_URL=http://127.0.0.1:4318 bun scripts/run.ts remote-slug '{"text":"Crème brûlée"}'
+bun src/cli/index.ts publish work.slow '{"ms":2000}'
+bun src/cli/index.ts request rpc.upper '"hello"'
+bun src/cli/index.ts stats
 ```
 
+![The dashboard](docs/images/dashboard.png)
+
+## Subjects
+
+Dot-separated tokens. `*` matches exactly one token, `>` matches one or more trailing tokens — the NATS convention, because people already know it.
+
 ```
-run 01M2C384JD2WKF8B5R1A8254SW
-  running      slug
-  succeeded    slug
-  running      verify
-  waiting      gate
-    approve with: curl -sX POST …/signals -d '{"name":"slug.approved","correlation":"01M2…"}'
-  succeeded    verify
+orders.eu.created        a concrete subject
+orders.*.created         matches orders.eu.created, not orders.eu.west.created
+orders.>                 matches both
+>                        everything
 ```
 
-The `slug` and `verify` steps ran in separate OS processes that never touched the engine's database. `gate` is a dagr `approval` step, parked until somebody signals it.
+## Fan-out happens on pull, not on publish
 
-![The fleet dashboard](docs/images/fleet-dashboard.png)
+A subscription holds a cursor into the log. When a consumer asks for work, the bus reads forward from that cursor and creates deliveries for the messages that match.
 
-## The pieces
+Three consequences worth knowing:
 
-| Command | What it is |
+- **Publishing is O(1)** in the number of subscriptions. Adding the fiftieth subscriber costs producers nothing.
+- **A subscription created today can read last week**, with `deliverFrom: "beginning"` or any sequence number.
+- **A wall of unrelated subjects cannot starve a subscription.** The cursor advances past messages it examined and did not match, so they are never looked at again. Matching *after* a `LIMIT` — the obvious implementation — is a liveness bug that only appears once you have more than a couple of subjects.
+
+## Delivery
+
+At-least-once, with effectively-once effects available to anyone who wants them.
+
+- A delivery is leased to one consumer for the subscription's `ackWaitMs`, with a monotonic `generation`. An ack or nack from a stale generation is rejected.
+- An expired lease returns the delivery to the queue for another consumer, up to `maxAttempts`.
+- Exhausting attempts **dead-letters onto an ordinary subject** (`dlq.<subscription>` by default) with the reason in the headers — so a DLQ is just another subscription, and a replay is just another publish.
+- `dedupeKey` is unique per workspace: publishing the same key twice returns the first message, and a deduplicated *request* is handed back the original correlation, so it waits on the answer that will actually arrive.
+- Every envelope carries `idempotencyKey` (`<subscription>:<seq>`), stable across redeliveries, for consumers making external effects.
+
+**Ordering.** `ordered: true` stops the bus leasing a delivery whose message `key` already has one in flight on that subscription. Per-key FIFO, with unrelated keys still moving in parallel. Off by default, because ordering costs throughput and most work does not need it.
+
+## Writing a consumer
+
+```ts
+import { BusClient, BusConsumer, FatalError } from "agenticbus/client";
+
+const client = new BusClient({ url: "http://127.0.0.1:4317", token: process.env.BUS_TOKEN! });
+
+await new BusConsumer({
+  client,
+  id: "resizer-1",
+  subscription: "work",
+  prefetch: 4,
+  async handle({ message }, api) {
+    if (!supported(message.body)) throw new FatalError("unsupported format");
+    await api.extend();               // renew the lease from a long handler
+    return { ok: true };              // a returned value answers a request
+  },
+}).start();
+```
+
+Return normally and the message is acked. Throw and it is nacked, retried, and eventually dead-lettered. Throw `FatalError` to dead-letter immediately, because a message this consumer can never handle should not be tried four more times.
+
+If the message carried a `reply-to`, whatever the handler returns becomes its response — an RPC consumer is an ordinary consumer that happens to return a value.
+
+**In any other language**, `--exec` is the whole integration: the message arrives on stdin, and stdout becomes the reply.
+
+```sh
+agenticbus consume work --exec ./resize.sh --prefetch 4
+```
+
+## CLI
+
+| | |
 | --- | --- |
-| `agenticbus serve` | Single box: dagr's engine, the broker, and dagr's control plane, in one process. |
-| `agenticbus broker` | The broker alone, for a split deployment. |
-| `agenticbus worker` | A remote worker hosting dagr's runtimes. |
-| `agenticbus token` | Mint a per-worker capability token. |
-| `agenticbus status` | Fleet and queue readout. |
-
-### Split across machines
-
-```sh
-# Wherever the workers can reach it:
-agenticbus broker --port 4317
-
-# The engine host, dispatching into that broker rather than embedding one:
-agenticbus serve --broker-url https://bus.internal:4317 --workflows ./workflows
-
-# Any number of worker machines:
-BUS_TOKEN=… agenticbus worker --broker https://bus.internal:4317 --runtimes bun
-```
-
-Three processes, three machines, one workflow. The engine still owns its journal alone; the broker owns its own; the workers own neither.
-
-`serve` listens on two ports: the broker (`--port`, default 4317) and dagr's control plane (`--engine-port`, default broker + 1), both behind the admin token. dagr ships its control plane unauthenticated by default and says so in its docs; this host does not expose it bare.
-
-### A worker
-
-```sh
-# On the engine host — mint a credential scoped to one worker:
-agenticbus token --worker gpu-1 --runtimes agent,bun --labels pool=gpu
-
-# On the worker machine:
-BUS_TOKEN=<that token> agenticbus worker \
-  --id gpu-1 --broker https://bus.internal \
-  --runtimes agent,bun --labels pool=gpu \
-  --jobs ./jobs --agent-cwd ./work --agent-models claude-opus-5
-```
-
-The worker hosts **dagr's own executors** — `bunExecutor`, `shellExecutor`, `httpExecutor`, `pythonExecutor`, `agentExecutor`, `promptExecutor`. A remoted `bun` step runs the same code it would have run in-process, with the same default-deny allowlists and the same subprocess kill discipline. Runtime parity is structural, not maintained by hand.
-
-Registration is default-deny in both directions: a worker serves only the runtimes named in `--runtimes`, and its token can withhold even those.
-
-## What the broker adds
-
-Everything a network needs that a single process does not.
-
-- **Idempotent dispatch** on dagr's `${runId}:${stepKey}`. A re-dispatched step reattaches to remote work in flight instead of starting a second copy.
-- **Reattach after an engine crash.** The executor checkpoints the task id before it waits, so a reclaimed attempt resumes watching a remote process that never stopped — the same trick dagr's agent runtime uses for session ids.
-- **Leases that arbitrate, not just recover.** A worker that dies mid-step loses its lease; the task returns to the queue and another machine finishes it, up to `maxAttempts`. dagr keeps leases only for crash recovery, because it has nothing to arbitrate against.
-- **Generation fencing.** A completion from a worker whose lease has moved on is rejected, not applied.
-- **Duplicate-safe completion.** The worker keeps an on-disk outbox, so a finished computation survives a broker outage; a replay of the same result is accepted, a *different* result for the same task is a conflict.
-- **Heartbeats paced by the lease.** The broker tells the worker how long its lease is and the worker beats three times inside it, so shortening the lease cannot silently break the fleet.
-- **Usage passthrough.** Workers report `costMicros` and token counts, so a remoted agent step still spends the run's resource grant.
+| `agenticbus serve` | run the bus |
+| `agenticbus token --consumer id --publish 'a.>' --subscribe work` | mint a scoped token |
+| `agenticbus publish <subject> <json>` | publish |
+| `agenticbus request <subject> <json>` | publish and wait for a reply |
+| `agenticbus subscribe <name> <pattern>` | create a durable subscription |
+| `agenticbus consume <subscription> --exec CMD` | run a consumer |
+| `agenticbus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
 ## HTTP API
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/health`, `/ready` | liveness; readiness names a stale fleet |
-| `POST` | `/api/tasks` | dispatch (admin) |
-| `GET` | `/api/tasks/:id` | one task |
-| `POST` | `/api/tasks/:id/cancel` | ask a worker to stop (admin) |
-| `POST` | `/api/tasks/:id/heartbeat` `/complete` `/progress` `/checkpoint` `/log` | worker lifecycle |
-| `POST` | `/api/workers/register`, `/api/workers/:id/claim` `/pause` | worker lifecycle |
-| `POST` | `/api/tokens` | mint a worker token (admin) |
-| `GET` | `/api/snapshot` `/api/events` `/api/events/stream` `/api/workers` `/api/usage` | observation |
-
-Runs, steps, asks, signals and schedules are dagr's API, served on the engine port.
+| `POST` | `/api/publish` | `{subject, key?, headers?, body, dedupeKey?, replyTo?, ttlMs?}` |
+| `POST` `GET` | `/api/subscriptions` | create; list |
+| `POST` | `/api/subscriptions/:name/claim` | `{consumer, max, waitMs}` — long-polls |
+| `POST` | `/api/subscriptions/:name/replay` `/purge` `/pause` | operator actions |
+| `POST` | `/api/deliveries/:id/ack` `/nack` `/extend` | |
+| `POST` `GET` | `/api/requests[/:correlation]` | request/reply, both long-polling |
+| `GET` | `/api/messages/:seq` · `/api/log` · `/api/stream` | the log; SSE refresh signal |
+| `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
+| `POST` | `/api/tokens` | mint (admin) |
 
 ## Security
 
-**Per-worker tokens.** The broker holds a signing key and mints HMAC-SHA-256 tokens carrying `{ workerId, runtimes, labels, expiry }`. A token cannot claim work outside its runtimes, cannot advertise labels it was not issued for, and cannot act as another worker. Verification is stateless, so revocation is by expiry or key rotation rather than a lookup on the hot path.
+**Scoped tokens.** A token names its workspace, the subject patterns it may publish to, and the subscriptions it may claim from. Grants are patterns, so `orders.>` licenses everything beneath it. Verification is a signature check with no database round trip — so revocation is by expiry or key rotation, which is the trade a stateless token always makes.
 
-**Three scopes.** `admin` dispatches, cancels and mints. `worker` claims and completes. `reader` is read-only, minted per page load and injected into the dashboard, so a page that can be opened is not a page that can dispatch work.
+**Three scopes.** `admin` publishes anywhere, manages subscriptions and mints tokens. `consumer` publishes and claims within its grants. `reader` observes, and is what the dashboard is given — a page that can be opened is not a page that can dispatch work.
+
+**Tenancy is enforced, not decorative.** `workspace` is a mandatory filter on every query, and a non-admin token is pinned to its own: it cannot name another one in a header.
 
 **The signing key and admin token live in `.agenticbus/` at mode 0600**, not in argv where `ps` would show them.
 
-**Transport is the operator's job.** A bearer token must not cross an untrusted network in plaintext: terminate TLS or use an encrypted tunnel. A reverse proxy in front of the dashboard must authenticate its own users.
-
-**Secrets and the wire.** dagr resolves `${{ secrets.X }}` while materializing a step, so a secret written into a remote step's `with` is resolved on the engine and shipped to the worker. Keep it out of `with` and let the runtime read it on the worker instead — `agenticbus worker --secrets NAME,NAME` is the allowlist for that.
-
-**Workers run handler code as their own user.** `agent`, `shell`, `bun` and `python` steps reach the worker host's filesystem — the agent runtime most of all, since a writing permission mode hands it the disk. A child process is a crash boundary, not a sandbox. Run untrusted definitions on workers that register only `http`, or put each worker in a container or VM. This is dagr's posture, inherited deliberately.
+**Transport is the operator's job.** A bearer token must not cross an untrusted network in plaintext: terminate TLS or use a tunnel.
 
 ## Verify
 
@@ -156,42 +149,41 @@ bun run build
 bun run test:e2e
 ```
 
-The end-to-end check is real processes and no mocks: it starts the engine host and two worker processes, runs a workflow with a slow remote step, **SIGKILLs the worker holding that step**, and asserts that the lease expires, another machine finishes the work, the journal records the expiry, the human gate parks and settles on a signal, and re-dispatching a finished key reattaches instead of duplicating.
-
-It then does the same for the split deployment — a standalone broker, an engine host pointed at it with `--broker-url`, and a worker that knows about neither database.
+The end-to-end check is real processes and no mocks — competing consumers, fan-out, a consumer **SIGKILLed mid-message**, a poison message, and a request answered from another process:
 
 ```
-ok   engine host and broker are up
-ok   two independent worker processes registered
-ok   killed worker-b while it held slow
-ok   a surviving worker recovered the expired lease — attempt 2, now on worker-a
-ok   the journal recorded the lease expiry
-ok   the run parked on its approval gate
-ok   the run succeeded end to end — succeeded
-ok   the workflow output carries the remote result — {"slug":"creme-brulee"}
-ok   re-dispatching a finished key reattaches instead of duplicating
-ok   a broker and an engine host started as separate processes
-ok   readiness fails while no worker has checked in
-ok   the run succeeded across three separate processes — succeeded
+ok   eight messages were handled with none left pending or dead — pending=0 dead=0
+ok   a second subscription received the same messages independently — 8 envelopes
+ok   killed worker-a while it held the slow message
+ok   a surviving consumer recovered the expired lease — attempt 2, now on worker-b
+ok   the poison message reached the dead-letter subject with its reason — unsupported payload
+ok   a request was answered by a consumer in another process — "HELLO BUS"
+ok   a repeated dedupe key does not publish twice
 ```
 
-## CI
+## dagr
 
-`examples/ci-gate.ts` gates a merge on a workflow. It keys the run on the commit SHA — so re-running the job reuses the run instead of paying for the remote steps twice — and exits **0** succeeded, **1** failed, **2** waiting on a person, **3** timed out.
+[dagr](https://github.com/TimMikeladze/dagr) is a workflow engine that runs one process against one SQLite journal, and says so plainly: multi-process execution is out of scope, because its single writer is load-bearing. `dagr-remote` closes that gap by putting this bus between the engine and its handlers — a step declares `runtime: remote`, the request goes onto a subject, and a consumer on another machine answers it.
 
-```sh
-ENGINE_URL=https://bus.internal:4318 bun examples/ci-gate.ts \
-  --workflow review --input "{\"sha\":\"$GITHUB_SHA\"}"
+```yaml
+review:
+  kind: task
+  runtime: remote
+  with:
+    run: agent
+    input: { prompt_file: ./prompts/review.md, model: claude-opus-5 }
 ```
+
+That package lives in dagr's repository and depends on this one. **The bus has no dependency on dagr** — it is one client among many, and nothing about workflows leaks into the core.
 
 ## Boundaries
 
-The broker is an availability boundary, as the engine host is. Cancel stops acceptance of results and asks workers to stop on their next heartbeat; it does not undo work already done.
+One process owns one SQLite file in WAL mode. Consumers never open it; they hold leases over HTTP, and every claim is a conditional `UPDATE` that only transitions *out of* `pending`, so two consumers racing for one delivery is safe rather than merely unlikely.
 
-Two attempt counters exist and mean different things. The **broker's** attempts recover a dead worker. The **engine's** `retries` re-run a step that genuinely failed. A `fatal` failure from a worker skips broker retries entirely and goes straight back to dagr's policy.
+The honest ceiling: this is right for a fleet and wrong for infrastructure a dozen services depend on. Replication, failover and multi-writer are not implemented. The store sits behind a seam so that is a swap rather than a rewrite — but nothing here pretends to be a replicated log.
 
-One broker process writes the broker's database, exactly as one engine process writes dagr's. Replicating either is not implemented.
+Also not implemented: exactly-once delivery (as opposed to effectively-once effects), message schemas, and priority classes.
 
 ## Design
 
-- [Distributed execution for dagr workflows](docs/superpowers/specs/2026-09-12-distributed-execution.md) — the current design and why it is shaped this way.
+- [A message bus for agents and ordinary work](docs/superpowers/specs/2026-09-12-message-bus.md) — the current design and why it is shaped this way.

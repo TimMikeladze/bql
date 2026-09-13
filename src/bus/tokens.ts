@@ -1,16 +1,16 @@
 import { timingSafeEqual } from "node:crypto";
-import type { Labels, TokenClaims } from "../shared/protocol";
+import type { TokenClaims } from "../shared/protocol";
 import { ANY } from "../shared/protocol";
+import { matches } from "./subjects";
 
 /**
- * Per-worker capability tokens.
+ * Scoped bearer tokens.
  *
- * The prototype had one shared secret that granted every worker operation, so
- * any holder could claim any task and impersonate any worker. A token here
- * names exactly one worker id, the runtimes it may execute, and the labels it
- * may advertise. Verification is a signature check plus a claims check, with no
- * database round trip, so revocation is by key rotation or expiry rather than a
- * lookup on the hot path — the trade a stateless token always makes.
+ * A token names the workspace it belongs to, the subject patterns it may
+ * publish to, and the subscriptions it may claim from. Verification is a
+ * signature check plus a claims check with no database round trip, which is the
+ * trade a stateless token always makes: revocation is by expiry or key
+ * rotation, not by a lookup on the hot path.
  */
 
 const encoder = new TextEncoder();
@@ -60,34 +60,37 @@ export function verify(
   }
   if (claims.exp !== 0 && claims.exp * 1000 <= now())
     throw new TokenError("token expired");
-  if (!["worker", "reader", "admin"].includes(claims.scope))
+  if (!["consumer", "reader", "admin"].includes(claims.scope))
     throw new TokenError("unknown token scope");
   return claims;
 }
 
-/** A worker may only register the runtimes and labels its token allows. */
-export function authorizeRegistration(
-  claims: TokenClaims,
-  workerId: string,
-  runtimes: string[],
-  labels: Labels,
-): void {
+export function authorizePublish(claims: TokenClaims, subject: string): void {
   if (claims.scope === "admin") return;
-  if (claims.sub !== workerId)
-    throw new TokenError(`token is issued for worker '${claims.sub}'`);
-  if (!claims.runtimes.includes(ANY))
-    for (const runtime of runtimes)
-      if (!claims.runtimes.includes(runtime))
-        throw new TokenError(`token does not allow runtime '${runtime}'`);
-  for (const [key, value] of Object.entries(claims.labels))
-    if (labels[key] !== value)
-      throw new TokenError(`token pins label ${key}=${value}`);
+  if (claims.scope === "reader")
+    throw new TokenError("a reader token may not publish");
+  if (claims.publish.includes(ANY)) return;
+  // A grant is a pattern, so `orders.>` licenses every subject beneath it.
+  if (!claims.publish.some((pattern) => matches(pattern, subject)))
+    throw new TokenError(`token may not publish to '${subject}'`);
 }
 
-export function authorizeWorker(claims: TokenClaims, workerId: string): void {
+export function authorizeSubscribe(
+  claims: TokenClaims,
+  subscription: string,
+): void {
   if (claims.scope === "admin") return;
-  if (claims.sub !== workerId)
-    throw new TokenError(`token is issued for worker '${claims.sub}'`);
+  if (claims.scope === "reader")
+    throw new TokenError("a reader token may not consume");
+  if (claims.subscribe.includes(ANY)) return;
+  if (!claims.subscribe.includes(subscription))
+    throw new TokenError(`token may not consume from '${subscription}'`);
+}
+
+export function authorizeConsumer(claims: TokenClaims, consumerId: string): void {
+  if (claims.scope === "admin") return;
+  if (claims.sub !== consumerId)
+    throw new TokenError(`token is issued for consumer '${claims.sub}'`);
 }
 
 export function generateKey(): string {

@@ -1,7 +1,7 @@
 {
   "name": "agenticbus",
   "version": "0.1.0",
-  "description": "Distributed execution for dagr workflows \u2014 run any step on any machine, with claim, lease and fencing",
+  "description": "A durable message bus for agents and ordinary work \u2014 Bun, SQLite, subjects, consumer groups, leases",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -16,16 +16,10 @@
         "default": "./src/index.ts"
       }
     },
-    "./broker": {
+    "./client": {
       "import": {
-        "types": "./src/broker/index.ts",
-        "default": "./src/broker/index.ts"
-      }
-    },
-    "./worker": {
-      "import": {
-        "types": "./src/worker/index.ts",
-        "default": "./src/worker/index.ts"
+        "types": "./src/client/bus.ts",
+        "default": "./src/client/bus.ts"
       }
     },
     "./package.json": "./package.json"
@@ -36,16 +30,12 @@
   "scripts": {
     "dev": "bun scripts/dev.ts",
     "serve": "bun src/cli/index.ts serve",
-    "broker": "bun src/cli/index.ts broker",
-    "worker": "bun src/cli/index.ts worker",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
-    "test:e2e": "bun scripts/e2e.ts && bun scripts/e2e-split.ts"
+    "test:e2e": "bun scripts/e2e.ts"
   },
-  "dependencies": {
-    "dagr": "file:../dagr/packages/dagr"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@base-ui/react": "^1.8.0",
     "@tailwindcss/vite": "^4.3.3",

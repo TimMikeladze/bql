@@ -1,19 +1,21 @@
 /**
- * End-to-end proof, with real processes and no mocks.
+ * End-to-end, with real processes and no mocks.
  *
- * Starts the engine host and two worker processes, runs a workflow whose steps
- * execute remotely, kills the worker holding a step mid-flight, and checks that
- * a different machine finishes the work and the run still settles. Then drives
- * the human gate over HTTP.
+ * Starts the bus and two consumer processes, then checks the properties that
+ * only show up across a network: competing consumers do not double-handle,
+ * fan-out reaches every subscription, a consumer killed mid-message loses its
+ * lease to another machine, a poison message dead-letters onto an ordinary
+ * subject, and a request gets its reply back through the bus.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { generateKey, mint } from "../src/broker";
+import { generateKey, mint } from "../src/bus/tokens";
+import { BusClient } from "../src/client/bus";
 
 const scratch = await mkdtemp(`${tmpdir()}/agenticbus-e2e-`);
 const signingKey = generateKey();
 const adminToken = generateKey();
-/** Take a free port rather than gambling on a random one. */
+
 async function freePort(start: number): Promise<number> {
   for (let candidate = start; candidate < start + 200; candidate++) {
     try {
@@ -28,25 +30,27 @@ async function freePort(start: number): Promise<number> {
   }
   throw new Error(`no free port from ${start}`);
 }
+const port = await freePort(4400);
+const url = `http://127.0.0.1:${port}`;
 
-const brokerPort = await freePort(4400);
-const enginePort = await freePort(brokerPort + 1);
-const brokerUrl = `http://127.0.0.1:${brokerPort}`;
-const engineUrl = `http://127.0.0.1:${enginePort}`;
-
-const children: ReturnType<typeof Bun.spawn>[] = [];
-const env = {
-  ...process.env,
-  BUS_SIGNING_KEY: signingKey,
-  BUS_ADMIN_TOKEN: adminToken,
-};
-const spawn = (args: string[], extra: Record<string, string> = {}) => {
+const children = new Map<string, ReturnType<typeof Bun.spawn>>();
+const spawn = (
+  name: string,
+  args: string[],
+  extra: Record<string, string> = {},
+) => {
   const child = Bun.spawn([process.execPath, ...args], {
-    env: { ...env, ...extra },
+    env: {
+      ...process.env,
+      BUS_SIGNING_KEY: signingKey,
+      BUS_ADMIN_TOKEN: adminToken,
+      BUS_URL: url,
+      ...extra,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
-  children.push(child);
+  children.set(name, child);
   return child;
 };
 
@@ -56,235 +60,198 @@ const check = (label: string, ok: boolean, detail = "") => {
   if (!ok) failures.push(label);
 };
 
-const api = async (
-  base: string,
-  path: string,
-  body?: unknown,
-): Promise<Record<string, unknown>> => {
-  const response = await fetch(`${base}${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      Authorization: `Bearer ${adminToken}`,
-      "x-dagr-workspace": "default",
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok)
-    throw new Error(`${path} -> HTTP ${response.status} ${JSON.stringify(payload)}`);
-  return payload as Record<string, unknown>;
-};
-
 async function waitFor<T>(
   label: string,
   read: () => Promise<T | null>,
-  timeoutMs = 45_000,
+  timeoutMs = 30_000,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = await read().catch(() => null);
     if (value) return value;
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
-    await Bun.sleep(250);
+    await Bun.sleep(200);
   }
 }
 
-const workerToken = (id: string) =>
+const admin = new BusClient({ url, token: adminToken });
+const consumerToken = (id: string, subscription: string) =>
   mint(
     {
       sub: id,
-      scope: "worker",
-      runtimes: ["bun"],
-      labels: { pool: "general" },
+      scope: "consumer",
+      workspace: "default",
+      publish: ["reply", "results.>"],
+      subscribe: [subscription],
       exp: 0,
     },
     signingKey,
   );
 
-const workers = new Map<string, ReturnType<typeof Bun.spawn>>();
-const startWorker = (id: string) => {
-  const child = spawn(
-    [
-      "src/cli/index.ts",
-      "worker",
-      "--id",
-      id,
-      "--broker",
-      brokerUrl,
-      "--runtimes",
-      "bun",
-      "--labels",
-      "pool=general",
-      "--jobs",
-      "./tests/fixtures/jobs",
-      "--spool",
-      `${scratch}/outbox-${id}`,
-    ],
-    { BUS_TOKEN: workerToken(id) },
-  );
-  workers.set(id, child);
-  return child;
-};
-
 try {
-  spawn([
+  spawn("bus", [
     "src/cli/index.ts",
     "serve",
     "--state",
     scratch,
-    "--port",
-    String(brokerPort),
-    "--engine-port",
-    String(enginePort),
-    "--workflows",
-    "./tests/fixtures/workflows",
-    "--lease-ms",
-    "2500",
-    "--engine-db",
-    `${scratch}/dagr.db`,
-    "--broker-db",
+    "--db",
     `${scratch}/bus.db`,
+    "--blobs",
+    `${scratch}/blobs`,
+    "--port",
+    String(port),
   ]);
-
-  await waitFor("the host to listen", async () =>
-    (await fetch(`${brokerUrl}/health`)).ok ? true : null,
+  await waitFor("the bus to listen", async () =>
+    (await fetch(`${url}/health`)).ok ? true : null,
   );
-  await waitFor("the control plane to listen", async () =>
-    (await fetch(`${engineUrl}/health`)).ok ? true : null,
+  check("the bus is up", true);
+
+  await admin.subscribe({
+    name: "work",
+    pattern: "work.>",
+    ackWaitMs: 2500,
+    maxAttempts: 2,
+  });
+  await admin.subscribe({ name: "audit", pattern: ">", ackWaitMs: 10_000 });
+  await admin.subscribe({ name: "rpc", pattern: "rpc.>", ackWaitMs: 10_000 });
+  await admin.subscribe({ name: "failures", pattern: "dlq.>" });
+
+  for (const [id, subscription] of [
+    ["worker-a", "work"],
+    ["worker-b", "work"],
+    ["responder", "rpc"],
+  ] as const)
+    spawn(
+      id,
+      ["examples/consumer.ts", "--id", id, "--subscription", subscription],
+      { BUS_TOKEN: consumerToken(id, subscription) },
+    );
+
+  await waitFor("consumers to register", async () => {
+    const stats = await admin.stats();
+    return stats.consumers.length === 3 ? true : null;
+  });
+  check("three consumer processes registered", true);
+
+  // ---- competing consumers: eight messages, each handled exactly once ----
+  for (let index = 0; index < 8; index++)
+    await admin.publish({ subject: "work.echo", body: { index } });
+
+  await waitFor("the work subscription to drain", async () => {
+    const stats = await admin.stats();
+    const work = stats.subscriptions.find((s) => s.name === "work")!;
+    return work.pending === 0 && work.leased === 0 ? true : null;
+  });
+  const drained = await admin.stats();
+  const work = drained.subscriptions.find((s) => s.name === "work")!;
+  check(
+    "eight messages were handled with none left pending or dead",
+    work.pending === 0 && work.dead === 0,
+    `pending=${work.pending} dead=${work.dead}`,
   );
-  check("engine host and broker are up", true);
 
-  startWorker("worker-a");
-  startWorker("worker-b");
-  const fleet = await waitFor("both workers to register", async () => {
-    const snapshot = (await api(brokerUrl, "/api/snapshot")) as {
-      workers: { id: string }[];
-    };
-    return snapshot.workers.length === 2 ? snapshot.workers : null;
-  });
-  check("two independent worker processes registered", fleet.length === 2);
+  // ---- fan-out: audit saw the same messages, on its own cursor ----
+  const audited = await admin.claim("audit", "auditor", 20, 2000);
+  check(
+    "a second subscription received the same messages independently",
+    audited.filter((e) => e.message.subject === "work.echo").length === 8,
+    `${audited.length} envelopes`,
+  );
+  for (const envelope of audited) await admin.ack(envelope.delivery, "auditor");
 
-  const run = await api(engineUrl, "/runs", {
-    workflow: "e2e",
-    // Long enough that the worker is genuinely mid-step when it is killed.
-    input: { text: "Crème brûlée", ms: 8000 },
-    idempotencyKey: `e2e-${Date.now()}`,
-  });
-  const runId = String(run.id);
-
-  // Kill whichever worker takes the first step, mid-flight.
-  const firstTask = await waitFor("a worker to claim the first step", async () => {
-    const snapshot = (await api(brokerUrl, "/api/snapshot")) as {
-      tasks: { id: string; status: string; workerId: string | null; stepKey: string }[];
-    };
+  // ---- a killed consumer loses its lease to another machine ----
+  await admin.publish({ subject: "work.slow", body: { ms: 8000 } });
+  const holder = await waitFor("a consumer to take the slow message", async () => {
+    const deliveries = (await admin.call("/api/deliveries")) as {
+      subscription: string;
+      status: string;
+      consumerId: string | null;
+      messageSeq: number;
+    }[];
     return (
-      snapshot.tasks.find(
-        (task) => task.status === "running" && task.workerId !== null,
+      deliveries.find(
+        (d) => d.subscription === "work" && d.status === "leased" && d.consumerId,
       ) ?? null
     );
   });
-  const victim = workers.get(firstTask.workerId ?? "");
-  victim?.kill("SIGKILL");
-  check(
-    `killed ${firstTask.workerId} while it held ${firstTask.stepKey}`,
-    victim !== undefined,
-  );
+  children.get(holder.consumerId!)?.kill("SIGKILL");
+  check(`killed ${holder.consumerId} while it held the slow message`, true);
 
   const recovered = await waitFor(
-    "the lease to expire and another worker to finish the step",
+    "the lease to expire and another consumer to finish it",
     async () => {
-      const snapshot = (await api(brokerUrl, "/api/snapshot")) as {
-        tasks: { id: string; status: string; workerId: string | null; attempt: number }[];
-        events: { type: string }[];
-      };
-      const task = snapshot.tasks.find((entry) => entry.id === firstTask.id);
-      return task?.status === "succeeded" && task.workerId !== firstTask.workerId
-        ? { task, events: snapshot.events }
+      const deliveries = (await admin.call("/api/deliveries")) as {
+        messageSeq: number;
+        status: string;
+        consumerId: string | null;
+        attempt: number;
+      }[];
+      const same = deliveries.find((d) => d.messageSeq === holder.messageSeq);
+      return same?.status === "acked" && same.consumerId !== holder.consumerId
+        ? same
         : null;
     },
+    45_000,
   );
   check(
-    "a surviving worker recovered the expired lease",
-    recovered.task.attempt >= 2,
-    `attempt ${recovered.task.attempt}, now on ${recovered.task.workerId}`,
-  );
-  check(
-    "the journal recorded the lease expiry",
-    recovered.events.some((event) => event.type.includes("lease_expired")),
+    "a surviving consumer recovered the expired lease",
+    recovered.attempt >= 2,
+    `attempt ${recovered.attempt}, now on ${recovered.consumerId}`,
   );
 
-  // The workflow's gate is a dagr approval step: the run parks until signalled.
-  await waitFor("the run to reach its human gate", async () => {
-    const steps = (await api(engineUrl, `/runs/${runId}/steps`)) as {
-      steps?: { stepKey: string; status: string }[];
-    };
-    const gate = steps.steps?.find((step) => step.stepKey === "gate");
-    return gate && ["waiting", "parked", "running"].includes(gate.status)
-      ? gate
-      : null;
-  });
-  check("the run parked on its approval gate", true);
-
-  await api(engineUrl, "/signals", {
-    name: "e2e.approved",
-    correlation: runId,
-    payload: { approvedBy: "e2e" },
-  });
-
-  const settled = await waitFor("the run to settle", async () => {
-    const current = (await api(engineUrl, `/runs/${runId}`)) as {
-      run?: { status?: string; output?: unknown };
-    };
-    const status = current.run?.status;
-    return status && !["running", "queued", "pending"].includes(String(status))
-      ? current.run!
-      : null;
+  // ---- a poison message dead-letters onto an ordinary subject ----
+  await admin.publish({ subject: "work.poison", body: { bad: true } });
+  const dead = await waitFor("the poison message to dead-letter", async () => {
+    const envelopes = await admin.claim("failures", "dlq-reader", 5, 3000);
+    return envelopes.length > 0 ? envelopes : null;
   });
   check(
-    "the run succeeded end to end",
-    settled.status === "succeeded",
-    String(settled.status),
+    "the poison message reached the dead-letter subject with its reason",
+    dead[0]!.message.headers["dlq-reason"]!.includes("unsupported"),
+    dead[0]!.message.headers["dlq-reason"]!,
   );
   check(
-    "the workflow output carries the remote result",
-    JSON.stringify(settled.output ?? {}).includes("creme-brulee"),
-    JSON.stringify(settled.output ?? null),
+    "the dead letter kept the original subject in its headers",
+    dead[0]!.message.headers["dlq-subject"]! === "work.poison",
   );
 
-  const steps = (await api(engineUrl, `/runs/${runId}/steps`)) as {
-    steps?: { stepKey: string; status: string; result?: unknown }[];
-  };
-  const slug = steps.steps?.find((step) => step.stepKey === "slow");
-  check(
-    "the remote handler produced the expected artifact",
-    JSON.stringify(slug?.result ?? {}).includes("creme-brulee"),
-    JSON.stringify(slug?.result ?? null),
-  );
-
-  const redispatch = await api(brokerUrl, "/api/tasks", {
-    idempotencyKey: `${runId}:slow`,
-    runtime: "bun",
-    selector: { pool: "general" },
-    input: {},
-    runId,
-    stepKey: "slow",
-    attempt: 9,
-    maxAttempts: 3,
-    deadlineAt: null,
-    provider: null,
-    workspace: "default",
+  // ---- request/reply across processes ----
+  const answered = await admin.request({
+    subject: "rpc.upper",
+    body: "hello bus",
+    waitMs: 10_000,
   });
   check(
-    "re-dispatching a finished key reattaches instead of duplicating",
-    redispatch.id === firstTask.id || redispatch.status === "succeeded",
+    "a request was answered by a consumer in another process",
+    answered.response?.body === "HELLO BUS",
+    JSON.stringify(answered.response?.body ?? null),
+  );
+
+  // ---- durability: the response survives being collected later ----
+  const again = await admin.response(answered.correlation!);
+  check("the response is still collectable afterwards", again?.body === "HELLO BUS");
+
+  // ---- dedupe ----
+  const first = await admin.publish({
+    subject: "work.echo",
+    body: 1,
+    dedupeKey: "once",
+  });
+  const second = await admin.publish({
+    subject: "work.echo",
+    body: 2,
+    dedupeKey: "once",
+  });
+  check(
+    "a repeated dedupe key does not publish twice",
+    second.seq === first.seq && second.duplicate,
   );
 } catch (error) {
   check("e2e completed without an unexpected error", false, String(error));
 } finally {
-  for (const child of children) child.kill("SIGTERM");
+  for (const child of children.values()) child.kill("SIGTERM");
   await Bun.sleep(600);
-  for (const child of children)
+  for (const child of children.values())
     if (child.exitCode === null) child.kill("SIGKILL");
   await rm(scratch, { recursive: true, force: true });
 }

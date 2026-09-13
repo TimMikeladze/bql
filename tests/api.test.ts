@@ -1,190 +1,184 @@
 import { afterAll, expect, test } from "bun:test";
-import { BrokerStore } from "../src/broker/store";
-import { createBroker } from "../src/broker/server";
-import { generateKey, mint } from "../src/broker/tokens";
+import { createServer } from "../src/bus/server";
+import { BusStore } from "../src/bus/store";
+import { generateKey, mint } from "../src/bus/tokens";
+import { BusClient } from "../src/client/bus";
 
 const signingKey = generateKey();
 const adminToken = generateKey();
-const store = new BrokerStore(":memory:", { leaseMs: 1000 });
-const server = createBroker({
+const store = new BusStore(":memory:");
+const server = createServer({
   store,
   signingKey,
   adminToken,
   port: 0,
   hostname: "127.0.0.1",
 });
-const base = `http://127.0.0.1:${server.port}`;
-const workerToken = mint(
+const url = `http://127.0.0.1:${server.port}`;
+
+const admin = new BusClient({ url, token: adminToken });
+const consumerToken = mint(
   {
-    sub: "worker-a",
-    scope: "worker",
-    runtimes: ["bun"],
-    labels: { pool: "general" },
+    sub: "worker-1",
+    scope: "consumer",
+    workspace: "default",
+    publish: ["results.>"],
+    subscribe: ["work"],
     exp: 0,
   },
   signingKey,
 );
+const worker = new BusClient({ url, token: consumerToken });
 
 afterAll(() => {
   server.stop(true);
   store.close();
 });
 
-const call = (path: string, token: string, body?: unknown) =>
-  fetch(`${base}${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-
-const dispatch = (key: string, selector = { pool: "general" }) =>
-  call("/api/tasks", adminToken, {
-    idempotencyKey: key,
-    runtime: "bun",
-    selector,
-    input: { text: "hello" },
-    runId: "run-1",
-    stepKey: key.split(":")[1] ?? "step",
-    attempt: 1,
-    maxAttempts: 3,
-    deadlineAt: null,
-    provider: null,
-    workspace: "default",
-  });
-
 test("health needs no credential; the API does", async () => {
-  expect((await fetch(`${base}/health`)).status).toBe(200);
-  expect((await call("/api/snapshot", "")).status).toBe(401);
-  expect((await call("/api/snapshot", "not-a-token")).status).toBe(401);
-});
-
-test("a worker token cannot dispatch, cancel or read the fleet", async () => {
-  expect((await dispatch("run-1:step-a")).status).toBe(201);
-  const task = await (await dispatch("run-1:step-a")).json();
-  expect(
-    (
-      await call("/api/tasks", workerToken, {
-        idempotencyKey: "x",
-        runtime: "bun",
-        selector: {},
-        runId: "r",
-        stepKey: "s",
-        attempt: 1,
-        maxAttempts: 1,
-        deadlineAt: null,
-        provider: null,
-        workspace: "default",
-      })
-    ).status,
-  ).toBe(403);
-  expect(
-    (await call(`/api/tasks/${task.id}/cancel`, workerToken, {})).status,
-  ).toBe(403);
-  expect((await call("/api/snapshot", workerToken)).status).toBe(403);
-});
-
-test("a worker registers, claims, heartbeats and completes", async () => {
-  const registered = await call("/api/workers/register", workerToken, {
-    id: "worker-a",
-    name: "worker-a",
-    host: "test",
-    runtimes: ["bun"],
-    labels: { pool: "general" },
+  expect((await fetch(`${url}/health`)).status).toBe(200);
+  expect((await fetch(`${url}/api/stats`)).status).toBe(401);
+  const bad = await fetch(`${url}/api/stats`, {
+    headers: { Authorization: "Bearer nonsense" },
   });
-  expect(registered.status).toBe(200);
-
-  const claim = await (
-    await call("/api/workers/worker-a/claim", workerToken, {})
-  ).json();
-  expect(claim.task.runtime).toBe("bun");
-  expect(claim.task.input).toEqual({ text: "hello" });
-
-  const beat = await (
-    await call(`/api/tasks/${claim.task.id}/heartbeat`, workerToken, {
-      workerId: "worker-a",
-      generation: claim.task.generation,
-    })
-  ).json();
-  expect(beat.leaseUntil).toBeGreaterThan(Date.now());
-
-  const done = await (
-    await call(`/api/tasks/${claim.task.id}/complete`, workerToken, {
-      workerId: "worker-a",
-      generation: claim.task.generation,
-      ok: true,
-      value: { slug: "hello" },
-      usage: { costMicros: 100 },
-    })
-  ).json();
-  expect(done.status).toBe("succeeded");
-  expect(done.value).toEqual({ slug: "hello" });
+  expect(bad.status).toBe(401);
 });
 
-test("a worker cannot act as another worker", async () => {
-  await dispatch("run-1:step-b");
-  const claim = await (
-    await call("/api/workers/worker-a/claim", workerToken, {})
-  ).json();
-  const response = await call(
-    `/api/tasks/${claim.task.id}/complete`,
-    workerToken,
+test("a subscription is created and then consumed end to end", async () => {
+  await admin.subscribe({ name: "work", pattern: "work.>", ackWaitMs: 5000 });
+  const published = await admin.publish({
+    subject: "work.resize",
+    body: { src: "a.png" },
+  });
+  expect(published.seq).toBeGreaterThan(0);
+
+  const envelopes = await worker.claim("work", "worker-1", 1);
+  expect(envelopes).toHaveLength(1);
+  expect(envelopes[0]!.message.body).toEqual({ src: "a.png" });
+  expect(envelopes[0]!.idempotencyKey).toBe(`work:${published.seq}`);
+
+  const acked = await worker.ack(envelopes[0]!.delivery, "worker-1");
+  expect(acked.status).toBe("acked");
+});
+
+test("a consumer token cannot publish outside its grants or admin the bus", async () => {
+  await expect(
+    worker.publish({ subject: "work.resize", body: 1 }),
+  ).rejects.toThrow(/may not publish/);
+  await expect(
+    worker.publish({ subject: "results.ok", body: 1 }),
+  ).resolves.toBeTruthy();
+  await expect(
+    worker.subscribe({ name: "other", pattern: "x.>" }),
+  ).rejects.toThrow(/admin/);
+  await expect(worker.stats()).rejects.toThrow(/read access/);
+});
+
+test("a consumer cannot claim a subscription it was not granted", async () => {
+  await admin.subscribe({ name: "secret", pattern: "secret.>" });
+  await expect(worker.claim("secret", "worker-1", 1)).rejects.toThrow(
+    /may not consume/,
+  );
+});
+
+test("a consumer cannot act as another consumer", async () => {
+  await expect(worker.claim("work", "worker-2", 1)).rejects.toThrow(
+    /issued for consumer/,
+  );
+});
+
+test("a claim long-polls and returns as soon as a message arrives", async () => {
+  const started = Date.now();
+  const pending = worker.claim("work", "worker-1", 1, 5000);
+  setTimeout(() => {
+    void admin.publish({ subject: "work.late", body: "arrived" });
+  }, 150);
+  const envelopes = await pending;
+  expect(envelopes).toHaveLength(1);
+  expect(envelopes[0]!.message.body).toBe("arrived");
+  // It waited for the message rather than returning empty immediately, and it
+  // did not sit out the whole window either.
+  expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+  expect(Date.now() - started).toBeLessThan(4000);
+  await worker.ack(envelopes[0]!.delivery, "worker-1");
+});
+
+test("request and reply travel through the bus", async () => {
+  await admin.subscribe({ name: "rpc", pattern: "rpc.>" });
+  const pending = admin.request({
+    subject: "rpc.add",
+    body: { a: 2, b: 3 },
+    waitMs: 5000,
+  });
+
+  // A responder is an ordinary consumer that publishes back on the correlation.
+  const envelopes = await admin.claim("rpc", "responder", 1, 3000);
+  expect(envelopes).toHaveLength(1);
+  const { message, delivery } = envelopes[0]!;
+  const { a, b } = message.body as { a: number; b: number };
+  await admin.reply(message, { sum: a + b });
+  await admin.ack(delivery, "responder");
+
+  const result = await pending;
+  expect(result.response?.body).toEqual({ sum: 5 });
+
+  // And it is still collectable afterwards, which is what makes it durable.
+  const later = await admin.response(result.correlation!);
+  expect(later?.body).toEqual({ sum: 5 });
+});
+
+test("a request that nobody answers returns 202 with no response", async () => {
+  const result = await admin.request({
+    subject: "rpc.void",
+    body: null,
+    waitMs: 100,
+  });
+  expect(result.response).toBeNull();
+  expect(await admin.response(result.correlation!)).toBeNull();
+});
+
+test("an unknown workspace is rejected for a pinned token", async () => {
+  const pinned = mint(
     {
-      workerId: "worker-b",
-      generation: claim.task.generation,
-      ok: true,
-      value: null,
+      sub: "t",
+      scope: "consumer",
+      workspace: "tenant-a",
+      publish: ["x.>"],
+      subscribe: [],
+      exp: 0,
     },
+    signingKey,
   );
-  expect(response.status).toBe(401);
-  expect((await response.json()).error).toMatch(/issued for worker/);
-});
-
-test("a token may not register a runtime or label it does not carry", async () => {
-  const response = await call("/api/workers/register", workerToken, {
-    id: "worker-a",
-    name: "worker-a",
-    host: "test",
-    runtimes: ["bun", "shell"],
-    labels: { pool: "general" },
-  });
-  expect(response.status).toBe(401);
-  expect((await response.json()).error).toMatch(/runtime 'shell'/);
-});
-
-test("malformed dispatches are rejected with 400, not 500", async () => {
-  const response = await call("/api/tasks", adminToken, {
-    idempotencyKey: "bad",
-    runtime: "bun",
-    selector: { "not a label key!": "x" },
-    runId: "r",
-    stepKey: "s",
-    attempt: 1,
-    maxAttempts: 1,
-    deadlineAt: null,
-    provider: null,
-    workspace: "default",
-  });
-  expect(response.status).toBe(400);
-});
-
-test("readiness reports whether any worker has checked in", async () => {
-  expect((await fetch(`${base}/ready`)).status).toBe(200);
-});
-
-test("the admin sees snapshot, events and usage", async () => {
-  const snapshot = await (await call("/api/snapshot", adminToken)).json();
-  expect(snapshot.workers.map((w: { id: string }) => w.id)).toContain(
-    "worker-a",
+  const other = new BusClient({ url, token: pinned, workspace: "tenant-b" });
+  await expect(other.publish({ subject: "x.y", body: 1 })).rejects.toThrow(
+    /pinned to another workspace/,
   );
-  expect(snapshot.tasks.length).toBeGreaterThan(0);
-  expect(snapshot.tasks[0].input).toBeUndefined();
-  const events = await (await call("/api/events?after=0", adminToken)).json();
-  expect(events.some((e: { type: string }) => e.type.includes("task.dispatched"))).toBe(
-    true,
+});
+
+test("a malformed subject is a 400, not a 500", async () => {
+  await expect(admin.publish({ subject: "bad..subject", body: 1 })).rejects.toThrow(
+    /invalid subject token|subject/,
   );
-  const usage = await (await call("/api/usage", adminToken)).json();
-  expect(usage.costMicros).toBeGreaterThan(0);
+  await expect(admin.publish({ subject: "with.*.wildcard", body: 1 })).rejects.toThrow(
+    /wildcard/,
+  );
+});
+
+test("the admin can read stats, the log and mint scoped tokens", async () => {
+  const stats = await admin.stats();
+  expect(stats.subscriptions.map((s) => s.name)).toContain("work");
+  expect(stats.lastSeq).toBeGreaterThan(0);
+
+  const log = await admin.log(0, 5);
+  expect(log.length).toBeGreaterThan(0);
+  expect(log[0]!.subject).toBeTruthy();
+
+  const minted = (await admin.call("/api/tokens", {
+    consumer: "fresh-1",
+    publish: ["a.>"],
+    subscribe: ["work"],
+  })) as { token: string };
+  const fresh = new BusClient({ url, token: minted.token });
+  await expect(fresh.publish({ subject: "a.b", body: 1 })).resolves.toBeTruthy();
+  await expect(fresh.publish({ subject: "b.c", body: 1 })).rejects.toThrow();
 });

@@ -1,11 +1,12 @@
 /**
- * Local development: the engine host, two remote workers, and the dashboard.
+ * Local development: the bus, three example consumers, and the dashboard.
  *
- * The workers are separate OS processes talking HTTP, exactly as they would be
- * on another machine — the only thing loopback changes is the latency.
+ * The consumers are separate OS processes talking HTTP, which is the only shape
+ * the bus supports — there is no in-process shortcut here to be misled by.
  */
 import { mkdir } from "node:fs/promises";
-import { generateKey, mint } from "../src/broker";
+import { generateKey, mint } from "../src/bus/tokens";
+import { BusClient } from "../src/client/bus";
 
 const state = ".agenticbus";
 await mkdir(state, { recursive: true });
@@ -37,12 +38,14 @@ async function freePort(start: number): Promise<number> {
 }
 
 const port = await freePort(Number(process.env.PORT ?? 4317));
-const enginePort = await freePort(port + 1);
 const vitePort = await freePort(Number(process.env.VITE_PORT ?? 5173));
+const url = `http://127.0.0.1:${port}`;
+
 const env = {
   ...process.env,
   BUS_SIGNING_KEY: signingKey,
   BUS_ADMIN_TOKEN: adminToken,
+  BUS_URL: url,
   // The dev server's config imports the token minter from source, which Vite's
   // native config loader warns about. The import is deliberate.
   VITE_CONFIG_NATIVE_IGNORE_WARNING: "true",
@@ -72,24 +75,20 @@ const stop = () => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
-const host = spawn([
+const bus = spawn([
   "src/cli/index.ts",
   "serve",
   "--port",
   String(port),
-  "--engine-port",
-  String(enginePort),
-  "--workflows",
-  "./workflows",
   "--assets",
   "dist",
 ]);
 
 let ready = false;
 for (let attempt = 0; attempt < 60; attempt++) {
-  if (host.exitCode !== null) break;
+  if (bus.exitCode !== null) break;
   try {
-    if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) {
+    if ((await fetch(`${url}/health`)).ok) {
       ready = true;
       break;
     }
@@ -98,34 +97,38 @@ for (let attempt = 0; attempt < 60; attempt++) {
 }
 
 if (!ready) {
-  console.error(
-    `The engine host did not start. Check that port ${port} is free, or set PORT.`,
-  );
+  console.error(`The bus did not start. Check that port ${port} is free.`);
   stop();
 } else {
-  for (const id of ["worker-a", "worker-b"]) {
+  const admin = new BusClient({ url, token: adminToken });
+  await admin.subscribe({ name: "work", pattern: "work.>", ackWaitMs: 15_000 });
+  await admin.subscribe({ name: "rpc", pattern: "rpc.>", ackWaitMs: 15_000 });
+  // A second subscription on the same subjects, to show fan-out: `audit` sees
+  // everything `work` sees, and its own cursor means neither steals from the
+  // other.
+  await admin.subscribe({ name: "audit", pattern: ">", ackWaitMs: 15_000 });
+
+  for (const [id, subscription] of [
+    ["worker-a", "work"],
+    ["worker-b", "work"],
+    ["responder", "rpc"],
+  ] as const) {
     const token = mint(
-      { sub: id, scope: "worker", runtimes: ["bun", "http"], labels: { pool: "general" }, exp: 0 },
+      {
+        sub: id,
+        scope: "consumer",
+        workspace: "default",
+        publish: ["reply", "results.>"],
+        subscribe: [subscription],
+        exp: 0,
+      },
       signingKey,
     );
-    spawn(
-      [
-        "src/cli/index.ts",
-        "worker",
-        "--id",
-        id,
-        "--broker",
-        `http://127.0.0.1:${port}`,
-        "--runtimes",
-        "bun,http",
-        "--labels",
-        "pool=general",
-        "--jobs",
-        "./jobs",
-      ],
-      { BUS_TOKEN: token },
-    );
+    spawn(["examples/consumer.ts", "--id", id, "--subscription", subscription], {
+      BUS_TOKEN: token,
+    });
   }
+
   spawn(
     [
       "--bun",
@@ -135,17 +138,19 @@ if (!ready) {
       "--port",
       String(vitePort),
     ],
-    { BUS_URL: `http://127.0.0.1:${port}`, VITE_PORT: String(vitePort) },
+    { VITE_PORT: String(vitePort) },
   );
+
   console.log(`
 AgenticBus dev
   dashboard   http://127.0.0.1:${vitePort}
-  broker      http://127.0.0.1:${port}
-  engine      http://127.0.0.1:${enginePort}  (dagr control plane)
-  workers     worker-a, worker-b  (runtimes bun,http · labels pool=general)
+  bus         ${url}
+  consumers   worker-a, worker-b (work) · responder (rpc)
 
-  Start a run:
-    ENGINE_URL=http://127.0.0.1:${enginePort} bun scripts/run.ts remote-slug '{"text":"Crème brûlée"}'
+  publish   bun src/cli/index.ts publish work.slow '{"ms":2000}'
+  request   bun src/cli/index.ts request rpc.upper '"hello"'
+  tail      bun src/cli/index.ts tail --after 0
+  stats     bun src/cli/index.ts stats
 `);
   await Promise.race(children.map((child) => child.exited));
   if (!closing) {

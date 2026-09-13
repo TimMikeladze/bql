@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { BrokerStore, createBroker, generateKey, mint } from "../broker";
-import { remoteExecutor } from "../executor/remote";
-import { startHost } from "../host/serve";
-import { RemoteWorker, buildExecutors, workerSecrets } from "../worker";
-import { ANY } from "../shared/protocol";
+import { dirname, resolve } from "node:path";
+import { fileBlobs } from "../bus/blobs";
+import { createServer } from "../bus/server";
+import { BusStore } from "../bus/store";
+import { generateKey, mint } from "../bus/tokens";
+import { BusClient, BusConsumer } from "../client/bus";
+import type { Json, TokenClaims } from "../shared/protocol";
+import { DEFAULT_WORKSPACE } from "../shared/protocol";
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "help";
@@ -19,9 +21,12 @@ function flag(name: string, fallback?: string): string | undefined {
     throw new Error(`--${name} needs a value`);
   return value;
 }
+const has = (name: string) => argv.includes(`--${name}`);
 function list(name: string): string[] {
   const value = flag(name);
-  return value ? value.split(",").map((entry) => entry.trim()).filter(Boolean) : [];
+  return value
+    ? value.split(",").map((entry) => entry.trim()).filter(Boolean)
+    : [];
 }
 function pairs(name: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -32,12 +37,11 @@ function pairs(name: string): Record<string, string> {
   }
   return out;
 }
-const has = (name: string) => argv.includes(`--${name}`);
 
-/**
- * Secrets live in a file with 0600 permissions rather than in argv, where every
- * other process on the box can read them out of `ps`.
- */
+const stateDir = flag("state", ".agenticbus") as string;
+const workspace = flag("workspace", DEFAULT_WORKSPACE) as string;
+
+/** Secrets live in a 0600 file, not in argv where `ps` would show them. */
 async function loadOrCreate(path: string): Promise<string> {
   const file = Bun.file(path);
   if (await file.exists()) return (await file.text()).trim();
@@ -46,9 +50,6 @@ async function loadOrCreate(path: string): Promise<string> {
   await writeFile(path, value, { mode: 0o600 });
   return value;
 }
-
-const stateDir = flag("state", ".agenticbus") as string;
-
 async function secrets() {
   return {
     signingKey:
@@ -58,6 +59,15 @@ async function secrets() {
       process.env.BUS_ADMIN_TOKEN ??
       (await loadOrCreate(`${stateDir}/admin-token`)),
   };
+}
+
+async function client(): Promise<BusClient> {
+  const token = process.env.BUS_TOKEN ?? (await secrets()).adminToken;
+  return new BusClient({
+    url: flag("url", process.env.BUS_URL ?? "http://127.0.0.1:4317") as string,
+    token,
+    workspace,
+  });
 }
 
 function shutdown(stop: () => void | Promise<void>) {
@@ -74,50 +84,27 @@ function shutdown(stop: () => void | Promise<void>) {
 switch (command) {
   case "serve": {
     const { signingKey, adminToken } = await secrets();
-    const host = await startHost({
-      workflows: flag("workflows", "./workflows") as string,
-      engineDb: flag("engine-db", `${stateDir}/dagr.db`) as string,
-      ...(has("broker-url")
-        ? { brokerUrl: flag("broker-url") as string }
-        : { brokerDb: flag("broker-db", `${stateDir}/bus.db`) as string }),
-      signingKey,
-      adminToken,
-      port: Number(flag("port", process.env.PORT ?? "4317")),
-      hostname: flag("host", "127.0.0.1") as string,
-      ...(has("engine-port") ? { enginePort: Number(flag("engine-port")) } : {}),
-      httpAllow: list("http-allow"),
-      ...(has("assets") ? { assets: flag("assets") as string } : { assets: "dist" }),
-      ...(has("concurrency")
-        ? { concurrency: Number(flag("concurrency")) }
+    const db = flag("db", `${stateDir}/bus.db`) as string;
+    await mkdir(dirname(resolve(db)), { recursive: true });
+    const store = new BusStore(db, {
+      blobs: fileBlobs(flag("blobs", `${stateDir}/blobs`) as string),
+      ...(has("retention-ms")
+        ? { retentionMs: Number(flag("retention-ms")) }
         : {}),
-      ...(has("lease-ms") ? { leaseMs: Number(flag("lease-ms")) } : {}),
     });
-    console.log(
-      `agenticbus broker   ${host.brokerUrl}${host.broker ? "" : "  (external)"}`,
-    );
-    console.log(
-      `agenticbus engine   http://${host.control.hostname}:${host.control.port} (dagr control plane)`,
-    );
-    console.log(`admin token         ${stateDir}/admin-token`);
-    shutdown(() => host.stop());
-    break;
-  }
-
-  case "broker": {
-    const { signingKey, adminToken } = await secrets();
-    const store = new BrokerStore(flag("db", `${stateDir}/bus.db`) as string, {
-      ...(has("lease-ms") ? { leaseMs: Number(flag("lease-ms")) } : {}),
-    });
-    const server = createBroker({
+    const server = createServer({
       store,
       signingKey,
       adminToken,
       port: Number(flag("port", process.env.PORT ?? "4317")),
       hostname: flag("host", "127.0.0.1") as string,
-      ...(has("assets") ? { assets: flag("assets") as string } : {}),
+      ...(has("assets")
+        ? { assets: flag("assets") as string }
+        : { assets: "dist" }),
     });
     const sweep = setInterval(() => store.sweep(), 1000);
-    console.log(`broker http://${server.hostname}:${server.port}`);
+    console.log(`agenticbus http://${server.hostname}:${server.port}`);
+    console.log(`admin token  ${stateDir}/admin-token`);
     shutdown(() => {
       clearInterval(sweep);
       server.stop(true);
@@ -126,118 +113,190 @@ switch (command) {
     break;
   }
 
-  case "worker": {
-    const runtimes = list("runtimes");
-    if (runtimes.length === 0)
-      throw new Error(
-        "--runtimes is required, e.g. --runtimes bun,shell (default-deny)",
-      );
-    const token = process.env.BUS_TOKEN;
-    if (!token)
-      throw new Error(
-        "BUS_TOKEN is required. Mint one with: agenticbus token --worker <id>",
-      );
-    const id = flag("id", `${hostname()}-${runtimes.join("-")}`) as string;
-    const worker = new RemoteWorker({
-      id,
-      ...(has("name") ? { name: flag("name") as string } : {}),
-      broker: (flag("broker", process.env.BUS_URL ?? "http://127.0.0.1:4317") as string).replace(
-        /\/$/,
-        "",
-      ),
-      token,
-      labels: pairs("labels"),
-      executors: buildExecutors(runtimes, {
-        shellAllow: list("shell-allow"),
-        httpAllow: list("http-allow"),
-        jobsDir: flag("jobs", "./jobs") as string,
-        agentCwd: flag("agent-cwd", "./work") as string,
-        agentCwdAllowlist: list("agent-cwd-allow"),
-        agentPermissionModes: list("agent-permission-modes"),
-        agentModelAllowlist: list("agent-models"),
-        ...(has("prompt-model")
-          ? { promptModel: flag("prompt-model") as string }
-          : {}),
-        ...(has("env-allow") ? { envAllowlist: list("env-allow") } : {}),
-      }),
-      secrets: workerSecrets(list("secrets")),
-      ...(has("spool") ? { spool: flag("spool") as string } : {}),
-    });
-    shutdown(() => worker.stop());
-    await worker.start();
-    break;
-  }
-
   case "token": {
     const { signingKey } = await secrets();
-    const workerId = flag("worker");
-    if (!workerId) throw new Error("--worker <id> is required");
-    const ttl = Number(flag("ttl", "0"));
-    const token = mint(
-      {
-        sub: workerId,
-        scope: "worker",
-        runtimes: list("runtimes").length > 0 ? list("runtimes") : [ANY],
-        labels: pairs("labels"),
-        exp: ttl === 0 ? 0 : Math.floor(Date.now() / 1000) + ttl,
-      },
-      signingKey,
-    );
-    console.log(token);
+    const claims: TokenClaims = {
+      sub: flag("consumer", "anonymous") as string,
+      scope: has("reader") ? "reader" : "consumer",
+      workspace,
+      publish: list("publish"),
+      subscribe: list("subscribe"),
+      exp: has("ttl") ? Math.floor(Date.now() / 1000) + Number(flag("ttl")) : 0,
+    };
+    console.log(mint(claims, signingKey));
     break;
   }
 
-  case "status": {
-    const { adminToken } = await secrets();
-    const base = flag("broker", process.env.BUS_URL ?? "http://127.0.0.1:4317");
-    const response = await fetch(`${base}/api/snapshot`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
+  case "publish": {
+    const bus = await client();
+    const positional = argv[2] && !argv[2].startsWith("--") ? argv[2] : undefined;
+    const result = await bus.publish({
+      subject: flag("subject", argv[1]) as string,
+      body: JSON.parse(flag("body", positional ?? "null") as string) as Json,
+      ...(has("key") ? { key: flag("key") as string } : {}),
+      ...(has("dedupe") ? { dedupeKey: flag("dedupe") as string } : {}),
+      headers: pairs("headers"),
     });
-    if (!response.ok) throw new Error(`broker returned HTTP ${response.status}`);
-    const snapshot = (await response.json()) as {
-      workers: { id: string; runtimes: string[]; labels: Record<string, string>; lastSeen: number; paused: boolean }[];
-      tasks: { id: string; runtime: string; status: string; stepKey: string }[];
-      queueDepth: Record<string, number>;
-      now: number;
-    };
-    console.log("workers");
-    for (const worker of snapshot.workers)
+    console.log(JSON.stringify(result));
+    break;
+  }
+
+  case "request": {
+    const bus = await client();
+    const positional = argv[2] && !argv[2].startsWith("--") ? argv[2] : undefined;
+    const result = await bus.request({
+      subject: flag("subject", argv[1]) as string,
+      body: JSON.parse(flag("body", positional ?? "null") as string) as Json,
+      waitMs: Number(flag("wait", "30000")),
+    });
+    console.log(JSON.stringify(result.response?.body ?? null));
+    if (!result.response) process.exit(2);
+    break;
+  }
+
+  case "subscribe": {
+    const bus = await client();
+    const from = flag("from");
+    console.log(
+      JSON.stringify(
+        await bus.subscribe({
+          name: flag("name", argv[1]) as string,
+          pattern: flag("pattern", argv[2]) as string,
+          ...(has("ack-wait") ? { ackWaitMs: Number(flag("ack-wait")) } : {}),
+          ...(has("max-attempts")
+            ? { maxAttempts: Number(flag("max-attempts")) }
+            : {}),
+          ...(has("ordered") ? { ordered: true } : {}),
+          ...(from
+            ? {
+                deliverFrom:
+                  from === "beginning"
+                    ? "beginning"
+                    : from === "new"
+                      ? "new"
+                      : Number(from),
+              }
+            : {}),
+        }),
+      ),
+    );
+    break;
+  }
+
+  case "consume": {
+    const bus = await client();
+    const subscription = flag("subscription", argv[1]) as string;
+    const exec = flag("exec");
+    const id = flag("id", `${hostname()}-${subscription}`) as string;
+    const consumer = new BusConsumer({
+      client: bus,
+      id,
+      subscription,
+      name: flag("name", id) as string,
+      host: hostname(),
+      prefetch: Number(flag("prefetch", "1")),
+      labels: pairs("labels"),
+      log: (message) => console.error(message),
+      // Without --exec the message is printed. With it, the message goes to the
+      // command's stdin and its stdout becomes the reply — which is the whole
+      // integration story for a language the bus has no SDK for.
+      handle: async ({ message }) => {
+        if (!exec) {
+          console.log(JSON.stringify(message));
+          return undefined;
+        }
+        const child = Bun.spawn(["/bin/sh", "-c", exec], {
+          stdin: new Blob([JSON.stringify(message)]),
+          stdout: "pipe",
+          stderr: "inherit",
+          env: {
+            ...process.env,
+            BUS_SUBJECT: message.subject,
+            BUS_SEQ: String(message.seq),
+          },
+        });
+        const output = await new Response(child.stdout).text();
+        const code = await child.exited;
+        if (code !== 0) throw new Error(`handler exited ${code}`);
+        const trimmed = output.trim();
+        if (trimmed.length === 0) return undefined;
+        try {
+          return JSON.parse(trimmed) as Json;
+        } catch {
+          return trimmed;
+        }
+      },
+    });
+    shutdown(() => consumer.stop());
+    await consumer.start();
+    break;
+  }
+
+  case "tail": {
+    const bus = await client();
+    let after = has("after")
+      ? Number(flag("after"))
+      : (await bus.stats()).lastSeq;
+    for (;;) {
+      for (const message of await bus.log(after, 100)) {
+        after = message.seq;
+        console.log(
+          `${String(message.seq).padStart(6)}  ${message.subject.padEnd(28)} ${JSON.stringify(
+            message.body,
+          ).slice(0, 160)}`,
+        );
+      }
+      await Bun.sleep(500);
+    }
+  }
+
+  case "stats": {
+    const bus = await client();
+    const stats = await bus.stats();
+    console.log(`messages ${stats.messages}  lastSeq ${stats.lastSeq}`);
+    console.log("subscriptions");
+    for (const subscription of stats.subscriptions)
       console.log(
-        `  ${worker.id}  ${worker.runtimes.join(",")}  ${Object.entries(worker.labels)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(" ")}  ${Math.round((snapshot.now - worker.lastSeen) / 1000)}s ago${
-          worker.paused ? "  (paused)" : ""
+        `  ${subscription.name.padEnd(18)} ${subscription.pattern.padEnd(22)} pending=${subscription.pending} leased=${subscription.leased} dead=${subscription.dead} lag=${subscription.lag}${
+          subscription.paused ? " (paused)" : ""
         }`,
       );
-    if (snapshot.workers.length === 0) console.log("  (none registered)");
-    const depth = Object.entries(snapshot.queueDepth);
-    console.log(
-      `queue: ${depth.length === 0 ? "empty" : depth.map(([r, n]) => `${r}=${n}`).join(" ")}`,
-    );
-    for (const task of snapshot.tasks.slice(0, 15))
-      console.log(`  ${task.status.padEnd(10)} ${task.runtime.padEnd(8)} ${task.stepKey}`);
+    if (stats.subscriptions.length === 0) console.log("  (none)");
+    console.log("consumers");
+    for (const consumer of stats.consumers)
+      console.log(
+        `  ${consumer.id.padEnd(24)} ${consumer.subscriptions.join(",").padEnd(18)} ${Math.round(
+          (stats.now - consumer.lastSeen) / 1000,
+        )}s ago${consumer.paused ? " (paused)" : ""}`,
+      );
+    if (stats.consumers.length === 0) console.log("  (none)");
     break;
   }
 
   default:
-    console.log(`agenticbus — distributed execution for dagr workflows
+    console.log(`agenticbus — a durable message bus for agents and ordinary work
 
-  serve    dagr engine + broker in one process, or --broker-url for a split one
-  broker   the broker alone (workers and the engine connect over HTTP)
-  worker   a remote worker hosting dagr's runtimes
-  token    mint a per-worker capability token
-  status   fleet and queue readout
+  serve       run the bus
+  token       mint a scoped token
+  publish     <subject> <json>            publish one message
+  request     <subject> <json>            publish and wait for a reply
+  subscribe   <name> <pattern>            create a durable subscription
+  consume     <subscription> --exec CMD   consume; message is stdin, stdout is the reply
+  tail        follow the log
+  stats       subscriptions, consumers, lag
 
 Common flags:
-  --state <dir>        where the signing key and admin token live (default .agenticbus)
-  --broker <url>       broker base URL (BUS_URL)
-  --port, --host       listener
-  --broker-url <url>   serve: dispatch into an external broker instead of embedding one
-  --runtimes a,b       worker: which runtimes to host (default-deny, required)
-  --labels k=v,k=v     worker: labels a step selector matches against
-  --shell-allow, --http-allow, --agent-models, --secrets   per-runtime allowlists
+  --url <url>          bus base URL (BUS_URL)
+  --state <dir>        signing key and admin token (default .agenticbus)
+  --workspace <name>   tenancy (default "default")
+  --port --host --db --blobs           serve
+  --publish a.b,c.>    token: subject patterns it may publish to
+  --subscribe name     token: subscriptions it may claim from
 
-Full documentation: README.md`);
+Examples:
+  agenticbus subscribe work 'work.>' --ordered
+  agenticbus consume work --exec ./handle.sh --prefetch 4
+  agenticbus publish work.resize '{"src":"a.png"}' --key a.png`);
     if (command !== "help" && command !== "--help") process.exit(1);
 }
 
