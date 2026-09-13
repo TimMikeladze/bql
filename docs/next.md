@@ -29,6 +29,17 @@ Windows**, all three gating. On `main`, pushed to **https://github.com/TimMikela
 
 ### What this session changed, newest first
 
+**At txid 0 the catalog is the position, not the file.** A sharded cluster test failed about one CI
+run in three with `ChecksumMismatch: pre-transaction checksum mismatch at txid 1: expected
+80adc3c53d5dd66b, computed 0` — a replica refusing record 1 of a database that should have had no
+history. Not a race: `openRecorder` let `computeFull` of the *file* decide the position at txid 0,
+and a database SQLite has merely opened holds the header page it writes on entering WAL mode, which
+belongs to no transaction. Created, closed and reopened without a write, a database stood at "1
+page, checksum 9272282459731252843" rather than "0 pages, checksum 0", and record 1 carried that as
+its `preChecksum`. Whether a worker opened the tenant before its first write is what made it look
+random. The rule was already written down three times — `openApplier`, `snapshot()` and
+`restoreFromBucket` each carry a copy — and `openRecorder` was the one place without it.
+
 **A snapshot parks a write; it does not refuse one.** `test/server/retention.test.ts` failed about
 half the time with "expected 9, received 8": nine writes issued, eight landed, and the ninth came
 back `503 BUSY: acme is taking a snapshot` to a test that never checked a status. The snapshot was
@@ -473,6 +484,10 @@ pushed the Homebrew dylib, `libsqlite3.so.0` and `/usr/lib/libsqlite3.dylib` on 
 Nothing broke — none of them opens — but the "no library" remedy on Windows named `libc.so.6`, a
 file the platform has never had. The test that caught it was one written to encode the comment's
 claim.
+
+**Windows runs `bun test --timeout 20000`.** Two tests crossed bun's 5 s default doing legitimate
+work — 7 s where sibling tests in the same files take 3.6 s and 0.95 s on the same runner. That
+scales the clock, not the assertions.
 
 **The whole suite now passes on `windows-latest`, and the job is a gate**: `continue-on-error` is
 gone from the job and its four steps, the name has lost "(exploratory)", and it has gained the
