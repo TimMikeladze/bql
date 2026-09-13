@@ -21,7 +21,11 @@ const claims: TokenClaims = {
 };
 
 test("a minted token verifies back to its claims", () => {
-  expect(verify(mint(claims, key), key)).toEqual(claims);
+  const verified = verify(mint(claims, key), key);
+  expect(verified).toMatchObject(claims);
+  // Every token gets an id, because a credential nothing but key rotation can
+  // withdraw is a credential you cannot withdraw.
+  expect(verified.jti).toMatch(/^[0-9a-f-]{36}$/);
 });
 
 test("a token signed with another key is rejected", () => {

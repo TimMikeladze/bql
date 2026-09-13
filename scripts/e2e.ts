@@ -39,7 +39,15 @@ const spawn = (
   args: string[],
   extra: Record<string, string> = {},
 ) => {
-  const child = Bun.spawn([process.execPath, ...args], {
+  // `AGENTICBUS_BIN` swaps the CLI for a compiled binary, so the same
+  // end-to-end checks run against the artefact that actually ships. A binary
+  // nobody executed in CI is not a release artefact.
+  const binary = process.env.AGENTICBUS_BIN;
+  const command =
+    binary && args[0] === "src/cli/index.ts"
+      ? [binary, ...args.slice(1)]
+      : [process.execPath, ...args];
+  const child = Bun.spawn(command, {
     env: {
       ...process.env,
       BUS_SIGNING_KEY: signingKey,
@@ -163,7 +171,7 @@ try {
   for (const envelope of audited) await admin.ack(envelope.delivery, "auditor");
 
   // ---- a killed consumer loses its lease to another machine ----
-  await admin.publish({ subject: "work.slow", body: { ms: 8000 } });
+  const slow = await admin.publish({ subject: "work.slow", body: { ms: 8000 } });
   const holder = await waitFor("a consumer to take the slow message", async () => {
     const deliveries = (await admin.call("/api/deliveries")) as {
       subscription: string;
@@ -171,9 +179,17 @@ try {
       consumerId: string | null;
       messageSeq: number;
     }[];
+    // By sequence number, not "any leased delivery on this subscription":
+    // `/api/deliveries` is a bounded, time-ordered view of every subscription,
+    // and picking whatever happened to be leased made the rest of this check
+    // assert something about a message it had not chosen.
     return (
       deliveries.find(
-        (d) => d.subscription === "work" && d.status === "leased" && d.consumerId,
+        (d) =>
+          d.subscription === "work" &&
+          d.messageSeq === slow.seq &&
+          d.status === "leased" &&
+          d.consumerId,
       ) ?? null
     );
   });
@@ -196,10 +212,22 @@ try {
     },
     45_000,
   ).catch(async (error) => {
-    const deliveries = (await admin.call("/api/deliveries")) as unknown[];
-    const stats = await admin.stats();
-    console.error("deliveries:", JSON.stringify(deliveries).slice(0, 900));
-    console.error("subs:", JSON.stringify(stats.subscriptions).slice(0, 500));
+    const deliveries = (await admin.call("/api/deliveries")) as {
+      subscription: string;
+      messageSeq: number;
+      status: string;
+      consumerId: string | null;
+      attempt: number;
+    }[];
+    console.error("holder:", JSON.stringify(holder));
+    console.error(
+      "work deliveries:",
+      JSON.stringify(
+        deliveries
+          .filter((d) => d.subscription === "work")
+          .map((d) => [d.messageSeq, d.status, d.consumerId, d.attempt]),
+      ),
+    );
     throw error;
   });
   check(
@@ -310,6 +338,32 @@ try {
     "a cancelled delivery is terminal, not retried",
     settled.attempt === 1,
     `attempt ${settled.attempt}`,
+  );
+
+  // ---- wire protocol version ----
+  // The skew mechanism, exercised rather than assumed: a client that spells
+  // the version explicitly and one that does not must reach the same route,
+  // and a client asking for a version this broker does not speak must be told
+  // so rather than served something it will misread.
+  const versioned = await fetch(`${url}/api/v1/stats`, {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  const unversioned = await fetch(`${url}/api/stats`, {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  check(
+    "/api/v1 and /api reach the same route",
+    versioned.status === 200 &&
+      unversioned.status === 200 &&
+      (await versioned.json()).lastSeq === (await unversioned.json()).lastSeq,
+  );
+  const future = await fetch(`${url}/api/stats`, {
+    headers: { Authorization: `Bearer ${adminToken}`, "x-bus-api-version": "99" },
+  });
+  check(
+    "a client asking for a version this broker does not speak is told so",
+    future.status === 400,
+    `HTTP ${future.status}`,
   );
 
   // ---- dedupe ----

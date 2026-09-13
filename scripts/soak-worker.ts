@@ -54,6 +54,13 @@ const consumer = new BusConsumer({
     // A little real work, jittered, so consumers are genuinely overlapping
     // rather than taking strict turns.
     if (holdMs > 0) await Bun.sleep(Math.floor(Math.random() * holdMs));
+    // A poison message fails every time, on purpose. The receipt above is
+    // written *before* the failure, so the harness can count how many times
+    // each poison message was actually handled — which is the only way to tell
+    // "retried with backoff" from "hot-looped through its whole budget".
+    const body = message.body as { poison?: boolean } | null;
+    if (body && typeof body === "object" && body.poison === true)
+      throw new Error(`poison message ${message.seq}`);
     return undefined;
   },
 });

@@ -136,6 +136,19 @@ console.log("USABLE");
       `${consumer}/node_modules/agenticbus/dist/dashboard/index.html`,
     ).exists(),
   );
+
+  // The other artefact people receive. A tarball that installs proves nothing
+  // about a binary nobody executed, and the two break in different places:
+  // `--compile` is fussy about assets read from disk and dynamic imports of
+  // computed paths, neither of which the npm path exercises.
+  if (!process.env.SKIP_COMPILED) {
+    const compiled = await run(["bun", "scripts/compiled-e2e.ts"], repo);
+    check(
+      "the compiled binary passes the end-to-end suite and serves its dashboard",
+      compiled.code === 0,
+      compiled.out.split("\n").slice(-3).join(" ") || compiled.err.slice(-300),
+    );
+  }
 } catch (error) {
   check("verify-pack completed without an unexpected error", false, String(error));
 } finally {

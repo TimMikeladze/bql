@@ -24,8 +24,15 @@ export function noopMetrics(): MetricsSink {
 }
 
 export interface PrometheusMetrics extends MetricsSink {
-  /** The current snapshot, in Prometheus text exposition format. */
-  render(): string;
+  /**
+   * The current snapshot, in Prometheus text exposition format.
+   *
+   * `include` narrows it to the series a caller is allowed to see. That is how
+   * a workspace-pinned reader token gets its own lag without being handed
+   * every other tenant's subscription names — a filter on the way out rather
+   * than a second registry to keep in step.
+   */
+  render(include?: (tags: Tags) => boolean): string;
   /** Drop everything. Only for tests; a real scrape target is cumulative. */
   reset(): void;
 }
@@ -114,10 +121,11 @@ export function prometheusMetrics(): PrometheusMetrics {
       found.min = Math.min(found.min, value);
       found.max = Math.max(found.max, value);
     },
-    render(): string {
+    render(include?: (tags: Tags) => boolean): string {
       const lines: string[] = [];
       const declared = new Set<string>();
       for (const entry of series.values()) {
+        if (include && !include(entry.tags)) continue;
         const name = metricName(entry.name);
         const labels = renderLabels(entry.tags);
         if (!declared.has(name)) {

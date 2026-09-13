@@ -101,6 +101,11 @@ function relative(time: number, now: number) {
   return `${Math.floor(seconds / 86_400)}d`;
 }
 
+/** A duration, in the same units `relative` uses, so the two read alike. */
+function formatAge(ms: number) {
+  return relative(0, ms);
+}
+
 const STATUS = {
   pending: { icon: CircleDashed, tone: "text-amber-600 bg-amber-50 border-amber-200" },
   leased: { icon: Loader2, tone: "text-blue-700 bg-blue-50 border-blue-200" },
@@ -230,6 +235,14 @@ function SubscriptionRow({
           </span>
         </div>
         <span className="shrink-0 text-xs tabular-nums text-[var(--muted-text)]">
+          {/* Age of the oldest thing still waiting, beside the depth. Depth
+              says how much is queued; age says how long the front of the queue
+              has been there, which is the number a person cares about. */}
+          {subscription.oldestPendingAgeMs > 0 ? (
+            <span className="mr-2">
+              oldest {formatAge(subscription.oldestPendingAgeMs)}
+            </span>
+          ) : null}
           lag {subscription.lag}
         </span>
       </div>
@@ -251,7 +264,12 @@ function SubscriptionRow({
           </span>
         ))}
         {subscription.ordered ? <span>ordered</span> : null}
-        {subscription.paused ? (
+        {/* A subscription the bus paused for a dead-letter storm is a
+            different fact from one an operator paused, and reads differently
+            at 03:00. */}
+        {subscription.quarantinedAt !== null ? (
+          <span className="text-red-700">quarantined</span>
+        ) : subscription.paused ? (
           <span className="text-amber-700">paused</span>
         ) : null}
       </div>

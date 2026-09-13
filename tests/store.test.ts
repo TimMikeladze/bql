@@ -18,6 +18,10 @@ const sub = (
     ackWaitMs: 1000,
     maxAttempts: 2,
     deliverFrom: "beginning",
+    // These tests drive a frozen clock and assert on the transition itself, so
+    // they opt out of retry pacing. The pacing has tests of its own below —
+    // running it here would only be asserting that `Math.random` works.
+    backoff: { baseMs: 0 },
     ...extra,
   });
 
@@ -107,9 +111,9 @@ test("acking with a stale generation is rejected", async () => {
   const stale = (await store.claim(W, "work", "c1", 1))[0]!;
   clock += 5000;
   await store.claim(W, "work", "c2", 1);
-  expect(() =>
+  await expect(
     store.ack(W, stale.delivery.id, "c1", stale.delivery.generation),
-  ).toThrow(/stale lease/);
+  ).rejects.toThrow(/stale lease/);
   store.close();
 });
 
@@ -118,7 +122,7 @@ test("an acked delivery is not redelivered", async () => {
   sub(store, "work", "work.>");
   await store.publish(W, { subject: "work.do", body: 1 });
   const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
-  store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
+  await store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
   clock += 10_000;
   expect(await store.claim(W, "work", "c1", 10)).toHaveLength(0);
   store.close();
@@ -185,7 +189,7 @@ test("an ordered subscription serializes deliveries sharing a key", async () => 
   // Two of the three, because the second cart-1 message waits its turn.
   expect(batch.map((e) => e.message.body).sort()).toEqual([1, 3]);
 
-  store.ack(W, batch[0]!.delivery.id, "c1", batch[0]!.delivery.generation);
+  await store.ack(W, batch[0]!.delivery.id, "c1", batch[0]!.delivery.generation);
   const next = await store.claim(W, "work", "c1", 10);
   expect(next.map((e) => e.message.body)).toEqual([2]);
   store.close();
@@ -224,7 +228,7 @@ test("replay after purge redelivers settled messages", async () => {
   sub(store, "work", "work.>");
   await store.publish(W, { subject: "work.do", body: 1 });
   const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
-  store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
+  await store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
 
   store.replay(W, "work", 0);
   expect(await store.claim(W, "work", "c1", 10)).toHaveLength(0); // acked, skipped
@@ -311,6 +315,7 @@ test("a body larger than the inline limit goes to the blob store", async () => {
         return key;
       },
       get: async (handle) => blobs.get(handle)!,
+      has: async (handle) => blobs.has(handle),
       delete: async (handle) => {
         blobs.delete(handle);
       },
@@ -385,7 +390,7 @@ test("retention never deletes a message whose delivery is unfinished", async () 
   store.sweep();
 
   // The leased one is still there for its consumer to ack.
-  store.ack(W, claimed[0]!.delivery.id, "c1", claimed[0]!.delivery.generation);
+  await store.ack(W, claimed[0]!.delivery.id, "c1", claimed[0]!.delivery.generation);
   // And the one that was never delivered is still waiting.
   const rest = await store.claim(W, "work", "c1", 10);
   expect(rest.map((e) => e.message.body)).toEqual(["in-flight"]);
@@ -402,7 +407,7 @@ test("retention does collect messages every subscription has settled", async () 
   });
   await store.publish(W, { subject: "work.do", body: 1 });
   const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
-  store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
+  await store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
 
   clock += 10_000;
   store.sweep();
@@ -425,9 +430,9 @@ test("a ttl does not delete a message a consumer is holding", async () => {
   store.sweep();
   // The handler is still running; taking its message away would leave it
   // acking a delivery that no longer exists.
-  expect(() =>
+  await expect(
     store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation),
-  ).not.toThrow();
+  ).resolves.toBeDefined();
   store.close();
 });
 
@@ -443,6 +448,7 @@ test("blobs are collected once no message references them", async () => {
         return key;
       },
       get: async (handle) => blobs.get(handle)!,
+      has: async (handle) => blobs.has(handle),
       delete: async (handle) => {
         blobs.delete(handle);
       },
@@ -461,7 +467,7 @@ test("blobs are collected once no message references them", async () => {
   expect(await store.collectBlobs()).toBe(0);
 
   const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
-  store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
+  await store.ack(W, envelope.delivery.id, "c1", envelope.delivery.generation);
   clock += 10_000;
   store.sweep();
 

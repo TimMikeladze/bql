@@ -74,8 +74,10 @@ test("metrics counters and gauges reach the scrape, and it needs a read token", 
   expect(scrape.status).toBe(200);
   const body = await scrape.text();
 
-  expect(body).toContain("agenticbus_messages_published 2");
-  expect(body).toContain('agenticbus_deliveries_acked{subscription="work"} 1');
+  expect(body).toContain('agenticbus_messages_published{workspace="default"} 2');
+  expect(body).toContain(
+    'agenticbus_deliveries_acked{subscription="work",workspace="default"} 1',
+  );
   expect(body).toContain("# TYPE agenticbus_claim_duration summary");
   // Depth is read at scrape time, not written when something moves: one
   // message was acked, so the other is still pending.
@@ -83,26 +85,72 @@ test("metrics counters and gauges reach the scrape, and it needs a read token", 
     'agenticbus_subscription_deliveries{status="pending",subscription="work",workspace="default"} 1',
   );
 
-  // A scrape covers every workspace, so it is admin-only: a reader token
-  // pinned to one workspace must not be handed the whole install's
-  // subscription names and depths.
-  for (const scope of ["consumer", "reader"] as const) {
-    const token = mint(
-      {
-        sub: "worker-1",
-        scope,
-        workspace: "default",
-        publish: [],
-        subscribe: ["work"],
-        exp: 0,
-      },
-      signingKey,
-    );
-    expect(
-      (await fetch(`${url}/metrics`, { headers: { Authorization: `Bearer ${token}` } }))
-        .status,
-    ).toBe(403);
-  }
+  // An admin scrape is the install. A workspace-pinned **reader** gets its own
+  // workspace and nothing else — not the other tenants' series, and not the
+  // install-wide disk numbers, which are the process's and not any tenant's.
+  const readerToken = mint(
+    {
+      sub: "dashboard",
+      scope: "reader",
+      workspace: "default",
+      publish: [],
+      subscribe: [],
+      exp: 0,
+    },
+    signingKey,
+  );
+  const scoped = await fetch(`${url}/metrics`, {
+    headers: { Authorization: `Bearer ${readerToken}` },
+  });
+  expect(scoped.status).toBe(200);
+  const scopedBody = await scoped.text();
+  expect(scopedBody).toContain(
+    'agenticbus_subscription_lag{subscription="work",workspace="default"} 0',
+  );
+  expect(scopedBody).not.toContain("agenticbus_disk_free_bytes");
+
+  // Another tenant's subscription must not appear in this tenant's scrape.
+  const other = new BusClient({ url, token: adminToken, workspace: "other" });
+  await other.subscribe({ name: "elsewhere", pattern: "work.>" });
+  await other.publish({ subject: "work.c", body: 3 });
+  const otherToken = mint(
+    {
+      sub: "dashboard",
+      scope: "reader",
+      workspace: "other",
+      publish: [],
+      subscribe: [],
+      exp: 0,
+    },
+    signingKey,
+  );
+  const otherBody = await (
+    await fetch(`${url}/metrics`, {
+      headers: { Authorization: `Bearer ${otherToken}` },
+    })
+  ).text();
+  expect(otherBody).toContain('subscription="elsewhere"');
+  expect(otherBody).not.toContain('subscription="work"');
+
+  // A consumer token still gets nothing: observing is a read.
+  const consumerToken = mint(
+    {
+      sub: "worker-1",
+      scope: "consumer",
+      workspace: "default",
+      publish: [],
+      subscribe: ["work"],
+      exp: 0,
+    },
+    signingKey,
+  );
+  expect(
+    (
+      await fetch(`${url}/metrics`, {
+        headers: { Authorization: `Bearer ${consumerToken}` },
+      })
+    ).status,
+  ).toBe(403);
   expect((await fetch(`${url}/metrics`)).status).toBe(401);
 
   server.stop(true);

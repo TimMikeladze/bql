@@ -8,6 +8,15 @@ export {
 } from "./bus/store";
 export { createServer, type BusServer, type ServerOptions } from "./bus/server";
 export {
+  createBus,
+  consumeTransactional,
+  DirectClient,
+  type EmbeddedBus,
+  type EmbeddedBusOptions,
+  type TransactionalConsumer,
+  type TransactionalConsumerOptions,
+} from "./bus/embedded";
+export {
   createLogger,
   isLogLevel,
   silentLogger,
@@ -39,15 +48,19 @@ export {
   narrowingGlob,
   SubjectError,
 } from "./bus/subjects";
-export { fileBlobs, type BlobStore } from "./bus/blobs";
+export { fileBlobs, BlobMissingError, type BlobStore } from "./bus/blobs";
 export {
   BusClient,
   BusConsumer,
   BusRequestError,
   CancelledError,
   FatalError,
+  LocalValidationError,
+  ShutdownError,
+  type BusApi,
   type ClientOptions,
   type ConsumerOptions,
   type HandlerApi,
+  type StandardSchemaV1,
 } from "./client/bus";
 export type * from "./shared/protocol";

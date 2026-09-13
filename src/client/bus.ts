@@ -1,16 +1,28 @@
 import type {
+  AckResult,
+  AuditEntry,
+  BlockedKey,
   CancelResult,
+  Consumer,
   Delivery,
+  EffectClaim,
+  EffectRecord,
   Envelope,
   ExtendResult,
   Json,
   Message,
   PublishRequest,
   PublishResult,
+  Quota,
+  RegisterConsumer,
   Response as BusResponse,
+  SchemaBinding,
+  SchemaCheck,
+  SchemaVersion,
   Stats,
   SubscribeRequest,
   Subscription,
+  Usage,
 } from "../shared/protocol";
 
 /**
@@ -29,6 +41,47 @@ export interface ClientOptions {
   fetchImpl?: typeof fetch;
   /** Per-request timeout. Long-polling calls add their wait on top. */
   timeoutMs?: number;
+}
+
+/**
+ * [Standard Schema](https://standardschema.dev), declared rather than imported.
+ *
+ * It is an *interface*, not a package: any library that implements it — Zod,
+ * Valibot, ArkType — satisfies this without the bus depending on any of them,
+ * so zero runtime dependencies holds. It is a client-side convenience for
+ * local validation and TypeScript inference; the wire contract is the JSON
+ * Schema in the registry, and this is never the source of truth.
+ */
+export interface StandardSchemaV1<Output = unknown> {
+  readonly "~standard": {
+    readonly version: 1;
+    readonly vendor: string;
+    readonly validate: (
+      value: unknown,
+    ) =>
+      | { value: Output; issues?: undefined }
+      | { issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<unknown> }> }
+      | Promise<
+          | { value: Output; issues?: undefined }
+          | { issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<unknown> }> }
+        >;
+    readonly types?: { readonly input: unknown; readonly output: Output };
+  };
+}
+
+/** Thrown when a body fails the caller's own schema, before it reaches the bus. */
+export class LocalValidationError extends Error {
+  constructor(readonly issues: ReadonlyArray<{ message: string; path?: ReadonlyArray<unknown> }>) {
+    super(
+      `the body does not match the schema: ${issues
+        .map(
+          (issue) =>
+            `${(issue.path ?? []).map((part) => String(part)).join(".") || "/"} ${issue.message}`,
+        )
+        .join("; ")}`,
+    );
+    this.name = "LocalValidationError";
+  }
 }
 
 export class BusRequestError extends Error {
@@ -87,8 +140,23 @@ export class BusClient {
     return payload as T;
   }
 
-  publish(request: PublishRequest): Promise<PublishResult> {
-    return this.call<PublishResult>("/api/publish", request);
+  /**
+   * Publish, optionally validating the body locally first.
+   *
+   * Passing `schema` catches a bad body in the producer, where the stack trace
+   * is, instead of as a 422 from a broker that cannot tell you which line
+   * built it. The bus still validates against the registry — this does not
+   * replace that, and a client-side schema is never the contract.
+   */
+  async publish(
+    request: PublishRequest & { schema?: StandardSchemaV1 },
+  ): Promise<PublishResult> {
+    const { schema, ...rest } = request;
+    if (schema) {
+      const result = await schema["~standard"].validate(rest.body ?? null);
+      if (result.issues) throw new LocalValidationError(result.issues);
+    }
+    return this.call<PublishResult>("/api/publish", rest);
   }
 
   /** Publish and wait for a reply, up to `waitMs`. */
@@ -170,6 +238,19 @@ export class BusClient {
   requeue(seq: number): Promise<PublishResult> {
     return this.call<PublishResult>(`/api/messages/${seq}/requeue`, {});
   }
+  /** Keys an ordered subscription is stalled on behind a dead letter. */
+  blockedKeys(subscription: string): Promise<BlockedKey[]> {
+    return this.call<BlockedKey[]>(
+      `/api/subscriptions/${subscription}/blocked`,
+    );
+  }
+  /** Let one blocked key move again. Admin. */
+  unblock(subscription: string, key: string): Promise<{ unblocked: boolean }> {
+    return this.call<{ unblocked: boolean }>(
+      `/api/subscriptions/${subscription}/unblock`,
+      { key },
+    );
+  }
   pause(subscription: string, paused: boolean): Promise<Subscription> {
     return this.call<Subscription>(
       `/api/subscriptions/${subscription}/pause`,
@@ -201,11 +282,100 @@ export class BusClient {
       { extraWaitMs: waitMs },
     );
   }
-  ack(delivery: Delivery, consumer: string): Promise<Delivery> {
-    return this.call<Delivery>(`/api/deliveries/${delivery.id}/ack`, {
+  /**
+   * Ack, optionally committing what the work produced in the same transaction.
+   *
+   * A retry of an ack this consumer already made answers 200 with
+   * `replayed: true` rather than a 409 — losing the response to an ack is a
+   * network event, not a conflict.
+   */
+  ack(
+    delivery: Delivery,
+    consumer: string,
+    options: { publish?: PublishRequest[]; effects?: EffectRecord[] } = {},
+  ): Promise<AckResult> {
+    return this.call<AckResult>(`/api/deliveries/${delivery.id}/ack`, {
       consumer,
       generation: delivery.generation,
+      ...options,
     });
+  }
+
+  // ------------------------------------------------------------ schemas
+  registerSchema(
+    name: string,
+    source: Json,
+    compat: "backward" | "forward" | "full" | "none" = "backward",
+  ): Promise<SchemaVersion> {
+    return this.call<SchemaVersion>("/api/schemas", { name, source, compat });
+  }
+  /** A dry run: what would change, and what would break. */
+  checkSchema(
+    name: string,
+    source: Json,
+    compat: "backward" | "forward" | "full" | "none" = "backward",
+  ): Promise<SchemaCheck> {
+    return this.call<SchemaCheck>("/api/schemas/check", { name, source, compat });
+  }
+  schemas(name?: string): Promise<SchemaVersion[]> {
+    return this.call<SchemaVersion[]>(
+      `/api/schemas${name ? `?name=${encodeURIComponent(name)}` : ""}`,
+    );
+  }
+  bindSchema(
+    pattern: string,
+    schema: string,
+    mode: "enforce" | "warn" | "off" = "warn",
+  ): Promise<SchemaBinding> {
+    return this.call<SchemaBinding>("/api/schemas/bindings", {
+      pattern,
+      schema,
+      mode,
+    });
+  }
+  schemaBindings(): Promise<SchemaBinding[]> {
+    return this.call<SchemaBinding[]>("/api/schemas/bindings");
+  }
+  unbindSchema(pattern: string): Promise<{ removed: number }> {
+    return this.call<{ removed: number }>(
+      `/api/schemas/bindings?pattern=${encodeURIComponent(pattern)}`,
+      undefined,
+      { method: "DELETE" },
+    );
+  }
+
+  // ------------------------------------------------------ tenant safety
+  revokeToken(jti: string, notAfter = 0): Promise<{ revoked: string }> {
+    return this.call<{ revoked: string }>("/api/tokens/revoke", {
+      jti,
+      notAfter,
+    });
+  }
+  quota(): Promise<{ quota: Quota; usage: Usage }> {
+    return this.call<{ quota: Quota; usage: Usage }>("/api/quota");
+  }
+  setQuota(quota: Partial<Quota>): Promise<Quota> {
+    return this.call<Quota>("/api/quota", quota);
+  }
+  auditLog(limit = 100): Promise<AuditEntry[]> {
+    return this.call<AuditEntry[]>(`/api/audit?limit=${limit}`);
+  }
+
+  /** Claim the right to perform an external effect exactly once. */
+  claimEffect(key: string, fence?: string): Promise<EffectClaim> {
+    return this.call<EffectClaim>("/api/effects/claim", {
+      key,
+      ...(fence ? { fence } : {}),
+    });
+  }
+  /** Record what an effect returned, outside an ack. */
+  recordEffect(key: string, result: Json): Promise<{ ok: true }> {
+    return this.call<{ ok: true }>("/api/effects/record", { key, result });
+  }
+
+  /** Register or refresh this consumer's presence in the fleet. */
+  register(input: RegisterConsumer): Promise<Consumer> {
+    return this.call<Consumer>("/api/consumers/register", input);
   }
   nack(
     delivery: Delivery,
@@ -241,8 +411,43 @@ export class BusClient {
   }
 }
 
+/**
+ * What a consume loop needs from a bus.
+ *
+ * `BusClient` implements it over HTTP; the embedded bus implements it against
+ * the store directly, with no loopback socket. Naming it is what lets one
+ * `BusConsumer` drive both.
+ */
+export interface BusApi {
+  publish(request: PublishRequest): Promise<PublishResult>;
+  claim(
+    subscription: string,
+    consumer: string,
+    max?: number,
+    waitMs?: number,
+  ): Promise<Envelope[]>;
+  ack(
+    delivery: Delivery,
+    consumer: string,
+    options?: { publish?: PublishRequest[]; effects?: EffectRecord[] },
+  ): Promise<AckResult>;
+  nack(
+    delivery: Delivery,
+    consumer: string,
+    options?: { error?: string; fatal?: boolean; delayMs?: number },
+  ): Promise<Delivery>;
+  extend(delivery: Delivery, consumer: string): Promise<ExtendResult>;
+  reply(
+    message: Message,
+    body: Json,
+    headers?: Record<string, string>,
+  ): Promise<PublishResult>;
+  register(input: RegisterConsumer): Promise<Consumer>;
+  claimEffect(key: string, fence?: string): Promise<EffectClaim>;
+}
+
 export interface ConsumerOptions {
-  client: BusClient;
+  client: BusApi;
   /** Consumer id. Must match the token's subject unless the token is admin. */
   id: string;
   subscription: string;
@@ -270,6 +475,8 @@ export interface ConsumerOptions {
    * limit, which is only right when the handler bounds itself.
    */
   handlerTimeoutMs?: number;
+  /** How many times a lost ack response is retried. The ack is idempotent. */
+  ackRetries?: number;
   log?: (message: string) => void;
 }
 
@@ -278,11 +485,50 @@ export interface HandlerApi {
   extend(): Promise<void>;
   /** Answer a request message. Returning a value from `handle` does this too. */
   reply(body: Json, headers?: Record<string, string>): Promise<void>;
+  /**
+   * Publish **with the ack**, in one transaction (Tier 2).
+   *
+   * The difference from `client.publish` inside a handler is the whole point:
+   * that publishes now and acks later, so a crash between them duplicates the
+   * message on redelivery. This one cannot produce a message the ack did not
+   * also commit.
+   */
+  emit(request: PublishRequest): void;
+  /**
+   * Perform an external effect at most once (Tier 3).
+   *
+   * Claims `key` in the ledger; if a previous attempt already recorded a
+   * result, `work` is not called and that result is returned. The result of a
+   * fresh call is recorded **with the ack**, so the ledger row and the ack
+   * commit together.
+   *
+   * The window this does not close, stated plainly: a crash between `work`
+   * returning and the ack committing. `fence` is on the envelope for exactly
+   * that case — a destination that supports a conditional write can reject the
+   * older attempt.
+   */
+  effect<T extends Json>(key: string, work: () => Promise<T> | T): Promise<T>;
+  /** `<deliveryId>:<generation>` — this attempt, for conditional writes. */
+  fence: string;
   signal: AbortSignal;
 }
 
 /** Thrown by a handler to dead-letter immediately, skipping remaining attempts. */
 export class FatalError extends Error {}
+
+/**
+ * The abort reason when this consumer is shutting down.
+ *
+ * Distinguishable from a handler timeout on purpose: the delivery is nacked
+ * with zero delay rather than the subscription's backoff, because nothing about
+ * the *message* failed.
+ */
+export class ShutdownError extends Error {
+  constructor(message = "shutting down") {
+    super(message);
+    this.name = "ShutdownError";
+  }
+}
 
 /**
  * The abort reason when the publisher — or an operator — cancelled this work.
@@ -314,19 +560,66 @@ export class CancelledError extends Error {
 export class BusConsumer {
   private stopping = false;
   private running = new Set<Promise<void>>();
+  /** In-flight work, so a shutdown can hand it back instead of abandoning it. */
+  private inFlight = new Map<string, AbortController>();
   private readonly log: (message: string) => void;
 
   constructor(private readonly options: ConsumerOptions) {
     this.log = options.log ?? (() => {});
   }
 
-  stop() {
+  /**
+   * Stop claiming, and give back what is in flight.
+   *
+   * `abandon` — the default — aborts running handlers and nacks their
+   * deliveries with **no delay**, so another consumer picks them up
+   * immediately. Letting the leases expire instead costs one `ackWaitMs` of
+   * dead time per in-flight message on every deploy, for nothing: the process
+   * knows it is going away, and saying so is one request.
+   *
+   * `stop({ abandon: false })` is the other reasonable choice — finish what is
+   * running, claim nothing new — for a consumer whose handlers are short and
+   * whose work is not safe to interrupt.
+   */
+  stop(options: { abandon?: boolean } = {}) {
     this.stopping = true;
+    if (options.abandon === false) return;
+    for (const abort of this.inFlight.values())
+      abort.abort(new ShutdownError("the consumer is shutting down"));
+  }
+
+  /**
+   * Ack, retrying a lost response.
+   *
+   * Only transport failures and 5xx are retried: a 409 means someone else owns
+   * the delivery now and retrying that would be a busy loop around a fact that
+   * will not change. The bus answers a repeat from the same consumer and
+   * generation with the original outcome, so this cannot double-publish
+   * whatever the ack carried.
+   */
+  private async ackWithRetry(
+    envelope: Envelope,
+    options: { publish?: PublishRequest[]; effects?: EffectRecord[] },
+  ): Promise<void> {
+    const attempts = this.options.ackRetries ?? 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.options.client.ack(envelope.delivery, this.options.id, options);
+        return;
+      } catch (error) {
+        const status =
+          error instanceof BusRequestError ? error.status : undefined;
+        const worthRetrying = status === undefined || status >= 500;
+        if (!worthRetrying || attempt >= attempts) throw error;
+        await Bun.sleep(Math.min(2000, 100 * 2 ** (attempt - 1)));
+      }
+    }
   }
 
   private async runOne(envelope: Envelope) {
     const { client, id } = this.options;
     const abort = new AbortController();
+    this.inFlight.set(envelope.delivery.id, abort);
     // Three renewals inside the granted lease: one lost request must not cost
     // the message. Reading the lease from the delivery rather than assuming a
     // constant is what keeps a 2s ack window working.
@@ -351,6 +644,9 @@ export class BusConsumer {
         })
         .catch(() => abort.abort(new Error("lease lost")));
     }, extendMs);
+    // Collected during the handler, committed with the ack.
+    const emitted: PublishRequest[] = [];
+    const effects: EffectRecord[] = [];
     const api: HandlerApi = {
       extend: async () => {
         const result = await client.extend(envelope.delivery, id);
@@ -363,6 +659,17 @@ export class BusConsumer {
       reply: async (body, headers) => {
         await client.reply(envelope.message, body, headers);
       },
+      emit: (request) => {
+        emitted.push(request);
+      },
+      effect: async <T extends Json>(key: string, work: () => Promise<T> | T) => {
+        const claimed = await client.claimEffect(key, envelope.fence);
+        if (!claimed.fresh) return claimed.result as T;
+        const value = await work();
+        effects.push({ key, result: value });
+        return value;
+      },
+      fence: envelope.fence,
       signal: abort.signal,
     };
     const timeoutMs = this.options.handlerTimeoutMs;
@@ -393,9 +700,25 @@ export class BusConsumer {
         this.log(`[${id}] ${envelope.message.subject} cancelled`);
         return;
       }
+      // A reply becomes one of the ack's publishes rather than a separate
+      // call: it then commits with the ack, so a crash cannot leave a message
+      // answered but unacked — which is how a handler runs twice and the
+      // caller gets two different answers.
       if (envelope.message.headers.correlation && result !== undefined)
-        await client.reply(envelope.message, result as Json);
-      await client.ack(envelope.delivery, id);
+        emitted.push({
+          subject: envelope.message.headers["reply-to"] ?? "reply",
+          correlation: envelope.message.headers.correlation,
+          body: result as Json,
+          reply: true,
+        });
+      // Retry the ack, because the ack is now idempotent for its own consumer
+      // and a lost *response* is the commonest way at-least-once turns into a
+      // duplicate. Before this, one dropped response meant the handler ran
+      // again on the next attempt for work that was already finished.
+      await this.ackWithRetry(envelope, {
+        ...(emitted.length > 0 ? { publish: emitted } : {}),
+        ...(effects.length > 0 ? { effects } : {}),
+      });
     } catch (error) {
       // Cancelled work is neither acked nor nacked. The bus has already moved
       // the delivery to `cancelled`, which is terminal: a nack would be
@@ -413,9 +736,13 @@ export class BusConsumer {
         .nack(envelope.delivery, id, {
           error: message,
           ...(error instanceof FatalError ? { fatal: true } : {}),
+          // A shutdown is not a failure of the message, so it must not inherit
+          // the subscription's retry backoff: hand it straight back.
+          ...(error instanceof ShutdownError ? { delayMs: 0 } : {}),
         })
         .catch(() => {});
     } finally {
+      this.inFlight.delete(envelope.delivery.id);
       clearInterval(timer);
       if (deadline !== undefined) clearTimeout(deadline);
     }
@@ -428,7 +755,7 @@ export class BusConsumer {
     this.log(`[${id}] consuming '${subscription}'`);
     while (!this.stopping) {
       try {
-        await client.call("/api/consumers/register", {
+        await client.register({
           id,
           name: this.options.name ?? id,
           host: this.options.host ?? "unknown",

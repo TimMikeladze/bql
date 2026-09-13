@@ -31,33 +31,93 @@ function sign(payload: string, key: string): string {
   return b64url(new Uint8Array(hasher.digest()));
 }
 
-export function mint(claims: TokenClaims, key: string): string {
-  const payload = b64url(encoder.encode(JSON.stringify(claims)));
-  return `${payload}.${sign(payload, key)}`;
+/**
+ * The signing keys this bus will accept.
+ *
+ * Two or more at once is the whole point: rotation without downtime means a
+ * window where tokens signed by the old key and the new one are both in
+ * circulation. Rotation used to be the *only* revocation mechanism, so it had
+ * to be possible to do it without invalidating every token in the fleet at
+ * once.
+ */
+export interface Keyring {
+  /** The key new tokens are signed with. */
+  active: { kid: string; secret: string };
+  /** Look up a key by id; `undefined` for anything retired or unknown. */
+  secret(kid?: string): string | undefined;
+}
+
+/** A keyring with one unnamed key: what a bus with no rotation has. */
+export function singleKey(secret: string, kid = "k0"): Keyring {
+  return {
+    active: { kid, secret },
+    // A token minted before keys had ids carries no `kid`, and has to keep
+    // verifying against the one key that exists.
+    secret: () => secret,
+  };
+}
+
+export function keyring(keys: Record<string, string>, active: string): Keyring {
+  const secret = keys[active];
+  if (secret === undefined)
+    throw new TokenError(`the active key '${active}' is not in the keyring`);
+  return {
+    active: { kid: active, secret },
+    secret: (kid) => (kid === undefined ? keys[active] : keys[kid]),
+  };
+}
+
+function asKeyring(key: string | Keyring): Keyring {
+  return typeof key === "string" ? singleKey(key) : key;
+}
+
+export function mint(claims: TokenClaims, key: string | Keyring): string {
+  const ring = asKeyring(key);
+  const stamped: TokenClaims = {
+    ...claims,
+    // Every token gets an id, so every token can be revoked. Minting one
+    // without would create a credential nothing but rotation can withdraw.
+    jti: claims.jti ?? crypto.randomUUID(),
+    ...(typeof key === "string" ? {} : { kid: ring.active.kid }),
+  };
+  const payload = b64url(encoder.encode(JSON.stringify(stamped)));
+  return `${payload}.${sign(payload, ring.active.secret)}`;
 }
 
 export class TokenError extends Error {}
 
+/** Read the claims without checking anything. Only for choosing a key. */
+function peek(payload: string): TokenClaims {
+  try {
+    return JSON.parse(new TextDecoder().decode(unb64url(payload)));
+  } catch {
+    throw new TokenError("malformed token payload");
+  }
+}
+
 export function verify(
   token: string,
-  key: string,
+  key: string | Keyring,
   now = Date.now,
 ): TokenClaims {
+  const ring = asKeyring(key);
   const [payload, signature] = token.split(".");
   if (!payload || !signature) throw new TokenError("malformed token");
-  const expected = encoder.encode(sign(payload, key));
+  const claims = peek(payload);
+  const secret = ring.secret(claims.kid);
+  if (secret === undefined)
+    throw new TokenError(
+      claims.kid
+        ? `signing key '${claims.kid}' has been retired`
+        : "no signing key for this token",
+    );
+  const expected = encoder.encode(sign(payload, secret));
   const provided = encoder.encode(signature);
   if (
     expected.length !== provided.length ||
     !timingSafeEqual(expected, provided)
   )
     throw new TokenError("bad signature");
-  let claims: TokenClaims;
-  try {
-    claims = JSON.parse(new TextDecoder().decode(unb64url(payload)));
-  } catch {
-    throw new TokenError("malformed token payload");
-  }
   if (claims.exp !== 0 && claims.exp * 1000 <= now())
     throw new TokenError("token expired");
   if (!["consumer", "reader", "admin"].includes(claims.scope))

@@ -1,5 +1,10 @@
 # What was done, what was verified, and what was not
 
+> This is the **0.1** report. What happened after it — durability, exactly-once, schemas,
+> tenant safety, observability, continuity and packaging — is recorded in
+> [the production spec](superpowers/specs/2026-09-13-production.md), which carries its own
+> verification table and a *What the plan got wrong* section.
+
 The work in [`FINISHING.md`](FINISHING.md), item by item. Decisions live in
 [the finishing spec](superpowers/specs/2026-09-13-finishing.md); this is the evidence.
 
