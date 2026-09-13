@@ -111,6 +111,25 @@ describe("group commit", () => {
     reg.close()
   })
 
+  test("a snapshot parks a queued write rather than refusing it", async () => {
+    // The opposite of the baton case above, and for the opposite reason: a snapshot is bounded —
+    // a TRUNCATE checkpoint and a reflink — and it is often the *node's own* housekeeping, since
+    // `ServerRuntime.maybeSnapshot` takes one from the retention sweep. A 503 there is a refusal
+    // the node inflicted on a client that did nothing unusual.
+    const { reg, tenant } = await tenantWith()
+    const before = tenant.txid
+    const snapshotting = tenant.snapshot()
+    const queued = tenant.writeQueued((db) => db.run("insert into t(v) values ('during')"))
+    const ref = await snapshotting
+    const written = await queued
+    expect(written.txid).toBe(before + 1n)
+    // The snapshot is of the state *before* the parked write, which is the point of parking it
+    // rather than folding it in.
+    expect(BigInt(ref.txid)).toBe(before)
+    expect(tenant.readSync((db) => db.prepare("select count(*) c from t").get())).toEqual({ c: 1 })
+    reg.close()
+  })
+
   test("closing rejects what is still queued instead of leaving it pending", async () => {
     const { reg, tenant } = await tenantWith()
     const pending = tenant.writeQueued((db) => db.run("insert into t(v) values ('z')"))

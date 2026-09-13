@@ -1890,8 +1890,14 @@ really send) and `docs/r5-orm.md` (the two adapters).
   for that commit.
 - **The catalog position is saved at most every 200 ms**, plus on close, checkpoint and snapshot.
   It is a fast-start hint; the reconcile takes its position from the log.
-- **Writes during a snapshot or a fork throw `BUSY`.** A commit inside that window would make the
-  snapshot newer than the txid it is filed under.
+- **A write during a snapshot or a fork queues; it is not refused.** A commit inside that window
+  would make the snapshot newer than the txid it is filed under, so the write waits for the
+  exclusive section to end and lands after it. The section is bounded — a TRUNCATE checkpoint and
+  a reflink — and it is often the node's own housekeeping rather than anything a client asked for
+  (`[durability] snapshotIntervalMs`, taken from the retention sweep), which is why a `503 BUSY`
+  there was the wrong answer. **The synchronous paths — a batch, and any write when
+  `[limits] groupCommit` is off — still throw `BUSY`**, because a synchronous caller has no way to
+  wait.
 - **`DELETE /v1/db/{db}` moves, never removes.** The directory goes to `<dataDir>/trash/<name>-<ms>`
   and is removed by the sweep once it is older than `[durability] retention`.
 - **Log retention is held to a floor, not to the age bound alone.** Design §4.4 says "`retention:

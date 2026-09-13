@@ -642,10 +642,16 @@ export class Tenant {
   writeQueued<T>(fn: (db: Database) => T, options: WriteOptions = {}): Promise<WriteResult<T>> {
     this.#assertOpen()
     this.#assertPrimary()
-    if (this.#exclusive) return Promise.reject(BunQLError.busy(`${this.name} is taking a snapshot`))
-    // A baton transaction holds the writer for as long as its client likes, so a plain write is
-    // refused rather than parked behind it — exactly as `write` does. Queuing here would turn a
-    // 409 into a wait of up to `txIdleTimeoutMs`, which is a worse answer, not a better one.
+    // **A snapshot is not a refusal.** It holds the writer for a bounded moment — a TRUNCATE
+    // checkpoint and a reflink — and `#drain` below is already written to wait it out and be
+    // rescheduled when it lets go. Refusing here contradicted that, and the refusal was one the
+    // node inflicted on itself: `ServerRuntime.maybeSnapshot` takes a housekeeping snapshot from
+    // the retention sweep, so a client doing nothing unusual would get a `503 BUSY` because the
+    // node had decided, on its own timer, to snapshot. A write arriving during one now queues.
+    //
+    // A baton transaction is the other way round and stays a refusal: it holds the writer for as
+    // long as its client likes, so queuing would turn a 409 into a wait of up to
+    // `txIdleTimeoutMs`, which is a worse answer rather than a better one.
     if (this.#txOpen) return Promise.reject(txBusy(this.name))
     return new Promise<WriteResult<T>>((resolve, reject) => {
       this.#queue.push({
@@ -1188,6 +1194,9 @@ export class Tenant {
     } finally {
       this.#exclusive = false
       this.#lastActivityMs = Date.now()
+      // Anything that queued while this held the writer is now waiting on a drain that `#drain`
+      // declined to run. Nothing else will schedule it.
+      if (this.#queue.length > 0) this.#scheduleDrain()
     }
   }
 
@@ -1291,6 +1300,9 @@ export class Tenant {
       return { name: newName, dir: target, txid }
     } finally {
       this.#exclusive = false
+      // Same as `snapshot()`: a write that queued behind the fork is waiting on a drain nothing
+      // else will schedule.
+      if (this.#queue.length > 0) this.#scheduleDrain()
     }
   }
 

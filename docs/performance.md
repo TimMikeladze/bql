@@ -10,12 +10,16 @@ SQLite and 71% in BunQL's own record pipeline. A read spends 0.79 µs in SQLite 
 later on a socket. Both ceilings are ours to move.
 
 
-> **The numbers in this file predate two default changes (2026-09-13).** Every throughput and
-> latency figure here was taken with `[durability] defaultAck = "local"` and `[limits] groupCommit`
-> off. Both moved, in opposite directions and by more than the noise: a single write now pays an
-> `fdatasync` (24.0 µs → 65.0 µs at p50) and concurrent writes now fold (4.7x at 64 clients).
-> Nothing below is wrong; it no longer describes a *default* node. `docs/next.md` carries the
-> re-measurement as the follow-up.
+> **Re-measured against the 2026-09-13 defaults.** §1 and §5 now say what a *default* node does —
+> `[durability] defaultAck = "fsync"`, `[limits] groupCommit` on, `[durability] deferAppend` on —
+> and each says which figure is which. One table is not re-measured and says so: §5's worker
+> ladder, because this machine could no longer hold a five-second throughput measurement steady
+> (11 721 and 49 507 writes/s at the *same* rung, minutes apart).
+>
+> **Read §8 before trusting a microsecond in this file.** Two artefacts were found while
+> re-measuring, and both had been quietly moving the published numbers: the HTTP benchmark was
+> charging its own warm-up to the first leg it measured, and a pair of runaway processes on the
+> benchmark machine made everything 1.6x slower for a day.
 
 ## 1. Where a write goes
 
@@ -30,8 +34,50 @@ own transaction, so a transaction's fixed cost is paid per row.
 | `log.appendEncoded` — write the segment | 1.83 | 8% | 1.96 |
 | **total** | **22.88** | | **28.42** |
 
-That total reproduces what `bench/tenant.ts` reports for the whole write path (24.0 µs,
-`ack: local`), so the four stages are the whole write.
+That total reproduces what `bench/tenant.ts` reports for the whole write path (23.7 µs,
+`ack: local`), so the four stages are the whole write. Re-measured on 2026-09-13 against the new
+defaults, the four stages are **unchanged** — 8.04, 2.86, 10.00, 1.86, total 22.75 over two runs —
+because none of them is what the defaults moved.
+
+**What the defaults added is a fifth line, and it is the biggest one.**
+
+| the same write, by `ack` | p50 µs | what it buys |
+|---|---|---|
+| `ack: "local"` — the four stages above | 23.7 | the transaction is committed and in the log |
+| **`ack: "fsync"` — the default since 2026-09-13** | **62–64** | …and on the platter |
+
+So the default costs **2.7x on a single write**, and all of it is one `fdatasync`: ~38 µs of
+waiting on a disk, not work. `ack: "local"` is the opt-out and means exactly what it meant before.
+
+**Under concurrency the arithmetic reverses**, because `groupCommit` folds. `bench/workers.ts` at
+one worker, 8 databases, 64 sockets, five seconds, old defaults against new, three interleaved
+rounds on the same machine:
+
+| | writes/s |
+|---|---|
+| `defaultAck: local`, `groupCommit` off — the old defaults | 27 742 · 29 049 · 30 444 |
+| `defaultAck: fsync`, `groupCommit` on — the current ones | 46 026 · 47 935 · 53 610 |
+| | **1.69x** |
+
+**A durable default is 1.69x faster than the non-durable one it replaced**, once more than one
+client is writing. The fsync a single write pays is the same fsync sixty-four of them now share.
+That is the whole argument for the change, and it is why the two halves of it landed together.
+
+The group-commit ladder itself, measured in process (`bun run bench/profile.ts`):
+
+| rows per transaction | µs/row | implied rows/s |
+|---|---|---|
+| 1 | 24.17 | 41 379 |
+| 2 | 12.67 | 78 948 |
+| 5 | 5.28 | 189 272 |
+| 10 | 2.75 | 363 636 |
+| 50 | 0.83 | 1 197 605 |
+| 200 | 0.57 | 1 765 350 |
+
+`groupCommitMax` is 64, so a node under load lands between the 50- and 200-row rows of that table
+without any client batching at all. **This is also the reason the change feed got coarser**: folded
+writes share a txid, so a CDC consumer sees fewer, fatter events. `docs/api.md` says so beside the
+flag that turns it off.
 
 The tail halved in P3 (§4G): the WAL frame checksum now runs in C, from
 `scripts/native/walsum.c` compiled into the vendored libsqlite3. A node on a system library keeps
@@ -58,25 +104,30 @@ worth 3.2 KB, and the answer is a deployment property, not a constant — see §
 | + tenant, `exec.ts`, policy, result shaping | 2.42 |
 | + `JSON.stringify` of the result | 2.46 |
 | over a WebSocket, end to end (`bench/http.ts`) | 28.0 |
-| over HTTP, end to end (`bench/http.ts`) | 47.8 |
+| over HTTP, end to end (`bench/http.ts`) | 53.7 |
 
-So ~25 µs of a socket read and ~45 µs of an HTTP read is transport, not work. `healthz` — the same
-transport with no SQLite in it at all — is 35.4 µs over HTTP, which confirms it: the HTTP request
+So ~25 µs of a socket read and ~50 µs of an HTTP read is transport, not work. `healthz` — the same
+transport with no SQLite in it at all — is 37.2 µs over HTTP, which confirms it: the HTTP request
 is the cost, and the query is a rounding error on top.
 
-### The cost no benchmark was paying
+### The cost no benchmark was paying, and it turned out to be small
 
-`bench/http-client.ts` authenticates with the **admin key**, which is a constant-time compare. Every
-deployed client sends a signed token instead, and that is an EdDSA verification per request:
+`bench/http-client.ts` authenticated with the **admin key**, a constant-time compare, while every
+deployed client sends a signed token. There is now a leg for it, so this is measured rather than
+extrapolated from `verifyToken`:
 
 | | p50 |
 |---|---|
-| `verifyToken`, EdDSA | 28.33 µs |
-| point read over HTTP, admin key | 44.2 µs |
-| **point read over HTTP, minted token** | **76.4 µs** |
+| point read over HTTP, admin key | 53.7 µs |
+| **point read over HTTP, minted token** | **58.6 µs** |
+| `verifyToken`, EdDSA, uncached | 30.9 µs |
 
-**A real token nearly doubles an HTTP read** and is not in any published figure. It is paid once per
-connection on a WebSocket (at `hello`), which is a second reason sockets beat HTTP here.
+**About 5 µs, not the 30 the EdDSA line suggests** — the verification cache (`c020766`) is doing
+its job, and a token costs a key-ring lookup and a map hit on all but the first request. An earlier
+edition of this section put the token read at 76.4 µs against 44.2, which was a 1.7x claim built
+out of two legs measured in different positions in the run; see §8.
+
+A socket pays even that once, at `hello`, which is a second reason sockets beat HTTP here.
 
 ## 3. The bottlenecks, ranked
 
@@ -86,7 +137,10 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
    29.04 µs, a **30x** difference. This is the ceiling behind the 25–30k writes/s figure and behind
    the one missed budget in `docs/benchmarks.md` (130k against a 150k WebSocket target, which that
    file already attributes to writes serialising).
-2. **Token verification per HTTP request** — 28 µs, unbatched, uncached, on every request.
+2. ~~**Token verification per HTTP request**~~ — **addressed by the verification cache
+   (`c020766`)**, and now measured rather than inferred: a token-bearing point read is 58.6 µs
+   against 53.7 for the admin key (§2). The uncached EdDSA is still 30.9 µs, which is what the
+   cache is worth on a first request per token.
 3. ~~**Unconditional zstd**~~ — 9.5 µs, 36% of a write. Now `[durability] compress`; off is 28%
    faster and 4.4x larger (§4C).
 4. ~~**One writer thread per process.**~~ **Addressed by `[server] workers` (C4).** Spreading writes
@@ -294,6 +348,24 @@ measured against exactly the ceiling it was meant to lift.
 back in JavaScript. The shape is unchanged; the floor is higher. It peaks at six on 18 cores: the router
 is one thread, and eight databases over eight shards is a lumpy split.
 
+> **The ladder above predates the 2026-09-13 defaults and was not re-measured.** Not for lack of
+> trying: on a machine this ladder no longer has to itself, five-second throughput runs at the same
+> rung returned 11 721 and 49 507 writes/s minutes apart, and a four-worker rung came back at 0.45x
+> and then 1.21x of its own one-worker rung. A ladder is a comparison between rungs, so noise of
+> that size does not average out — it inverts the result. It wants a machine with six free cores,
+> and §8 says how to tell whether you have one.
+>
+> **The one rung that could be measured says the defaults raised the floor.** At one worker, the
+> same 8 databases and 64 sockets, old defaults against new, three interleaved rounds:
+> **27 742 · 29 049 · 30 444 writes/s** with `ack: local` and no group commit, against
+> **46 026 · 47 935 · 53 610** with the current ones — **1.69x, while also becoming durable**
+> (§1). The old-defaults column lands on the 28.8k–29.1k this section already records for that
+> rung, which is the cross-check that says the harness is still measuring what it used to.
+>
+> Whether the multi-worker rungs gain the same 1.69x is the open question. They should gain *less*:
+> group commit folds writes queued behind one writer, and sharding is the other way of relieving
+> the same queue, so the two are partly buying the same thing.
+
 What is *not* lifted: one database still has one writer, and `workers > 1` still refuses to start
 alongside `[cluster] enabled`. Both halves of replication are supported: *serving* replicas as of
 C4b — the router owns the replication connection and the worker that owns a database owns its
@@ -304,18 +376,24 @@ Placement (milestone 3) is still what routes across *nodes*.
 **The ladder, in the order it pays off**
 
 1. Batch on the client — 24x on bulk writes, available now.
-2. Move clients to the socket — ~40% off every read, and no token verification per request.
-3. Cache token verification — 28 µs off every HTTP request (A).
-4. Group commit on the server — up to 30x on concurrent single-row writes (B).
+2. Move clients to the socket — ~45% off every read, and no token verification per request.
+3. ✅ Cache token verification — done (`c020766`); a token-bearing HTTP read is now 58.6 µs
+   against 53.7 for the admin key, rather than the 1.7x this list once predicted.
+4. ✅ Group commit on the server — **on by default since 2026-09-13**, and worth 1.69x at one
+   worker and 64 clients *while also making every write durable* (§1).
 5. ✅ `workers: N` — **2.67x measured, one node, one port** (`docs/c4-workers.md`). Placement
    (milestone 3) is the remaining half, across nodes rather than threads.
 6. Replicas for reads, which already work, and placement for writes, which does not yet.
 
 **What does not scale, and cannot be made to.** One database has one writer — that is SQLite, and
 it is the trade the whole design takes in exchange for a database per tenant costing nothing. A
-single database will not exceed ~35k writes/s in process, or ~1M rows/s if the writes arrive in
-batches. Ten thousand databases, on the other hand, scale with cores and nodes; the product is
-"many small databases", and the write ceiling is per database rather than per system.
+single database will not exceed ~42k writes/s in process — that is the one-row rung of §1's group
+commit table, 24.17 µs/row — or ~1.8M rows/s if the writes arrive in batches. Concurrency raises
+the *first* of those and not the second: group commit turns sixty-four queued single-row writes
+into one transaction, which is why a default node reaches ~49k writes/s at 64 clients while a
+single serial writer cannot. Ten thousand databases, on the other hand, scale with cores and nodes;
+the product is "many small databases", and the write ceiling is per database rather than per
+system.
 
 ## 6. Tried and rejected
 
@@ -400,3 +478,43 @@ bun run bench --only wal            # the shipping legs
 `bench/profile.ts` is deliberately not part of `bun run bench`: three of its four sections measure
 things BunQL does not do (uncompressed records, group commit, cached verification), so they are
 attribution for this document rather than budgets to hold.
+
+### Two ways this file has been wrong, and how to not repeat them
+
+Re-measuring for the 2026-09-13 defaults turned up two artefacts, and between them they account for
+every unexplained movement this document has recorded. Neither was a change in the server.
+
+**The first leg of `bench/http-client.ts` paid for warming the client.** `measure` runs 50
+iterations before it starts timing, which warms the *server* — its prepared-statement cache, its
+policy memo — and does nothing for this process: Bun's `fetch`, the JSON codec and the keep-alive
+socket are cold on the first leg and warm for every leg after it. The proof is an identical leg run
+twice in one process:
+
+| the same point read | p50 |
+|---|---|
+| as the first measured leg | 94.8 µs |
+| as the fourth | 56.6 µs |
+
+**40 µs of warm-up, charged to HTTP.** That is the whole of the gap between the 48.2 µs this file
+once published and the 87 µs a later run produced, and it is why the HTTP budget row kept crossing
+its threshold in both directions. It also invalidated the old "a token nearly doubles an HTTP read"
+claim in §2, which compared a first leg against a fourth. Both client paths now warm the transport
+before the first leg. **A leg that is only ever measured first is a leg whose number you cannot
+compare to anything.**
+
+**Two runaway processes made the machine 1.6x slower for a day.** A shell that simulated CI load
+with eight `while :; do :; done` subshells did not kill them; two survived at 100% CPU for 18 hours
+and were still running when this re-measurement began. Every latency figure taken in that window is
+inflated, and a `git bisect` over the HTTP point read blamed a commit that touches nothing but the
+WAL applier — a bisect finds *a* boundary whether or not the thing being measured has one.
+
+So, before taking a number from this file or adding one to it:
+
+- **Check the machine is quiet.** `uptime`, and look at what is actually running. A load average
+  above about 4 on this 18-core machine makes every microsecond figure here unreliable, and a
+  throughput figure worse — `bench/workers.ts` returned 11 721 and 49 507 writes/s at the same rung
+  minutes apart under load.
+- **Run the comparison interleaved, A-B-A-B**, on the same machine in the same minutes. Every
+  number in §1's defaults table was taken that way, which is why three rounds of it agree.
+- **Prefer `bench/router.ts`**, which P6 built to a 4% resolution, for anything within 10%.
+  Everything else in this file is a 20%-resolution instrument at best.

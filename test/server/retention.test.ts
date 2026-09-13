@@ -50,8 +50,20 @@ describe("the server's retention sweep", () => {
     })
     try {
       await server.fetch("/v1/db", { method: "POST", body: JSON.stringify({ name: "acme" }) })
-      const run = (sql: string) =>
-        server.fetch("/v1/db/acme/query", { method: "POST", body: JSON.stringify({ sql }) })
+      // The status is checked, and that is not boilerplate. This test counts transactions by
+      // asserting on a txid, so a write that came back 503 and was ignored made it fail eight
+      // steps later with "expected 9, received 8" — which is what a background snapshot racing
+      // the writes used to produce. A write refused here is the failure, and it should say so.
+      const run = async (sql: string): Promise<Response> => {
+        const response = await server.fetch("/v1/db/acme/query", {
+          method: "POST",
+          body: JSON.stringify({ sql }),
+        })
+        if (response.status !== 200) {
+          throw new Error(`${sql} answered ${response.status}: ${await response.text()}`)
+        }
+        return response
+      }
       await run(SCHEMA)
       for (let i = 0; i < 8; i++) await run(`insert into t(v) values ('a${i}')`)
 
