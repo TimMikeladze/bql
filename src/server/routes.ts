@@ -719,8 +719,9 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
   return {
     name: stats.name,
     role: stats.role,
-    // null means "follows `[sqlite] foreignKeys`", which is what almost every database does.
+    // null means "follows the node's setting", which is what almost every database does.
     foreignKeys: row?.foreignKeys ?? null,
+    ackWithoutReplicas: row?.ackWithoutReplicas ?? null,
     sizeBytes: stats.sizeBytes,
     walBytes: stats.walBytes,
     logBytes: stats.logBytes,
@@ -749,24 +750,26 @@ export const statDb: Handler = async (ctx) => {
 }
 
 /**
- * Per-database settings (`docs/p1-pragmas.md`). One key so far, and the shape is built for more.
+ * Per-database settings (`docs/p1-pragmas.md`, `docs/r8-per-db-ack.md`). Two keys, and the shape is
+ * built for more.
  *
- * `foreignKeys` has three states, not two: `true`, `false`, and `null` to clear the override and
- * follow `[sqlite] foreignKeys` again. "Nobody has said" is not the same fact as "off" — collapsing
- * them would mean a node that later turns the node-level switch on could not reach a database
- * created before it did.
+ * Each has three states, not two: a value, and `null` to clear the override and follow the node
+ * again. "Nobody has said" is not the same fact as "off" — collapsing them would mean a node that
+ * later turns its own switch on could not reach a database created before it did.
  *
  * `PRAGMA foreign_keys` is per *connection*, so setting it releases the tenant and the next open
- * applies it. Any transaction open on it at the time ends the way an eviction ends it.
+ * applies it; any transaction open on it at the time ends the way an eviction ends it.
+ * `ackWithoutReplicas` is read at ack time instead, so it disturbs nothing and the next write sees
+ * it — which is why a body carrying only that key leaves an open transaction alone.
  */
 export const updateDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const name = dbName(ctx)
   requirePrimaryFor(ctx, name)
-  const body = await readJson<{ foreignKeys?: boolean | null }>(
-    ctx,
-    ctx.runtime.config.limits.maxBodyBytes,
-  )
+  const body = await readJson<{
+    foreignKeys?: boolean | null
+    ackWithoutReplicas?: "error" | "allow" | null
+  }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   if (!ctx.runtime.registry.has(name)) throw BunQLError.dbNotFound(name)
   if (body.foreignKeys !== undefined) {
     if (body.foreignKeys !== null && typeof body.foreignKeys !== "boolean") {
@@ -774,6 +777,15 @@ export const updateDb: Handler = async (ctx) => {
     }
     ctx.runtime.evict(name)
     ctx.runtime.registry.setForeignKeys(name, body.foreignKeys)
+  }
+  if (body.ackWithoutReplicas !== undefined) {
+    const value = body.ackWithoutReplicas
+    if (value !== null && value !== "error" && value !== "allow") {
+      throw BunQLError.badRequest(
+        'ackWithoutReplicas must be "error", "allow", or null to follow the node',
+      )
+    }
+    ctx.runtime.registry.setAckWithoutReplicas(name, value)
   }
   const tenant = ctx.runtime.tenant(name)
   ctx.txid = Number(tenant.txid)

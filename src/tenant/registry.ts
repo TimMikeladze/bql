@@ -16,7 +16,13 @@ import path from "node:path"
 import { BunQLError } from "../server/errors.ts"
 import { Database } from "../sqlite/index.ts"
 import { type ApplyMechanism, computeFull } from "../wal/index.ts"
-import { Catalog, positionOf, type TenantRole, type TenantRow } from "./catalog.ts"
+import {
+  type AckWithoutReplicas,
+  Catalog,
+  positionOf,
+  type TenantRole,
+  type TenantRow,
+} from "./catalog.ts"
 import {
   type AckLevel,
   assertValidName,
@@ -141,6 +147,13 @@ export class TenantRegistry {
    * other's pin, which is why this is keyed by owner rather than being a bare set.
    */
   #pinned = new Map<string, Set<string>>()
+  /**
+   * Per-database `ackWithoutReplicas`, memoised. `AckTracker` asks on every `replica`/`quorum`
+   * write, and the answer is a catalog row that only this class writes — so it is cached here and
+   * invalidated wherever that row can change (`docs/r8-per-db-ack.md`). `undefined` in the map is
+   * a miss; `null` is the answer "this database follows the node".
+   */
+  #ackOverrides = new Map<string, AckWithoutReplicas | null>()
   #sweeper: ReturnType<typeof setInterval> | null = null
   #evictions = 0
   #closed = false
@@ -380,6 +393,8 @@ export class TenantRegistry {
     const tenant = this.open(name)
     this.#open.delete(name)
     this.#pinned.delete(name)
+    // The name is free again, and a database created under it next follows the node.
+    this.#ackOverrides.delete(name)
     const trash = tenant.delete()
     this.#changed("delete", name)
     return trash
@@ -433,6 +448,32 @@ export class TenantRegistry {
     if (!this.catalog.getTenant(name)) throw BunQLError.dbNotFound(name)
     this.catalog.setForeignKeys(name, value)
     this.release(name)
+  }
+
+  /**
+   * Sets (or clears, with `null`) one database's `ackWithoutReplicas` override.
+   *
+   * Nothing is released: unlike `foreign_keys` this is not a connection property, it is read at
+   * ack time by `AckTracker`. The next write sees it, whether or not the tenant is open.
+   */
+  setAckWithoutReplicas(name: string, value: AckWithoutReplicas | null): void {
+    this.#assertOpen()
+    if (!this.catalog.getTenant(name)) throw BunQLError.dbNotFound(name)
+    this.catalog.setAckWithoutReplicas(name, value)
+    this.#ackOverrides.set(name, value)
+  }
+
+  /**
+   * This database's `ackWithoutReplicas`, or null when it follows the node. The write path's
+   * question, so it is answered from the memo rather than from SQLite.
+   */
+  ackWithoutReplicasOf(name: string): AckWithoutReplicas | null {
+    const hit = this.#ackOverrides.get(name)
+    if (hit !== undefined) return hit
+    if (this.#closed) return null
+    const value = this.catalog.getTenant(name)?.ackWithoutReplicas ?? null
+    this.#ackOverrides.set(name, value)
+    return value
   }
 
   release(name: string): void {
@@ -498,6 +539,7 @@ export class TenantRegistry {
       }
     }
     this.#open.clear()
+    this.#ackOverrides.clear()
     this.catalog.close()
   }
 
@@ -564,6 +606,9 @@ export class TenantRegistry {
     }
     const tenant = Tenant.open(options)
     this.#open.set(row.name, tenant)
+    // The one place every create, fork, import, revive and reopen passes through, so the ack memo
+    // is refreshed here rather than at each of them.
+    this.#ackOverrides.set(row.name, row.ackWithoutReplicas)
     if (this.#options.onOpen) {
       try {
         this.#options.onOpen(tenant)

@@ -298,6 +298,9 @@ export class ServerRuntime {
       server: this.replication,
       timeoutMs: options.config.replication.ackTimeoutMs,
       withoutReplicas: options.config.replication.ackWithoutReplicas,
+      // R8: a database may answer differently from the node it is on, so the node's setting is the
+      // fallback rather than the rule. Memoised in the registry; `docs/r8-per-db-ack.md`.
+      withoutReplicasOf: (db) => this.registry.ackWithoutReplicasOf(db),
     })
     this.forwarder = new Forwarder(this)
     this.clusterMode = options.clusterMode ?? "own"

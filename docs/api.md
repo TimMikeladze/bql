@@ -112,7 +112,8 @@ Two failures belong to the replica levels, and **neither rolls anything back**:
 
 - `503 NO_REPLICAS` — no replica is attached to that database. Raised *before* the statement runs
   where it can be, so the usual misconfiguration costs no write at all. `[replication]
-  ackWithoutReplicas = "allow"` opts into answering locally instead.
+  ackWithoutReplicas = "allow"` opts into answering locally instead, and `PATCH /v1/db/{db}` sets
+  it for one database rather than for the node.
 - `503 ACK_TIMEOUT` — the transaction committed and is durable on this node, but the acks did not
   arrive within `[replication] ackTimeoutMs`. The body carries the `txid` that committed, plus
   `acks` and `needed`. Retrying the statement would write it twice; read the txid back instead.
@@ -1533,18 +1534,28 @@ With `[replication] forwardWrites = false` a replica is read-only and a write is
 `PATCH /v1/db/{db}` changes settings that belong to one database rather than to the node.
 
 ```json
-{ "foreignKeys": true }
+{ "foreignKeys": true, "ackWithoutReplicas": "allow" }
 ```
 
-`foreignKeys` has **three** states: `true`, `false`, and `null` to clear the override so the
-database follows `[sqlite] foreignKeys` again. "Nobody has said" is deliberately not the same fact
-as "off" — collapsing them would mean a node that later turns the node-level switch on could not
-reach a database created before it did. `GET /v1/db/{db}` reports the live value, `null` for the
-databases that follow the node, which is almost all of them.
+Both keys have **three** states: a value, and `null` to clear the override so the database follows
+the node again. "Nobody has said" is deliberately not the same fact as "off" — collapsing them
+would mean a node that later turns its own switch on could not reach a database created before it
+did. `GET /v1/db/{db}` reports the live value of each, `null` for the databases that follow the
+node, which is almost all of them. A database created under a reused name follows the node: an
+override does not survive the delete.
 
-`PRAGMA foreign_keys` is per **connection**, so this closes and reopens the database: anything open
-on it ends the way an eviction ends it. Turning it on can make writes that succeed today start
-failing `SQLITE_CONSTRAINT_FOREIGNKEY`, which is the whole point of it being opt-in.
+`foreignKeys` is a `PRAGMA` and is per **connection**, so setting it closes and reopens the
+database: anything open on it ends the way an eviction ends it. Turning it on can make writes that
+succeed today start failing `SQLITE_CONSTRAINT_FOREIGNKEY`, which is the whole point of it being
+opt-in.
+
+`ackWithoutReplicas` takes `"error"`, `"allow"` or `null`, and says what *this* database does when
+`ack: "replica"` or `ack: "quorum"` is asked for and no replica is attached to it — overriding
+`[replication] ackWithoutReplicas` for that one database. It exists because the node-level switch is
+blunt: a node with ten databases and a replica following one of them refuses the replica levels on
+the other nine. It is read at ack time rather than held on a connection, so setting it closes
+nothing, disturbs no open transaction, and the next write sees it. It overrides in both directions —
+a database can refuse on a node that allows. `docs/r8-per-db-ack.md`.
 
 ### Placement, in a cluster
 

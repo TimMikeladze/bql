@@ -135,6 +135,110 @@ describe("ack levels", () => {
     expect(response.status).toBe(200)
   })
 
+  // R8 (`docs/r8-per-db-ack.md`). Every case here asserts the *behaviour* on a node with no
+  // replicas attached, not the value read back out of `GET /v1/db/{db}` — recording a setting and
+  // enforcing it are different claims, and only the second one matters.
+  describe("per-database ackWithoutReplicas", () => {
+    async function patch(node: Node, db: string, value: string | null): Promise<Response> {
+      return await node.fetch(`/v1/db/${db}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ackWithoutReplicas: value }),
+      })
+    }
+
+    test("one database can allow while the rest of the node still refuses", async () => {
+      const primary = track(await startPrimary())
+      for (const name of ["acme", "other"]) await createDb(primary, name, SCHEMA)
+
+      // Default: both follow the node, which is `"error"`.
+      expect((await write(primary, "acme", "insert into t (v) values ('a')", { ack: "replica" }))
+        .status).toBe(503)
+      expect(await patch(primary, "acme", "allow").then((r) => r.status)).toBe(200)
+
+      const allowed = await write(primary, "acme", "insert into t (v) values ('a')", {
+        ack: "replica",
+      })
+      expect(allowed.status).toBe(200)
+      // Answered locally means the write happened, not that it was skipped.
+      const rows = (await query(primary, "acme", "select count(*) as n from t")).rows[0] as number[]
+      expect(rows[0]).toBe(1)
+
+      // The whole point of the milestone: the other nine databases are untouched.
+      const refused = await write(primary, "other", "insert into t (v) values ('b')", {
+        ack: "replica",
+      })
+      expect(refused.status).toBe(503)
+      expect(((await refused.json()) as ErrorBody).error.code).toBe("NO_REPLICAS")
+    })
+
+    test("null puts a database back on the node's setting, in both directions", async () => {
+      const primary = track(await startPrimary())
+      await createDb(primary, "acme", SCHEMA)
+      await patch(primary, "acme", "allow")
+      expect((await write(primary, "acme", "insert into t (v) values ('1')", { ack: "replica" }))
+        .status).toBe(200)
+
+      // Three states, not two: clearing the override is not the same as setting it to "error".
+      expect(
+        ((await primary.json("/v1/db/acme")) as { ackWithoutReplicas: string | null })
+          .ackWithoutReplicas,
+      ).toBe("allow")
+      await patch(primary, "acme", null)
+      expect(
+        ((await primary.json("/v1/db/acme")) as { ackWithoutReplicas: string | null })
+          .ackWithoutReplicas,
+      ).toBeNull()
+      expect((await write(primary, "acme", "insert into t (v) values ('2')", { ack: "replica" }))
+        .status).toBe(503)
+    })
+
+    test("a database can refuse on a node that allows, which is the override running the hard way", async () => {
+      const primary = track(await startPrimary({ replication: { ackWithoutReplicas: "allow" } }))
+      for (const name of ["acme", "other"]) await createDb(primary, name, SCHEMA)
+      expect(await patch(primary, "acme", "error").then((r) => r.status)).toBe(200)
+
+      const refused = await write(primary, "acme", "insert into t (v) values ('x')", {
+        ack: "quorum",
+      })
+      expect(refused.status).toBe(503)
+      expect(((await refused.json()) as ErrorBody).error.code).toBe("NO_REPLICAS")
+      // And nothing was written, because the refusal happens before the statement runs.
+      const rows = (await query(primary, "acme", "select count(*) as n from t")).rows[0] as number[]
+      expect(rows[0]).toBe(0)
+
+      expect((await write(primary, "other", "insert into t (v) values ('y')", { ack: "quorum" }))
+        .status).toBe(200)
+    })
+
+    test("it survives a restart, because it is a catalog column rather than a memo", async () => {
+      const primary = track(await startPrimary())
+      await createDb(primary, "acme", SCHEMA)
+      await patch(primary, "acme", "allow")
+      await primary.close()
+      const restarted = track(await startPrimary({}, { dir: primary.dir }))
+      expect((await write(restarted, "acme", "insert into t (v) values ('r')", { ack: "replica" }))
+        .status).toBe(200)
+    })
+
+    test("an override does not follow the name through a delete", async () => {
+      const primary = track(await startPrimary())
+      await createDb(primary, "acme", SCHEMA)
+      await patch(primary, "acme", "allow")
+      expect((await primary.fetch("/v1/db/acme", { method: "DELETE" })).status).toBe(200)
+      await createDb(primary, "acme", SCHEMA)
+      // A new database under a reused name follows the node, not whatever the last one said.
+      expect((await write(primary, "acme", "insert into t (v) values ('n')", { ack: "replica" }))
+        .status).toBe(503)
+    })
+
+    test("anything but error, allow or null is refused", async () => {
+      const primary = track(await startPrimary())
+      await createDb(primary, "acme", SCHEMA)
+      const response = await patch(primary, "acme", "maybe")
+      expect(response.status).toBe(400)
+    })
+  })
+
   test("a replica that never acks answers ACK_TIMEOUT, and the write still committed", async () => {
     const primary = track(await startPrimary({ replication: { ackTimeoutMs: 150 } }))
     await createDb(primary, "acme", SCHEMA)

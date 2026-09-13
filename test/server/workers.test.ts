@@ -50,6 +50,63 @@ describe("the shards are real", () => {
   })
 })
 
+// Per-database settings are a catalog write, and on a sharded node the catalog write, the memo
+// that caches it and the code that reads it all have to land on the *same* worker — the one that
+// owns the database and answers its writes. This is the case that would catch them drifting apart.
+describe("per-database settings across the boundary", () => {
+  test("an ackWithoutReplicas override is enforced on the worker that owns the database", async () => {
+    const refused = await server.fetch(`/v1/db/${FIRST}/query`, {
+      method: "POST",
+      body: JSON.stringify({ sql: "insert into t(v) values ('a')", ack: "replica" }),
+    })
+    expect(refused.status).toBe(503)
+
+    const patched = await server.fetch(`/v1/db/${FIRST}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ackWithoutReplicas: "allow" }),
+    })
+    expect(patched.status).toBe(200)
+    expect((await patched.json()) as { ackWithoutReplicas: string }).toMatchObject({
+      ackWithoutReplicas: "allow",
+    })
+
+    const allowed = await server.fetch(`/v1/db/${FIRST}/query`, {
+      method: "POST",
+      body: JSON.stringify({ sql: "insert into t(v) values ('a')", ack: "replica" }),
+    })
+    expect(allowed.status).toBe(200)
+
+    // A database on a different worker is untouched, which is what the override being per database
+    // rather than per node means.
+    const other = await server.fetch(`/v1/db/${SECOND}/query`, {
+      method: "POST",
+      body: JSON.stringify({ sql: "insert into t(v) values ('b')", ack: "replica" }),
+    })
+    expect(other.status).toBe(503)
+
+    await server.fetch(`/v1/db/${FIRST}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ackWithoutReplicas: null }),
+    })
+    // These databases are shared with the cases below, so the row this one proved goes away again.
+    await query(FIRST, "delete from t where v = 'a'")
+  })
+
+  test("a foreignKeys override crosses the same way", async () => {
+    const patched = await server.fetch(`/v1/db/${THIRD}`, {
+      method: "PATCH",
+      body: JSON.stringify({ foreignKeys: true }),
+    })
+    expect(patched.status).toBe(200)
+    const pragma = await query(THIRD, "pragma foreign_keys")
+    expect(pragma.rows).toEqual([[1]])
+    await server.fetch(`/v1/db/${THIRD}`, {
+      method: "PATCH",
+      body: JSON.stringify({ foreignKeys: null }),
+    })
+  })
+})
+
 describe("HTTP across the boundary", () => {
   test("a write and a read on every shard", async () => {
     for (const name of NAMES) {

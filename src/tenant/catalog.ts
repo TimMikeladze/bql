@@ -46,7 +46,16 @@ export interface TenantRow {
    * mean a node that turned the switch on could not reach a database created before it did.
    */
   foreignKeys: boolean | null
+  /**
+   * Per-database `[replication] ackWithoutReplicas`, or **null to follow the node**. The same
+   * three states as `foreignKeys`, for the same reason: a node with ten databases and a replica on
+   * one of them should not have to answer for all ten the same way (`docs/r8-per-db-ack.md`).
+   */
+  ackWithoutReplicas: AckWithoutReplicas | null
 }
+
+/** What a node — or now one database — does when an ack level it cannot satisfy is asked for. */
+export type AckWithoutReplicas = "error" | "allow"
 
 export interface TenantInit {
   name: string
@@ -60,6 +69,8 @@ export interface TenantInit {
   createdAtMs?: number
   /** Per-database `PRAGMA foreign_keys`; null or absent follows `[sqlite] foreignKeys`. */
   foreignKeys?: boolean | null
+  /** Null or absent follows `[replication] ackWithoutReplicas`. */
+  ackWithoutReplicas?: AckWithoutReplicas | null
 }
 
 /** A token the node minted, as recorded for revocation and audit. */
@@ -97,7 +108,9 @@ create table if not exists tenants (
   role          text    not null default 'primary',
   -- Nullable on purpose: null is "whatever [sqlite] foreignKeys says", which is not the same fact
   -- as "off". A database that has never been told keeps following the node.
-  foreign_keys  integer
+  foreign_keys  integer,
+  -- Nullable for the same reason: null is "whatever [replication] ackWithoutReplicas says".
+  ack_no_replicas text
 ) strict;
 
 create table if not exists tokens (
@@ -133,6 +146,7 @@ interface RawTenant {
   clean: number
   role: string
   foreign_keys: number | null
+  ack_no_replicas: string | null
 }
 
 function toRow(raw: RawTenant): TenantRow {
@@ -152,6 +166,12 @@ function toRow(raw: RawTenant): TenantRow {
     clean: raw.clean !== 0,
     role: raw.role === "replica" ? "replica" : "primary",
     foreignKeys: raw.foreign_keys === null ? null : raw.foreign_keys !== 0,
+    // Only the two values the column is ever written with are honoured; anything else a future
+    // version wrote reads as "follow the node", which is the safe direction.
+    ackWithoutReplicas:
+      raw.ack_no_replicas === "error" || raw.ack_no_replicas === "allow"
+        ? raw.ack_no_replicas
+        : null,
   }
 }
 
@@ -185,6 +205,10 @@ function migrate(db: Database): void {
   // every database did before there was a per-database setting.
   if (!columns.has("foreign_keys")) {
     db.exec("alter table tenants add column foreign_keys integer")
+  }
+  // Same again: nullable, no default, so every existing row follows the node.
+  if (!columns.has("ack_no_replicas")) {
+    db.exec("alter table tenants add column ack_no_replicas text")
   }
 }
 
@@ -247,19 +271,22 @@ export class Catalog implements RevocationList {
       // A new database follows the node until something says otherwise, and a revived tombstone
       // is a new database: its override does not survive the delete.
       foreignKeys: init.foreignKeys ?? null,
+      ackWithoutReplicas: init.ackWithoutReplicas ?? null,
     }
     this.db.run(
       `insert into tenants
          (name, created_at, page_size, quota_bytes, deleted_at, epoch, txid, checksum,
-          db_size_pages, wal_salt1, wal_salt2, wal_frame, clean, role, foreign_keys)
-       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+          db_size_pages, wal_salt1, wal_salt2, wal_frame, clean, role, foreign_keys,
+          ack_no_replicas)
+       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
        on conflict(name) do update set
          created_at = excluded.created_at, page_size = excluded.page_size,
          quota_bytes = excluded.quota_bytes, deleted_at = null, epoch = excluded.epoch,
          txid = excluded.txid, checksum = excluded.checksum,
          db_size_pages = excluded.db_size_pages, wal_salt1 = excluded.wal_salt1,
          wal_salt2 = excluded.wal_salt2, wal_frame = excluded.wal_frame, clean = 1,
-         role = excluded.role, foreign_keys = excluded.foreign_keys`,
+         role = excluded.role, foreign_keys = excluded.foreign_keys,
+         ack_no_replicas = excluded.ack_no_replicas`,
       [
         row.name,
         row.createdAtMs,
@@ -274,6 +301,7 @@ export class Catalog implements RevocationList {
         row.walFrame,
         row.role,
         row.foreignKeys === null ? null : row.foreignKeys ? 1 : 0,
+        row.ackWithoutReplicas,
       ],
     )
     return row
@@ -298,6 +326,18 @@ export class Catalog implements RevocationList {
       value === null ? null : value ? 1 : 0,
       name,
     ])
+  }
+
+  /**
+   * Per-database `[replication] ackWithoutReplicas`. `null` clears the override and the database
+   * follows the node again.
+   *
+   * Unlike `foreign_keys` this is not a connection property: it is read at ack time, so no tenant
+   * has to be released for the new value to be reached (`docs/r8-per-db-ack.md`).
+   */
+  setAckWithoutReplicas(name: string, value: AckWithoutReplicas | null): void {
+    this.#assertOpen()
+    this.db.run("update tenants set ack_no_replicas = ? where name = ?", [value, name])
   }
 
   getTenant(name: string, options: { includeDeleted?: boolean } = {}): TenantRow | null {

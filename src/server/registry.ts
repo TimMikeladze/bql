@@ -92,6 +92,12 @@ const DbStats = s
       .describe(
         "This database's own `PRAGMA foreign_keys`, or null when it follows `[sqlite] foreignKeys`.",
       ),
+    ackWithoutReplicas: s
+      .union([s.enum(["error", "allow"] as const), s.null()])
+      .describe(
+        "What this database does when `ack: replica|quorum` is asked for and no replica is " +
+          "attached, or null when it follows `[replication] ackWithoutReplicas`.",
+      ),
     apply: s
       .string()
       .describe(
@@ -423,10 +429,16 @@ const SPECS: Spec[] = [
     description:
       "`foreignKeys` takes true, false, or null to clear the override and follow " +
       "`[sqlite] foreignKeys` again. The pragma is per connection, so the database is closed and " +
-      "reopened; anything open on it ends as an eviction ends it.",
+      "reopened; anything open on it ends as an eviction ends it. `ackWithoutReplicas` takes " +
+      '"error", "allow", or null to follow `[replication] ackWithoutReplicas` again; it is read ' +
+      "at ack time rather than on a connection, so setting it closes nothing and the next write " +
+      "sees it.",
     tags: ["lifecycle"],
     security: "admin",
-    body: s.object({ foreignKeys: s.union([s.boolean(), s.null()]).optional() }),
+    body: s.object({
+      foreignKeys: s.union([s.boolean(), s.null()]).optional(),
+      ackWithoutReplicas: s.union([s.enum(["error", "allow"] as const), s.null()]).optional(),
+    }),
     response: DbStats,
     errors: [...ON_DB, "NOT_PRIMARY"],
     handler: handlers.updateDb,

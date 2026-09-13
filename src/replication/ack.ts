@@ -55,8 +55,15 @@ export interface AckTrackerOptions {
   server: ReplicationServer | null
   /** `replication.ackTimeoutMs`. */
   timeoutMs?: number
-  /** `replication.ackWithoutReplicas`. */
+  /** `replication.ackWithoutReplicas`. The node's answer, and the fallback for every database. */
   withoutReplicas?: "error" | "allow"
+  /**
+   * One database's own answer, or null when it follows the node (`docs/r8-per-db-ack.md`).
+   *
+   * The tracker still owns the rule — this only says which default applies to this database — so a
+   * tracker built without a resolver behaves exactly as it did before there was one.
+   */
+  withoutReplicasOf?: (db: string) => "error" | "allow" | null
 }
 
 interface Waiter {
@@ -79,6 +86,7 @@ export class AckTracker {
   readonly withoutReplicas: "error" | "allow"
 
   #server: ReplicationServer | null
+  #withoutReplicasOf: ((db: string) => "error" | "allow" | null) | null
   #acked = new Map<string, Map<string, bigint>>()
   #waiters = new Set<Waiter>()
   #unhook: (() => void) | null = null
@@ -87,7 +95,17 @@ export class AckTracker {
     this.#server = options.server
     this.timeoutMs = options.timeoutMs ?? 2000
     this.withoutReplicas = options.withoutReplicas ?? "error"
+    this.#withoutReplicasOf = options.withoutReplicasOf ?? null
     if (this.#server) this.#unhook = this.#server.onAck((event) => this.#onAck(event))
+  }
+
+  /**
+   * What `db` does when the level it was asked for cannot be satisfied: its own override, or the
+   * node's setting when it has none. The single place the rule is read, so the two call sites
+   * below cannot disagree about it.
+   */
+  ruleFor(db: string): "error" | "allow" {
+    return this.#withoutReplicasOf?.(db) ?? this.withoutReplicas
   }
 
   /** True when this node could ever satisfy a replica ack level. */
@@ -138,7 +156,7 @@ export class AckTracker {
     if (txid <= 0n) return Promise.resolve({ acks: 0, needed: 0, replicas: this.replicaCount(db) })
     const replicas = this.replicaCount(db)
     if (replicas === 0) {
-      if (this.withoutReplicas === "allow") return Promise.resolve({ acks: 0, needed: 0, replicas })
+      if (this.ruleFor(db) === "allow") return Promise.resolve({ acks: 0, needed: 0, replicas })
       return Promise.reject(new NoReplicas(db, level, txid))
     }
     const needed = this.needed(db, level, replicas)
@@ -176,7 +194,7 @@ export class AckTracker {
    */
   assertAvailable(db: string, level: AckLevel): void {
     if (level !== "replica" && level !== "quorum") return
-    if (this.withoutReplicas === "allow") return
+    if (this.ruleFor(db) === "allow") return
     if (this.replicaCount(db) === 0) throw new NoReplicas(db, level, null)
   }
 
