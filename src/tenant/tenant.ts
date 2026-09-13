@@ -419,6 +419,8 @@ export class Tenant {
    * checkpoints, and a flush refused there would lose the records that capture produced.
    */
   #filingStopped = false
+  /** The snapshot in flight, so a second caller waits for it rather than being refused. */
+  #snapshotting: Promise<SnapshotRef> | null = null
   /** `[durability] deferAppend`, resolved once. */
   readonly #deferAppend: boolean
   #lastActivityMs = Date.now()
@@ -1163,6 +1165,28 @@ export class Tenant {
    * the first: the file is already the database at that txid.
    */
   async snapshot(): Promise<SnapshotRef> {
+    // A snapshot already in flight is the node's own housekeeping as often as not — the retention
+    // sweep takes one every `[durability] snapshotIntervalMs` — so answering a caller `503 BUSY`
+    // because of it is a refusal the node inflicted on itself, exactly as it was on the write path
+    // (`writeQueued`). Wait for it instead: if nothing has committed since, that snapshot *is*
+    // this one, which is the same answer `existing` gives below for a repeat at one txid. One
+    // wait, not a loop — a second racer means real contention, and `BUSY` is then honest.
+    const inflight = this.#snapshotting
+    if (inflight) {
+      const ref = await inflight.catch(() => null)
+      if (ref && BigInt(ref.txid) === this.position.txid) return ref
+    }
+    const run = this.#snapshot()
+    this.#snapshotting = run
+    try {
+      return await run
+    } finally {
+      if (this.#snapshotting === run) this.#snapshotting = null
+    }
+  }
+
+  /** The snapshot itself. `snapshot()` owns the one-in-flight rule; this owns the exclusive one. */
+  async #snapshot(): Promise<SnapshotRef> {
     // P5: a snapshot taken with records outstanding would be one the log cannot explain.
     this.flushPending()
     this.#assertOpen()

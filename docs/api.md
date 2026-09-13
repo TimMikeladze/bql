@@ -1890,6 +1890,10 @@ really send) and `docs/r5-orm.md` (the two adapters).
   for that commit.
 - **The catalog position is saved at most every 200 ms**, plus on close, checkpoint and snapshot.
   It is a fast-start hint; the reconcile takes its position from the log.
+- **A second `POST /v1/db/{db}/snapshot` waits for the one in flight; it is not refused.** If
+  nothing has committed in between it is answered with that snapshot, which is the same answer a
+  repeat at one txid already gets. The node takes snapshots of its own from the retention sweep
+  (`[durability] snapshotIntervalMs`), so a `503` there was one it inflicted on itself.
 - **A write during a snapshot or a fork queues; it is not refused.** A commit inside that window
   would make the snapshot newer than the txid it is filed under, so the write waits for the
   exclusive section to end and lands after it. The section is bounded — a TRUNCATE checkpoint and

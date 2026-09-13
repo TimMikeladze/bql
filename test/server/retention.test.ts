@@ -67,8 +67,14 @@ describe("the server's retention sweep", () => {
       await run(SCHEMA)
       for (let i = 0; i < 8; i++) await run(`insert into t(v) values ('a${i}')`)
 
-      // The PITR base. Everything below it is what the sweep is free to take.
-      const snap = await server.json<{ txid: number }>("/v1/db/acme/snapshot", { method: "POST" })
+      // The PITR base. Everything below it is what the sweep is free to take. The status is
+      // checked for the same reason `run` checks it: this test counts transactions by asserting on
+      // a txid, so an error body reads as `undefined` and fails somewhere unhelpful.
+      const snapshot = await server.fetch("/v1/db/acme/snapshot", { method: "POST" })
+      if (snapshot.status !== 200) {
+        throw new Error(`snapshot answered ${snapshot.status}: ${await snapshot.text()}`)
+      }
+      const snap = (await snapshot.json()) as { txid: number }
       expect(snap.txid).toBe(9)
 
       for (let i = 0; i < 3; i++) await run(`insert into t(v) values ('b${i}')`)

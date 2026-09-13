@@ -130,6 +130,20 @@ describe("group commit", () => {
     reg.close()
   })
 
+  test("a second snapshot request waits for the one in flight instead of being refused", async () => {
+    // `ServerRuntime.maybeSnapshot` takes one from the retention sweep, so an explicit
+    // `POST /v1/db/{db}/snapshot` racing the node's own housekeeping used to be a 503 the node
+    // inflicted on itself — the same shape as the write path's, one level up.
+    const { reg, tenant } = await tenantWith()
+    await tenant.writeQueued((db) => db.run("insert into t(v) values ('one')"))
+    const [a, b] = await Promise.all([tenant.snapshot(), tenant.snapshot()])
+    // Nothing committed in between, so the second is the first: one file, one txid.
+    expect(a.path).toBe(b.path)
+    expect(BigInt(a.txid)).toBe(tenant.txid)
+    expect(tenant.snapshots()).toHaveLength(1)
+    reg.close()
+  })
+
   test("closing rejects what is still queued instead of leaving it pending", async () => {
     const { reg, tenant } = await tenantWith()
     const pending = tenant.writeQueued((db) => db.run("insert into t(v) values ('z')"))
