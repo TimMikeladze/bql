@@ -40,7 +40,9 @@ function pairs(name: string): Record<string, string> {
   return out;
 }
 
-const stateDir = flag("state", ".agenticbus") as string;
+// `BUS_STATE` so a container can relocate the signing key, admin token,
+// database and blobs onto its volume without rewriting the command line.
+const stateDir = flag("state", process.env.BUS_STATE ?? ".agenticbus") as string;
 const workspace = flag("workspace", DEFAULT_WORKSPACE) as string;
 
 const level = flag("log-level", process.env.BUS_LOG_LEVEL ?? "info") as string;

@@ -122,6 +122,39 @@ will try to apply them to the restored one.
 A message handled twice is normal here. A consumer whose effects are not idempotent is the thing
 to fix before the restore, not during it.
 
+## Deploying
+
+A `Dockerfile` and a `fly.toml` are in the repo. The image bakes the dashboard in, runs as an
+unprivileged user, and takes SIGTERM as a drain signal.
+
+```sh
+fly apps create my-bus
+fly volumes create agenticbus_data --size 1 --region sjc --app my-bus
+fly secrets set BUS_SIGNING_KEY=$(openssl rand -base64 32)                 BUS_ADMIN_TOKEN=$(openssl rand -base64 32) --app my-bus
+fly deploy --app my-bus
+```
+
+Two things about the posture are deliberate.
+
+**The bus still binds loopback by default.** A container has to bind `0.0.0.0` to receive
+anything at all, so the image sets `BUS_HOST=0.0.0.0` explicitly and the platform terminates TLS
+in front of it. Running the binary outside a container gets the safe default.
+
+**One machine, one volume, `strategy = "immediate"`.** A rolling deploy would briefly run two
+processes against one SQLite file, which is the one thing the design rules out. The cost is a
+few seconds of downtime per deploy; consumers reconnect on their own, since a failed claim is
+retried a second later.
+
+Secrets, not `[env]`: without them the bus generates a signing key and admin token into
+`BUS_STATE` at mode 0600 on first boot, which works and persists on the volume — but then the
+only way to read the admin token is to shell into the machine.
+
+A remote consumer needs only the URL and a scoped token:
+
+```sh
+BUS_URL=https://my-bus.fly.dev BUS_TOKEN=$(agenticbus token --consumer laptop-1 --subscribe rpc)   agenticbus consume rpc --exec ./handle.sh
+```
+
 ## Capacity, honestly
 
 One process, one file, no replication. Right for a fleet; wrong for infrastructure a dozen

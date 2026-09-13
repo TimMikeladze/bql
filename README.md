@@ -190,7 +190,7 @@ deliveries would keep reporting whatever it last reported.
 
 **The signing key and admin token live in `.agenticbus/` at mode 0600**, not in argv where `ps` would show them.
 
-**Transport is the operator's job.** A bearer token must not cross an untrusted network in plaintext: terminate TLS or use a tunnel.
+**Transport is the operator's job.** A bearer token must not cross an untrusted network in plaintext: terminate TLS or use a tunnel. The bundled `Dockerfile` and `fly.toml` do exactly that — the platform terminates TLS, and the bus binds `0.0.0.0` only because a container must, never as a changed default. See [docs/operations.md](docs/operations.md#deploying).
 
 ## Verify
 
