@@ -43,7 +43,13 @@ import {
   type HranaSocketData,
 } from "../hrana/index.ts"
 import { HostedCluster } from "./cluster.ts"
-import { bindingsOf, headerPairs, type FromWorker, type ToWorker } from "./protocol.ts"
+import {
+  bindingsOf,
+  flattenHeaders,
+  type FromWorker,
+  type ToWorker,
+  unflattenHeaders,
+} from "./protocol.ts"
 import { shardOf } from "./shard.ts"
 
 /** Above this, a response is streamed rather than copied whole into one message. */
@@ -378,13 +384,16 @@ async function serve(
   id: number,
   method: string,
   url: string,
-  headers: [string, string][],
+  flat: string,
   body: Uint8Array | null,
 ): Promise<void> {
   const abort = new AbortController()
   current.inflight.set(id, abort)
   try {
     const parsed = new URL(url)
+    // The one place the flat form is unpacked; `docs/p6-router-resolution.md` §4 is why it crosses
+    // flat in the first place.
+    const headers = unflattenHeaders(flat)
     assertOwned(current, parsed, headers)
     const request = new Request(url, {
       method,
@@ -462,7 +471,7 @@ export function databaseOf(url: URL, headers: [string, string][]): string | null
  * memory before it can be answered.
  */
 async function deliver(current: WorkerState, id: number, response: Response): Promise<void> {
-  const headers = headerPairs(response.headers)
+  const headers = flattenHeaders(response.headers)
   const type = response.headers.get("content-type") ?? ""
   const declared = Number(response.headers.get("content-length") ?? "-1")
   const streamed = type.startsWith("text/event-stream") || declared > STREAM_ABOVE_BYTES

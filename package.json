@@ -46,7 +46,8 @@
     "bench:http": "bun run bench/http.ts",
     "bench:replication": "bun run bench/replication.ts",
     "bench:storage": "bun run bench/storage.ts",
-    "bench:workers": "bun run bench/workers.ts"
+    "bench:workers": "bun run bench/workers.ts",
+    "bench:router": "bun run bench/router.ts"
   },
   "engines": {
     "bun": ">=1.4.0"

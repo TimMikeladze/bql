@@ -14,7 +14,9 @@
 //
 // A body crosses as `Uint8Array`, which structured clone copies; the alternative, a transferable
 // `ArrayBuffer`, would detach the router's copy and is not worth the sharp edge for bodies that
-// are almost always a few hundred bytes.
+// are almost always a few hundred bytes. Measured, and the body is not where the cost is: removing
+// the body clone entirely is worth 6.6% of a hop while removing the *header* clone is worth 37.5%,
+// which is why headers cross flat. `docs/p6-router-resolution.md` §4.
 
 import type {
   ClusterViewDb,
@@ -24,22 +26,28 @@ import type {
 } from "../../cluster/index.ts"
 import type { MetricsState, ReplicationMetrics, StorageMetrics } from "../metrics.ts"
 
-/** One HTTP request, on its way to the worker that owns the database its path names. */
+/**
+ * One HTTP request, on its way to the worker that owns the database its path names.
+ *
+ * `headers` is **flat** — `"key\nvalue\nkey\nvalue"` — rather than an array of pairs, because the
+ * structured clone of a dozen small strings inside five small arrays is most of what a hop costs.
+ * Measured: `docs/p6-router-resolution.md` §4.
+ */
 export interface HttpHop {
   kind: "http"
   id: number
   method: string
   url: string
-  headers: [string, string][]
+  headers: string
   body: Uint8Array | null
 }
 
-/** A whole response, for a handler that returned a buffered body. */
+/** A whole response, for a handler that returned a buffered body. `headers` is flat; see `HttpHop`. */
 export interface HttpReply {
   kind: "http.reply"
   id: number
   status: number
-  headers: [string, string][]
+  headers: string
   body: Uint8Array | null
 }
 
@@ -48,7 +56,7 @@ export interface HttpOpen {
   kind: "http.open"
   id: number
   status: number
-  headers: [string, string][]
+  headers: string
 }
 
 export interface HttpChunk {
@@ -668,10 +676,39 @@ export type FromWorker =
   | DbsReply
   | ShutdownReply
 
-/** Headers as a list of pairs, which is what structured clone takes. */
-export function headerPairs(headers: Headers): [string, string][] {
+/**
+ * Headers as one string for the channel: `"key\nvalue\nkey\nvalue"`.
+ *
+ * A newline is a safe separator because HTTP forbids one in a header name or value — a request
+ * carrying one never reaches here, because Bun's own parser rejects it first.
+ *
+ * Why not pairs: a structured clone walks every object and every string it meets, and an array of
+ * N two-element arrays is 3N+1 allocations against one. Replacing it is worth 19% of a hop's cost
+ * on its own (`docs/p6-router-resolution.md` §4).
+ */
+export function flattenHeaders(headers: Headers): string {
+  const parts: string[] = []
+  headers.forEach((value, key) => {
+    parts.push(key, value)
+  })
+  return parts.join("\n")
+}
+
+/** The same, from pairs the caller already has. */
+export function flattenPairs(pairs: readonly (readonly [string, string])[]): string {
+  const parts: string[] = []
+  for (const [key, value] of pairs) parts.push(key, value)
+  return parts.join("\n")
+}
+
+/** Back to pairs, which is what `new Request`/`new Response` and `databaseOf` take. */
+export function unflattenHeaders(flat: string): [string, string][] {
+  if (flat.length === 0) return []
+  const parts = flat.split("\n")
   const out: [string, string][] = []
-  headers.forEach((value, key) => out.push([key, value]))
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    out.push([parts[i] as string, parts[i + 1] as string])
+  }
   return out
 }
 

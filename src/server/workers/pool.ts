@@ -18,7 +18,14 @@
 import type { Command, PromotionOutcome, PromotionRequest } from "../../cluster/index.ts"
 import type { ServerConfig } from "../config.ts"
 import { Metrics, type MetricsState, type StorageMetrics } from "../metrics.ts"
-import type { ClusterViewPush, FollowResult, FromWorker, ToWorker } from "./protocol.ts"
+import {
+  type ClusterViewPush,
+  flattenHeaders,
+  type FollowResult,
+  type FromWorker,
+  type ToWorker,
+  unflattenHeaders,
+} from "./protocol.ts"
 import { resolveWorkers, shardOf } from "./shard.ts"
 
 /** What the pool needs from the listener, once it exists. */
@@ -105,6 +112,7 @@ export class SocketRouting {
   /** Set for a libsql socket; the worker needs it to build the same socket data. */
   hrana: { db: string; version: number } | null = null
 }
+
 
 /**
  * Above this, a hopped request body is transferred instead of copied. One megabyte: small enough
@@ -217,8 +225,7 @@ export class WorkerPool {
       (request.method === "GET" || request.method === "HEAD"
         ? null
         : new Uint8Array(await request.arrayBuffer()))
-    const headers: [string, string][] = []
-    request.headers.forEach((value, key) => headers.push([key, value]))
+    const headers = flattenHeaders(request.headers)
     const answer = new Promise<Response>((resolve, reject) => {
       this.#pending.set(id, { resolve, reject })
     })
@@ -234,9 +241,10 @@ export class WorkerPool {
     // router's `ArrayBuffer`, which is exactly right here — the buffer came from
     // `request.arrayBuffer()`, nothing else views it, and the router never reads it again.
     //
-    // Small bodies stay cloned. The general rule `protocol.ts` states — clone, because a body is
-    // almost always a few hundred bytes and a detached buffer is a sharp edge — is still the rule;
-    // this is the one case where the body is megabytes and the sharp edge has no reach.
+    // Small bodies stay cloned, and P6 **measured** that rather than assuming it: transferring
+    // every body, in one direction or both, is worth nothing on a read and possibly a little less
+    // than nothing. A query body is forty bytes, and taking ownership of a buffer is not cheaper
+    // than copying forty bytes. `docs/p6-router-resolution.md` §5.
     const transfer =
       body !== null && body.byteLength >= TRANSFER_ABOVE_BYTES ? [body.buffer as ArrayBuffer] : undefined
     this.#post(
@@ -602,7 +610,7 @@ export class WorkerPool {
         pending.resolve(
           new Response(message.body ?? null, {
             status: message.status,
-            headers: message.headers,
+            headers: unflattenHeaders(message.headers),
           }),
         )
         return
@@ -621,7 +629,9 @@ export class WorkerPool {
             this.#post(index, { kind: "http.abort", id })
           },
         })
-        pending.resolve(new Response(stream, { status: message.status, headers: message.headers }))
+        pending.resolve(
+          new Response(stream, { status: message.status, headers: unflattenHeaders(message.headers) }),
+        )
         return
       }
       case "http.chunk": {

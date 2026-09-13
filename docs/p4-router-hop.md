@@ -110,6 +110,13 @@ building a `Response` and a `Headers` from the reply, and the structured clone o
 body in both directions — and that is where the next person should look, with §2's two-client
 control in hand.
 
+**P6 did, and it was the clone: `docs/p6-router-resolution.md`.** Building the `Response` from
+pairs is 2.2%; the clone costs 71% more time per request than not doing it, and within it the
+*headers* are 37.5% against the body's 6.6%. Headers now cross the channel as one joined string
+rather than as an array of pairs, which is worth about **+7.6%** on a sharded node's HTTP reads.
+P6 also built the instrument this section asked for — it resolves 4%, and it says plainly where it
+cannot be trusted.
+
 ## 5. What this means for a deployment
 
 **`workers: N` is a write lever.** Writes scale 28 809 to 86 754/s and the hop is 4 µs against a
