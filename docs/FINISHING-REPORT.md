@@ -8,7 +8,7 @@ The work in [`FINISHING.md`](FINISHING.md), item by item. Decisions live in
 | Check | Result |
 | --- | --- |
 | `bun run typecheck` | clean, under `noUncheckedIndexedAccess` |
-| `bun test tests` | 79 pass, 0 fail (was 61) |
+| `bun test tests` | 84 pass, 0 fail (was 61) |
 | `bun run build` | library bundle + dashboard |
 | `bun run test:e2e` | 15 checks, all pass |
 | `bun run verify-pack` | packs, installs into an empty directory, runs |
@@ -32,9 +32,17 @@ the broker mid-flight; `--term-bus` SIGTERMs it and scrapes `/metrics` afterward
 four variants pass. Redeliveries appear as expected — typically 15–45 per run, which is the
 evidence that the kills actually landed on in-flight work rather than after it.
 
-One bug *was* found, in the harness rather than the bus: the first version paced kills by message
-count, which put most of them after the run had drained. It passed while proving nothing; the
-tell was 12 kills producing a single redelivery. Kills are wall-clock paced now.
+Two bugs *were* found, both in the harness rather than the bus. The first version paced kills by
+message count, which put most of them after the run had drained — it passed while proving
+nothing, and the tell was 12 kills producing a single redelivery. Kills are wall-clock paced now.
+
+The second only appeared under `--kill-bus`, once in ten runs: `acked=5001 published=5000`.
+SIGKILLing the broker can lose the *response* to a publish that already committed, and the
+harness's retry then published a second copy. The publisher uses a `dedupeKey` now, so a retry is
+handed back the original message — which is what dedupe keys are for, and makes the assertion
+exact instead of approximate. That it was the harness and not the store was worth confirming
+rather than assuming: the failure mode of an over-count is indistinguishable from a real
+double-ack until you look.
 
 ## 2. Schema versioning — done
 
@@ -62,7 +70,7 @@ gave up.
 
 ## 4. Operability — done
 
-- **Metrics.** `GET /metrics`, Prometheus text, behind a read-capable token. Counters in the
+- **Metrics.** `GET /metrics`, Prometheus text, admin-only. Counters in the
   store (so reclaims and sweep-time dead letters are counted, which an HTTP-layer counter would
   miss), gauges computed at scrape time. Scraped clean under load at the end of every
   `--term-bus` soak run, and by hand against the Fly deployment.

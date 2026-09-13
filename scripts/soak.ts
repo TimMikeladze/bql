@@ -236,6 +236,14 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
           const result = await admin.publish({
             subject: "soak.work",
             body: { index },
+            // Killing the broker mid-publish can lose the *response* to a
+            // request that already committed, and the retry below would then
+            // publish a second copy — 5001 messages for 5000 intended, which
+            // reads as "acked more than once" when it is nothing of the kind.
+            // A dedupe key makes the retry return the original message, which
+            // is exactly what dedupe keys are for, and turns the assertion
+            // into an exact one rather than an approximate one.
+            dedupeKey: `soak-${index}`,
             ...(options.ordered ? { key: keyOf(index) } : {}),
           });
           published.add(result.seq);
