@@ -202,22 +202,29 @@ served route that is not in the registry. **H7** adds GraphQL subscriptions over
 
 ## Known gaps worth fixing along the way
 
-Added by C4 (2026-09-12), all in reporting rather than in data, and all only with `workers > 1`:
+~~Added by C4 (2026-09-12), all in reporting rather than in data, and all only with
+`workers > 1`.~~ **All three closed by C4e**; kept here because each says what the shape of the
+problem was.
 
-- **`GET /v1/db` reports `"open": false` for every database.** "Open" is a fact about one worker's
-  LRU and the router holds none. The rest of the row comes from the catalog and is exact. Fixing it
-  means asking every worker, which is a round trip on a route that is otherwise a single catalog
-  read.
+- ~~**`GET /v1/db` reports `"open": false` for every database.**~~ **Closed.** "Open" is a fact
+  about one worker's LRU and the router holds none, so it is now one gather of the workers' open
+  sets and live positions. A round trip on an admin listing route, and `openStates()` is null on
+  every thread that holds its own tenants, so a single-threaded node pays nothing.
 - ~~**`GET /metrics` omits the replication and storage gauges.**~~ **Half closed (C4b).** Every
   worker's counters are summed (`Metrics.state`/`absorb`) and so are the router's own, and the
   replication gauges are now assembled from both halves by a rule per gauge: `connected` and
   `bytes` from the router, which owns every socket and writes every byte, `records` summed and
   `lag_txid` maxed across the workers, which own the streams
-  (`docs/c4b-replication-workers.md` §7). The S3 shipper's gauges are still omitted: they are per
-  worker with no summing rule that is not a lie.
-- **A hopped request body crosses as one `Uint8Array`**, so `POST /v1/db/{db}/import` of a large
-  SQLite file is copied once more than on a single-threaded node. `[limits] maxImportBytes` bounds
-  it. The response side already streams above 1 MiB.
+  (`docs/c4b-replication-workers.md` §7). ~~The S3 shipper's gauges are still omitted.~~ **Closed
+  (C4e)**, and the rule turned out to be exact rather than a convention: the shards hold **disjoint**
+  databases, so it is the same merge `ShipperPool.totals` already applies across one node's —
+  `shipped_txid` maxes, `pending_records`, `errors` and `bytes` sum, `behind` counts. Max-of-max is
+  a max.
+- ~~**A hopped request body crosses as one `Uint8Array`**, so `POST /v1/db/{db}/import` of a large
+  SQLite file is copied once more than on a single-threaded node.~~ **Closed (C4e).** A body of a
+  megabyte or more is **transferred** rather than cloned, which detaches the router's `ArrayBuffer`
+  — right here, because it came from `request.arrayBuffer()`, nothing else views it and the router
+  never reads it again. `[limits] maxImportBytes` still bounds it.
 
 Added by the performance session (2026-09-12):
 

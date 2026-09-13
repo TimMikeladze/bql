@@ -156,8 +156,12 @@ node computes the same answer. **Nothing is recorded** — the intended replica 
 it is needed, because `DbState.replicas` means "nodes that have told the cluster they hold a copy"
 and `#failover` reads it as exactly that.
 
-C3b, still open: replica set membership driving which node subscribes to which, which needs
-`runtime.replica` to become one client per upstream node rather than one per node.
+**C3b is built too**: replica set membership drives which node subscribes to which.
+`ServerRuntime` holds one `ReplicaClient` per upstream *node* and `src/server/follow.ts` plans them
+from the placement — nothing is configured with `[replication] primary` and every database still
+reaches its `rf - 1` replicas. A sharded node follows several upstreams as well: every `follow.*`
+envelope carries the upstream it belongs to. §7.1 of `docs/c3-placement.md` lists the three bugs it
+found, all of one shape — one thread's view taken for the node's.
 
 ### C4 — `workers: N` ✅ **Built.** `docs/c4-workers.md`
 
