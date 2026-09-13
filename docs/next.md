@@ -56,6 +56,14 @@ the mapping and fences with `xShmBarrier`; so does BunQL now, on every platform 
 a `win32` branch — a branch would leave the new path exercised only by the one job that cannot be
 run locally.
 
+**A record is stamped with the wall clock, not the monotonic one.**
+`performance.timeOrigin + performance.now()` is the wall clock as it stood at process start plus
+monotonic time since, so it drifts from `Date.now()` by every clock correction made while the
+process runs — and every reader of the field compares it against a real `Date.now()`, including
+`restoreFromBucket({ at: { timestamp } })`. A point-in-time restore on a long-lived node was off by
+the accumulated drift; a macOS runner under NTP correction made the test for it fail with 25 ms of
+guard on either side of the cut.
+
 **DDL reaches the SSE change feed**, not only the WebSocket, and a `tables` filter does not narrow
 it. **The HTTP benchmark stopped measuring its own warm-up** — 40 µs charged to the first leg it
 measured, which is the whole of the distance between the 48.2 µs and the 87 µs this repo has
@@ -448,9 +456,19 @@ Two POSIX assumptions in the tests went with it: a TOML fixture wrote a Windows 
 string, where every separator is an escape sequence, and temp-dir teardown now retries and gives up
 quietly rather than failing the test that happened to run last.
 
-**If the `windows-latest` job passes, delete its `continue-on-error` lines** — the job level and
-the four step levels — and Windows is a gate. If it does not, the job output is still the
-instrument, and the next cause will be one cause again.
+**The run after that fix: 1479 pass, 2 skip, 6 fail**, against E1's 1346 / 150. Five of the six were
+tests asserting that the platform is POSIX — a `0o600` mode where there are no mode bits,
+`SQLITE_FCNTL_HAS_MOVED` where the Win32 VFS answers `SQLITE_NOTFOUND`, `vendor/sqlite/libsqlite3.`
+as a path needle where the separator is `\` and the file is `sqlite3.dll`, and `libc.so.6` as the
+"not a libsqlite3" fixture. The sixth was speed: `evicts idle tenants` created 2000 tenants against
+a `maxOpen` of 50 and took over two minutes there against five seconds on macOS; ten times
+`maxOpen` is what the test is about, so it is 500 now. All six are fixed and
+`docs/e2-windows-gate.md` §4 lists them.
+
+**If the next `windows-latest` run is clean, delete its `continue-on-error` lines** — the job level
+and the four step levels — and Windows is a gate. That deliberately did not happen in the same push
+as the fixes: flipping it there would only have turned main red if one of the six was more than it
+looked.
 
 ### 3. The bounded ones
 
@@ -461,11 +479,18 @@ instrument, and the next cause will be one cause again.
   `docs/p6-router-resolution.md` §6. **Do this one on a quiet machine or not at all**: it is a 5-11%
   effect and this machine could not resolve 2x today.
 - **The other 0.75 µs of a poll.** `WalTailer.poll()` is 1.98 µs once the checksum is native, of
-  which an `fstat` and a separate 32-byte header read are 0.75. One `pread` taking the header and
-  the first frame together would collapse them. `docs/p3-wal-checksum.md` §2.
-- **A read mode for the native `/v1/db/{db}/tx`.** R10 built the machinery and wired only Hrana to
-  it; the native surface would need a fourth mode and a baton dispatch across two session kinds.
-  `docs/r10-read-transactions.md` §4.
+  which an `fstat` and a separate 32-byte header read are 0.75. Looked at and **not done**, with
+  a reason: the shape next.md proposed — "one `pread` taking the header and the first frame
+  together" — only helps while `#offset` is still at the header, which it is for exactly one poll
+  per WAL generation. What is left after that is dropping the `fstat` and letting a short read
+  signal EOF, which is worth perhaps 0.3 µs of 1.98 on the most correctness-critical loop in the
+  system, and could not be told from noise on this machine today. Do it when §8's conditions hold,
+  or leave it. `docs/p3-wal-checksum.md` §2.
+- ~~**A read mode for the native `/v1/db/{db}/tx`.**~~ **Not a gap — a decision.**
+  `docs/r10-read-transactions.md` §4 already argues it the other way: the native surface's
+  consistent-read answer is `BunQL-Min-Txid`, which needs no transaction at all, and a fourth mode
+  means a baton dispatch across two session kinds for something nothing asks for. Listing it here
+  as an open item was this file misreading its own source.
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a restart. Spill it to
   disk or serve old positions from the log. This is the last of the realtime gaps — schema events
   now reach the SSE feed as well as the socket.
