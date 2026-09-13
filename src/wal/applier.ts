@@ -74,7 +74,17 @@ import {
   WALINDEX_HDR_SIZE,
   WALINDEX_LOCK_OFFSET,
 } from "./shm.ts"
-import { WalLocks, type WalLocksUnavailable } from "./shmlock.ts"
+import { WalIndex, WalLocks, type WalLocksUnavailable } from "./shmlock.ts"
+
+/**
+ * The two ways the applier can publish a wal-index: SQLite's mapping of it, or the `-shm` file.
+ * `WalIndex` satisfies this structurally; `#indexSink` builds the descriptor form.
+ */
+interface WalIndexSink {
+  read(length: number, offset: number): Uint8Array
+  write(src: Uint8Array, offset: number): void
+  barrier(): void
+}
 
 /** Everything a replica needs to prove where it stands. `(txid, postChecksum)` is the position. */
 export interface ReplicaPosition {
@@ -163,6 +173,7 @@ export class WalApplier {
   #mechanism: ApplyMechanism
   #fallback: WalLocksUnavailable | null = null
   #locks: WalLocks | null = null
+  #index: WalIndex | null = null
   #dbFd: number | null = null
   #shmFd: number | null = null
   #shmTailZeroed = false
@@ -337,6 +348,7 @@ export class WalApplier {
     this.#closed = true
     this.#locks?.unlock()
     this.#locks = null
+    this.#index = null
     if (this.#walFd !== null) {
       fs.closeSync(this.#walFd)
       this.#walFd = null
@@ -528,6 +540,9 @@ export class WalApplier {
       return
     }
     this.#locks = locks
+    // `WalLocks.open` has just proved the wal-index is mapped, so this is the same mapping and it
+    // cannot come back null for a reason the lock set did not already catch.
+    this.#index = WalIndex.open(connection)
     // The database file is authoritative under A: whatever the overlay held belonged to a WAL
     // that has just been folded away.
     this.#source?.resetOverlay()
@@ -603,21 +618,49 @@ export class WalApplier {
   }
 
   /**
-   * Publishes a wal-index header describing an empty WAL over a database of `nPage` pages, so the
-   * next reader takes `WAL_READ_LOCK(0)` and reads the file directly — no recovery, no rescan.
-   * Copy 1 and the `WalCkptInfo` go first as one contiguous write, then copy 0, which is the order
-   * `walIndexWriteHdr` uses so that a reader catching a half-written header sees the two copies
-   * disagree and retries.
+   * Where the wal-index gets published. Two of them, and the mapping is preferred whenever there
+   * is one: a store into shared memory is what `walIndexWriteHdr` does, it is coherent with every
+   * other mapping of the region, and on Windows it is the only form permitted at all while a
+   * section object exists over the `-shm` file — a descriptor write there fails
+   * `ERROR_USER_MAPPED_FILE`, which arrives as `EBUSY` (`docs/e2-windows-gate.md` §2).
+   *
+   * The descriptor remains the answer for the case it was always right for: no mapping, because
+   * nothing has the database open.
    */
-  #writeWalIndexHeader(nPage: number): void {
+  #indexSink(): WalIndexSink | null {
+    if (this.#index) return this.#index
     const fd = this.#shmDescriptor()
     // No `-shm` means nobody has the database open, and the first reader will build the index
     // from the (empty) WAL anyway.
-    if (fd === null) return
+    if (fd === null) return null
+    return {
+      read(length: number, offset: number): Uint8Array {
+        const buf = new Uint8Array(length)
+        const n = fs.readSync(fd, buf, 0, length, offset)
+        return n === length ? buf : buf.subarray(0, n)
+      },
+      write(src: Uint8Array, offset: number): void {
+        fs.writeSync(fd, src, 0, src.byteLength, offset)
+      },
+      // A file write is ordered by the kernel; there is nothing to fence.
+      barrier(): void {},
+    }
+  }
 
-    const current = new Uint8Array(WALINDEX_HDR_COPY_SIZE)
-    const read = fs.readSync(fd, current, 0, WALINDEX_HDR_COPY_SIZE, 0)
-    const previous = read === WALINDEX_HDR_COPY_SIZE ? readWalIndexHeader(current) : null
+  /**
+   * Publishes a wal-index header describing an empty WAL over a database of `nPage` pages, so the
+   * next reader takes `WAL_READ_LOCK(0)` and reads the file directly — no recovery, no rescan.
+   * Copy 1 and the `WalCkptInfo` go first as one contiguous write, then a barrier, then copy 0,
+   * which is the order `walIndexWriteHdr` uses so that a reader catching a half-written header
+   * sees the two copies disagree and retries.
+   */
+  #writeWalIndexHeader(nPage: number): void {
+    const shm = this.#indexSink()
+    if (shm === null) return
+
+    const current = shm.read(WALINDEX_HDR_COPY_SIZE, 0)
+    const previous =
+      current.byteLength === WALINDEX_HDR_COPY_SIZE ? readWalIndexHeader(current) : null
     const header = encodeWalIndexHeader({
       iChange: ((previous?.iChange ?? 0) + 1) >>> 0,
       pageSize: this.#pageSize,
@@ -628,14 +671,15 @@ export class WalApplier {
     const second = new Uint8Array(WALINDEX_LOCK_OFFSET - WALINDEX_HDR_COPY_SIZE)
     second.set(header, 0)
     second.set(encodeCkptInfo(0), WALINDEX_CKPT_OFFSET - WALINDEX_HDR_COPY_SIZE)
-    fs.writeSync(fd, second, 0, second.byteLength, WALINDEX_HDR_COPY_SIZE)
-    fs.writeSync(fd, header, 0, WALINDEX_HDR_COPY_SIZE, 0)
+    shm.write(second, WALINDEX_HDR_COPY_SIZE)
+    shm.barrier()
+    shm.write(header, 0)
 
     if (!this.#shmTailZeroed) {
       // `nBackfillAttempted` and `notUsed0`, past the eight lock bytes at 120 — which are never
       // written, because the amalgamation says they must not be.
       const tail = new Uint8Array(WALINDEX_HDR_SIZE - (WALINDEX_LOCK_OFFSET + 8))
-      fs.writeSync(fd, tail, 0, tail.byteLength, WALINDEX_LOCK_OFFSET + 8)
+      shm.write(tail, WALINDEX_LOCK_OFFSET + 8)
       this.#shmTailZeroed = true
     }
   }
@@ -820,6 +864,7 @@ export class WalApplier {
    * open, and the first reader will build the index from scratch anyway.
    */
   #invalidateShm(): void {
+    const zeroes = new Uint8Array(SHM_HEADER_SIZE)
     const shm = `${this.dbPath}-shm`
     let fd: number
     try {
@@ -828,7 +873,17 @@ export class WalApplier {
       return
     }
     try {
-      fs.writeSync(fd, new Uint8Array(SHM_HEADER_SIZE), 0, SHM_HEADER_SIZE, 0)
+      fs.writeSync(fd, zeroes, 0, SHM_HEADER_SIZE, 0)
+      return
+    } catch (err) {
+      // Windows refuses a descriptor write to a file some connection has mapped, and mechanism B
+      // holds no mapping of its own to use instead. Take one — through our own connection, which
+      // maps the wal-index as a side effect of the read `#connection` already does — and store
+      // into that. `docs/e2-windows-gate.md` §2.
+      const index = WalIndex.open(this.#connection())
+      if (!index) throw err
+      index.write(zeroes, 0)
+      index.barrier()
     } finally {
       fs.closeSync(fd)
     }

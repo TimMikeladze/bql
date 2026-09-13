@@ -8,6 +8,7 @@ import os from "node:os"
 import path from "node:path"
 import { parseArgs } from "../../src/cli.ts"
 import { DEFAULT_CONFIG, envNameFor, loadConfig } from "../../src/server/config.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 describe("[replication] configuration", () => {
   test("a node is a primary with replication off by default", () => {
@@ -75,7 +76,7 @@ describe("[replication] configuration", () => {
       expect(config.replication.secret).toBe("shhh")
       expect(config.replication.role).toBe("replica")
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true })
+      removeTempDir(dir)
     }
   })
 })

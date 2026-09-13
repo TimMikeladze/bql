@@ -11,6 +11,7 @@ import path from "node:path"
 import { BunQLClientError } from "../../src/client/errors.ts"
 import { drizzle, libsqlClient, type BunQLDatabase } from "../../src/drizzle.ts"
 import { anotherDb, failure, startOrmFixture, stopAll, type OrmFixture } from "./harness.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const authors = sqliteTable("authors", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -276,7 +277,7 @@ describe("migrations", () => {
       await migrate(target, { migrationsFolder: folder })
       expect(await target.all(sql`select count(*) as n from notes`)).toEqual([{ n: 1 }])
     } finally {
-      fs.rmSync(folder, { recursive: true, force: true })
+      removeTempDir(folder)
     }
   })
 })

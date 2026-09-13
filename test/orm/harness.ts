@@ -8,6 +8,7 @@ import path from "node:path"
 import { createClient, type Client, type Db } from "../../src/client/index.ts"
 import { BunQL } from "../../src/embedded.ts"
 import { createDb, startTestServer, stopAll as stopServers, type TestServer } from "../server/harness.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const clients: Client[] = []
 const embedded: BunQL[] = []
@@ -60,7 +61,7 @@ export async function stopAll(): Promise<void> {
   for (const client of clients.splice(0)) client.close()
   for (const bq of embedded.splice(0)) await bq.close()
   await stopServers()
-  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const dir of dirs.splice(0)) removeTempDir(dir)
 }
 
 /** The error a promise rejected with. Fails the test when it resolved instead. */

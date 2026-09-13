@@ -13,13 +13,14 @@ import os from "node:os"
 import path from "node:path"
 import { Database } from "../../src/sqlite/index.ts"
 import { sqlite } from "../../src/sqlite/lib.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const dirs: string[] = []
 
 afterEach(() => {
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 })
 

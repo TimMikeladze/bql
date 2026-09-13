@@ -104,7 +104,7 @@ export {
   walIndexChecksum,
   walIndexHeaderValid,
 } from "./shm.ts"
-export { WalLocks, type WalLocksProbe, type WalLocksUnavailable } from "./shmlock.ts"
+export { WalIndex, WalLocks, type WalLocksProbe, type WalLocksUnavailable } from "./shmlock.ts"
 export {
   listSnapshots,
   planSnapshotPrune,

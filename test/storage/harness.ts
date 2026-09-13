@@ -12,6 +12,7 @@ import { S3Store } from "../../src/storage/index.ts"
 import { Catalog, TenantRegistry } from "../../src/tenant/index.ts"
 import type { Tenant } from "../../src/tenant/index.ts"
 import { FakeS3 } from "./fake-s3.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const created: string[] = []
 const registries: TenantRegistry[] = []
@@ -34,7 +35,7 @@ export function cleanup(): void {
   for (const fake of fakes.splice(0)) fake.stop()
   while (created.length > 0) {
     const dir = created.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 }
 

@@ -8,6 +8,7 @@ import path from "node:path"
 import { Database } from "../../src/sqlite/index.ts"
 import { startServer, type ServerHandle } from "../../src/server/app.ts"
 import { loadConfig } from "../../src/server/config.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const dirs: string[] = []
 
@@ -20,7 +21,7 @@ export function tempDir(prefix = "bunql-e2e-"): string {
 export function cleanupTempDirs(): void {
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 }
 

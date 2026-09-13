@@ -10,6 +10,7 @@ import path from "node:path"
 import { startServer, type ServerHandle } from "../../src/server/app.ts"
 import { loadConfig, type ServerConfigInput } from "../../src/server/config.ts"
 import { FakeS3 } from "../storage/fake-s3.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const WORKERS = 3
 const dirs: string[] = []
@@ -28,7 +29,7 @@ afterEach(async () => {
   }
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 })
 

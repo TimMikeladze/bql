@@ -9,13 +9,14 @@ import os from "node:os"
 import path from "node:path"
 import { ReplicaClient, ReplicaOffline, type ClientSocket } from "../../src/replication/index.ts"
 import { TenantRegistry } from "../../src/tenant/index.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const open: { registry: TenantRegistry; dir: string }[] = []
 
 afterEach(() => {
   for (const { registry, dir } of open.splice(0)) {
     registry.close()
-    fs.rmSync(dir, { recursive: true, force: true })
+    removeTempDir(dir)
   }
 })
 

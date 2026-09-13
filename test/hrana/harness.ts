@@ -27,6 +27,7 @@ import type {
   ServerMsg,
   StreamRequest,
 } from "../../src/server/hrana/proto.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const dirs: string[] = []
 const running: TestHrana[] = []
@@ -186,7 +187,7 @@ export async function stopAllHrana(): Promise<void> {
   }
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 }
 

@@ -35,12 +35,13 @@ import {
   untilSynced,
   until,
 } from "./harness.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 afterEach(async () => {
   await stopAll()
   for (const { registry, dir } of scratch.splice(0)) {
     registry.close()
-    fs.rmSync(dir, { recursive: true, force: true })
+    removeTempDir(dir)
   }
 })
 

@@ -10,6 +10,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { ClusterNode, RAFT_PATH, type RaftUpgradeHost } from "../../src/cluster/index.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const SECRET = "cluster-secret-for-the-raft-tests"
 
@@ -120,7 +121,7 @@ async function waitFor(what: string, predicate: () => boolean, timeoutMs = 15_00
 
 afterAll(async () => {
   for (const node of running) await node.stop().catch(() => {})
-  for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true })
+  for (const dir of dirs) removeTempDir(dir)
 })
 
 describe("three nodes over real sockets", () => {

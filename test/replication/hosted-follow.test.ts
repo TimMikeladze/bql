@@ -27,6 +27,7 @@ import {
   type ReplicaHost,
 } from "../../src/replication/replica.ts"
 import { TenantRegistry, type Tenant } from "../../src/tenant/index.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const SECRET = "hosted-follow-secret"
 const dirs: string[] = []
@@ -47,7 +48,7 @@ afterEach(() => {
 afterAll(() => {
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 })
 

@@ -7,6 +7,7 @@ import os from "node:os"
 import path from "node:path"
 import { startServer, type ServerHandle } from "../../src/server/app.ts"
 import { loadConfig, type ServerConfigInput } from "../../src/server/config.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const dirs: string[] = []
 const running: ServerHandle[] = []
@@ -96,7 +97,7 @@ export async function stopAll(): Promise<void> {
   }
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 }
 

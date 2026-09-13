@@ -63,7 +63,7 @@ describe("loadConfig", () => {
         'host = "127.0.0.1"',
         "tenantFromHost = true",
         "[data]",
-        `dir = "${path.join(dir, "data")}"`,
+        `dir = '${path.join(dir, "data")}'`,
         "maxOpen = 8",
         "[limits]",
         "maxRows = 42",
@@ -110,14 +110,14 @@ describe("loadConfig", () => {
         BUNQL_AUTH_ADMIN_KEY: "canonical-key",
       },
     })
-    expect(config.data.dir).toBe("/tmp/bunql-canonical")
+    expect(config.data.dir).toBe(path.resolve("/tmp/bunql-canonical"))
     expect(config.server.port).toBe(4444)
     expect(config.limits.queryTimeoutMs).toBe(1234)
     expect(config.realtime.ringBytes).toBe(5000)
     expect(config.auth.adminKey).toBe("canonical-key")
 
     const legacy = loadConfig({ env: { BUNQL_DIR: "/tmp/bunql-legacy", BUNQL_PORT: "4445" } })
-    expect(legacy.data.dir).toBe("/tmp/bunql-legacy")
+    expect(legacy.data.dir).toBe(path.resolve("/tmp/bunql-legacy"))
     expect(legacy.server.port).toBe(4445)
   })
 
@@ -125,7 +125,7 @@ describe("loadConfig", () => {
     const config = loadConfig({
       env: { BUNQL_DIR: "/tmp/bunql-alias", BUNQL_DATA_DIR: "/tmp/bunql-canonical" },
     })
-    expect(config.data.dir).toBe("/tmp/bunql-canonical")
+    expect(config.data.dir).toBe(path.resolve("/tmp/bunql-canonical"))
   })
 
   test("a list-valued key is comma-separated in the environment", () => {

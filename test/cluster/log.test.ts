@@ -8,6 +8,7 @@ import path from "node:path"
 import { encodeEntry, RaftLog } from "../../src/cluster/log.ts"
 import type { LogEntry, RaftSnapshot } from "../../src/cluster/raft.ts"
 import { emptyState, encodeSnapshot } from "../../src/cluster/state.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const dirs: string[] = []
 
@@ -18,7 +19,7 @@ function tempDir(): string {
 }
 
 afterAll(() => {
-  for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true })
+  for (const dir of dirs) removeTempDir(dir)
 })
 
 function entry(index: number, term: number, text = `entry-${index}`): LogEntry {

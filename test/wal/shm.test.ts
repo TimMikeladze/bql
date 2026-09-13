@@ -17,6 +17,7 @@ import {
   WALINDEX_LOCK_OFFSET,
   WALINDEX_MAX_VERSION,
   walIndexChecksum,
+  WalIndex,
   walIndexHeaderValid,
 } from "../../src/wal/index.ts"
 import { cleanupTempDirs, openPrimary, tempDir } from "./tmp.ts"
@@ -121,6 +122,52 @@ describe("wal-index header", () => {
       after.subarray(WALINDEX_HDR_COPY_SIZE, WALINDEX_HDR_COPY_SIZE * 2),
     )
     expect(fs.statSync(path.join(dir, "main.db-wal")).size).toBe(0)
+    db.close()
+  })
+})
+
+describe("the wal-index mapping", () => {
+  // Mechanism A publishes its header into this mapping rather than into the `-shm` file, which is
+  // what makes it work on Windows at all (`docs/e2-windows-gate.md` §2). Two things have to hold:
+  // the VFS gives region 0 without being asked to extend it, and a store into it is the same
+  // bytes every other mapping — and the file — sees.
+  test("region 0 is the -shm file, seen through SQLite's own mapping", () => {
+    const { db, dbPath } = openPrimary(tempDir("bunql-shmmap-"))
+    db.exec("create table t(a)")
+    db.exec("insert into t values (1)")
+
+    const index = WalIndex.open(db)
+    expect(index).not.toBeNull()
+    const mapped = index as WalIndex
+
+    // `notUsed0`, the last four bytes of WALINDEX_HDR_SIZE: SQLite neither reads nor writes it,
+    // so scribbling there cannot make the database disagree with itself.
+    const at = WALINDEX_HDR_SIZE - 4
+    const before = mapped.read(4, at)
+    mapped.write(new Uint8Array([0xde, 0xad, 0xbe, 0xef]), at)
+    mapped.barrier()
+
+    const seen = new Uint8Array(4)
+    const fd = fs.openSync(`${dbPath}-shm`, "r")
+    fs.readSync(fd, seen, 0, 4, at)
+    fs.closeSync(fd)
+    expect([...seen]).toEqual([0xde, 0xad, 0xbe, 0xef])
+
+    mapped.write(before, at)
+    mapped.barrier()
+    expect([...mapped.read(4, at)]).toEqual([...before])
+
+    // Off the end of region 0 is a bug in the caller, not a silent partial write.
+    expect(() => mapped.write(new Uint8Array(8), 32768 - 4)).toThrow(RangeError)
+    db.close()
+  })
+
+  test("a connection that never mapped a wal-index has no region to hand back", () => {
+    // No WAL, so there is no wal-index at all and nothing for `xShmMap` to return.
+    const db = Database.open(path.join(tempDir("bunql-shmmap-none-"), "main.db"), { wal: false })
+    db.exec("pragma journal_mode = delete")
+    db.exec("create table t(a)")
+    expect(WalIndex.open(db)).toBeNull()
     db.close()
   })
 })

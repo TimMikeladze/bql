@@ -12,6 +12,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { TenantRegistry } from "../../src/tenant/index.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const dirs: string[] = []
 const open: TenantRegistry[] = []
@@ -20,7 +21,7 @@ afterEach(() => {
   while (open.length > 0) open.pop()?.close()
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 })
 

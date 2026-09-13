@@ -9,6 +9,7 @@ import path from "node:path"
 import { BunQL, type EmbeddedDb } from "../../src/embedded.ts"
 import { BunQLClientError } from "../../src/client/errors.ts"
 import type { DecodedChangeEvent } from "../../src/client/feed.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 /** The error a promise rejected with. Fails the test when it resolved instead. */
 async function failure(promise: PromiseLike<unknown>): Promise<BunQLClientError> {
@@ -57,7 +58,7 @@ afterAll(async () => {
   while (open.length > 0) await open.pop()?.close()
   while (dirs.length > 0) {
     const dir = dirs.pop()
-    if (dir) fs.rmSync(dir, { recursive: true, force: true })
+    if (dir) removeTempDir(dir)
   }
 })
 

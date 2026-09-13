@@ -9,13 +9,14 @@ import path from "node:path"
 import { startServer, type ServerHandle } from "../../src/server/app.ts"
 import { loadConfig } from "../../src/server/config.ts"
 import { ReplicaOffline } from "../../src/replication/index.ts"
+import { removeTempDir } from "../tmpdir.ts"
 
 const running: ServerHandle[] = []
 const dirs: string[] = []
 
 afterEach(async () => {
   for (const handle of running.splice(0)) await handle.close()
-  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+  for (const dir of dirs.splice(0)) removeTempDir(dir)
 })
 
 test("a deliberate 503 is answered, not reported as a fault", async () => {
