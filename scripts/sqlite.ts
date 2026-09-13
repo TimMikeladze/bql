@@ -87,7 +87,11 @@ const FLAGS: readonly { flag: string; why: string }[] = [
   { flag: "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1", why: "src/tenant/tenant.ts runs `pragma synchronous = normal`" },
 
   { flag: "-O2", why: "" },
-  { flag: "-fPIC", why: "" },
+  // PE code is position-independent by construction, and clang refuses the flag outright on a
+  // Windows target rather than ignoring it. Observed: `docs/e1-windows.md` §3.
+  ...(process.platform === "win32"
+    ? []
+    : [{ flag: "-fPIC", why: "" }]),
 ]
 
 // ── main ─────────────────────────────────────────────────────────────────────────────────────
