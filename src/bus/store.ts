@@ -34,6 +34,89 @@ const uuid = () => crypto.randomUUID();
 const parse = <T>(text: string | null, fallback: T): T =>
   text === null ? fallback : (JSON.parse(text) as T);
 
+export interface Migration {
+  version: number;
+  statements: string[];
+}
+
+/**
+ * The schema, as an ordered list of migrations.
+ *
+ * Append only. A migration that has shipped is history: editing one changes
+ * what a database at that version means, which is the whole failure mode the
+ * version table exists to prevent.
+ */
+export const MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS messages (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        workspace TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        key TEXT,
+        headers TEXT NOT NULL,
+        body TEXT,
+        body_blob TEXT,
+        published_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        dedupe_key TEXT)`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS messages_dedupe ON messages(workspace, dedupe_key) WHERE dedupe_key IS NOT NULL",
+      "CREATE INDEX IF NOT EXISTS messages_log ON messages(workspace, seq)",
+      `CREATE TABLE IF NOT EXISTS subscriptions (
+        id TEXT PRIMARY KEY,
+        workspace TEXT NOT NULL,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        cursor_seq INTEGER NOT NULL DEFAULT 0,
+        ack_wait_ms INTEGER NOT NULL,
+        max_attempts INTEGER NOT NULL,
+        ordered INTEGER NOT NULL DEFAULT 0,
+        dlq_subject TEXT NOT NULL,
+        paused INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL)`,
+      "CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_name ON subscriptions(workspace, name)",
+      `CREATE TABLE IF NOT EXISTS deliveries (
+        id TEXT PRIMARY KEY,
+        subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        message_seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        consumer_id TEXT,
+        generation INTEGER NOT NULL DEFAULT 0,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        lease_until INTEGER,
+        available_at INTEGER NOT NULL DEFAULT 0,
+        key TEXT,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(subscription_id, message_seq))`,
+      "CREATE INDEX IF NOT EXISTS deliveries_ready ON deliveries(subscription_id, status, available_at, message_seq)",
+      "CREATE INDEX IF NOT EXISTS deliveries_lease ON deliveries(status, lease_until)",
+      "CREATE INDEX IF NOT EXISTS deliveries_key ON deliveries(subscription_id, status, key)",
+      `CREATE TABLE IF NOT EXISTS responses (
+        workspace TEXT NOT NULL,
+        correlation TEXT NOT NULL,
+        message_seq INTEGER NOT NULL,
+        headers TEXT NOT NULL,
+        body TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace, correlation))`,
+      `CREATE TABLE IF NOT EXISTS blobs (
+        handle TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS consumers (
+        id TEXT PRIMARY KEY,
+        workspace TEXT NOT NULL,
+        last_seen INTEGER NOT NULL,
+        data TEXT NOT NULL)`,
+    ],
+  },
+];
+
+export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+
 export interface StoreOptions {
   now?: () => number;
   /** Bodies larger than this are written to the blob store. */
@@ -127,85 +210,73 @@ export class BusStore {
     this.migrate();
   }
 
+  /**
+   * Bring the database up to `SCHEMA_VERSION`, or refuse to open it.
+   *
+   * The previous version of this was `CREATE TABLE IF NOT EXISTS` with no
+   * version marker at all, which meant the first schema change to a deployed
+   * bus would have been a silent corruption or a crash. Now every change is a
+   * numbered migration, and a database written by a *newer* build is refused
+   * rather than guessed at — a binary rolled back onto a schema it does not
+   * know cannot say what the extra columns mean.
+   */
   private migrate() {
-    this.db.run(`CREATE TABLE IF NOT EXISTS messages (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT,
-      id TEXT NOT NULL UNIQUE,
-      workspace TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      key TEXT,
-      headers TEXT NOT NULL,
-      body TEXT,
-      body_blob TEXT,
-      published_at INTEGER NOT NULL,
-      expires_at INTEGER,
-      dedupe_key TEXT)`);
-    this.db.run(
-      "CREATE UNIQUE INDEX IF NOT EXISTS messages_dedupe ON messages(workspace, dedupe_key) WHERE dedupe_key IS NOT NULL",
-    );
-    this.db.run(
-      "CREATE INDEX IF NOT EXISTS messages_log ON messages(workspace, seq)",
-    );
+    this.db.run(`CREATE TABLE IF NOT EXISTS schema_version (
+      version INTEGER PRIMARY KEY,
+      applied_at INTEGER NOT NULL)`);
 
-    this.db.run(`CREATE TABLE IF NOT EXISTS subscriptions (
-      id TEXT PRIMARY KEY,
-      workspace TEXT NOT NULL,
-      name TEXT NOT NULL,
-      pattern TEXT NOT NULL,
-      cursor_seq INTEGER NOT NULL DEFAULT 0,
-      ack_wait_ms INTEGER NOT NULL,
-      max_attempts INTEGER NOT NULL,
-      ordered INTEGER NOT NULL DEFAULT 0,
-      dlq_subject TEXT NOT NULL,
-      paused INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL)`);
-    this.db.run(
-      "CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_name ON subscriptions(workspace, name)",
-    );
+    const applied = (
+      this.db.query("SELECT MAX(version) AS version FROM schema_version").get() as {
+        version: number | null;
+      }
+    ).version;
 
-    this.db.run(`CREATE TABLE IF NOT EXISTS deliveries (
-      id TEXT PRIMARY KEY,
-      subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
-      message_seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
-      status TEXT NOT NULL,
-      consumer_id TEXT,
-      generation INTEGER NOT NULL DEFAULT 0,
-      attempt INTEGER NOT NULL DEFAULT 0,
-      lease_until INTEGER,
-      available_at INTEGER NOT NULL DEFAULT 0,
-      key TEXT,
-      error TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      UNIQUE(subscription_id, message_seq))`);
-    this.db.run(
-      "CREATE INDEX IF NOT EXISTS deliveries_ready ON deliveries(subscription_id, status, available_at, message_seq)",
-    );
-    this.db.run(
-      "CREATE INDEX IF NOT EXISTS deliveries_lease ON deliveries(status, lease_until)",
-    );
-    this.db.run(
-      "CREATE INDEX IF NOT EXISTS deliveries_key ON deliveries(subscription_id, status, key)",
-    );
+    // A database from before this change has the version-1 tables and no
+    // marker. Adopting it is a one-row write, not a rewrite.
+    let current = applied ?? 0;
+    if (applied === null && this.hasTable("messages")) {
+      this.db.run(
+        "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)",
+        [this.now()],
+      );
+      current = 1;
+    }
 
-    this.db.run(`CREATE TABLE IF NOT EXISTS responses (
-      workspace TEXT NOT NULL,
-      correlation TEXT NOT NULL,
-      message_seq INTEGER NOT NULL,
-      headers TEXT NOT NULL,
-      body TEXT,
-      created_at INTEGER NOT NULL,
-      PRIMARY KEY (workspace, correlation))`);
+    if (current > SCHEMA_VERSION)
+      throw new BusError(
+        `this database is at schema version ${current}, and this build only knows ${SCHEMA_VERSION} — upgrade agenticbus rather than downgrading the data`,
+        500,
+      );
 
-    this.db.run(`CREATE TABLE IF NOT EXISTS blobs (
-      handle TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`);
+    for (const migration of MIGRATIONS) {
+      if (migration.version <= current) continue;
+      this.db.transaction(() => {
+        for (const statement of migration.statements) this.db.run(statement);
+        this.db.run(
+          "INSERT INTO schema_version (version, applied_at) VALUES (?,?)",
+          [migration.version, this.now()],
+        );
+      })();
+    }
+  }
 
-    this.db.run(`CREATE TABLE IF NOT EXISTS consumers (
-      id TEXT PRIMARY KEY,
-      workspace TEXT NOT NULL,
-      last_seen INTEGER NOT NULL,
-      data TEXT NOT NULL)`);
+  private hasTable(name: string): boolean {
+    return (
+      this.db
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get(name) !== null
+    );
+  }
+
+  /** The schema version this database is actually at. */
+  schemaVersion(): number {
+    return (
+      (
+        this.db
+          .query("SELECT MAX(version) AS version FROM schema_version")
+          .get() as { version: number | null }
+      ).version ?? 0
+    );
   }
 
   close() {

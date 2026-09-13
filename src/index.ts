@@ -1,4 +1,11 @@
-export { BusStore, BusError, type StoreOptions } from "./bus/store";
+export {
+  BusStore,
+  BusError,
+  MIGRATIONS,
+  SCHEMA_VERSION,
+  type Migration,
+  type StoreOptions,
+} from "./bus/store";
 export { createServer, type ServerOptions } from "./bus/server";
 export {
   authorizeConsumer,

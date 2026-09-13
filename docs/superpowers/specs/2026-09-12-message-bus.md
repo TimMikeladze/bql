@@ -89,7 +89,13 @@ deliveries(id PK, subscription_id, message_seq, status, consumer_id, generation,
 responses(workspace, correlation, message_seq, body, created_at,
           PRIMARY KEY(workspace, correlation))
 consumers(id PK, workspace, name, subscriptions, labels, last_seen, paused)
+schema_version(version PK, applied_at)
 ```
+
+The schema is an ordered, append-only list of migrations rather than a pile of `CREATE TABLE IF
+NOT EXISTS`. A database with the tables but no `schema_version` row is adopted at version 1; a
+database at a version this build does not know is **refused**, because a binary rolled back onto
+a newer schema cannot say what the extra columns mean.
 
 Indexed on `messages(workspace, seq)`, `deliveries(subscription_id, status, message_seq)`, `deliveries(status, lease_until)`, `deliveries(subscription_id, status, key)`.
 
