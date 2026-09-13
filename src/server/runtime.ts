@@ -506,6 +506,11 @@ export class ServerRuntime {
   async maybeSnapshot(tenant: Tenant, now = Date.now()): Promise<boolean> {
     const every = this.config.durability.snapshotIntervalMs
     if (!(every > 0) || tenant.role !== "primary" || tenant.closed) return false
+    // The sweep's timer and a shutdown race: this is `await`ed from a `setInterval`, so a snapshot
+    // that started before `close()` finishes after it and files its ref into a catalog that is
+    // gone. It was only ever a logged error — the snapshot itself is on disk and the next open
+    // finds it — but a shutdown that logs an error is a shutdown people learn to ignore.
+    if (this.registry.closed) return false
     const stats = tenant.stats()
     if (stats.txid === 0n) return false
     const newest = tenant.snapshots().at(-1)

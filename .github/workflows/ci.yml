@@ -1,4 +1,4 @@
-# Invariant: every leg of this workflow proves the same thing on both platforms — that BunQL
+# Invariant: every leg of this workflow proves the same thing on all three platforms — that BunQL
 # builds the libsqlite3 it needs from a pinned source, type-checks, and passes its whole suite.
 # Nothing here needs a secret, and nothing here reaches a network service the tests do not start
 # themselves: the storage tests use the in-process FakeS3 unless BUNQL_TEST_S3_ENDPOINT names a
@@ -69,20 +69,19 @@ jobs:
       - name: docs/api.md covers every route
         run: bun run scripts/routes.ts --check
 
-  # Windows has never run BunQL. `docs/c5-apply-pages.md` predicts the worst case — `winShmLock`
-  # takes the same eight slots and the code checks `pMethods->iVersion`, so a VFS that cannot
-  # offer them falls back to mechanism B with a warning — but that is a prediction, and this job
-  # exists to replace it with an observation (`docs/e1-windows.md`).
+  # Windows is a gate as of E2 (`docs/e2-windows-gate.md`). It was exploratory for three runs and
+  # `continue-on-error` at every level while it answered the question E1 asked; the answer was 1346
+  # of 1498, then one fix took it to 1479, then five POSIX assumptions in tests and one that was
+  # merely slow took it to the whole suite. The `continue-on-error` lines are gone, which is what
+  # E1 §2 said would happen on the day it passed.
   #
-  # `continue-on-error` on purpose, and it is not a way of ignoring the result: the job's output is
-  # the deliverable, and making main red on a platform nothing claims to support yet would only
-  # train people to ignore a red tick. It becomes a gate when it passes, and the line to delete is
-  # this one.
+  # It keeps its own job rather than joining the matrix because it needs 30 minutes where the other
+  # two need 20: creating a file and opening SQLite on it are both far dearer there, and the suite
+  # runs about three times as long as a result.
   windows:
-    name: windows-latest (exploratory)
+    name: windows-latest
     runs-on: windows-latest
     timeout-minutes: 30
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,21 +97,17 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      # Each step reports rather than gates, so one failure does not hide the next: the question
-      # this job answers is *how far* Windows gets, and a job that stopped at the first error would
-      # answer it one step at a time across a dozen pushes.
       - name: build libsqlite3
-        continue-on-error: true
         run: bun run sqlite:build
 
       - name: report the library under test
-        continue-on-error: true
         run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
 
-      - name: typecheck
-        continue-on-error: true
-        run: bun run typecheck
+      - run: bun run scripts/bytes.ts --check
 
-      - name: the suite
-        continue-on-error: true
-        run: bun test
+      - run: bun run typecheck
+
+      - run: bun test
+
+      - name: docs/api.md covers every route
+        run: bun run scripts/routes.ts --check

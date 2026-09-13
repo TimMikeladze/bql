@@ -46,6 +46,12 @@ export function candidatePaths(): string[] {
   if (env) out.push(env)
   const vendored = vendoredPath()
   if (vendored) out.push(vendored)
+  // **No system candidate on Windows**, deliberately — and that is enforced here rather than
+  // stated below, which is what it used to be. Every path after this point is a POSIX one, and a
+  // Windows run was listing all of them in its "Tried:" report, so the remedy for a missing
+  // library read `libc.so.6: Failed to open library "libc.so.6"` on a platform that has no such
+  // file. See the note at the end of this function for why there is no Windows equivalent to add.
+  if (process.platform === "win32") return out
   out.push(
     "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
     "/usr/local/opt/sqlite/lib/libsqlite3.dylib",
@@ -62,7 +68,7 @@ export function candidatePaths(): string[] {
     // /usr/lib is absent or unreadable; the fixed candidates still apply.
   }
   out.push("/usr/lib/libsqlite3.so.0", "libsqlite3.so", "/usr/lib/libsqlite3.dylib")
-  // **No system candidate on Windows**, deliberately. It ships no libsqlite3, and a bare
+  // Why Windows gets none of these and nothing of its own: it ships no libsqlite3, and a bare
   // `"sqlite3.dll"` is not a name — it is a request to the loader to search System32 and every
   // directory on PATH, which found *something* on a CI runner and segfaulted at address 0 on the
   // first call into it (`docs/e1-windows.md` §3). A clean "no library, run `bun run sqlite:build`"

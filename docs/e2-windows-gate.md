@@ -3,6 +3,11 @@
 `docs/e1-windows.md` asked the question and got 1346 of 1498. This milestone is the answer to the
 150, and then deleting the `continue-on-error` lines that made the job exploratory.
 
+**Result: the whole suite passes on `windows-latest`, and the job is a gate.** One fix accounted
+for 144 of the 150; five of the remainder were tests asserting that the platform is POSIX; one was
+a test that was merely too slow there; and the last was a real bug in `candidatePaths()` that a
+Windows run was the only thing that could have found.
+
 ## 1. E1 named the wrong root cause
 
 E1 concluded:
@@ -98,9 +103,38 @@ seconds on macOS. Creating a file and opening SQLite on it are both far dearer o
 any of them intact, which 500 tenants prove exactly as well as 2000 — and in 0.75 s rather than
 5.6.
 
-## 5. The gate
+## 5. One of the six was more than it looked
 
-`.github/workflows/ci.yml` loses `continue-on-error` from the `windows-latest` job and from its
-four steps, **after** a run with the fixes above comes back clean. E1 §2 said it becomes a gate on
-the day it passes; flipping it in the same push that tries to make it pass would only mean a red
-main if one of the six was more than it looked.
+The run after those fixes came back **1484 pass, 2 skip, 1 fail**, and the one was not a test
+assumption after all. `candidatePaths()` carried this, and had carried it since E1:
+
+> **No system candidate on Windows**, deliberately. It ships no libsqlite3, and a bare
+> `"sqlite3.dll"` is not a name — it is a request to the loader to search System32 and every
+> directory on `PATH` …
+
+The comment was true about intent and false about the code: the function omitted the bare
+`"sqlite3.dll"` and then pushed `/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib`, `libsqlite3.so.0`,
+`/usr/lib/libsqlite3.dylib` and the rest on every platform. Harmless in that none of them opens —
+and visible, because the "no library" remedy on Windows then reports
+
+```
+Tried:
+  libc.so.6: Failed to open library "libc.so.6": error code 126
+```
+
+which is a remedy naming a file the platform has never had. The rule is now enforced where it is
+stated: on `win32`, `candidatePaths()` returns `BUNQL_SQLITE_LIB` and the vendored artefact, and
+stops.
+
+Worth noticing how this surfaced. The test that caught it was one I had just written *to encode
+the comment's claim* — and the claim was wrong about its own module. A test written from a comment
+checks the comment, which is exactly the value in writing it.
+
+## 6. The gate
+
+`.github/workflows/ci.yml` has lost `continue-on-error` from the `windows-latest` job and from its
+four steps, and the job is named `windows-latest` rather than `windows-latest (exploratory)`. It
+also gained the two checks the other platforms run and it did not — the raw-byte scan and the route
+table — because a gate that proves less than its peers is a gate with a hole in it.
+
+E1 §2 said it becomes a gate on the day it passes. This is that day.
