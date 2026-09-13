@@ -76,7 +76,12 @@ export interface SubscribeRequest {
   deliverFrom?: DeliverFrom;
 }
 
-export type DeliveryStatus = "pending" | "leased" | "acked" | "dead";
+export type DeliveryStatus =
+  | "pending"
+  | "leased"
+  | "acked"
+  | "dead"
+  | "cancelled";
 
 export interface Delivery {
   id: string;
@@ -155,7 +160,9 @@ export interface RegisterConsumer {
 export interface SubscriptionStats extends Subscription {
   pending: number;
   leased: number;
+  acked: number;
   dead: number;
+  cancelled: number;
   /** Messages in the log this subscription has not examined yet. */
   lag: number;
 }
@@ -184,4 +191,4 @@ export interface TokenClaims {
 
 export const ANY = "*";
 export const isTerminal = (status: DeliveryStatus) =>
-  status === "acked" || status === "dead";
+  status === "acked" || status === "dead" || status === "cancelled";

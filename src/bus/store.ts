@@ -1009,7 +1009,9 @@ export class BusStore {
           ...subscription,
           pending: of("pending"),
           leased: of("leased"),
+          acked: of("acked"),
           dead: of("dead"),
+          cancelled: of("cancelled"),
           lag: Math.max(0, lastSeq - subscription.cursorSeq),
         };
       },

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  Ban,
   CheckCircle2,
   CircleDashed,
   Inbox,
@@ -50,6 +51,7 @@ const STATUS = {
   leased: { icon: Loader2, tone: "text-blue-700 bg-blue-50 border-blue-200" },
   acked: { icon: CheckCircle2, tone: "text-emerald-700 bg-emerald-50 border-emerald-200" },
   dead: { icon: Skull, tone: "text-red-700 bg-red-50 border-red-200" },
+  cancelled: { icon: Ban, tone: "text-neutral-600 bg-neutral-100 border-neutral-300" },
 } as const;
 
 function Status({ status }: { status: Delivery["status"] }) {

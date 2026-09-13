@@ -33,7 +33,8 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
-    "test:e2e": "bun scripts/e2e.ts"
+    "test:e2e": "bun scripts/e2e.ts",
+    "soak": "bun scripts/soak.ts"
   },
   "dependencies": {},
   "devDependencies": {
