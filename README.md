@@ -94,6 +94,8 @@ await new BusConsumer({
 
 Return normally and the message is acked. Throw and it is nacked, retried, and eventually dead-lettered. Throw `FatalError` to dead-letter immediately, because a message this consumer can never handle should not be tried four more times.
 
+Set `handlerTimeoutMs` (or `--exec-timeout`) on anything that could hang. The loop renews the lease for as long as a handler is pending, so the mechanism that protects slow work protects stuck work just as well — without a timeout, a wedged handler holds its message indefinitely.
+
 If the message carried a `reply-to`, whatever the handler returns becomes its response — an RPC consumer is an ordinary consumer that happens to return a value.
 
 **In any other language**, `--exec` is the whole integration: the message arrives on stdin, and stdout becomes the reply.
@@ -111,7 +113,7 @@ agenticbus consume work --exec ./resize.sh --prefetch 4
 | `agenticbus publish <subject> <json>` | publish |
 | `agenticbus request <subject> <json>` | publish and wait for a reply |
 | `agenticbus subscribe <name> <pattern>` | create a durable subscription |
-| `agenticbus consume <subscription> --exec CMD` | run a consumer |
+| `agenticbus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
 | `agenticbus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
 ## HTTP API

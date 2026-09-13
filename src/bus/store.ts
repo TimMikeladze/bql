@@ -1062,13 +1062,22 @@ export class BusStore {
   sweep() {
     this.reclaim();
     const now = this.now();
-    const UNFINISHED = `NOT EXISTS (
+    const notLeased = `NOT EXISTS (
+      SELECT 1 FROM deliveries d
+       WHERE d.message_seq = messages.seq AND d.status = 'leased')`;
+    const unfinished = `NOT EXISTS (
       SELECT 1 FROM deliveries d
        WHERE d.message_seq = messages.seq AND d.status IN ('pending','leased'))`;
 
+    // TTL and retention guard differently, because they mean different things.
+    // A TTL says the message stopped being relevant, so an undelivered copy of
+    // it should go — guarding that on `pending` would mean a message nobody
+    // ever consumed outlived its own expiry indefinitely. What it must not do
+    // is take a message away from a handler already running: that leaves the
+    // consumer acking a delivery that no longer exists.
     this.db.run(
       `DELETE FROM messages
-        WHERE expires_at IS NOT NULL AND expires_at <= ? AND ${UNFINISHED}`,
+        WHERE expires_at IS NOT NULL AND expires_at <= ? AND ${notLeased}`,
       [now],
     );
     if (this.retentionMs > 0)
@@ -1076,7 +1085,7 @@ export class BusStore {
         `DELETE FROM messages
           WHERE published_at < ?
             AND seq <= COALESCE((SELECT MIN(cursor_seq) FROM subscriptions), 0)
-            AND ${UNFINISHED}`,
+            AND ${unfinished}`,
         [now - this.retentionMs],
       );
   }

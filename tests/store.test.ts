@@ -469,3 +469,62 @@ test("blobs are collected once no message references them", async () => {
   expect(blobs.size).toBe(0);
   store.close();
 });
+
+test("a ttl collects a message nobody ever consumed", async () => {
+  const store = new BusStore(":memory:", { now, retentionMs: 0 });
+  store.subscribe(W, {
+    name: "work",
+    pattern: "work.>",
+    deliverFrom: "beginning",
+  });
+  await store.publish(W, { subject: "work.do", body: 1, ttlMs: 1000 });
+  // Materialize the delivery without leasing it, then let the ttl pass.
+  await store.claim(W, "work", "c1", 0);
+  clock += 5000;
+  store.sweep();
+  // An expired message that nobody started must not outlive its own ttl just
+  // because a delivery row was created for it.
+  expect(store.stats(W).messages).toBe(0);
+  store.close();
+});
+
+test("a match is found across many scan batches, not just the first", async () => {
+  // scanBatch is deliberately tiny so the cursor has to walk the log in steps.
+  const store = new BusStore(":memory:", { now, scanBatch: 10 });
+  store.subscribe(W, {
+    name: "rare",
+    pattern: "rare.event",
+    ackWaitMs: 1000,
+    deliverFrom: "beginning",
+  });
+  for (let index = 0; index < 95; index++)
+    await store.publish(W, { subject: "noise.tick", body: index });
+  await store.publish(W, { subject: "rare.event", body: "found" });
+
+  let envelopes: Awaited<ReturnType<typeof store.claim>> = [];
+  for (let attempt = 0; attempt < 20 && envelopes.length === 0; attempt++)
+    envelopes = await store.claim(W, "rare", "c1", 1);
+
+  expect(envelopes).toHaveLength(1);
+  expect(envelopes[0]!.message.body).toBe("found");
+  store.close();
+});
+
+test("a subscription whose pattern starts with a wildcard still matches", async () => {
+  // narrowingGlob gives up and returns '*' here, so this exercises the path
+  // where SQL narrows nothing and the token match does all the work.
+  const store = bus();
+  store.subscribe(W, {
+    name: "created",
+    pattern: "*.created",
+    ackWaitMs: 1000,
+    deliverFrom: "beginning",
+  });
+  await store.publish(W, { subject: "orders.created", body: 1 });
+  await store.publish(W, { subject: "orders.eu.created", body: 2 });
+  await store.publish(W, { subject: "users.created", body: 3 });
+
+  const envelopes = await store.claim(W, "created", "c1", 10);
+  expect(envelopes.map((e) => e.message.body).sort()).toEqual([1, 3]);
+  store.close();
+});

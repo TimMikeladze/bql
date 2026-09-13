@@ -204,6 +204,16 @@ export interface ConsumerOptions {
    * silently starve every consumer in the fleet.
    */
   maxExtendMs?: number;
+  /**
+   * Longest a single handler may run before it is aborted and the delivery
+   * nacked.
+   *
+   * Without one, a handler that hangs holds its message indefinitely: this loop
+   * keeps renewing the lease for as long as the promise is pending, so the very
+   * mechanism that protects slow work also protects stuck work. Unset means no
+   * limit, which is only right when the handler bounds itself.
+   */
+  handlerTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
@@ -272,8 +282,27 @@ export class BusConsumer {
       },
       signal: abort.signal,
     };
+    const timeoutMs = this.options.handlerTimeoutMs;
+    const deadline =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(
+            () => abort.abort(new Error(`handler exceeded ${timeoutMs}ms`)),
+            timeoutMs,
+          );
     try {
-      const result = await this.options.handle(envelope, api);
+      const result = await Promise.race([
+        this.options.handle(envelope, api),
+        new Promise<never>((_, reject) => {
+          if (abort.signal.aborted) reject(abort.signal.reason);
+          else
+            abort.signal.addEventListener(
+              "abort",
+              () => reject(abort.signal.reason),
+              { once: true },
+            );
+        }),
+      ]);
       if (envelope.message.headers.correlation && result !== undefined)
         await client.reply(envelope.message, result as Json);
       await client.ack(envelope.delivery, id);
@@ -290,6 +319,7 @@ export class BusConsumer {
         .catch(() => {});
     } finally {
       clearInterval(timer);
+      if (deadline !== undefined) clearTimeout(deadline);
     }
   }
 

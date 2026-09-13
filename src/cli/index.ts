@@ -202,6 +202,9 @@ switch (command) {
       host: hostname(),
       prefetch: Number(flag("prefetch", "1")),
       labels: pairs("labels"),
+      ...(has("exec-timeout")
+        ? { handlerTimeoutMs: Number(flag("exec-timeout")) }
+        : {}),
       log: (message) => console.error(message),
       // Without --exec the message is printed. With it, the message goes to the
       // command's stdin and its stdout becomes the reply — which is the whole
@@ -288,6 +291,7 @@ switch (command) {
   request     <subject> <json>            publish and wait for a reply
   subscribe   <name> <pattern>            create a durable subscription
   consume     <subscription> --exec CMD   consume; message is stdin, stdout is the reply
+              --exec-timeout <ms>          abort and nack a handler that hangs
   tail        follow the log
   stats       subscriptions, consumers, lag
 
