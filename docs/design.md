@@ -408,9 +408,10 @@ fenced on reconnect.
 - Replicas: snapshot-consistent at some txid; never torn; lag is typically < 1 ms on LAN.
 - **Read-your-writes**: every response carries `BunQL-Txid`. Send `BunQL-Min-Txid` (or SDK does
   it automatically) and a replica waits up to `waitMs` (default 2000) or forwards to primary.
-- **Durability**: `ack: "local"` (default; `synchronous=NORMAL`: survives process crash, may
-  lose the last txns on power loss until checkpoint) · `"fsync"` (`FULL` for that commit) ·
-  `"replica"` (≥1 replica has fsynced the record) · `"quorum"`.
+- **Durability**: `ack: "fsync"` (**the default since 2026-09-13**; an explicit `fdatasync` of
+  the WAL and the log, so it survives power loss on this node — 24.0 µs → 65.0 µs on a single-row
+  write) · `"local"` (`synchronous=NORMAL`: survives a process crash, may lose the last txns on
+  power loss until checkpoint) · `"replica"` (≥1 replica has fsynced the record) · `"quorum"`.
 - Failover with `ack: "local"` can lose un-replicated txns (bounded by lag); with `"replica"`
   or `"quorum"` it cannot, because promotion picks the highest acked txid.
 
@@ -704,7 +705,7 @@ bunql cluster status|join|leave
 ```toml
 [server]  port = 4321  host = "0.0.0.0"  hrana = true  tenantFromHost = false
 [data]    dir = "./data"  maxOpen = 1024  readers = 2  pageSize = 4096
-[durability] defaultAck = "local"  checkpointWalBytes = 4_000_000  retention = "7d"
+[durability] defaultAck = "fsync"  checkpointWalBytes = 4_000_000  retention = "7d"
 [realtime] ringBytes = 10_000_000  maxLiveQueries = 1000  maxRowsPerLive = 1000
 [limits]  queryTimeoutMs = 10_000  writeTimeoutMs = 30_000  txIdleTimeoutMs = 5_000  maxRows = 10_000
 [s3]      bucket = "backups"  endpoint = "https://…"  prefix = "bunql/"  shipIntervalMs = 1000

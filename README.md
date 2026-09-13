@@ -237,8 +237,10 @@ Promotion is refused rather than risked: `NO_COPY`, `GENERATION_MISMATCH`, `STRE
 node knows the new primary's HTTP base, `503 NOT_PRIMARY` + `BunQL-Primary` where it knows only a
 replication URL, and a `moved` frame on a WebSocket.
 
-With the default `ack: "local"` a failover can lose transactions the primary answered but no
-replica received, bounded by replica lag. `ack: "replica"` makes it impossible.
+The default `ack` is `"fsync"`, so a write is on the primary's disk before it is answered. That
+does not make failover lossless: with any node-local level a failover can lose transactions the
+primary answered but no replica received, bounded by replica lag. `ack: "replica"` makes it
+impossible.
 [docs/c2-promotion.md](docs/c2-promotion.md) has the safety argument in full.
 
 ## The cluster

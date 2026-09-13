@@ -40,6 +40,7 @@ what the realtime engine needs. `BUNQL_SQLITE_LIB` overrides the search.
 | point read over HTTP keep-alive | 48.2 µs | ≤ 60 µs | **PASS** |
 | point read over WebSocket | 28.6 µs | ≤ 35 µs | **PASS** |
 | single-row write, `ack: local`, incl. tail+log | 28.2 µs | ≤ 40 µs | **PASS** |
+| single-row write, `ack: fsync` — **the default since 2026-09-13** | 65.0 µs | — | what an `fdatasync` costs; `local` is the 2.7x opt-out |
 | write visible on a replica | 219.5 µs | ≤ 1 ms | **PASS** |
 | write visible on a replica, no transport | 291.6 µs | ≤ 1 ms | **PASS** |
 | live-query invalidation → event on socket | 17.3 µs | ≤ 200 µs | **PASS** |

@@ -9,6 +9,14 @@ The short version: **SQLite is not the bottleneck anywhere.** A write spends 29%
 SQLite and 71% in BunQL's own record pipeline. A read spends 0.79 µs in SQLite and arrives 28 µs
 later on a socket. Both ceilings are ours to move.
 
+
+> **The numbers in this file predate two default changes (2026-09-13).** Every throughput and
+> latency figure here was taken with `[durability] defaultAck = "local"` and `[limits] groupCommit`
+> off. Both moved, in opposite directions and by more than the noise: a single write now pays an
+> `fdatasync` (24.0 µs → 65.0 µs at p50) and concurrent writes now fold (4.7x at 64 clients).
+> Nothing below is wrong; it no longer describes a *default* node. `docs/next.md` carries the
+> re-measurement as the follow-up.
+
 ## 1. Where a write goes
 
 One row per transaction, because that is the shape of `/v1/db/:db/query` — every statement is its
@@ -72,7 +80,8 @@ connection on a WebSocket (at `hello`), which is a second reason sockets beat HT
 
 ## 3. The bottlenecks, ranked
 
-1. ~~**One transaction per statement.**~~ **Addressed by `[limits] groupCommit` (§4B), opt-in.**
+1. ~~**One transaction per statement.**~~ **Addressed by `[limits] groupCommit` (§4B), on by
+   default since 2026-09-13.**
    Every fixed cost above — commit, tail, checksum, encode, append — is paid per row. At 50 rows per transaction the per-row cost is 0.96 µs instead of
    29.04 µs, a **30x** difference. This is the ceiling behind the 25–30k writes/s figure and behind
    the one missed budget in `docs/benchmarks.md` (130k against a 150k WebSocket target, which that
@@ -114,8 +123,9 @@ request, since that is a set lookup and is the only part that can change between
 size, so a flood of distinct tokens cannot grow it. This is the cheapest large win in the list and
 it touches one file (`src/server/auth.ts`).
 
-**B. Group commit.** ✅ **Built, opt-in** — `[limits] groupCommit`, off by default because folded
-writes share a txid (`docs/p2-group-commit.md`). Measured over real sockets, writes/s:
+**B. Group commit.** ✅ **Built, and on by default since 2026-09-13** — `[limits] groupCommit`.
+Folded writes share a txid, which is a real contract change and is documented rather than
+defaulted away (`docs/p2-group-commit.md`, `docs/api.md`). Measured over real sockets, writes/s:
 
 | concurrent clients | off | on | mean fold |
 |---|---|---|---|
@@ -163,7 +173,9 @@ only has to be compressed before it ships, not before the client is answered. Th
 *and* moves the cost off the hot path, at the price of decoupling the log append from the commit —
 which is why it is not this change.
 
-**Built: `[durability] deferAppend`, off by default** (`docs/p5-deferred-compression.md`). The
+**Built: `[durability] deferAppend`, on by default since 2026-09-13** — and dormant, because it
+applies to `ack: "local"` only and the default ack is now `"fsync"`
+(`docs/p5-deferred-compression.md`). The
 finding was that the win is not "compress later" but "answer before the log append", of which zstd
 is 80% — the data is already durable when `#capture` starts, because SQLite committed on the line
 above. It is safe because a log record is *derived from the WAL* rather than authored, so a crash
