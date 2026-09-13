@@ -24,8 +24,20 @@ Three things at once, from one set of primitives:
 Bun 1.4 or newer.
 
 ```sh
+bun add agenticbus
+bunx agenticbus serve &
+bunx agenticbus subscribe work 'work.>'
+bunx agenticbus publish work.resize '{"src":"a.png"}'
+```
+
+The package ships the library, the `agenticbus` binary and the built dashboard, so `serve` has a
+UI with nothing else to install.
+
+**Working on the bus itself** runs it from source instead:
+
+```sh
 bun install
-bun run build      # the dashboard
+bun run build      # the library bundle and the dashboard
 bun run dev
 ```
 
@@ -187,7 +199,13 @@ bun run typecheck
 bun test tests
 bun run build
 bun run test:e2e
+bun run verify-pack
 ```
+
+`verify-pack` is the one that catches what the others cannot: it packs the tarball, installs it
+into an empty directory, imports every advertised entry point and starts a bus from the installed
+copy. A bundler can drop a module and still emit its name in the export list — that failure would
+otherwise surface in someone else's install.
 
 The end-to-end check is real processes and no mocks — competing consumers, fan-out, a consumer **SIGKILLed mid-message**, a poison message, and a request answered from another process:
 
