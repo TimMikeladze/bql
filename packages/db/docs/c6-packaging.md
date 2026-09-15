@@ -216,7 +216,9 @@ Homebrew, no matter the platform or the cause. It now distinguishes three cases:
 
 All three end with the same remedy, defined once in `remedy()` so the wording cannot drift:
 `bun run sqlite:build`, where the artefact will be, and what a library of your own must be built
-with. For example, against a shared library that is not SQLite:
+with. (From an **installed** package the same build is `bun run
+node_modules/@bunql/db/scripts/sqlite.ts`, because `npm run` cannot reach a dependency's scripts.
+`docs/l7-tarball.md` is the gate that proves that path works.) For example, against a shared library that is not SQLite:
 
 ```
 BunQL found a libsqlite3 but it is too old: … loaded, but has no sqlite3_changes64.

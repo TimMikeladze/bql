@@ -46,7 +46,15 @@ BunQL is one of two packages in this repository — [`@bunql/bus`](../bus) is th
 [docs/monorepo.md](../../docs/monorepo.md) is why. `bun run db <script>` forwards from the root to
 this package; from inside `packages/db`, every script still runs by its own name.
 
-Once published, `bun add @bunql/db` and `bun run sqlite:build` in your own project.
+Once published, `bun add @bunql/db`, then build the engine **by path**:
+
+```sh
+bun run node_modules/@bunql/db/scripts/sqlite.ts
+```
+
+`npm run` cannot reach a dependency's own scripts, so `bun run sqlite:build` in your project would
+look for a script of yours by that name and find none — the path above is the contract. CI proves
+it on the real tarball on every push (`bun run db pack:check`, `docs/l7-tarball.md`).
 
 ## Getting started
 

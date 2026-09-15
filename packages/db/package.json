@@ -51,8 +51,11 @@
   "files": [
     "LICENSE",
     "src",
+    "scripts",
     "docs/design.md",
     "docs/api.md",
+    "docs/c6-packaging.md",
+    "docs/l7-tarball.md",
     "README.md"
   ],
   "scripts": {
@@ -60,6 +63,7 @@
     "typecheck": "tsc --noEmit",
     "sqlite:build": "bun run scripts/sqlite.ts",
     "routes:check": "bun run scripts/routes.ts --check",
+    "pack:check": "bun run scripts/pack-check.ts",
     "start": "bun run src/server/main.ts",
     "dev": "bun run --watch src/server/main.ts",
     "cli": "bun run src/cli.ts",
