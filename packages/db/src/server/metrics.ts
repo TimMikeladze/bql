@@ -319,6 +319,7 @@ export class Metrics {
       writeQueueDepth?: number
       pinned?: number
       openRefused?: number
+      fsync?: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
     },
     node: string,
     replication?: ReplicationMetrics | null,
@@ -389,6 +390,23 @@ export class Metrics {
       this.#txQueued,
     )
     counter("bunql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
+    if (registry.fsync) {
+      counter(
+        "bunql_fsync_total",
+        "Barriers the shared fsync sweep has issued ([durability] fsyncSweep = \"shared\").",
+        registry.fsync.total,
+      )
+      gauge(
+        "bunql_fsync_sweep_duration_us",
+        "How long the sweep's last pass took, in microseconds.",
+        registry.fsync.lastDurationUs,
+      )
+      gauge(
+        "bunql_fsync_pending",
+        "Logs with bytes the disk has not been told about, waiting for the next sweep.",
+        registry.fsync.pending,
+      )
+    }
     counter(
       "bunql_open_refused_total",
       "Opens refused because every open database was pinned by a subscription.",

@@ -573,6 +573,7 @@ export interface MetricsReply {
     writeQueueDepth: number
     pinned: number
     openRefused: number
+    fsync: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
   }
   /**
    * C4b: this worker's share of the replication figures. `connected` is not here — the router owns

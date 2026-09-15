@@ -554,6 +554,7 @@ function pick(stats: RegistryStats): MetricsReply["registry"] {
     writeQueueDepth: stats.writeQueueDepth,
     pinned: stats.pinned,
     openRefused: stats.openRefused,
+    fsync: stats.fsync,
   }
 }
 

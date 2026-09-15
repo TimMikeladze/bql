@@ -518,3 +518,88 @@ So, before taking a number from this file or adding one to it:
   number in §1's defaults table was taken that way, which is why three rounds of it agree.
 - **Prefer `bench/router.ts`**, which P6 built to a 4% resolution, for anything within 10%.
   Everything else in this file is a 20%-resolution instrument at best.
+
+## 9. What a thousand databases cost the disk (L5)
+
+New with the L track. `bench/fsync.ts` is the instrument and it exists because nothing else here
+measures *many* databases writing at once — every other benchmark in this file runs one. It counts
+real syscalls, not policy: `fsyncSync`, `fdatasyncSync` and the callback `fsync` are wrapped for
+the life of the process.
+
+### 9.1 The write path already costs exactly two barriers, and group commit is what amortises them
+
+At `ack: "fsync"` — the node's default since 2026-09-13 — every transaction does an `fdatasync` of
+the WAL and an `fsync` of the log, inline, before the caller is answered. Measured, `--depth` being
+the number of writes each database has in flight at once:
+
+| writes in flight per database | fsyncs per write | writes/s at 100 databases |
+|---|---|---|
+| 1 | 2.00 | 12 253 |
+| 4 | 0.50 | 35 063 |
+| 16 | 0.13 | 154 487 |
+
+0.13 is 2/16 exactly: sixteen concurrent writes fold into one transaction, which pays one pair of
+barriers between them. **The amortisation a shared fsync sweep would provide is already provided,
+by group commit**, and the barrier rate is pinned at 18–24k/s in every row — that is this disk's
+ceiling, not the node's.
+
+### 9.2 This disk is fastest when barriers are issued one at a time
+
+Sixty-four files, one barrier each, on an Apple NVMe:
+
+| how | barriers/s |
+|---|---|
+| serial `fsyncSync` | 30 180 |
+| serial `await fsync` (thread pool) | 22 646 |
+| concurrent, width 4 | 21 302 |
+| concurrent, width 16 | 14 627 |
+| concurrent, width 64 | 10 506 |
+
+Concurrency is *slower*, monotonically. So no scheduler can beat the inline behaviour by issuing
+differently — only by issuing less, or by issuing off the event loop.
+
+### 9.3 Where the herd actually is: `ack: "local"` at five hundred databases
+
+The interval policy — at most one barrier per log per `fsyncIntervalMs`, issued inline from
+whichever append happens to cross the boundary — is what `docs/plan-limits.md` L5 predicted would
+hurt, and it does. `ack: "local"`, one write in flight per database, three interleaved rounds each,
+medians:
+
+| databases | `per-db` writes/s | `shared` writes/s | `per-db` fsyncs/s | `shared` fsyncs/s | `per-db` p99 | `shared` p99 |
+|---|---|---|---|---|---|---|
+| 1 | 18 231 | 19 643 | 0 | 0 | 156 µs | 125 µs |
+| 10 | 32 372 | 31 624 | 0 | 0 | 0.94 ms | 1.29 ms |
+| 100 | 31 715 | 31 998 | 1 008 | 1 067 | 4.09 ms | 4.52 ms |
+| 500 | 23 867 | **29 407** | 4 387 | **874** | 40.6 ms | **16.9 ms** |
+
+(At one and ten databases the run is over before a 100 ms interval elapses, so neither setting
+issues a barrier at all; those two rows measure the cost of *having* a sweep, which is nothing.)
+
+### 9.4 The decision: `[durability] fsyncSweep` stays `"per-db"`
+
+L5's criterion was that `"shared"` must beat `"per-db"` **at N ≥ 100** on both p99 and barriers per
+second. At 500 it wins enormously — 23% more throughput, a fifth of the barriers, and p99 cut from
+40.6 ms to 16.9 ms. **At 100 it loses on both**: p99 4.52 ms against 4.09, and 1 067 barriers a
+second against 1 008. The criterion is not met, so the default does not move.
+
+Two further reasons, both measured rather than argued:
+
+- **Under the node's default ack the sweep is inert.** `ack: "fsync"` flushes the log inline before
+  answering, so the log is already clean when the sweep reaches it and no barrier is issued. A/B at
+  `ack: "fsync"`, N = 1 and N = 100: identical within noise, 2.00 fsyncs per write either way. A
+  default that changes nothing for the default configuration is not a default worth flipping.
+- **Part of the win at 500 is a longer hygiene window, not just better scheduling.** A sweep pass
+  over 500 databases takes longer than the 100 ms interval, so the effective interval stretches to
+  roughly 570 ms there. For `ack: "local"`, which promises process-crash survival and explicitly
+  not power-loss survival, that is a defensible trade — but it is a durability trade, and it should
+  be opted into rather than defaulted into.
+
+`[durability] fsyncSweep = "shared"` is therefore shipped and off. Turn it on for a node running
+`ack: "local"` with hundreds of write-active databases on one thread;
+`bunql_fsync_sweep_duration_us` is what tells you the interval has stretched.
+
+**Conditions these numbers were taken under.** §8's bar was met for §9.2 and the `--depth` ladder
+(load average 1.8–1.9) and *not* for the ladder in §9.3, which ran at load 6–9. Every row there is
+the median of three interleaved A-B rounds, and the 500-database result is the one that survives
+that noise by a wide margin; the 100-database result is a 10% effect at a 20% resolution, which is
+one more reason the default did not move on it.

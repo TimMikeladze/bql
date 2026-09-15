@@ -62,6 +62,7 @@ import {
   WalError,
   WalFormatError,
 } from "../wal/index.ts"
+import type { FsyncSweep } from "../durability/index.ts"
 import { Catalog, positionOf, type TenantRole } from "./catalog.ts"
 
 /**
@@ -168,6 +169,12 @@ export interface TenantOptions {
    * everything already written readable.
    */
   compressLog?: boolean
+  /**
+   * L5: the thread's shared fsync sweep, when `[durability] fsyncSweep` is `"shared"`. The log's
+   * `"interval"` barriers go there instead of onto the write path; `ack: "fsync"` is unaffected and
+   * still fsyncs inline before the caller is answered.
+   */
+  fsyncSweep?: FsyncSweep | null
   /** P5: file a committed transaction after the client is answered, for `ack: "local"`. */
   deferAppend?: boolean
   /**
@@ -559,6 +566,7 @@ export class Tenant {
       ...(options.segmentBytes !== undefined ? { segmentBytes: options.segmentBytes } : {}),
       fsync: options.logFsync ?? "interval",
       ...(options.compressLog !== undefined ? { compress: options.compressLog } : {}),
+      ...(options.fsyncSweep ? { sweep: options.fsyncSweep } : {}),
     })
 
     try {
@@ -1755,6 +1763,7 @@ export class Tenant {
       ...(this.#options.compressLog !== undefined
         ? { compress: this.#options.compressLog }
         : {}),
+      ...(this.#options.fsyncSweep ? { sweep: this.#options.fsyncSweep } : {}),
     })
   }
 

@@ -285,6 +285,7 @@ export class ServerRuntime {
         maxQueuedWriteBytes: options.config.limits.maxQueuedWriteBytes,
         queueWaitMs: options.config.limits.queueWaitMs,
         maxPinnedPerPrincipal: options.config.limits.maxPinnedPerPrincipal,
+        fsyncSweep: options.config.durability.fsyncSweep,
         applyMechanism: options.config.replication.apply,
         applyBusyMs: options.config.replication.applyBusyMs,
         // L3: on a worker, `maxOpen` here is this shard's *share* of the node's budget and the

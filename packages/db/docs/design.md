@@ -414,6 +414,12 @@ fenced on reconnect.
 - Replicas: snapshot-consistent at some txid; never torn; lag is typically < 1 ms on LAN.
 - **Read-your-writes**: every response carries `BunQL-Txid`. Send `BunQL-Min-Txid` (or SDK does
   it automatically) and a replica waits up to `waitMs` (default 2000) or forwards to primary.
+- **The barriers themselves** are issued inline, on the write path, by the tenant that needs them.
+  `[durability] fsyncSweep = "shared"` (L5) moves the log's *interval* barriers — hygiene for
+  `ack: "local"`, with nobody waiting on them — onto one per-thread sweep that issues them off the
+  event loop. It is off by default: it wins at five hundred write-active databases on one thread
+  and loses at a hundred, and it is inert under `ack: "fsync"`, which must fsync before it answers.
+  `docs/performance.md` §9.
 - **Durability**: `ack: "fsync"` (**the default since 2026-09-13**; an explicit `fdatasync` of
   the WAL and the log, so it survives power loss on this node — 24.0 µs → 65.0 µs on a single-row
   write) · `"local"` (`synchronous=NORMAL`: survives a process crash, may lose the last txns on
@@ -718,6 +724,7 @@ bunql cluster status|join|leave
 [server]  port = 4321  host = "0.0.0.0"  hrana = true  tenantFromHost = false
 [data]    dir = "./data"  maxOpen = 1024  readers = 2  pageSize = 4096
 [durability] defaultAck = "fsync"  checkpointWalBytes = 4_000_000  retention = "7d"
+             fsyncSweep = "per-db"
 [realtime] ringBytes = 10_000_000  maxLiveQueries = 1000  maxRowsPerLive = 1000
 [limits]  queryTimeoutMs = 10_000  writeTimeoutMs = 30_000  txIdleTimeoutMs = 5_000  maxRows = 10_000
           maxResultBytes = 67_108_864  maxQueuedWrites = 256  maxQueuedWriteBytes = 8_388_608

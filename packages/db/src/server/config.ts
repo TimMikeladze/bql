@@ -166,6 +166,19 @@ export interface DurabilitySection {
    * `docs/p5-deferred-compression.md`.
    */
   deferAppend: boolean
+  /**
+   * How `ack: "fsync"` and the log's interval policy reach the disk (L5,
+   * `docs/l5-fsync-sweep.md`).
+   *
+   * `"per-db"` is the original behaviour: each tenant fsyncs its own log and WAL inline, on its
+   * own clock, coordinated by nothing. `"shared"` registers an intent with one per-thread sweep
+   * that walks the logs with work outstanding and fsyncs them with a concurrency of one, so the
+   * disk sees a serialised stream rather than a herd and the depth is bounded.
+   *
+   * `"per-db"` is the back-out, and which of the two is the default is a number rather than an
+   * opinion: `bench/fsync.ts` and `docs/performance.md` §9.
+   */
+  fsyncSweep: "shared" | "per-db"
 }
 
 export interface RealtimeSection {
@@ -489,6 +502,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     compress: true,
     deferAppend: true,
     snapshotIntervalMs: 60 * 60 * 1000,
+    fsyncSweep: "per-db",
   },
   realtime: {
     ringBytes: 10_000_000,

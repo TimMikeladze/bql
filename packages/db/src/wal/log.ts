@@ -23,6 +23,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
+import type { FsyncSweep } from "../durability/sweep.ts"
 import { LogGap, WalFormatError } from "./errors.ts"
 import {
   decode,
@@ -66,6 +67,14 @@ export interface TxnLogOptions {
   indexIntervalMs?: number
   /** Set false to stop writing sidecar indexes at all; opening still reads one that is there. */
   index?: boolean
+  /**
+   * L5: where the `"interval"` policy's barriers go. With a sweep attached, an append registers an
+   * intent instead of fsyncing inline, and the sweep issues the barrier on its own timer with a
+   * budget — so no write pays for another database's durability hygiene. `ack: "fsync"` is
+   * unaffected either way: it calls `flush()` directly and synchronously, because a caller must
+   * not be answered before the barrier covering its append returned.
+   */
+  sweep?: FsyncSweep | null
   /**
    * Compress record bodies with zstd. Default true. Per record and in the header, so turning it
    * off does not make what is already written unreadable — `decode` reads either.
@@ -184,11 +193,15 @@ export class TxnLog {
   readonly rescanned: string[] = []
 
   #segments: Segment[] = []
+  /** L5's shared sweep, or null for the per-database behaviour this class has always had. */
+  #sweep: FsyncSweep | null = null
   #fd: number | null = null
   #openSegment: Segment | null = null
   #lastFsyncMs = 0
   #lastIndexMs = 0
   #dirty = false
+  /** Bumped by every append, so an asynchronous barrier can tell what it actually covered. */
+  #writeSeq = 0
   #closed = false
 
   private constructor(options: TxnLogOptions) {
@@ -200,6 +213,10 @@ export class TxnLog {
     this.indexIntervalMs = options.indexIntervalMs ?? 1000
     this.writeIndex = options.index ?? true
     this.compress = options.compress ?? true
+    // Only the interval policy has anything to hand over: `"each"` must fsync on the write path by
+    // definition and `"never"` has no barriers at all.
+    this.#sweep = this.fsyncPolicy === "interval" ? (options.sweep ?? null) : null
+    this.#sweep?.register(this)
   }
 
   /**
@@ -278,6 +295,7 @@ export class TxnLog {
     segment.offsets[segment.count] = segment.bytes
     segment.newestUs = head.header.timestampUs
     this.#dirty = true
+    this.#writeSeq++
     this.#maybeFsync()
   }
 
@@ -424,6 +442,8 @@ export class TxnLog {
 
   close(): void {
     if (this.#closed) return
+    this.#sweep?.unregister(this)
+    this.#sweep = null
     this.flush()
     this.#saveIndex(this.#openSegment)
     this.#closeDescriptor()
@@ -490,7 +510,47 @@ export class TxnLog {
       this.flush()
       return
     }
+    // L5: with a sweep, the barrier leaves the write path. The interval is the sweep's, and the
+    // only thing an append does is say there is something to sync.
+    if (this.#sweep) {
+      this.#sweep.intent(this)
+      return
+    }
     if (Date.now() - this.#lastFsyncMs >= this.fsyncIntervalMs) this.flush()
+  }
+
+  /**
+   * `FsyncSweep`'s side of the contract: issue a barrier for whatever is unsynced, **off the event
+   * loop**, and say whether one was issued.
+   *
+   * Asynchronous on purpose, and it is the whole reason the sweep is worth having. A barrier costs
+   * the same either way; what differs is who waits for it. `fsyncSync` stops the thread, so
+   * hygiene for one database is latency for every other database on it — measured, a synchronous
+   * sweep is *worse* than the inline behaviour it replaces, because it concentrates the blocking
+   * into a burst instead of spreading it. `fs.promises.fsync` costs about 25% more per call and
+   * costs the event loop nothing (`docs/l5-fsync-sweep.md` §3).
+   *
+   * An append that lands while the barrier is in flight is not covered by it, so the dirty flag is
+   * cleared only when nothing was written since it was issued — `#writeSeq` is what says so.
+   */
+  async sweepFlush(): Promise<boolean> {
+    if (this.#closed || !this.#dirty || this.#fd === null) return false
+    const fd = this.#fd
+    const issuedAt = this.#writeSeq
+    // The callback form, not `fs.promises`: `node:fs/promises` has no raw `fsync(fd)` — only one on
+    // a `FileHandle`, which this class does not hold — and the callback goes to the same thread
+    // pool. Wrapped here rather than with `promisify` so the module stays dependency-free.
+    await new Promise<void>((resolve, reject) => {
+      fs.fsync(fd, (err) => (err ? reject(err) : resolve()))
+    })
+    if (this.#closed) return true
+    if (this.#writeSeq === issuedAt) this.#dirty = false
+    this.#lastFsyncMs = Date.now()
+    if (this.#lastFsyncMs - this.#lastIndexMs >= this.indexIntervalMs) {
+      this.#lastIndexMs = this.#lastFsyncMs
+      this.#saveIndex(this.#openSegment)
+    }
+    return true
   }
 
   #rebuild(): void {

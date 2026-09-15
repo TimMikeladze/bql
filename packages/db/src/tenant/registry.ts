@@ -16,6 +16,7 @@ import path from "node:path"
 import { BunQLError } from "../server/errors.ts"
 import { Database } from "../sqlite/index.ts"
 import { type ApplyMechanism, computeFull } from "../wal/index.ts"
+import { FsyncSweep } from "../durability/index.ts"
 import {
   type AckWithoutReplicas,
   Catalog,
@@ -66,6 +67,8 @@ export interface RegistryOptions {
    * Past it, `429 PIN_LIMIT`.
    */
   maxPinnedPerPrincipal?: number
+  /** `[durability] fsyncSweep`: `"shared"` puts every tenant's fsync on one sweep (L5). */
+  fsyncSweep?: "shared" | "per-db"
   /** Write-queue ceilings, one tenant at a time; see `TenantOptions` (L2). */
   maxQueuedWrites?: number
   maxQueuedWriteBytes?: number
@@ -140,6 +143,8 @@ export interface RegistryStats {
   pinned: number
   /** Opens refused because every open tenant was pinned (L4). */
   openRefused: number
+  /** L5's sweep, absent under `"per-db"`. */
+  fsync: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
   /** Per-tenant stats for everything currently open. */
   openTenants: TenantStats[]
 }
@@ -246,6 +251,8 @@ export class TenantRegistry {
   readonly maxOpen: number
   /** Distinct databases one principal may pin; see `pin` (L4). */
   readonly maxPinnedPerPrincipal: number
+  /** This thread's shared fsync sweep, or null under `[durability] fsyncSweep = "per-db"` (L5). */
+  readonly fsyncSweep: FsyncSweep | null
 
   #options: RegistryOptions
   /** Insertion order is recency: the oldest entry is the first eviction candidate. */
@@ -281,6 +288,10 @@ export class TenantRegistry {
     this.catalog = catalog
     this.maxOpen = options.maxOpen ?? 1024
     this.maxPinnedPerPrincipal = Math.max(1, options.maxPinnedPerPrincipal ?? 64)
+    // L5: one sweep per registry, which on a server is one per thread. Created only when asked
+    // for, so `"per-db"` — the default, and the back-out — allocates nothing and behaves exactly
+    // as it did before L5.
+    this.fsyncSweep = options.fsyncSweep === "shared" ? new FsyncSweep() : null
     this.#options = options
   }
 
@@ -679,6 +690,14 @@ export class TenantRegistry {
       writeQueueDepth,
       pinned: this.#pinned.size,
       openRefused: this.#openRefused,
+      fsync: this.fsyncSweep
+        ? {
+            total: this.fsyncSweep.fsyncs,
+            lastDurationUs: this.fsyncSweep.lastDurationUs,
+            pending: this.fsyncSweep.pending,
+            deferred: this.fsyncSweep.deferred,
+          }
+        : null,
       openTenants,
     }
   }
@@ -714,6 +733,8 @@ export class TenantRegistry {
     }
     this.#open.clear()
     this.#ackOverrides.clear()
+    // After the tenants, so a log that still had unsynced bytes when it closed has already gone.
+    this.fsyncSweep?.close()
     this.catalog.close()
   }
 
@@ -776,6 +797,7 @@ export class TenantRegistry {
       ...(this.#options.queueWaitMs !== undefined
         ? { queueWaitMs: this.#options.queueWaitMs }
         : {}),
+      ...(this.fsyncSweep ? { fsyncSweep: this.fsyncSweep } : {}),
       ...(this.#options.applyMechanism !== undefined
         ? { applyMechanism: this.#options.applyMechanism }
         : {}),

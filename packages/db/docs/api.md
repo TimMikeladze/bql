@@ -1753,6 +1753,7 @@ the canonical one wins when both are set.
 | `[limits] maxQueuedWriteBytes` | `8388608` | `BUNQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
 | `[limits] queueWaitMs` | `5000` | `BUNQL_LIMITS_QUEUE_WAIT_MS` | — |
 | `[limits] maxPinnedPerPrincipal` | `64` | `BUNQL_LIMITS_MAX_PINNED_PER_PRINCIPAL` | — |
+| `[durability] fsyncSweep` | `"per-db"` | `BUNQL_DURABILITY_FSYNC_SWEEP` | — |
 | `[limits] maxReadTx` | `16` | `BUNQL_LIMITS_MAX_READ_TX` | — |
 | `[limits] readTxTimeoutMs` | `30000` | `BUNQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
 | `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |
@@ -1923,6 +1924,12 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **A forwarded write is not retried.** A replica sends it once. `FORWARD_TIMEOUT` and a socket
   that drops mid-flight both mean "this may or may not have committed on the primary" — read the
   txid back rather than sending it again.
+- **`[durability] fsyncSweep` is off, and the number is why.** `"shared"` puts every log's
+  `"interval"` barrier on one per-thread sweep, off the event loop. It wins at five hundred
+  write-active databases on one thread — 23% more throughput, a fifth of the barriers, p99 40.6 ms
+  to 16.9 — and loses at a hundred. It is also **inert under the default `ack: "fsync"`**, which
+  flushes the log inline before answering, so the sweep finds nothing to do. Turn it on for a node
+  running `ack: "local"` with hundreds of write-active databases; `docs/performance.md` §9.
 - **A subscription pins its database open, and a principal may pin at most
   `[limits] maxPinnedPerPrincipal` of them.** Past that, `429 PIN_LIMIT` — raised before the
   subscription exists, so a refusal leaves nothing behind. Several subscriptions to the *same*

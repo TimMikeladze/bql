@@ -3,7 +3,7 @@
 //
 //   bun run bench                 # everything
 //   bun run bench --quick         # fewer rounds, for a laptop on battery
-//   bun run bench --only http     # one of driver | wal | tenant | http | replication | storage
+//   bun run bench --only http     # driver | wal | tenant | http | replication | storage | fsync
 //
 // `bench/workers.ts` and `bench/profile.ts` are deliberately not in this set: both measure a
 // configuration the node does not run by default (`[server] workers`, and attribution for
@@ -51,6 +51,14 @@ const BENCHES: BenchSpec[] = [
     args: QUICK ? ["100", "500"] : ["300", "2000"],
   },
   { name: "storage", file: "storage.ts", args: QUICK ? ["500"] : ["2000"] },
+  // L5's instrument. The only benchmark here that runs *many* databases at once, which is the
+  // whole point of it — and the reason its ladder is short by default: 500 tenants is 500 open
+  // SQLite connections and three minutes of disk.
+  {
+    name: "fsync",
+    file: "fsync.ts",
+    args: QUICK ? ["40", "--tenants", "1,10,100"] : ["60", "--tenants", "1,10,100,500"],
+  },
 ]
 
 /** One row of design §10. `direction` says which side of the budget is good. */

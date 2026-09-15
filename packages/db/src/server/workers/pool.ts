@@ -518,6 +518,7 @@ export class WorkerPool {
       writeQueueDepth: 0,
       pinned: 0,
       openRefused: 0,
+      fsync: null,
     }
     let replication: { lagTxid: number; records: number } | null = null
     let storage: StorageMetrics | null = null
@@ -533,6 +534,21 @@ export class WorkerPool {
               registry.writeQueueDepth += reply.registry.writeQueueDepth
               registry.pinned += reply.registry.pinned
               registry.openRefused += reply.registry.openRefused
+              // One sweep per thread, so the node's numbers are the sum of its threads' — except
+              // the pass duration, which is a duration and takes the worst.
+              if (reply.registry.fsync) {
+                const seen = reply.registry.fsync
+                const merged = (registry.fsync ??= {
+                  total: 0,
+                  lastDurationUs: 0,
+                  pending: 0,
+                  deferred: 0,
+                })
+                merged.total += seen.total
+                merged.pending += seen.pending
+                merged.deferred += seen.deferred
+                merged.lastDurationUs = Math.max(merged.lastDurationUs, seen.lastDurationUs)
+              }
               registry.tenants = Math.max(registry.tenants, reply.registry.tenants)
               if (reply.replication) {
                 replication ??= { lagTxid: 0, records: 0 }
@@ -849,6 +865,8 @@ export interface RegistryShare {
   /** Pinned tenants on this thread, and opens it refused because they all were (L4). */
   pinned: number
   openRefused: number
+  /** This thread's fsync sweep, when it has one. Null on every thread means the node has none. */
+  fsync: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
 }
 
 /** One worker's answer to a `metrics` ask. */
