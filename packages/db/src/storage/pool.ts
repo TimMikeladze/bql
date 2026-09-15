@@ -9,13 +9,20 @@
 // shipper's own async drain, and `close()` is the only thing that waits.
 
 import type { Tenant, TenantRegistry } from "../tenant/index.ts"
+import { UploadBudget } from "./budget.ts"
 import { Shipper, type ShipperOptions, type ShipperState } from "./shipper.ts"
 import type { S3Store } from "./s3.ts"
 
-export interface ShipperPoolOptions extends Omit<ShipperOptions, "db"> {
+export interface ShipperPoolOptions extends Omit<ShipperOptions, "db" | "budget"> {
   registry: TenantRegistry
   /** How often closed shippers are reaped and behind databases reopened. Default `shipIntervalMs`. */
   sweepIntervalMs?: number
+  /**
+   * L6: S3 requests this pool has in flight at once, across every shipper on the thread. Default 8.
+   * Without it, a thousand shipping databases are a thousand upload chains competing for one
+   * thread's sockets and for the bucket's own rate limits.
+   */
+  maxConcurrentUploads?: number
 }
 
 export class ShipperPool {
@@ -24,6 +31,8 @@ export class ShipperPool {
   readonly sweepIntervalMs: number
 
   #options: ShipperPoolOptions
+  /** L6: one budget for the thread, shared by every shipper this pool creates. */
+  readonly budget: UploadBudget
   #shippers = new Map<string, Shipper>()
   /** Databases whose tenant closed while the bucket was still behind. */
   #owed = new Set<string>()
@@ -37,6 +46,7 @@ export class ShipperPool {
     this.store = options.store
     this.prefix = options.prefix
     this.sweepIntervalMs = options.sweepIntervalMs ?? options.shipIntervalMs ?? 1000
+    this.budget = new UploadBudget(options.maxConcurrentUploads ?? 8)
   }
 
   /** Starts the sweep. Separate from the constructor so a test can drive the pool by hand. */
@@ -68,8 +78,13 @@ export class ShipperPool {
     this.#skip.delete(tenant.name)
     let shipper = this.#shippers.get(tenant.name)
     if (!shipper) {
-      const { registry: _registry, sweepIntervalMs: _sweep, ...rest } = this.#options
-      shipper = new Shipper({ ...rest, db: tenant.name })
+      const {
+        registry: _registry,
+        sweepIntervalMs: _sweep,
+        maxConcurrentUploads: _permits,
+        ...rest
+      } = this.#options
+      shipper = new Shipper({ ...rest, db: tenant.name, budget: this.budget })
       this.#shippers.set(tenant.name, shipper)
     }
     shipper.bind(tenant)
@@ -146,11 +161,24 @@ export class ShipperPool {
    * `totals()` plus the databases whose bucket is behind — what `/metrics` renders, in one call so
    * that a worker can post it across the channel without importing the route table (C4e).
    */
-  metrics(): { shippedTxid: number; pendingRecords: number; errors: number; bytes: number; behind: number } {
+  metrics(): {
+    shippedTxid: number
+    pendingRecords: number
+    errors: number
+    bytes: number
+    behind: number
+    uploadInflight: number
+    uploadWaiting: number
+  } {
     const totals = this.totals()
     let behind = 0
     for (const shipper of this.#shippers.values()) if (shipper.behind) behind++
-    return { ...totals, behind }
+    return {
+      ...totals,
+      behind,
+      uploadInflight: this.budget.inflight,
+      uploadWaiting: this.budget.waiting,
+    }
   }
 
   async close(): Promise<void> {

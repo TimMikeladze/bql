@@ -1381,7 +1381,7 @@ function replicationMetrics(runtime: ServerRuntime): ReplicationMetrics | null {
   }
 }
 
-/** The four `bunql_s3_*` series, or null on a node with no bucket configured. */
+/** The `bunql_s3_*` and `bunql_upload_*` series, or null on a node with no bucket configured. */
 function storageMetrics(runtime: ServerRuntime): StorageMetrics | null {
   const pool = runtime.storage
   if (!pool) return null
@@ -1391,6 +1391,8 @@ function storageMetrics(runtime: ServerRuntime): StorageMetrics | null {
     pendingRecords: totals.pendingRecords,
     errors: totals.errors,
     bytes: totals.bytes,
+    uploadInflight: pool.budget.inflight,
+    uploadWaiting: pool.budget.waiting,
     behind: [...pool.shippers.values()].filter((one) => one.behind).length,
   }
 }

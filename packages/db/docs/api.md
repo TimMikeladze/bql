@@ -1804,6 +1804,8 @@ the canonical one wins when both are set.
 | `[s3] snapshotEveryBytes` | `67108864` (0 disables) | `BUNQL_S3_SNAPSHOT_EVERY_BYTES` | — |
 | `[s3] retention` | `"30d"` (`"0"` keeps everything) | `BUNQL_S3_RETENTION` | — |
 | `[s3] concurrency` | `4` | `BUNQL_S3_CONCURRENCY` | — |
+| `[s3] maxConcurrentUploads` | `0` (follow `concurrency`) | `BUNQL_S3_MAX_CONCURRENT_UPLOADS` | — |
+| `[s3] uploadWaitMs` | `5000` | `BUNQL_S3_UPLOAD_WAIT_MS` | — |
 | `[s3] maxPendingBytes` | `67108864` | `BUNQL_S3_MAX_PENDING_BYTES` | — |
 | `[s3] retries` | `4` | `BUNQL_S3_RETRIES` | — |
 | `[api] enabled` | `true` | `BUNQL_API_ENABLED` | — |
@@ -1924,6 +1926,12 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **A forwarded write is not retried.** A replica sends it once. `FORWARD_TIMEOUT` and a socket
   that drops mid-flight both mean "this may or may not have committed on the primary" — read the
   txid back rather than sending it again.
+- **Uploads are bounded per node and queued by how far behind they are.** `[s3]
+  maxConcurrentUploads` (following `[s3] concurrency`, 4) is the ceiling on S3 uploads in flight
+  across every database on a thread; a shipper that waits longer than `[s3] uploadWaitMs` gives up
+  and re-arms rather than queueing a second drain. The queue is ordered by the caller's shipped
+  txid, so a database that has been behind for an hour is served before one that committed a moment
+  ago. `bunql_upload_inflight` and `bunql_upload_waiting` report it. `docs/l6-upload-budget.md`.
 - **`[durability] fsyncSweep` is off, and the number is why.** `"shared"` puts every log's
   `"interval"` barrier on one per-thread sweep, off the event loop. It wins at five hundred
   write-active databases on one thread — 23% more throughput, a fifth of the barriers, p99 40.6 ms

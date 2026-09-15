@@ -558,12 +558,24 @@ export class WorkerPool {
               // The shards hold disjoint databases, so this is the same merge a single-threaded
               // node already does over its own: the highest position, and the rest added up.
               if (reply.storage) {
-                storage ??= { shippedTxid: 0, pendingRecords: 0, errors: 0, bytes: 0, behind: 0 }
-                storage.shippedTxid = Math.max(storage.shippedTxid, reply.storage.shippedTxid)
-                storage.pendingRecords += reply.storage.pendingRecords
-                storage.errors += reply.storage.errors
-                storage.bytes += reply.storage.bytes
-                storage.behind += reply.storage.behind
+                const seen = reply.storage
+                const merged = (storage ??= {
+                  shippedTxid: 0,
+                  pendingRecords: 0,
+                  errors: 0,
+                  bytes: 0,
+                  behind: 0,
+                  uploadInflight: 0,
+                  uploadWaiting: 0,
+                })
+                merged.shippedTxid = Math.max(merged.shippedTxid, seen.shippedTxid)
+                merged.pendingRecords += seen.pendingRecords
+                merged.errors += seen.errors
+                merged.bytes += seen.bytes
+                merged.behind += seen.behind
+                // L6: one budget per thread, and the shards are disjoint, so both sum.
+                merged.uploadInflight += seen.uploadInflight
+                merged.uploadWaiting += seen.uploadWaiting
               }
               resolve()
             })

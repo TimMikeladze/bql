@@ -1504,6 +1504,11 @@ function buildShipperPool(
     snapshotIntervalMs: s3.snapshotIntervalMs,
     snapshotEveryBytes: s3.snapshotEveryBytes,
     maxPendingBytes: s3.maxPendingBytes,
+    // L6: 0 means "follow `[s3] concurrency`", which is the honest default — the store's own gate
+    // is the node's real ceiling on requests and a larger budget here would only move the queueing
+    // into it, where the priority ordering is lost.
+    maxConcurrentUploads: s3.maxConcurrentUploads || s3.concurrency,
+    uploadWaitMs: s3.uploadWaitMs,
     maxBatchBytes: config.durability.segmentBytes,
     retentionMs: parseRetentionMs(s3.retention),
     onError,

@@ -38,6 +38,9 @@ export interface StorageMetrics {
   bytes: number
   /** Databases whose bucket is behind their tenant right now. The one to alert on. */
   behind: number
+  /** L6: S3 uploads in flight, and shippers queued for a permit. */
+  uploadInflight: number
+  uploadWaiting: number
 }
 
 export interface MetricsSnapshot {
@@ -493,6 +496,16 @@ export class Metrics {
         storage.errors,
       )
       counter("bunql_s3_bytes_total", "Bytes uploaded to the bucket.", storage.bytes)
+      gauge(
+        "bunql_upload_inflight",
+        "S3 uploads in flight across every shipper on this node.",
+        storage.uploadInflight,
+      )
+      gauge(
+        "bunql_upload_waiting",
+        "Shippers queued for an upload permit. Non-zero under load is the budget doing its job.",
+        storage.uploadWaiting,
+      )
     }
 
     return `${out.join("\n")}\n`

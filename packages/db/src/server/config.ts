@@ -393,8 +393,23 @@ export interface S3Section {
   snapshotEveryBytes: number
   /** Delete bucket objects older than this, never one a retained snapshot replays from. */
   retention: string
-  /** Requests in flight at once, per node. */
+  /** Requests in flight at once, per node — reads and writes alike, in `S3Store` itself. */
   concurrency: number
+  /**
+   * L6: **uploads** in flight at once across every shipper on a thread, and the queue they wait
+   * in. `concurrency` above has bounded requests since R3, but first-come-first-served and with no
+   * ceiling on the wait, so a database that had been behind for an hour queued behind one that
+   * committed a moment ago. This queue is ordered by how far behind the caller is, gives up after
+   * `uploadWaitMs` so the shipper re-arms rather than growing a second queue, and is reported as
+   * `bunql_upload_inflight` and `bunql_upload_waiting`.
+   *
+   * Defaults to `concurrency`, because the store's own gate is the node's real ceiling and a
+   * larger number here would only move the queueing into it, where the ordering is lost.
+   * `docs/l6-upload-budget.md`.
+   */
+  maxConcurrentUploads: number
+  /** How long one upload waits for a permit before its drain gives up and re-arms. Default 5000. */
+  uploadWaitMs: number
   /** Queue ceiling before the shipper drops its buffer and reads from the log instead. */
   maxPendingBytes: number
   /** Attempts past the first for a retryable bucket failure. */
@@ -585,6 +600,8 @@ export const DEFAULT_CONFIG: ServerConfig = {
     retention: "30d",
     concurrency: 4,
     maxPendingBytes: 64 * 1024 * 1024,
+    maxConcurrentUploads: 0,
+    uploadWaitMs: 5000,
     retries: 4,
   },
   api: {

@@ -730,6 +730,7 @@ bunql cluster status|join|leave
           maxResultBytes = 67_108_864  maxQueuedWrites = 256  maxQueuedWriteBytes = 8_388_608
           queueWaitMs = 5_000  maxPinnedPerPrincipal = 64
 [s3]      bucket = "backups"  endpoint = "https://…"  prefix = "bunql/"  shipIntervalMs = 1000
+          concurrency = 4  maxConcurrentUploads = 0  uploadWaitMs = 5_000
 [replication] role = "primary"        # or "replica"; primary = "wss://…"
 [cluster] enabled = false  rf = 2  peers = ["…"]  leaseTtlMs = 3000
 [auth]    adminKey = "${BUNQL_ADMIN_KEY}"  jwtKey = "${BUNQL_JWT_ED25519}"

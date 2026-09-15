@@ -37,6 +37,7 @@ export {
   snapshotPrefix,
   TXID_WIDTH,
 } from "./layout.ts"
+export { UploadBudget, UploadBudgetTimeout } from "./budget.ts"
 export { ShipperPool, type ShipperPoolOptions } from "./pool.ts"
 export {
   type BucketRestoreOptions,

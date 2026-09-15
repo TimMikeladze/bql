@@ -41,6 +41,7 @@ import {
   snapshotKey,
   snapshotPrefix,
 } from "./layout.ts"
+import type { UploadBudget } from "./budget.ts"
 import { type IndexChunkRef, loadIndex } from "./restore.ts"
 import { S3Store } from "./s3.ts"
 
@@ -94,6 +95,18 @@ export interface ShipperOptions {
   /** Run the retention sweep at most this often. Default 60 s. */
   retentionSweepMs?: number
   onError?: (err: unknown) => void
+  /**
+   * L6: the thread's shared upload budget. A permit is taken around each request and released as
+   * soon as it returns, so a shipper that is only encoding holds none. Absent — as in a test that
+   * drives one shipper by hand — every upload goes straight through.
+   */
+  budget?: UploadBudget | null
+  /**
+   * How long one upload waits for a permit before the drain gives up and re-arms. Default 5000.
+   * Giving up is the point: a shipper that queued instead would grow a second queue behind the
+   * budget's own, which is the failure this milestone exists to stop.
+   */
+  uploadWaitMs?: number
 }
 
 /** What `/v1/db/:db/backup`, `/v1/db/:db/replication` and `/metrics` report. */
@@ -157,6 +170,8 @@ export class Shipper {
 
   #timer: ReturnType<typeof setTimeout> | null = null
   #draining: Promise<void> | null = null
+  readonly #budget: UploadBudget | null
+  readonly #uploadWaitMs: number
   #again = false
   #closed = false
 
@@ -184,6 +199,8 @@ export class Shipper {
     this.retentionMs = options.retentionMs ?? 30 * 86_400_000
     this.retentionSweepMs = options.retentionSweepMs ?? 60_000
     this.#onError = options.onError ?? (() => {})
+    this.#budget = options.budget ?? null
+    this.#uploadWaitMs = options.uploadWaitMs ?? 5000
   }
 
   get tenant(): Tenant | null {
@@ -406,6 +423,21 @@ export class Shipper {
     }
   }
 
+  /**
+   * One request against the bucket, under the thread's upload budget (L6).
+   *
+   * The priority is this database's `shippedTxid`: the lower it is, the further behind the bucket
+   * is, and the sooner it gets a permit. A database that is not behind at all passes 0 and is
+   * served first, which is right — it has one small manifest write to do and then it is out of the
+   * queue.
+   */
+  #upload<T>(fn: () => Promise<T>): Promise<T> {
+    const budget = this.#budget
+    if (!budget) return fn()
+    const priority = this.#behind ? Number(this.#shippedTxid) : 0
+    return budget.run(priority, this.#uploadWaitMs, fn)
+  }
+
   // ── the pieces of a drain ────────────────────────────────────────────────────────────────────
 
   async #load(tenant: Tenant): Promise<Manifest> {
@@ -512,7 +544,7 @@ export class Shipper {
     const plain = new Uint8Array(fs.readFileSync(ref.path))
     const body = new Uint8Array(Bun.zstdCompressSync(plain, { level: 3 }))
     const key = snapshotKey(this.prefix, this.db, txid)
-    await this.store.put(key, body, "application/zstd")
+    await this.#upload(() => this.store.put(key, body, "application/zstd"))
     this.#bytesShipped += body.byteLength
 
     const entry: SnapshotEntry = {
@@ -551,7 +583,7 @@ export class Shipper {
 
       const key = segmentKey(this.prefix, this.db, batch.startTxid, batch.endTxid)
       const body = new Uint8Array(Bun.zstdCompressSync(batch.plain, { level: 3 }))
-      await this.store.put(key, body, "application/zstd")
+      await this.#upload(() => this.store.put(key, body, "application/zstd"))
       this.#bytesShipped += body.byteLength
       this.#bytesSinceSnapshot += batch.plain.byteLength
 
@@ -701,7 +733,7 @@ export class Shipper {
   /** The manifest body: everything, with only the unfrozen tail of the segment inventory. */
   async #putManifest(manifest: Manifest): Promise<void> {
     const body = encodeManifest({ ...manifest, segments: this.#tailOf(manifest.segments) })
-    await this.store.put(manifestKey(this.prefix, this.db), body, "application/json")
+    await this.#upload(() => this.store.put(manifestKey(this.prefix, this.db), body, "application/json"))
     this.#bytesShipped += body.length
   }
 
@@ -733,7 +765,7 @@ export class Shipper {
         BigInt(last.endTxid),
       )
       const body = encodeIndexChunk(this.db, take)
-      await this.store.put(key, body, "application/json")
+      await this.#upload(() => this.store.put(key, body, "application/json"))
       this.#bytesShipped += body.length
       this.#chunks.push({ key, entries: take })
       for (const entry of take) this.#frozen.add(entry.key)
@@ -787,7 +819,7 @@ export class Shipper {
     manifest.shippedTxid = narrowed.shippedTxid
     manifest.generations = narrowed.generations
     await this.#putManifest(narrowed)
-    await this.store.deleteMany([...doomed, ...superseded])
+    await this.#upload(() => this.store.deleteMany([...doomed, ...superseded]))
   }
 
   /**
@@ -818,7 +850,7 @@ export class Shipper {
         BigInt(last.endTxid),
       )
       const body = encodeIndexChunk(this.db, survivors)
-      await this.store.put(key, body, "application/json")
+      await this.#upload(() => this.store.put(key, body, "application/json"))
       this.#bytesShipped += body.length
       next.push({ key, entries: survivors })
     }
@@ -867,7 +899,7 @@ export class Shipper {
       if (range === null || range.endTxid > this.#shippedTxid) continue
       strays.push(object.key)
     }
-    if (strays.length > 0) await this.store.deleteMany(strays)
+    if (strays.length > 0) await this.#upload(() => this.store.deleteMany(strays))
     return strays
   }
 }
