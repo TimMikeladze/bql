@@ -61,6 +61,8 @@ export interface MetricsSnapshot {
   ackTimeouts: number
   /** Interactive transactions that had to wait for the writer before they could begin. */
   txQueued: number
+  /** Largest result footprint any statement has accounted for, in bytes. */
+  resultBytesMax: number
   openTenants: number
   tenants: number
   evictions: number
@@ -81,6 +83,7 @@ export interface MetricsState {
   forwarded: number
   ackTimeouts: number
   txQueued: number
+  resultBytesMax: number
   errors: number
   wsConnections: number
   wsOpen: number
@@ -107,6 +110,7 @@ export class Metrics {
   #forwarded = 0
   #ackTimeouts = 0
   #txQueued = 0
+  #resultBytesMax = 0
   #errors = 0
   #wsConnections = 0
   #wsOpen = 0
@@ -138,6 +142,7 @@ export class Metrics {
       forwarded: this.#forwarded,
       ackTimeouts: this.#ackTimeouts,
       txQueued: this.#txQueued,
+      resultBytesMax: this.#resultBytesMax,
       errors: this.#errors,
       wsConnections: this.#wsConnections,
       wsOpen: this.#wsOpen,
@@ -168,6 +173,9 @@ export class Metrics {
     this.#forwarded += state.forwarded
     this.#ackTimeouts += state.ackTimeouts
     this.#txQueued += state.txQueued
+    // A high-water mark, so the merge across disjoint shards is a max rather than a sum: the
+    // largest result any worker built is the largest result this node built.
+    if (state.resultBytesMax > this.#resultBytesMax) this.#resultBytesMax = state.resultBytesMax
     this.#errors += state.errors
     this.#wsConnections += state.wsConnections
     this.#wsOpen += state.wsOpen
@@ -191,10 +199,11 @@ export class Metrics {
     this.#buckets[i] = (this.#buckets[i] as number) + 1
   }
 
-  statement(kind: "read" | "write", vmSteps: number): void {
+  statement(kind: "read" | "write", vmSteps: number, resultBytes = 0): void {
     if (kind === "write") this.#writes++
     else this.#queries++
     this.#vmSteps += vmSteps
+    if (resultBytes > this.#resultBytesMax) this.#resultBytesMax = resultBytes
   }
 
   batch(): void {
@@ -275,6 +284,7 @@ export class Metrics {
       forwarded: this.#forwarded,
       ackTimeouts: this.#ackTimeouts,
       txQueued: this.#txQueued,
+      resultBytesMax: this.#resultBytesMax,
       openTenants: registry.open,
       tenants: registry.tenants,
       evictions: registry.evictions,
@@ -355,6 +365,11 @@ export class Metrics {
     )
     counter("bunql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
 
+    gauge(
+      "bunql_result_bytes_max",
+      "Largest result footprint any statement has built, against [limits] maxResultBytes.",
+      this.#resultBytesMax,
+    )
     gauge("bunql_open_tenants", "Databases currently open.", registry.open)
     gauge("bunql_tenants", "Databases in the catalog.", registry.tenants)
     gauge("bunql_ws_connections", "WebSocket connections open.", this.#wsOpen)

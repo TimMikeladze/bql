@@ -175,6 +175,9 @@ export type BunQLErrorCode =
   | "DB_NOT_FOUND"
   | "NOT_FOUND"
   | "QUERY_TIMEOUT"
+  | "TOO_MANY_ROWS"
+  /** One result reached `[limits] maxResultBytes` while it was being built. */
+  | "RESULT_TOO_LARGE"
   | "TXID_NOT_AVAILABLE"
   | "NOT_PRIMARY"
   | "RESET_REQUIRED"

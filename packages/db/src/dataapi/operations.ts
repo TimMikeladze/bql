@@ -81,6 +81,7 @@ const READ_ERRORS = [
   "DB_NOT_FOUND",
   "QUERY_TIMEOUT",
   "TOO_MANY_ROWS",
+  "RESULT_TOO_LARGE",
   "BUSY",
 ]
 

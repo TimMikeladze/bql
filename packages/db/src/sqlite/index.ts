@@ -17,8 +17,8 @@ export type {
   WalHook,
 } from "./database.ts"
 export { Statement } from "./statement.ts"
-export type { Row, RunResult } from "./statement.ts"
-export { codeName, FeatureUnavailableError, SqliteError } from "./errors.ts"
+export type { ResultBudget, Row, RunResult } from "./statement.ts"
+export { codeName, FeatureUnavailableError, ResultLimitError, SqliteError } from "./errors.ts"
 export { candidatePaths, loadFrom, sqlite } from "./lib.ts"
 export type { SqliteFeatures, SqliteLibrary, WalsumSymbols } from "./lib.ts"
 export type { BindArg, BindParams, BindValue, NamedParams, SqliteValue } from "./values.ts"

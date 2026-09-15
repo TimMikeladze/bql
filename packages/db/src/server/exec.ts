@@ -1,7 +1,8 @@
 // Invariant: no statement steps until three things are true — a policy the token signed for is on
-// its connection, a deadline is armed, and a row cap is known. That order is the whole safety
+// its connection, a deadline is armed, and a result budget is armed. That order is the whole safety
 // story of the request path, and it is written once here so HTTP, WebSocket and the baton routes
-// cannot each get it subtly wrong.
+// cannot each get it subtly wrong. The budget is a row *and* byte ceiling enforced inside the step
+// loop (L1), which is what makes it a bound on memory rather than a report about it.
 //
 // Statement classification is `sqlite3_stmt_readonly`, not a regular expression over the SQL. A
 // read-only statement runs on a pooled reader; anything else goes to the tenant's single writer
@@ -33,6 +34,8 @@ import type { ServerRuntime } from "./runtime.ts"
 export interface ResolvedOptions {
   rows: RowsMode
   maxRows: number
+  /** Node ceiling on one result's footprint, `[limits] maxResultBytes`. Not client-settable. */
+  maxResultBytes: number
   /** Deadline for a statement that turns out to be read-only. */
   readTimeoutMs: number
   /** Deadline for a statement that writes, and for a transaction as a whole. */
@@ -95,6 +98,7 @@ export function resolveOptions(
   return {
     rows,
     maxRows: Math.min(maxRows, limits.maxRows),
+    maxResultBytes: limits.maxResultBytes,
     readTimeoutMs: Math.min(timeoutMs ?? limits.queryTimeoutMs, limits.queryTimeoutMs),
     writeTimeoutMs: Math.min(timeoutMs ?? limits.writeTimeoutMs, limits.writeTimeoutMs),
     ack,
@@ -122,14 +126,21 @@ interface Stepped {
   vmSteps: number
   rowsAffected: number
   lastInsertRowid: number | bigint | null
+  /** What the bounded step loop accounted for, reported as `bunql_result_bytes_max`. */
+  resultBytes: number
 }
 
 const isZero = (v: number | bigint): boolean => v === 0 || v === 0n
 
 /**
- * Binds, arms the deadline and steps. `values()` materialises the result, so `maxRows` is checked
- * once it is known; the deadline and the per-connection `sqlite3_limit` set are what bound the
- * work before that point.
+ * Binds, arms the deadline and the result budget, and steps.
+ *
+ * L1: the budget is what makes `maxRows` a memory bound rather than a report. It used to be
+ * checked on `rows.length` once `values()` had materialised everything, so a scan returning twenty
+ * million rows inside `queryTimeoutMs` allocated twenty million arrays before anything looked at
+ * the count — and the OOM took the process, every shard of it, not the tenant. The ceiling is now
+ * armed on the statement and refused at the row that would cross it, so the overshoot is one row.
+ * `docs/l1-result-budget.md`.
  *
  * `lastInsertRowid` is the connection's counter, not the statement's, so the counter alone cannot
  * say whether *this* statement set it. The statement says whether it could: `stmt.inserts` is
@@ -143,7 +154,12 @@ const isZero = (v: number | bigint): boolean => v === 0 || v === 0n
  * still reads it. A statement that calls `last_insert_rowid()` itself takes the counter as an
  * input and is never zeroed under it; there the older "did the number move" test is all there is.
  */
-function step(db: Database, request: StatementRequest, timeoutMs: number, maxRows: number): Stepped {
+function step(
+  db: Database,
+  request: StatementRequest,
+  timeoutMs: number,
+  options: ResolvedOptions,
+): Stepped {
   const stmt = db.prepare(request.sql)
   const params = decodeArgs(request.args as Args | undefined)
   const writes = !stmt.readonly
@@ -153,6 +169,7 @@ function step(db: Database, request: StatementRequest, timeoutMs: number, maxRow
   if (marking && !isZero(rowidBefore)) db.setLastInsertRowid(0)
   stmt.vmSteps(true)
   db.deadline(timeoutMs)
+  stmt.budget({ maxRows: options.maxRows, maxBytes: options.maxResultBytes })
   let rows: SqliteValue[][]
   try {
     rows = stmt.values(...params)
@@ -164,7 +181,7 @@ function step(db: Database, request: StatementRequest, timeoutMs: number, maxRow
   } finally {
     db.deadline(null)
   }
-  if (rows.length > maxRows) throw BunQLError.tooManyRows(maxRows)
+  const resultBytes = stmt.resultBytes
   const rowsAffected = writes ? Number(db.changes) : 0
   let lastInsertRowid: number | bigint | null = null
   if (mayInsert) {
@@ -186,6 +203,7 @@ function step(db: Database, request: StatementRequest, timeoutMs: number, maxRow
     vmSteps: stmt.vmSteps(),
     rowsAffected,
     lastInsertRowid,
+    resultBytes,
   }
 }
 
@@ -234,11 +252,11 @@ export function executeStatement(
   const startedNs = Bun.nanoseconds()
   const read = runtime.withReader(tenant, principal, (db) => {
     if (!db.prepare(request.sql).readonly) return null
-    return step(db, request, options.readTimeoutMs, options.maxRows)
+    return step(db, request, options.readTimeoutMs, options)
   })
   if (read) {
     const result = toResult(read, options.rows, tenant.txid, startedNs)
-    runtime.metrics.statement("read", result.vmSteps)
+    runtime.metrics.statement("read", result.vmSteps, read.resultBytes)
     return { result, kind: "read" }
   }
 
@@ -255,7 +273,7 @@ export function executeStatement(
     (db) => {
       const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
       try {
-        return step(db, request, options.writeTimeoutMs, options.maxRows)
+        return step(db, request, options.writeTimeoutMs, options)
       } finally {
         handle.release()
       }
@@ -263,7 +281,7 @@ export function executeStatement(
     { ack: options.ack },
   )
   const result = toResult(written.result, options.rows, written.txid, startedNs)
-  runtime.metrics.statement("write", result.vmSteps)
+  runtime.metrics.statement("write", result.vmSteps, written.result.resultBytes)
   return { result, kind: "write" }
 }
 
@@ -291,11 +309,11 @@ export async function executeStatementQueued(
   const startedNs = Bun.nanoseconds()
   const read = runtime.withReader(tenant, principal, (db) => {
     if (!db.prepare(request.sql).readonly) return null
-    return step(db, request, options.readTimeoutMs, options.maxRows)
+    return step(db, request, options.readTimeoutMs, options)
   })
   if (read) {
     const result = toResult(read, options.rows, tenant.txid, startedNs)
-    runtime.metrics.statement("read", result.vmSteps)
+    runtime.metrics.statement("read", result.vmSteps, read.resultBytes)
     return { result, kind: "read" }
   }
 
@@ -308,7 +326,7 @@ export async function executeStatementQueued(
       // caller, so two principals in one transaction never borrow each other's rights.
       const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
       try {
-        return step(db, request, options.writeTimeoutMs, options.maxRows)
+        return step(db, request, options.writeTimeoutMs, options)
       } finally {
         handle.release()
       }
@@ -316,7 +334,7 @@ export async function executeStatementQueued(
     { ack: options.ack },
   )
   const result = toResult(written.result, options.rows, written.txid, startedNs)
-  runtime.metrics.statement("write", result.vmSteps)
+  runtime.metrics.statement("write", result.vmSteps, written.result.resultBytes)
   return { result, kind: "write" }
 }
 
@@ -377,7 +395,7 @@ export function executeBatch(
         for (let i = 0; i < statements.length; i++) {
           try {
             stepped.push(
-              step(db, statements[i] as StatementRequest, options.writeTimeoutMs, options.maxRows),
+              step(db, statements[i] as StatementRequest, options.writeTimeoutMs, options),
             )
           } catch (err) {
             throw markFailedIndex(err, i)
@@ -393,7 +411,7 @@ export function executeBatch(
 
   const results = written.result.map((one) => {
     const result = toResult(one, options.rows, written.txid, startedNs)
-    runtime.metrics.statement(one.writes ? "write" : "read", result.vmSteps)
+    runtime.metrics.statement(one.writes ? "write" : "read", result.vmSteps, one.resultBytes)
     return result
   })
   return { results, txid: Number(written.txid) }
@@ -414,13 +432,13 @@ export function executeInTx(
       const timeoutMs = db.prepare(request.sql).readonly
         ? options.readTimeoutMs
         : options.writeTimeoutMs
-      return step(db, request, timeoutMs, options.maxRows)
+      return step(db, request, timeoutMs, options)
     } finally {
       handle.release()
     }
   })
   const result = toResult(stepped, options.rows, tenant.txid, startedNs)
-  runtime.metrics.statement(stepped.writes ? "write" : "read", result.vmSteps)
+  runtime.metrics.statement(stepped.writes ? "write" : "read", result.vmSteps, stepped.resultBytes)
   return result
 }
 
@@ -443,13 +461,13 @@ export function executeInReadTx(
   const stepped = tenant.readTxExec(tx, (db) => {
     const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
     try {
-      return step(db, request, options.readTimeoutMs, options.maxRows)
+      return step(db, request, options.readTimeoutMs, options)
     } finally {
       handle.release()
     }
   })
   const result = toResult(stepped, options.rows, tenant.txid, startedNs)
-  runtime.metrics.statement("read", result.vmSteps)
+  runtime.metrics.statement("read", result.vmSteps, stepped.resultBytes)
   return result
 }
 

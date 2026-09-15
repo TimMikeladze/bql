@@ -87,7 +87,7 @@ Accepted as body fields on every statement-bearing request, and two of them as h
 | option | header | values | default |
 |---|---|---|---|
 | `rows` | — | `"array"`, `"object"` | `"array"` |
-| `maxRows` | — | positive integer; a result above it fails the request | `[limits] maxRows`, 10000 |
+| `maxRows` | — | positive integer; the request fails at the row that would cross it | `[limits] maxRows`, 10000 |
 | `timeoutMs` | — | positive integer, clamped to the configured limit | `[limits] queryTimeoutMs` |
 | `ack` | `BunQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `fsync` |
 | `minTxid` | `BunQL-Min-Txid` | integer; the request waits up to 2 s, then `425` | none |
@@ -190,7 +190,7 @@ that were once refused and is gone with the last of them.
 | code | status | when |
 |---|---|---|
 | `BAD_REQUEST` | 400 | malformed body, unknown option, bad SQL that SQLite reports as `SQLITE_ERROR` |
-| `TOO_MANY_ROWS` | 400 | the result exceeded the request's `maxRows` |
+| `TOO_MANY_ROWS` | 400 | the result reached the request's `maxRows`; refused at that row, not after the scan |
 | `UNAUTHENTICATED` | 401 | no token, a bad signature, an expired or revoked token |
 | `NOT_AUTHORIZED` | 403 | the token's scope or table ACL refuses this |
 | `DB_NOT_FOUND` | 404 | no such database |
@@ -202,6 +202,7 @@ that were once refused and is gone with the last of them.
 | `TX_BUSY` | 409 | another transaction held the writer for the whole `[limits] txWaitMs`; `Retry-After: 1` |
 | `SQLITE_CONSTRAINT_*` | 409 | the constraint SQLite names |
 | `PAYLOAD_TOO_LARGE` | 413 | body over `[limits] maxBodyBytes` or `maxImportBytes` |
+| `RESULT_TOO_LARGE` | 413 | one result reached `[limits] maxResultBytes` while it was being built |
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
 | `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, a snapshot in progress, or too many forwards in flight |
 | `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it, or an admin write reached one at all; carries `BunQL-Primary` |
@@ -1737,6 +1738,7 @@ the canonical one wins when both are set.
 | `[limits] writeTimeoutMs` | `30000` | `BUNQL_LIMITS_WRITE_TIMEOUT_MS` | `BUNQL_WRITE_TIMEOUT_MS` |
 | `[limits] txIdleTimeoutMs` | `5000` | `BUNQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BUNQL_TX_IDLE_TIMEOUT_MS` |
 | `[limits] maxRows` | `10000` | `BUNQL_LIMITS_MAX_ROWS` | `BUNQL_MAX_ROWS` |
+| `[limits] maxResultBytes` | `67108864` | `BUNQL_LIMITS_MAX_RESULT_BYTES` | `BUNQL_MAX_RESULT_BYTES` |
 | `[limits] maxOpenTx` | `1` | `BUNQL_LIMITS_MAX_OPEN_TX` | `BUNQL_MAX_OPEN_TX` |
 | `[limits] txWaitMs` | `5000` | `BUNQL_LIMITS_TX_WAIT_MS` | `BUNQL_TX_WAIT_MS` |
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
@@ -1904,6 +1906,13 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **`wait` is what switches `/changes` between SSE and the long poll**, not `Accept`.
 - **`maxRows` fails a one-shot query and truncates a live one.** `400 TOO_MANY_ROWS` on `/query`;
   `truncated: true` on a live event.
+- **Both result ceilings are enforced inside the step loop, not after it.** A query with no
+  `LIMIT` is refused at the row that would cross `maxRows` or `[limits] maxResultBytes`, so the
+  node allocates one row past the ceiling rather than the whole result. `maxResultBytes` is a node
+  setting with no request field: a client bounds its own result with `maxRows`, and this bounds
+  the node against a client that did not. The size counted is the result's footprint — SQLite's
+  byte count for text and blobs, eight bytes for a number, plus a fixed charge per row and per
+  cell — not the length of the JSON it would serialise to. `docs/l1-result-budget.md`.
 - **The first live event is always `rows`, later ones `diff`.** A diff needs a previous result and
   the subscribe-time event has none.
 - **The default `BunQL-Node` is a hash of the hostname**, not the hostname. It travels on every

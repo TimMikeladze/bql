@@ -2,6 +2,13 @@
 // again when it stops stepping, including on the error and early-return paths, so no statement
 // ever holds a read transaction open between calls.
 //
+// Second invariant, added by L1: a result is bounded while it is built, never after it is built.
+// `budget()` arms a row and byte ceiling for exactly the next verb; the row that would cross it is
+// never pushed, so a query with no LIMIT costs one row of overshoot rather than however many rows
+// it was going to return. The budget is one-shot — every verb takes it in `#prepareCall` — because
+// statements live in a connection's prepared-statement cache and an armed ceiling that outlived
+// its call would silently bound somebody else's.
+//
 // A statement also carries what the connection's authorizer saw while compiling it (`inserts`,
 // `readsLastInsertRowid`). Those facts are captured once, at prepare time, and are immutable for
 // the life of the statement, which is what lets them ride along in the connection's
@@ -14,14 +21,18 @@ import {
   STMT_STATUS,
   type StmtStatusName,
 } from "./constants.ts"
-import { SqliteError } from "./errors.ts"
+import { ResultLimitError, SqliteError } from "./errors.ts"
 import { ptr } from "bun:ffi"
 import { cbuf, cstr, type SqliteLibrary } from "./lib.ts"
 import {
   bindOne,
+  CELL_OVERHEAD_BYTES,
   columnValue,
+  columnValueInto,
+  ROW_OVERHEAD_BYTES,
   type BindArg,
   type BindValue,
+  type ByteSink,
   type NamedParams,
   type SqliteValue,
 } from "./values.ts"
@@ -64,6 +75,16 @@ export interface RunResult {
 
 export type Row = Record<string, SqliteValue>
 
+/**
+ * A ceiling on one result, armed with `Statement.budget` before the verb that builds it. Both
+ * halves are inclusive: a result of exactly `maxRows` rows or exactly `maxBytes` bytes is served,
+ * and the next row past either is refused with a `ResultLimitError`.
+ */
+export interface ResultBudget {
+  readonly maxRows: number
+  readonly maxBytes: number
+}
+
 function isNamedParams(params: readonly BindArg[]): params is [NamedParams] {
   if (params.length !== 1) return false
   const first = params[0]
@@ -84,6 +105,12 @@ export class Statement {
   #types: (string | null)[] | null = null
   #nameIndex: Map<string, number> | null = null
   #rowFactory: (() => Row) | null = null
+  /** The same factory built over the counting decoder; only ever needed under a budget. */
+  #countingRowFactory: ((sink: ByteSink) => Row) | null = null
+  /** Armed by `budget()`, taken by the next `#prepareCall`. */
+  #budget: ResultBudget | null = null
+  /** Bytes the last bounded verb accounted for. Zero after an unbounded one. */
+  #resultBytes = 0
   #boundCount = 0
   #finalized = false
   /** True while a generator from `.iterate()` is mid-flight. */
@@ -190,6 +217,29 @@ export class Statement {
     return this.status("VM_STEP", reset)
   }
 
+  /**
+   * Arms a ceiling on the **next** verb that builds a result — `all`, `values` or `iterate`. The
+   * budget is consumed by that call whatever it is, so it can never bound a later one, and a verb
+   * that builds no result (`run`, `get`) simply discards it.
+   *
+   * Refusing at the boundary is what makes the ceiling a memory bound rather than a report: the
+   * row that would cross it is not decoded into the result, so `SELECT * FROM t` on a table of
+   * five million rows allocates `maxRows + 1` rows and stops. Pass null to disarm.
+   */
+  budget(limit: ResultBudget | null): this {
+    this.#budget = limit
+    return this
+  }
+
+  /**
+   * Bytes the last bounded verb accounted for, by the rule in `columnValueInto`: SQLite's own byte
+   * count for text and blobs, eight bytes for a number, plus a fixed charge per row and per cell.
+   * Zero when the last verb ran without a budget, since nothing counted.
+   */
+  get resultBytes(): number {
+    return this.#resultBytes
+  }
+
   /** Resets the statement, aborting any in-progress iteration. */
   reset(): this {
     this.#assertLive()
@@ -224,17 +274,34 @@ export class Statement {
     return null
   }
 
-  /** All rows as objects. */
+  /** All rows as objects, bounded by the armed budget if there is one. */
   all(...params: BindArg[]): Row[] {
     const s = this.#host.lib.symbols
     const h = this.#handle
-    this.#prepareCall(params)
+    const budget = this.#prepareCall(params)
     const out: Row[] = []
     try {
       let rc = s.sqlite3_step(h)
-      while (rc === SQLITE_ROW) {
-        out.push(this.#row())
-        rc = s.sqlite3_step(h)
+      if (budget === null) {
+        while (rc === SQLITE_ROW) {
+          out.push(this.#row())
+          rc = s.sqlite3_step(h)
+        }
+      } else {
+        const sink: ByteSink = { bytes: 0 }
+        const build = this.#countingRow()
+        const perRow = ROW_OVERHEAD_BYTES + CELL_OVERHEAD_BYTES * this.#columnCount
+        try {
+          while (rc === SQLITE_ROW) {
+            if (out.length >= budget.maxRows) throw new ResultLimitError("rows", budget.maxRows)
+            sink.bytes += perRow
+            out.push(build(sink))
+            if (sink.bytes > budget.maxBytes) throw new ResultLimitError("bytes", budget.maxBytes)
+            rc = s.sqlite3_step(h)
+          }
+        } finally {
+          this.#resultBytes = sink.bytes
+        }
       }
       if (rc !== SQLITE_DONE) this.#host.fail(rc)
     } finally {
@@ -243,17 +310,33 @@ export class Statement {
     return out
   }
 
-  /** All rows as arrays, in column order. */
+  /** All rows as arrays, in column order, bounded by the armed budget if there is one. */
   values(...params: BindArg[]): SqliteValue[][] {
     const s = this.#host.lib.symbols
     const h = this.#handle
-    this.#prepareCall(params)
+    const budget = this.#prepareCall(params)
     const out: SqliteValue[][] = []
     try {
       let rc = s.sqlite3_step(h)
-      while (rc === SQLITE_ROW) {
-        out.push(this.#values())
-        rc = s.sqlite3_step(h)
+      if (budget === null) {
+        while (rc === SQLITE_ROW) {
+          out.push(this.#values())
+          rc = s.sqlite3_step(h)
+        }
+      } else {
+        const sink: ByteSink = { bytes: 0 }
+        const perRow = ROW_OVERHEAD_BYTES + CELL_OVERHEAD_BYTES * this.#columnCount
+        try {
+          while (rc === SQLITE_ROW) {
+            if (out.length >= budget.maxRows) throw new ResultLimitError("rows", budget.maxRows)
+            sink.bytes += perRow
+            out.push(this.#valuesInto(sink))
+            if (sink.bytes > budget.maxBytes) throw new ResultLimitError("bytes", budget.maxBytes)
+            rc = s.sqlite3_step(h)
+          }
+        } finally {
+          this.#resultBytes = sink.bytes
+        }
       }
       if (rc !== SQLITE_DONE) this.#host.fail(rc)
     } finally {
@@ -266,6 +349,7 @@ export class Statement {
   run(...params: BindArg[]): RunResult {
     const s = this.#host.lib.symbols
     const h = this.#handle
+    // A budget armed before a verb that builds no result is discarded with it, never carried.
     this.#prepareCall(params)
     try {
       let rc = s.sqlite3_step(h)
@@ -290,17 +374,31 @@ export class Statement {
   *iterate(...params: BindArg[]): Generator<Row, void, undefined> {
     const s = this.#host.lib.symbols
     const h = this.#handle
-    this.#prepareCall(params)
+    const budget = this.#prepareCall(params)
     this.#iterating = true
+    const sink: ByteSink = { bytes: 0 }
+    const build = budget === null ? null : this.#countingRow()
+    const perRow = ROW_OVERHEAD_BYTES + CELL_OVERHEAD_BYTES * this.#columnCount
+    let seen = 0
     try {
       let rc = s.sqlite3_step(h)
       while (rc === SQLITE_ROW) {
-        yield this.#row()
+        if (build === null) {
+          yield this.#row()
+        } else {
+          if (seen >= budget!.maxRows) throw new ResultLimitError("rows", budget!.maxRows)
+          seen++
+          sink.bytes += perRow
+          const row = build(sink)
+          if (sink.bytes > budget!.maxBytes) throw new ResultLimitError("bytes", budget!.maxBytes)
+          yield row
+        }
         if (!this.#iterating) return
         rc = s.sqlite3_step(h)
       }
       if (rc !== SQLITE_DONE) this.#host.fail(rc)
     } finally {
+      if (build !== null) this.#resultBytes = sink.bytes
       this.#iterating = false
       s.sqlite3_reset(h)
     }
@@ -344,6 +442,48 @@ export class Statement {
     return build(columnValue, lib, h, safe)
   }
 
+  /**
+   * The row factory over the counting decoder. Built and cached separately from `#rowFactory` so
+   * the unbounded path's generated code stays exactly what it was — one call per cell, no sink.
+   */
+  #countingRow(): (sink: ByteSink) => Row {
+    return (this.#countingRowFactory ??= this.#buildCountingRowFactory())
+  }
+
+  #buildCountingRowFactory(): (sink: ByteSink) => Row {
+    const names = this.columnNames
+    const lib = this.#host.lib
+    const safe = this.#host.safeIntegers
+    const h = this.#handle
+    if (names.length === 0) return () => ({})
+    const literal = names
+      .map((name, i) => `${JSON.stringify(name)}: read(lib, h, ${i}, safe, sink)`)
+      .join(", ")
+    const build = new Function(
+      "read",
+      "lib",
+      "h",
+      "safe",
+      `return function row(sink) { return { ${literal} } }`,
+    ) as (
+      read: typeof columnValueInto,
+      lib: SqliteLibrary,
+      h: number,
+      safe: boolean,
+    ) => (sink: ByteSink) => Row
+    return build(columnValueInto, lib, h, safe)
+  }
+
+  #valuesInto(sink: ByteSink): SqliteValue[] {
+    const lib = this.#host.lib
+    const safe = this.#host.safeIntegers
+    const h = this.#handle
+    const n = this.#columnCount
+    const out: SqliteValue[] = new Array(n)
+    for (let i = 0; i < n; i++) out[i] = columnValueInto(lib, h, i, safe, sink)
+    return out
+  }
+
   #values(): SqliteValue[] {
     const lib = this.#host.lib
     const safe = this.#host.safeIntegers
@@ -354,8 +494,15 @@ export class Statement {
     return out
   }
 
-  #prepareCall(params: readonly BindArg[]): void {
+  /**
+   * Resets, binds, and hands back the budget armed for this call — clearing it, so it bounds this
+   * verb and no other.
+   */
+  #prepareCall(params: readonly BindArg[]): ResultBudget | null {
     this.#assertLive()
+    const budget = this.#budget
+    this.#budget = null
+    this.#resultBytes = 0
     const s = this.#host.lib.symbols
     s.sqlite3_reset(this.#handle)
     this.#iterating = false
@@ -364,11 +511,11 @@ export class Statement {
         s.sqlite3_clear_bindings(this.#handle)
         this.#boundCount = 0
       }
-      return
+      return budget
     }
     if (isNamedParams(params)) {
       this.#bindNamed(params[0])
-      return
+      return budget
     }
     if (params.length < this.#boundCount) s.sqlite3_clear_bindings(this.#handle)
     for (let i = 0; i < params.length; i++) {
@@ -376,6 +523,7 @@ export class Statement {
       if (rc !== SQLITE_OK) this.#host.fail(rc)
     }
     this.#boundCount = params.length
+    return budget
   }
 
   #bindNamed(obj: NamedParams): void {

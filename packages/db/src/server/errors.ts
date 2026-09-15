@@ -3,7 +3,7 @@
 // objects the caller already sent) or a string this file wrote. Unrecognised throws become a
 // bare 500 with no detail at all.
 
-import { SqliteError } from "../sqlite/errors.ts"
+import { ResultLimitError, SqliteError } from "../sqlite/errors.ts"
 import { HEADERS, type BunQLErrorCode, type ErrorBody, type ErrorInfo } from "../client/protocol.ts"
 
 /** Default HTTP status for each BunQL error code (design §6.6). */
@@ -21,6 +21,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   TX_NOT_FOUND: 404,
   TOO_MANY_ROWS: 400,
   PAYLOAD_TOO_LARGE: 413,
+  /** A result reached `[limits] maxResultBytes` mid-step (`docs/l1-result-budget.md`). */
+  RESULT_TOO_LARGE: 413,
   TXID_NOT_AVAILABLE: 425,
   TOO_MANY_REQUESTS: 429,
   BUSY: 503,
@@ -144,6 +146,31 @@ export class BunQLError extends Error {
       400,
     )
   }
+
+  /**
+   * A result reached `[limits] maxResultBytes` while it was being built. A node limit rather than
+   * a request one, so it is a 413 and names the ceiling the operator set.
+   */
+  static resultTooLarge(maxBytes: number): BunQLError {
+    return new BunQLError(
+      "RESULT_TOO_LARGE",
+      `the result reached the ${maxBytes}-byte ceiling this node allows for one result; ` +
+        `add a LIMIT or narrow the columns`,
+      413,
+    )
+  }
+}
+
+/**
+ * A ceiling the step loop refused at (`src/sqlite/statement.ts`). It arrives here as a driver-layer
+ * error rather than a `BunQLError` because `src/sqlite/` knows nothing about HTTP; this is the one
+ * place that translation lives, so the embedded API sees the driver's error and the wire sees the
+ * code design §6.6 documents.
+ */
+function fromResultLimit(err: ResultLimitError): BunQLError {
+  return err.limit === "rows"
+    ? BunQLError.tooManyRows(err.max)
+    : BunQLError.resultTooLarge(err.max)
 }
 
 /**
@@ -213,7 +240,12 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   let message: string
   let own: ErrorDetails | undefined
 
-  if (err instanceof BunQLError) {
+  if (err instanceof ResultLimitError) {
+    const mapped = fromResultLimit(err)
+    status = mapped.status
+    code = mapped.code
+    message = mapped.message
+  } else if (err instanceof BunQLError) {
     status = err.status
     code = err.code
     message = err.message

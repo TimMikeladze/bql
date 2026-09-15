@@ -142,6 +142,66 @@ export function columnValue(
   }
 }
 
+/**
+ * Where a bounded decode adds up what it has allocated. One object per bounded call, mutated per
+ * cell — cheaper than returning a pair from every cell read, and confined to one statement's loop.
+ */
+export interface ByteSink {
+  bytes: number
+}
+
+/** Bytes charged for the array holding one row, before any cell payload. */
+export const ROW_OVERHEAD_BYTES = 16
+/** Bytes charged for one slot of that array, before the cell's own payload. */
+export const CELL_OVERHEAD_BYTES = 8
+
+/**
+ * `columnValue`, adding what the value costs to `sink`. It is a copy of the switch above rather
+ * than a flag on it because `columnValue` is called from generated row factories on the unbounded
+ * hot path, where a per-cell branch is measurable and a budget is not wanted at all.
+ *
+ * The size charged is SQLite's own byte count for text and blobs — already read to decode them,
+ * so counting is an add rather than a second pass — and eight bytes for a number, which is what
+ * the slot holds. It is an account of the result's footprint, not of its serialised length.
+ */
+export function columnValueInto(
+  lib: SqliteLibrary,
+  stmt: number,
+  i: number,
+  safeIntegers: boolean,
+  sink: ByteSink,
+): SqliteValue {
+  const s = lib.symbols
+  switch (s.sqlite3_column_type(stmt, i)) {
+    case SQLITE_INTEGER:
+      sink.bytes += 8
+      return safeIntegers
+        ? lib.wide.sqlite3_column_int64(stmt, i)
+        : s.sqlite3_column_int64(stmt, i)
+    case SQLITE_FLOAT:
+      sink.bytes += 8
+      return s.sqlite3_column_double(stmt, i)
+    case SQLITE_TEXT: {
+      const p = s.sqlite3_column_text(stmt, i)
+      if (!p) return ""
+      const n = s.sqlite3_column_bytes(stmt, i)
+      sink.bytes += n
+      return n === 0 ? "" : new CString(p, 0, n).toString()
+    }
+    case SQLITE_BLOB: {
+      const p = s.sqlite3_column_blob(stmt, i)
+      const n = s.sqlite3_column_bytes(stmt, i)
+      sink.bytes += n
+      if (!p || n === 0) return new Uint8Array(0)
+      const out = new Uint8Array(n)
+      out.set(new Uint8Array(toArrayBufferUnsafe(p, n)))
+      return out
+    }
+    default:
+      return null
+  }
+}
+
 /** Reads an `sqlite3_value *`, used by the preupdate accessors. */
 export function protectedValue(
   lib: SqliteLibrary,

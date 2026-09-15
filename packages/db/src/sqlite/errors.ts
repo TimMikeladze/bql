@@ -18,6 +18,31 @@ export class SqliteError extends Error {
   }
 }
 
+/**
+ * Raised from inside a step loop when a result reaches the ceiling armed by `Statement.budget`.
+ *
+ * It is thrown at the boundary rather than reported after the fact, which is the whole point:
+ * the row that would have crossed the ceiling is never pushed, so refusing costs one row of
+ * overshoot instead of however many rows the query was going to return (`docs/l1-result-budget.md`).
+ */
+export class ResultLimitError extends Error {
+  /** Which ceiling was reached. */
+  readonly limit: "rows" | "bytes"
+  /** The ceiling itself, as armed. */
+  readonly max: number
+
+  constructor(limit: "rows" | "bytes", max: number) {
+    super(
+      limit === "rows"
+        ? `the result has more than the ${max} rows this request allowed`
+        : `the result reached the ${max}-byte ceiling this node allows for one result`,
+    )
+    this.name = "ResultLimitError"
+    this.limit = limit
+    this.max = max
+  }
+}
+
 /** Raised when the loaded libsqlite3 does not provide a capability the caller asked for. */
 export class FeatureUnavailableError extends Error {
   readonly feature: string

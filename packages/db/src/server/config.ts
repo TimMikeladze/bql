@@ -186,6 +186,16 @@ export interface LimitsSection {
   writeTimeoutMs: number
   txIdleTimeoutMs: number
   maxRows: number
+  /**
+   * Bytes one result may accumulate, checked **while** it is being stepped rather than after
+   * (`docs/l1-result-budget.md`). `maxRows` bounds a result a client asked to be small; this
+   * bounds the node, because a row is not a fixed size and ten thousand of them can be a gigabyte.
+   * Past it, `413 RESULT_TOO_LARGE`.
+   *
+   * The size counted is the result's footprint — SQLite's byte count for text and blobs, eight
+   * bytes for a number, plus a fixed charge per row and per cell — not its serialised length.
+   */
+  maxResultBytes: number
   /** Interactive transactions open at once, per database. The tenant has one writer, so: 1. */
   maxOpenTx: number
   /**
@@ -463,6 +473,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     writeTimeoutMs: 30_000,
     txIdleTimeoutMs: 5_000,
     maxRows: 10_000,
+    maxResultBytes: 67_108_864,
     maxOpenTx: 1,
     txWaitMs: 5000,
     maxBodyBytes: 8 * 1024 * 1024,
@@ -572,6 +583,7 @@ const ENV_ALIASES: Readonly<Record<string, string>> = {
   BUNQL_WRITE_TIMEOUT_MS: "limits.writeTimeoutMs",
   BUNQL_TX_IDLE_TIMEOUT_MS: "limits.txIdleTimeoutMs",
   BUNQL_MAX_ROWS: "limits.maxRows",
+  BUNQL_MAX_RESULT_BYTES: "limits.maxResultBytes",
   BUNQL_MAX_OPEN_TX: "limits.maxOpenTx",
   BUNQL_TX_WAIT_MS: "limits.txWaitMs",
   BUNQL_MAX_BODY_BYTES: "limits.maxBodyBytes",
