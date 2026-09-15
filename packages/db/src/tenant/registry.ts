@@ -74,6 +74,16 @@ export interface RegistryOptions {
   sweepIntervalMs?: number
   /** Where the fd-budget warning goes. Defaults to `console.warn`. */
   warn?: (message: string) => void
+  /**
+   * L3: the file-descriptor check, when this registry is not the one that should perform it.
+   *
+   * `data.maxOpen` is the **node's** number. Bun workers are threads sharing one descriptor table,
+   * so a node with `workers: 8` and `maxOpen: 1024` divides that into eight shares of 128 — and a
+   * worker warning about *its* share would under-report the node's requirement by exactly the
+   * worker count, which is what it used to do. Pass `false` on a worker: the router probes once
+   * and warns once for the whole node.
+   */
+  fdBudget?: false
   onError?: (err: unknown) => void
   /** Passed to every tenant: called for each connection opened, writer or reader. */
   onConnection?: (db: Database, role: "writer" | "reader") => void
@@ -125,8 +135,32 @@ export interface RegistryStats {
   openTenants: TenantStats[]
 }
 
-/** The process's open-file limit, or null when it cannot be read. */
+/** Computed once per process; the answer cannot change under us and the probe is a subprocess. */
+let fdLimitCache: number | null | undefined
+
+/**
+ * The process's open-file limit, or null when there is no such number to read.
+ *
+ * **Null on Windows, and that is the answer rather than a failure.** Win32 has no per-process
+ * descriptor rlimit: the CRT's `_setmaxstdio` bounds only stdio-style handles, and a kernel handle
+ * is bounded by paged-pool memory rather than by a count. Before L3 this shelled out to
+ * `sh -c "ulimit -n"` on every platform, which on Windows found no `sh`, returned null, and warned
+ * nobody about anything — the same outcome, reached by accident and at the cost of a failed
+ * subprocess spawn per registry.
+ *
+ * On POSIX it is still `ulimit -n`, because Bun's `process.report.getReport()` carries no `rlimit`
+ * section (checked on Bun 1.4) and reaching `getrlimit(2)` would mean a second `dlopen` of libc on
+ * every start, for a warning. It is memoised, and a sharded node probes on the router and passes
+ * the answer to its workers, so a node spawns one subprocess rather than one per thread.
+ */
 export function fileDescriptorLimit(): number | null {
+  if (fdLimitCache !== undefined) return fdLimitCache
+  fdLimitCache = probeFileDescriptorLimit()
+  return fdLimitCache
+}
+
+function probeFileDescriptorLimit(): number | null {
+  if (process.platform === "win32") return null
   try {
     const result = Bun.spawnSync(["sh", "-c", "ulimit -n"])
     if (!result.success) return null
@@ -137,6 +171,51 @@ export function fileDescriptorLimit(): number | null {
   } catch {
     return null
   }
+}
+
+/**
+ * How many descriptors a node holding `tenants` open databases needs, and what `maxOpen` it could
+ * carry within `limit`. One function so the router and a single-threaded node say the same thing.
+ */
+export function fdBudgetFor(tenants: number): { needed: number; limit: number | null } {
+  return { needed: tenants * FDS_PER_TENANT, limit: fileDescriptorLimit() }
+}
+
+/**
+ * The `maxOpen` share one worker of `workers` gets out of a node budget of `maxOpen`.
+ *
+ * The floor is **one**, not the eight `docs/plan-limits.md` proposed, and the reason is the rule
+ * the whole track is built on: a per-worker floor of eight is `8 * workers` wearing a disguise,
+ * which is exactly the "per-tenant limit times open tenants is not a limit" this milestone exists
+ * to delete. A node configured small stays small; `maxOpenThrashes` is what says so out loud.
+ */
+export function maxOpenShare(maxOpen: number, workers: number): number {
+  if (workers <= 1) return maxOpen
+  return Math.max(1, Math.floor(maxOpen / workers))
+}
+
+/**
+ * True when dividing `maxOpen` across `workers` leaves each shard too little to work with. A shard
+ * that can hold only a handful of databases open evicts and reopens on every request that misses,
+ * which is slow rather than wrong — so it is a warning, not a refusal.
+ */
+export function maxOpenThrashes(maxOpen: number, workers: number): boolean {
+  return workers > 1 && maxOpenShare(maxOpen, workers) < 8
+}
+
+/**
+ * Warns if holding `tenants` databases open would want more descriptors than this process has.
+ * Called once per node: by the registry on a single-threaded node, and by the router on a sharded
+ * one, where `tenants` is the node's `maxOpen` rather than any worker's share of it.
+ */
+export function warnFdBudget(tenants: number, warn?: (message: string) => void): void {
+  const { needed, limit } = fdBudgetFor(tenants)
+  if (limit === null || needed <= limit) return
+  const say = warn ?? ((message: string) => console.warn(message))
+  say(
+    `bunql: maxOpen ${tenants} needs about ${needed} file descriptors but ulimit -n is ` +
+      `${limit}. Lower maxOpen to ${Math.floor(limit / FDS_PER_TENANT)} or raise the limit.`,
+  )
 }
 
 export class TenantRegistry {
@@ -683,15 +762,8 @@ export class TenantRegistry {
 
   /** Design §4.7: the server checks the fd budget at start and warns. */
   #checkFdBudget(): void {
-    const limit = fileDescriptorLimit()
-    if (limit === null) return
-    const needed = this.maxOpen * FDS_PER_TENANT
-    if (needed <= limit) return
-    const warn = this.#options.warn ?? ((message: string) => console.warn(message))
-    warn(
-      `bunql: maxOpen ${this.maxOpen} needs about ${needed} file descriptors but ulimit -n is ` +
-        `${limit}. Lower maxOpen to ${Math.floor(limit / FDS_PER_TENANT)} or raise the limit.`,
-    )
+    if (this.#options.fdBudget === false) return
+    warnFdBudget(this.maxOpen, this.#options.warn)
   }
 
   #report(err: unknown): void {

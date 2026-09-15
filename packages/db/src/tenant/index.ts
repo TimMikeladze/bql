@@ -12,7 +12,11 @@ export {
 } from "./catalog.ts"
 export {
   type CreateOptions,
+  fdBudgetFor,
   fileDescriptorLimit,
+  maxOpenShare,
+  maxOpenThrashes,
+  warnFdBudget,
   type RegistryOptions,
   type RegistryStats,
   type SnapshotInstall,

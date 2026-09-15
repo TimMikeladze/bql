@@ -283,6 +283,10 @@ export class ServerRuntime {
         queueWaitMs: options.config.limits.queueWaitMs,
         applyMechanism: options.config.replication.apply,
         applyBusyMs: options.config.replication.applyBusyMs,
+        // L3: on a worker, `maxOpen` here is this shard's *share* of the node's budget and the
+        // descriptor table is shared with every other shard, so the check belongs to the router,
+        // which knows the node's number and performs it once.
+        ...(options.shard ? ({ fdBudget: false } as const) : {}),
         onError: this.#onError,
         onConnection: (db, role) => this.#adopt(db, role),
         onChange: (event) => this.#databasesChanged(event),

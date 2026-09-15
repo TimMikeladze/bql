@@ -26,6 +26,7 @@ import {
   type ToWorker,
   unflattenHeaders,
 } from "./protocol.ts"
+import { maxOpenShare, maxOpenThrashes, warnFdBudget } from "../../tenant/index.ts"
 import { resolveWorkers, shardOf } from "./shard.ts"
 
 /** What the pool needs from the listener, once it exists. */
@@ -158,6 +159,20 @@ export class WorkerPool {
     onError: (err: unknown) => void,
   ): Promise<WorkerPool> {
     const size = resolveWorkers(config.server.workers)
+    // L3: `[data] maxOpen` is the **node's** ceiling, not each thread's. Bun workers are threads
+    // sharing one descriptor table, so eight registries each honouring 1024 held 8192 databases
+    // and about 57 000 descriptors while each one independently warned about 7 168 — the check
+    // under-reported by exactly the worker count. The router divides the budget and probes once.
+    const share = maxOpenShare(config.data.maxOpen, size)
+    const shardConfig: ServerConfig = { ...config, data: { ...config.data, maxOpen: share } }
+    warnFdBudget(config.data.maxOpen, (message) => console.warn(message))
+    if (maxOpenThrashes(config.data.maxOpen, size)) {
+      console.warn(
+        `bunql: maxOpen ${config.data.maxOpen} across ${size} workers is ${share} databases per ` +
+          `shard, which will evict and reopen on most requests. Raise maxOpen to at least ` +
+          `${size * 8} or lower workers.`,
+      )
+    }
     const pool = new WorkerPool(size, onError)
     const url = new URL("./entry.ts", import.meta.url).href
     const ready: Promise<void>[] = []
@@ -177,7 +192,7 @@ export class WorkerPool {
           worker.onerror = (event: ErrorEvent) => reject(event.error ?? new Error(String(event.message)))
         }),
       )
-      worker.postMessage({ kind: "init", index, workers: size, config } satisfies ToWorker)
+      worker.postMessage({ kind: "init", index, workers: size, config: shardConfig } satisfies ToWorker)
     }
     try {
       await Promise.all(ready)

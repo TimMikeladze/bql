@@ -368,7 +368,11 @@ chunked per event-loop tick and bounded by `streamTimeoutMs`, which is what boun
 | cross-tenant access | authorizer denies `ATTACH`/`DETACH`; `PRAGMA` allow-list (`SQLITE_PRAGMA` action); `load_extension` off; `SQLITE_DBCONFIG_DEFENSIVE` on for non-admin tokens |
 
 File descriptors: writer + 2 readers ≈ 7 fds per open tenant (shm fd is shared per inode), so
-`maxOpen = 10000` needs `ulimit -n ≥ 80k`; the server checks and warns at start.
+`maxOpen = 10000` needs `ulimit -n ≥ 80k`; the server checks and warns at start. **`[data] maxOpen`
+is the node's number, not each thread's (L3):** Bun workers are threads sharing one descriptor
+table, so the router divides the budget across `[server] workers` and probes the limit once, and
+the warning names the node's requirement. Windows has no per-process descriptor rlimit and gets no
+warning, which is the answer rather than a failure to read one.
 
 ## 5. Topologies and consistency
 

@@ -376,6 +376,8 @@ const SPECS: Spec[] = [
     tags: ["lifecycle"],
     security: "admin",
     response: s.object({
+      open: s.int().describe("Databases open across every shard of this node."),
+      maxOpen: s.int().describe("`[data] maxOpen`, the node's ceiling on that number."),
       databases: s.array(
         s.object({
           name: s.string(),

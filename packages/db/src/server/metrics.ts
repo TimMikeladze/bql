@@ -311,7 +311,13 @@ export class Metrics {
 
   /** Prometheus text exposition format, version 0.0.4. */
   render(
-    registry: { open: number; tenants: number; evictions: number; writeQueueDepth?: number },
+    registry: {
+      open: number
+      maxOpen?: number
+      tenants: number
+      evictions: number
+      writeQueueDepth?: number
+    },
     node: string,
     replication?: ReplicationMetrics | null,
     storage?: StorageMetrics | null,
@@ -398,6 +404,13 @@ export class Metrics {
       registry.writeQueueDepth ?? 0,
     )
     gauge("bunql_open_tenants", "Databases currently open.", registry.open)
+    if (registry.maxOpen !== undefined) {
+      gauge(
+        "bunql_max_open_tenants",
+        "[data] maxOpen: the node's ceiling on open databases, across every shard.",
+        registry.maxOpen,
+      )
+    }
     gauge("bunql_tenants", "Databases in the catalog.", registry.tenants)
     gauge("bunql_ws_connections", "WebSocket connections open.", this.#wsOpen)
     gauge("bunql_sse_streams", "SSE streams open.", this.#sseOpen)

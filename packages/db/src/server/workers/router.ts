@@ -297,6 +297,9 @@ export async function routerMetrics(
   // counters belong in the total.
   metrics.absorb(runtime.metrics.state())
   registry.tenants = runtime.registry.list().length
+  // L3: the ceiling is the node's, and this thread is the one that holds it — the workers each
+  // carry a share of it and would each under-report it.
+  const nodeRegistry = { ...registry, maxOpen: runtime.registry.maxOpen }
   // The rule is `replicationMetrics`'s, applied across threads: a node that *follows* reports its
   // client, a node that *serves* reports its sockets, and the per-stream half of either is summed
   // from the workers. `connected` and `bytes` are always the router's — it owns every socket and
@@ -322,7 +325,7 @@ export async function routerMetrics(
   // is the one `ShipperPool.totals` already performs across a node's databases, applied across the
   // shards — which is exact rather than a convention, because a database belongs to one worker and
   // the shards are therefore disjoint.
-  const body = metrics.render(registry, runtime.node, replicationMetrics, storage)
+  const body = metrics.render(nodeRegistry, runtime.node, replicationMetrics, storage)
   return new Response(body, {
     headers: {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",

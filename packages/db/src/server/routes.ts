@@ -703,6 +703,11 @@ export const listDbs: Handler = async (ctx) => {
   const live = await ctx.runtime.openStates()
   const openNames = live ?? new Set(ctx.runtime.registry.openNames)
   return json({
+    // L3: the node's ceiling and what it is holding against it. This registry is the router's on a
+    // sharded node, so `maxOpen` here is `[data] maxOpen` as configured rather than any worker's
+    // share of it — the same number `bunql_max_open_tenants` reports.
+    open: live ? live.size : (openNames as Set<string>).size,
+    maxOpen: ctx.runtime.registry.maxOpen,
     databases: rows.map((row) => {
       // The catalog position is throttled (docs/m4-tenant.md), so an open tenant is asked
       // directly rather than reported as of the last save.

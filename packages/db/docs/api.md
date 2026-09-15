@@ -462,7 +462,8 @@ records each carry a microsecond timestamp. A time older than the log is a `400`
 log still holds.
 
 ```http
-GET /v1/db     → { "databases": [ { "name": "acme", "txid": 4812, "epoch": 0, "pageSize": 4096,
+GET /v1/db     → { "open": 3, "maxOpen": 1024,
+                   "databases": [ { "name": "acme", "txid": 4812, "epoch": 0, "pageSize": 4096,
                                     "quotaBytes": 0, "createdAtMs": 1789…, "open": true } ] }
 
 GET /v1/db/acme
@@ -1897,6 +1898,18 @@ really send) and `docs/r5-orm.md` (the two adapters).
   handles natively; this is the same question for clients that cannot see control frames.
 - **`consistency` is accepted and validated but changes nothing** on a single node, which is always
   the primary. `minTxid` does all the work.
+- **`[data] maxOpen` is the node's ceiling, not each worker's.** A node started with
+  `workers: 8, maxOpen: 1024` holds at most 1024 databases open across every shard: the router
+  divides the budget into shares of 128 and passes each worker its own. Bun workers are threads
+  sharing one file-descriptor table, so the old per-thread reading meant 8192 databases and about
+  57 000 descriptors while each thread warned about 7 168. `GET /v1/db` reports `open` and
+  `maxOpen` for the node and `/metrics` reports the same two as `bunql_open_tenants` and
+  `bunql_max_open_tenants`. A `maxOpen` too small to divide is still divided — a per-worker floor
+  would be that floor times the worker count wearing a disguise — and the node warns at start that
+  it will thrash. `docs/l3-fd-budget.md`.
+- **The file-descriptor warning is about the node and is printed once.** It needs roughly seven
+  descriptors per open database. On Windows there is no number to check and none is printed: Win32
+  has no per-process descriptor rlimit.
 - **`maxOpenTx` is fixed at 1 per database** by the tenant having one writer. The config key exists
   but a larger value would not be honoured; `[limits] txWaitMs` is the knob that matters, since it
   decides how long the second transaction waits for the first rather than how many may run.
