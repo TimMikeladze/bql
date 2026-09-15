@@ -239,6 +239,15 @@ export interface LimitsSection {
    */
   maxQueuedWriteBytes: number
   /**
+   * Distinct databases one principal may hold open with subscriptions (L4,
+   * `docs/l4-pin-limit.md`). A subscriber pins its database out of the LRU for as long as it keeps
+   * the subscription open, so without this one client subscribing to two thousand databases pinned
+   * two thousand tenants past `[data] maxOpen` and nothing refused it. Past this, `429 PIN_LIMIT`.
+   *
+   * The admin key is not counted: it is the operator. Nor is an in-process embedded caller.
+   */
+  maxPinnedPerPrincipal: number
+  /**
    * How long a queued write waits for the writer before it is refused `503 WRITE_QUEUE_TIMEOUT`.
    * An unbounded wait is the other half of an unbounded queue: the caller learns nothing and holds
    * a connection while it learns it.
@@ -503,6 +512,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     maxQueuedWrites: 256,
     maxQueuedWriteBytes: 8 * 1024 * 1024,
     queueWaitMs: 5000,
+    maxPinnedPerPrincipal: 64,
     maxReadTx: 16,
     readTxTimeoutMs: 30_000,
   },

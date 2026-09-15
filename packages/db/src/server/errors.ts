@@ -25,6 +25,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   RESULT_TOO_LARGE: 413,
   TXID_NOT_AVAILABLE: 425,
   TOO_MANY_REQUESTS: 429,
+  /** This principal already holds `[limits] maxPinnedPerPrincipal` databases open (L4). */
+  PIN_LIMIT: 429,
   BUSY: 503,
   NOT_PRIMARY: 503,
   // L2's write-admission refusals. Both mean "this write never started", so a client may retry
@@ -33,6 +35,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   WRITE_QUEUE_FULL: 503,
   /** Queued past `[limits] queueWaitMs` without reaching the writer. */
   WRITE_QUEUE_TIMEOUT: 503,
+  /** The LRU cannot make room because every open database is pinned (L4). */
+  TOO_MANY_OPEN: 503,
   // R2's durability answers. Both mean "the transaction committed, on this node, at this txid" —
   // they are refusals of the *promise* the request asked for, never of the write itself.
   ACK_TIMEOUT: 503,

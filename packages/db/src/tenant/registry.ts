@@ -61,6 +61,11 @@ export interface RegistryOptions {
   deferAppend?: boolean
   /** Most statements one group commit folds; see `TenantOptions.maxGroupCommit`. */
   maxGroupCommit?: number
+  /**
+   * Distinct databases one principal may hold pinned open with subscriptions (L4). Default 64.
+   * Past it, `429 PIN_LIMIT`.
+   */
+  maxPinnedPerPrincipal?: number
   /** Write-queue ceilings, one tenant at a time; see `TenantOptions` (L2). */
   maxQueuedWrites?: number
   maxQueuedWriteBytes?: number
@@ -131,6 +136,10 @@ export interface RegistryStats {
   evictions: number
   /** Writes queued across every open tenant right now (L2). */
   writeQueueDepth: number
+  /** Open tenants a subscription is holding open (L4). */
+  pinned: number
+  /** Opens refused because every open tenant was pinned (L4). */
+  openRefused: number
   /** Per-tenant stats for everything currently open. */
   openTenants: TenantStats[]
 }
@@ -218,20 +227,44 @@ export function warnFdBudget(tenants: number, warn?: (message: string) => void):
   )
 }
 
+export interface PinOptions {
+  /**
+   * Count this pin against `maxPinnedPerPrincipal` and refuse past it. True for a client token,
+   * which is the principal this ceiling exists for; false for the operator's admin key, for an
+   * in-process embedded caller and for the node's own holders — a replica stream, a baton
+   * transaction — none of which are a client that can open two thousand subscriptions.
+   */
+  capped?: boolean
+}
+
+/** Shared empty answer for `pinnedBy`, so the common miss allocates nothing. */
+const EMPTY_NAMES: ReadonlySet<string> = new Set<string>()
+
 export class TenantRegistry {
   readonly dir: string
   readonly catalog: Catalog
   readonly maxOpen: number
+  /** Distinct databases one principal may pin; see `pin` (L4). */
+  readonly maxPinnedPerPrincipal: number
 
   #options: RegistryOptions
   /** Insertion order is recency: the oldest entry is the first eviction candidate. */
   #open = new Map<string, Tenant>()
   /**
-   * Names the LRU may not close, and who asked. A tenant with a live subscription still has to see
-   * commits, and so does one a replica is streaming from — and neither holder may release the
-   * other's pin, which is why this is keyed by owner rather than being a bare set.
+   * Names the LRU may not close, and who asked, and how many times. A tenant with a live
+   * subscription still has to see commits, and so does one a replica is streaming from — and
+   * neither holder may release the other's pin, which is why this is keyed by owner rather than
+   * being a bare set.
+   *
+   * L4 made it a **count** per owner rather than a set membership: with the owner now being the
+   * principal, one principal holds several subscriptions to the same database, and the first of
+   * them to close must not release the pin the others still need.
    */
-  #pinned = new Map<string, Set<string>>()
+  #pinned = new Map<string, Map<string, number>>()
+  /** The same thing from the other side, so `maxPinnedPerPrincipal` is a `Set.size` (L4). */
+  #pinnedByOwner = new Map<string, Set<string>>()
+  /** Opens refused because the LRU was entirely pinned; `bunql_open_refused_total`. */
+  #openRefused = 0
   /**
    * Per-database `ackWithoutReplicas`, memoised. `AckTracker` asks on every `replica`/`quorum`
    * write, and the answer is a catalog row that only this class writes — so it is cached here and
@@ -247,6 +280,7 @@ export class TenantRegistry {
     this.dir = options.dir
     this.catalog = catalog
     this.maxOpen = options.maxOpen ?? 1024
+    this.maxPinnedPerPrincipal = Math.max(1, options.maxPinnedPerPrincipal ?? 64)
     this.#options = options
   }
 
@@ -385,7 +419,10 @@ export class TenantRegistry {
     this.#assertOpen()
     const row = this.catalog.getTenant(name)
     if (!row) throw BunQLError.dbNotFound(name)
-    const pinned = this.#pinned.has(name)
+    // Every holder's pins, so they can be put back exactly as they were rather than collapsed
+    // into one anonymous one — with the owner now being the principal, that distinction is the
+    // per-principal cap (L4).
+    const heldBy = new Map(this.#pinned.get(name) ?? [])
     this.release(name)
     const dir = tenantDir(this.dir, name)
     const dbPath = path.join(dir, "main.db")
@@ -414,7 +451,9 @@ export class TenantRegistry {
       walSalt2: 0,
       walFrame: 0,
     })
-    if (pinned) this.pin(name)
+    for (const [owner, count] of heldBy) {
+      for (let i = 0; i < count; i++) this.pin(name, owner)
+    }
     return tenant
   }
 
@@ -477,7 +516,7 @@ export class TenantRegistry {
     if (!row) throw BunQLError.dbNotFound(name)
     const tenant = this.open(name)
     this.#open.delete(name)
-    this.#pinned.delete(name)
+    this.#clearPins(name)
     // The name is free again, and a database created under it next follows the node.
     this.#ackOverrides.delete(name)
     const trash = tenant.delete()
@@ -501,22 +540,66 @@ export class TenantRegistry {
    * connection, so closing a tenant that somebody is subscribed to would silently stop the feed.
    * `owner` separates holders: `unpin` releases one holder's claim, and the tenant stays pinned
    * while any other holder still has one.
+   *
+   * **L4: a pin is not a licence.** A pin lasts as long as a client keeps a subscription open, so
+   * without a ceiling one client opening a subscription against each of two thousand databases
+   * pinned two thousand tenants past `maxOpen` and nothing refused it. An owner may hold at most
+   * `maxPinnedPerPrincipal` *distinct* databases pinned; past that, `429 PIN_LIMIT`. Another
+   * subscription to a database this owner already pins is always admitted — it costs nothing new.
    */
-  pin(name: string, owner = "default"): void {
+  pin(name: string, owner = "default", options: PinOptions = {}): void {
+    const held = this.#pinnedByOwner.get(owner)
+    if (options.capped && held && !held.has(name) && held.size >= this.maxPinnedPerPrincipal) {
+      throw new BunQLError(
+        "PIN_LIMIT",
+        `this principal already holds ${this.maxPinnedPerPrincipal} databases open with ` +
+          `subscriptions; close one before subscribing to ${name}`,
+        429,
+      )
+    }
     const owners = this.#pinned.get(name)
-    if (owners) owners.add(owner)
-    else this.#pinned.set(name, new Set([owner]))
+    if (owners) owners.set(owner, (owners.get(owner) ?? 0) + 1)
+    else this.#pinned.set(name, new Map([[owner, 1]]))
+    if (held) held.add(name)
+    else this.#pinnedByOwner.set(owner, new Set([name]))
   }
 
   unpin(name: string, owner = "default"): void {
     const owners = this.#pinned.get(name)
     if (!owners) return
+    const count = owners.get(owner)
+    if (count === undefined) return
+    if (count > 1) {
+      owners.set(owner, count - 1)
+      return
+    }
     owners.delete(owner)
     if (owners.size === 0) this.#pinned.delete(name)
+    this.#dropOwner(name, owner)
+  }
+
+  /** Every name `owner` holds pinned right now. */
+  pinnedBy(owner: string): ReadonlySet<string> {
+    return this.#pinnedByOwner.get(owner) ?? EMPTY_NAMES
   }
 
   get pinned(): ReadonlySet<string> {
     return new Set(this.#pinned.keys())
+  }
+
+  #dropOwner(name: string, owner: string): void {
+    const held = this.#pinnedByOwner.get(owner)
+    if (!held) return
+    held.delete(name)
+    if (held.size === 0) this.#pinnedByOwner.delete(owner)
+  }
+
+  /** Forgets every pin on a name, from every owner. `release` and `delete` take the tenant away. */
+  #clearPins(name: string): void {
+    const owners = this.#pinned.get(name)
+    if (!owners) return
+    for (const owner of owners.keys()) this.#dropOwner(name, owner)
+    this.#pinned.delete(name)
   }
 
   /** Closes a tenant without deleting anything. It reopens on the next `open`. */
@@ -563,7 +646,7 @@ export class TenantRegistry {
 
   release(name: string): void {
     const tenant = this.#open.get(name)
-    this.#pinned.delete(name)
+    this.#clearPins(name)
     // Every holder's pin goes with the tenant; a caller that still wants it pinned reopens it.
     if (!tenant) return
     this.#open.delete(name)
@@ -594,6 +677,8 @@ export class TenantRegistry {
       tenants: this.catalog.listTenants().length,
       evictions: this.#evictions,
       writeQueueDepth,
+      pinned: this.#pinned.size,
+      openRefused: this.#openRefused,
       openTenants,
     }
   }
@@ -702,6 +787,18 @@ export class TenantRegistry {
         ? { onConnection: this.#options.onConnection }
         : {}),
     }
+    // L4: make room *before* opening, so a node whose LRU is entirely pinned refuses the open
+    // rather than admitting past `maxOpen` and calling the cap a target. A busy tenant still
+    // overshoots, still by one statement, still on purpose.
+    if (this.#open.size >= this.maxOpen && this.#evict(this.maxOpen - 1) === "pinned") {
+      this.#openRefused += 1
+      throw new BunQLError(
+        "TOO_MANY_OPEN",
+        `this node holds its maxOpen of ${this.maxOpen} databases open and every one of them is ` +
+          `pinned by a subscription; cannot open ${row.name}`,
+        503,
+      )
+    }
     const tenant = Tenant.open(options)
     this.#open.set(row.name, tenant)
     // The one place every create, fork, import, revive and reopen passes through, so the ack memo
@@ -719,12 +816,29 @@ export class TenantRegistry {
     return tenant
   }
 
-  /** Closes the least recently used tenants until the cap holds. Busy tenants are skipped. */
-  #evict(): void {
-    if (this.#open.size <= this.maxOpen) return
+  /**
+   * Closes least recently used tenants until at most `target` are open, and says what stopped it.
+   *
+   * `"busy"` is the one overshoot this design allows, and only because it is bounded by the
+   * duration of one statement: refusing a correct write because the LRU is full would be a worse
+   * answer than being one over the cap for a moment. `"pinned"` is not bounded by anything — a pin
+   * lasts as long as a client keeps a subscription open — so the caller refuses the open instead
+   * (L4, `docs/l4-pin-limit.md`).
+   */
+  #evict(target = this.maxOpen): "ok" | "busy" | "pinned" {
+    if (this.#open.size <= target) return "ok"
+    let busy = false
+    let pinned = false
     for (const [name, tenant] of this.#open) {
-      if (this.#open.size <= this.maxOpen) break
-      if (tenant.busy || this.#pinned.has(name)) continue
+      if (this.#open.size <= target) break
+      if (tenant.busy) {
+        busy = true
+        continue
+      }
+      if (this.#pinned.has(name)) {
+        pinned = true
+        continue
+      }
       this.#open.delete(name)
       try {
         tenant.close()
@@ -733,7 +847,10 @@ export class TenantRegistry {
       }
       this.#evictions += 1
     }
-    // Everything left is busy: the cap is a target, not a promise a correct write can break.
+    if (this.#open.size <= target) return "ok"
+    // A busy tenant is about to stop being busy; a pinned one is not, so it is the honest answer
+    // when both are in the way.
+    return pinned ? "pinned" : busy ? "busy" : "ok"
   }
 
   /**

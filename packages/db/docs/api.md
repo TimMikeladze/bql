@@ -204,10 +204,12 @@ that were once refused and is gone with the last of them.
 | `PAYLOAD_TOO_LARGE` | 413 | body over `[limits] maxBodyBytes` or `maxImportBytes` |
 | `RESULT_TOO_LARGE` | 413 | one result reached `[limits] maxResultBytes` while it was being built |
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
+| `PIN_LIMIT` | 429 | this principal already holds `[limits] maxPinnedPerPrincipal` databases open with subscriptions |
 | `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, a snapshot in progress, or too many forwards in flight |
 | `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it, or an admin write reached one at all; carries `BunQL-Primary` |
 | `WRITE_QUEUE_FULL` | 503 | the database's write queue is at `[limits] maxQueuedWrites` or `maxQueuedWriteBytes`; carries `Retry-After` |
 | `WRITE_QUEUE_TIMEOUT` | 503 | queued past `[limits] queueWaitMs` without reaching the writer |
+| `TOO_MANY_OPEN` | 503 | the node is at `[data] maxOpen` and every open database is pinned by a subscription |
 | `NO_REPLICAS` | 503 | `ack: "replica"`/`"quorum"` on a node with no replica attached |
 | `ACK_TIMEOUT` | 503 | committed and locally durable, but not enough replica acks in time |
 | `FORWARD_TIMEOUT` | 504 | the primary never answered a write a replica forwarded to it |
@@ -1750,6 +1752,7 @@ the canonical one wins when both are set.
 | `[limits] maxQueuedWrites` | `256` | `BUNQL_LIMITS_MAX_QUEUED_WRITES` | — |
 | `[limits] maxQueuedWriteBytes` | `8388608` | `BUNQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
 | `[limits] queueWaitMs` | `5000` | `BUNQL_LIMITS_QUEUE_WAIT_MS` | — |
+| `[limits] maxPinnedPerPrincipal` | `64` | `BUNQL_LIMITS_MAX_PINNED_PER_PRINCIPAL` | — |
 | `[limits] maxReadTx` | `16` | `BUNQL_LIMITS_MAX_READ_TX` | — |
 | `[limits] readTxTimeoutMs` | `30000` | `BUNQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
 | `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |
@@ -1920,6 +1923,16 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **A forwarded write is not retried.** A replica sends it once. `FORWARD_TIMEOUT` and a socket
   that drops mid-flight both mean "this may or may not have committed on the primary" — read the
   txid back rather than sending it again.
+- **A subscription pins its database open, and a principal may pin at most
+  `[limits] maxPinnedPerPrincipal` of them.** Past that, `429 PIN_LIMIT` — raised before the
+  subscription exists, so a refusal leaves nothing behind. Several subscriptions to the *same*
+  database count once. The admin key is not counted, and neither is an in-process embedded caller.
+  A dropped socket releases its pins; the last subscriber out keeps one for `[realtime]
+  idleRetainMs` so a `Last-Event-ID` reconnect can still be served from the ring.
+- **A node at `[data] maxOpen` with every open database pinned refuses the open**, `503
+  TOO_MANY_OPEN`, rather than admitting past the cap. A database that is merely *busy* still
+  overshoots the cap by one, on purpose: that lasts one statement, and refusing a correct write
+  because the LRU is full would be the worse answer. `docs/l4-pin-limit.md`.
 - **A database's write queue is bounded, and both refusals mean the write never started.**
   `WRITE_QUEUE_FULL` when it is at `[limits] maxQueuedWrites` or `maxQueuedWriteBytes`,
   `WRITE_QUEUE_TIMEOUT` when an entry waited past `[limits] queueWaitMs`. Neither can have

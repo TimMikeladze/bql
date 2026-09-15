@@ -607,6 +607,35 @@ export function tokenPrincipal(claims: TokenClaims): TokenPrincipal {
   }
 }
 
+/**
+ * Who a pin belongs to, for `[limits] maxPinnedPerPrincipal` (L4). A pin lasts as long as a client
+ * keeps a subscription open, so it is charged to the identity behind the token — `sub` when the
+ * token names one, and the token id otherwise, which is the honest fallback when it does not.
+ *
+ * The admin key is **not** capped: it is the operator, and refusing the operator's own
+ * subscription because they have sixty-five of them would be a worse failure than the one this
+ * ceiling prevents.
+ */
+export interface PinHolder {
+  /** The key pins are grouped under in `TenantRegistry`. */
+  readonly owner: string
+  /** Whether this holder is charged against `[limits] maxPinnedPerPrincipal`. */
+  readonly capped: boolean
+}
+
+/**
+ * A holder that is not a client: the embedded API, a replica stream, the node's own housekeeping.
+ * None of them is the thing `maxPinnedPerPrincipal` exists to bound, and one of them is the
+ * in-process caller who owns the machine.
+ */
+export const INTERNAL_HOLDER: PinHolder = Object.freeze({ owner: "default", capped: false })
+
+export function pinOwner(principal: Principal): PinHolder {
+  if (principal.kind === "admin") return { owner: "admin", capped: false }
+  const claims = principal.claims
+  return { owner: `p:${claims.sub ?? claims.jti}`, capped: true }
+}
+
 /** Raises 403 unless the principal has at least `need` on `db`; returns its actual scope. */
 export function requireScope(principal: Principal, db: string, need: Scope): Scope {
   if (principal.kind === "admin") return "rw"

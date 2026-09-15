@@ -317,6 +317,8 @@ export class Metrics {
       tenants: number
       evictions: number
       writeQueueDepth?: number
+      pinned?: number
+      openRefused?: number
     },
     node: string,
     replication?: ReplicationMetrics | null,
@@ -388,6 +390,11 @@ export class Metrics {
     )
     counter("bunql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
     counter(
+      "bunql_open_refused_total",
+      "Opens refused because every open database was pinned by a subscription.",
+      registry.openRefused ?? 0,
+    )
+    counter(
       "bunql_write_queue_rejected_total",
       "Writes refused admission to a database's write queue, full or timed out.",
       this.#writeQueueRejected,
@@ -404,6 +411,11 @@ export class Metrics {
       registry.writeQueueDepth ?? 0,
     )
     gauge("bunql_open_tenants", "Databases currently open.", registry.open)
+    gauge(
+      "bunql_tenants_pinned",
+      "Open databases a subscription or transaction is holding out of the LRU.",
+      registry.pinned ?? 0,
+    )
     if (registry.maxOpen !== undefined) {
       gauge(
         "bunql_max_open_tenants",

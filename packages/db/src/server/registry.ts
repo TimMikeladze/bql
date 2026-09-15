@@ -151,6 +151,7 @@ const ON_STATEMENT = [
   "BUSY",
   "WRITE_QUEUE_FULL",
   "WRITE_QUEUE_TIMEOUT",
+  "TOO_MANY_OPEN",
   "NOT_PRIMARY",
   "ACK_TIMEOUT",
   "NO_REPLICAS",
@@ -363,7 +364,7 @@ const SPECS: Spec[] = [
     }),
     response: opaque("A `rows` or `diff` event; see design §6.4."),
     responseType: "text/event-stream",
-    errors: [...ON_DB, "TOO_MANY_ROWS", "RESULT_TOO_LARGE", "QUERY_TIMEOUT"],
+    errors: [...ON_DB, "TOO_MANY_ROWS", "RESULT_TOO_LARGE", "QUERY_TIMEOUT", "PIN_LIMIT"],
     handler: handlers.live,
   },
 

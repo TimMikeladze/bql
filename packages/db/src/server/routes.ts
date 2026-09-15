@@ -44,6 +44,7 @@ import {
 import { assertValidName, type Tenant } from "../tenant/index.ts"
 import { listSnapshots } from "../wal/index.ts"
 import {
+  pinOwner,
   type Principal,
   type Scope,
   requireScope,
@@ -391,7 +392,7 @@ function includeParam(url: URL): IncludeLevel {
  * poll of design §6.4, which is what an HTTP-only client or a CDN in front of one gets.
  */
 export const changes: Handler = async (ctx) => {
-  const { tenant, name } = await open(ctx, "ro")
+  const { principal, tenant, name } = await open(ctx, "ro")
   const since = resumeFrom(ctx.request, ctx.url)
   const tables = tablesParam(ctx.url)
   const include = includeParam(ctx.url)
@@ -404,12 +405,15 @@ export const changes: Handler = async (ctx) => {
   const wantsSse = wait === null && !wantsJson
 
   const runtime = ctx.runtime
-  runtime.retain(name)
+  // L4: the pin belongs to this principal, and `[limits] maxPinnedPerPrincipal` is what stops one
+  // client holding a subscription open against more databases than the node can hold at all.
+  const holder = pinOwner(principal)
+  runtime.retain(name, holder)
   let realtime: ReturnType<ServerRuntime["realtimeFor"]>
   try {
     realtime = runtime.realtimeFor(tenant)
   } catch (err) {
-    runtime.releaseSubscription(name)
+    runtime.releaseSubscription(name, holder)
     throw err
   }
 
@@ -425,7 +429,7 @@ export const changes: Handler = async (ctx) => {
         "cache-control": historical ? "public, max-age=31536000, immutable" : "no-store",
       })
     } finally {
-      runtime.releaseSubscription(name)
+      runtime.releaseSubscription(name, holder)
     }
   }
 
@@ -438,7 +442,7 @@ export const changes: Handler = async (ctx) => {
       if (engineSub) realtime.unsubscribe(engineSub)
       runtime.metrics.unsubscribed("changes")
       runtime.metrics.sseClosed()
-      runtime.releaseSubscription(name)
+      runtime.releaseSubscription(name, holder)
     },
   })
   runtime.metrics.subscribed("changes")
@@ -549,12 +553,15 @@ export const live: Handler = async (ctx) => {
   const maxRows = Number.isFinite(maxRowsRaw) && maxRowsRaw > 0 ? Math.floor(maxRowsRaw) : undefined
 
   const runtime = ctx.runtime
-  runtime.retain(name)
+  // L4: the pin belongs to this principal, and `[limits] maxPinnedPerPrincipal` is what stops one
+  // client holding a subscription open against more databases than the node can hold at all.
+  const holder = pinOwner(principal)
+  runtime.retain(name, holder)
   let realtime: ReturnType<ServerRuntime["realtimeFor"]>
   try {
     realtime = runtime.realtimeFor(tenant)
   } catch (err) {
-    runtime.releaseSubscription(name)
+    runtime.releaseSubscription(name, holder)
     throw err
   }
 
@@ -567,7 +574,7 @@ export const live: Handler = async (ctx) => {
       if (engineSub) realtime.unsubscribe(engineSub)
       runtime.metrics.unsubscribed("live")
       runtime.metrics.sseClosed()
-      runtime.releaseSubscription(name)
+      runtime.releaseSubscription(name, holder)
     },
   })
   runtime.metrics.subscribed("live")

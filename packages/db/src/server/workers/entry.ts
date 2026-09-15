@@ -25,6 +25,7 @@ import type {
 } from "../../replication/index.ts"
 import { createApp, createRuntime, type App } from "../app.ts"
 import type { ServerConfig } from "../config.ts"
+import type { RegistryStats } from "../../tenant/index.ts"
 import { BunQLError, errorResponse } from "../errors.ts"
 import type { ServerRuntime } from "../runtime.ts"
 import {
@@ -47,6 +48,7 @@ import {
   bindingsOf,
   flattenHeaders,
   type FromWorker,
+  type MetricsReply,
   type ToWorker,
   unflattenHeaders,
 } from "./protocol.ts"
@@ -544,17 +546,14 @@ function closeVirtual(current: WorkerState, id: string): void {
 }
 
 /** Only the numbers `Metrics.render` reads; the full stats carry an array per tenant. */
-function pick(stats: {
-  open: number
-  tenants: number
-  evictions: number
-  writeQueueDepth: number
-}): { open: number; tenants: number; evictions: number; writeQueueDepth: number } {
+function pick(stats: RegistryStats): MetricsReply["registry"] {
   return {
     open: stats.open,
     tenants: stats.tenants,
     evictions: stats.evictions,
     writeQueueDepth: stats.writeQueueDepth,
+    pinned: stats.pinned,
+    openRefused: stats.openRefused,
   }
 }
 

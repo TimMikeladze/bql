@@ -182,6 +182,10 @@ export type BunQLErrorCode =
   | "WRITE_QUEUE_FULL"
   /** Queued past `[limits] queueWaitMs` without reaching the writer. */
   | "WRITE_QUEUE_TIMEOUT"
+  /** This principal already holds `[limits] maxPinnedPerPrincipal` databases open. */
+  | "PIN_LIMIT"
+  /** The node is at `[data] maxOpen` and every open database is pinned by a subscription. */
+  | "TOO_MANY_OPEN"
   | "TXID_NOT_AVAILABLE"
   | "NOT_PRIMARY"
   | "RESET_REQUIRED"

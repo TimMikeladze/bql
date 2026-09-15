@@ -566,7 +566,14 @@ export interface MetricsReply {
    * Its share of the LRU, since `open` and `evictions` are per thread — and of the write queue,
    * which is per tenant and so sums across the shards like any other disjoint quantity (L2).
    */
-  registry: { open: number; tenants: number; evictions: number; writeQueueDepth: number }
+  registry: {
+    open: number
+    tenants: number
+    evictions: number
+    writeQueueDepth: number
+    pinned: number
+    openRefused: number
+  }
   /**
    * C4b: this worker's share of the replication figures. `connected` is not here — the router owns
    * every socket and is the only thread that can count them — so this carries only what is per

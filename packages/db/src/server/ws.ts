@@ -29,8 +29,8 @@ import {
   type LiveEvent,
   type Publisher,
 } from "../realtime/index.ts"
-import type { Principal } from "./auth.ts"
-import { requireScope } from "./auth.ts"
+import type { PinHolder, Principal } from "./auth.ts"
+import { pinOwner, requireScope } from "./auth.ts"
 import type { RemoteTx } from "./forward.ts"
 import { BunQLError, mapError } from "./errors.ts"
 import {
@@ -52,6 +52,8 @@ interface Subscription {
   topics: string[]
   /** The id the tenant's realtime engine knows it by. */
   engineSub: string
+  /** Whose pin this subscription holds, so dropping it releases exactly that one (L4). */
+  holder: PinHolder
 }
 
 export interface SocketData {
@@ -536,7 +538,10 @@ function subscribe(ws: Socket, message: WsAny, db: string): void {
 function subscribeChanges(ws: Socket, message: WsAny, tenant: TxSession["tenant"]): void {
   const runtime = ws.data.runtime
   const db = tenant.name
-  runtime.retain(db)
+  // L4: the pin is this principal's, and `PIN_LIMIT` is raised here — before the engine is asked
+  // for anything — so a refused subscription leaves no state behind on either side.
+  const holder = pinOwner(principalOf(ws))
+  runtime.retain(db, holder)
   let realtime: ReturnType<ServerRuntime["realtimeFor"]>
   let engineSub: string
   let backlog: ReturnType<
@@ -556,7 +561,7 @@ function subscribeChanges(ws: Socket, message: WsAny, tenant: TxSession["tenant"
     )
     engineSub = backlog.sub
   } catch (err) {
-    runtime.releaseSubscription(db)
+    runtime.releaseSubscription(db, holder)
     throw err
   }
 
@@ -565,7 +570,7 @@ function subscribeChanges(ws: Socket, message: WsAny, tenant: TxSession["tenant"
     : [changesTopic(db), schemaTopic(db)]
   for (const topic of topics) ws.subscribe(topic)
   const id = topics[0] as string
-  ws.data.subs.set(id, { kind: "changes", db, topics, engineSub })
+  ws.data.subs.set(id, { kind: "changes", db, topics, engineSub, holder })
   runtime.metrics.subscribed("changes")
 
   send(ws, { id: message.id, ok: true, sub: id, subs: topics })
@@ -585,7 +590,8 @@ function subscribeLive(ws: Socket, message: WsAny, tenant: TxSession["tenant"]):
   const db = tenant.name
   if (!message.sql) throw BunQLError.badRequest("a live subscription needs sql")
   const rows = message.rows === "object" ? "object" : "array"
-  runtime.retain(db)
+  const holder = pinOwner(principal)
+  runtime.retain(db, holder)
   // The engine publishes the first result from inside `subscribeLive`, before the subscription id
   // exists, so early events are held until there is an id to stamp them with — and until the
   // `ok` reply has gone out, which is the order a client is entitled to see.
@@ -607,14 +613,14 @@ function subscribeLive(ws: Socket, message: WsAny, tenant: TxSession["tenant"]):
       },
     )
     id = liveTopic(db, subscription.sub)
-    ws.data.subs.set(id, { kind: "live", db, topics: [], engineSub: subscription.sub })
+    ws.data.subs.set(id, { kind: "live", db, topics: [], engineSub: subscription.sub, holder })
     runtime.metrics.subscribed("live")
     send(ws, { id: message.id, ok: true, sub: id })
     for (const event of early) pushLive(ws, id, event)
     early.length = 0
   } catch (err) {
     if (id) ws.data.subs.delete(id)
-    runtime.releaseSubscription(db)
+    runtime.releaseSubscription(db, holder)
     throw err
   }
 }
@@ -667,7 +673,7 @@ function dropSubscription(ws: Socket, id: string): boolean {
   const runtime = ws.data.runtime
   runtime.realtimeOf(subscription.db)?.unsubscribe(subscription.engineSub)
   runtime.metrics.unsubscribed(subscription.kind)
-  runtime.releaseSubscription(subscription.db)
+  runtime.releaseSubscription(subscription.db, subscription.holder)
   return true
 }
 

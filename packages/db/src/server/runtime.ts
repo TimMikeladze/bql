@@ -55,6 +55,9 @@ import {
 import {
   applyPolicy,
   type Authenticator,
+  INTERNAL_HOLDER,
+  type PinHolder,
+  pinOwner,
   pinQueryOnly,
   type Principal,
 } from "./auth.ts"
@@ -228,7 +231,7 @@ export class ServerRuntime {
   #unhook = new Map<string, () => void>()
   #subscribers = new Map<string, number>()
   /** Databases whose engine is being kept alive for a reconnect; see `releaseSubscription`. */
-  #retiring = new Map<string, ReturnType<typeof setTimeout>>()
+  #retiring = new Map<string, { timer: ReturnType<typeof setTimeout>; owner: PinHolder }>()
   #tx = new Map<string, TxSession>()
   #txByDb = new Map<string, TxSession>()
   /** Open read transactions by baton. A separate space: these hold readers, not the writer. */
@@ -281,6 +284,7 @@ export class ServerRuntime {
         maxQueuedWrites: options.config.limits.maxQueuedWrites,
         maxQueuedWriteBytes: options.config.limits.maxQueuedWriteBytes,
         queueWaitMs: options.config.limits.queueWaitMs,
+        maxPinnedPerPrincipal: options.config.limits.maxPinnedPerPrincipal,
         applyMechanism: options.config.replication.apply,
         applyBusyMs: options.config.replication.applyBusyMs,
         // L3: on a worker, `maxOpen` here is this shard's *share* of the node's budget and the
@@ -959,15 +963,24 @@ export class ServerRuntime {
       })
   }
 
-  /** Counts a subscription against a tenant and pins it open while any remain. */
-  retain(name: string): void {
+  /**
+   * Counts a subscription against a tenant and pins it open while any remain.
+   *
+   * L4: `owner` is the **principal**, not a single anonymous holder, because a pin lasts as long as
+   * a client keeps its subscription open. `[limits] maxPinnedPerPrincipal` is what stops one client
+   * pinning two thousand databases past `maxOpen`; it throws `PIN_LIMIT` before the subscriber
+   * count moves, so a refused subscription leaves nothing behind.
+   */
+  retain(name: string, owner: PinHolder = INTERNAL_HOLDER): void {
+    this.registry.pin(name, owner.owner, { capped: owner.capped })
     const retiring = this.#retiring.get(name)
     if (retiring) {
-      clearTimeout(retiring)
+      // The window's own pin goes back here, having been replaced by this subscription's.
+      clearTimeout(retiring.timer)
       this.#retiring.delete(name)
+      this.registry.unpin(name, retiring.owner.owner)
     }
     this.#subscribers.set(name, (this.#subscribers.get(name) ?? 0) + 1)
-    this.registry.pin(name)
   }
 
   /**
@@ -976,35 +989,47 @@ export class ServerRuntime {
    * later would otherwise always be told to re-query. The engine is closed once the retain window
    * passes with nobody having come back.
    */
-  releaseSubscription(name: string): void {
+  releaseSubscription(name: string, owner: PinHolder = INTERNAL_HOLDER): void {
     const next = (this.#subscribers.get(name) ?? 1) - 1
     if (next > 0) {
+      // Somebody else is still subscribed, so only this holder's claim goes back. The tenant stays
+      // pinned by theirs, which is exactly what per-owner pins are for.
       this.#subscribers.set(name, next)
+      this.registry.unpin(name, owner.owner)
       return
     }
     this.#subscribers.delete(name)
     const retainMs = this.config.realtime.idleRetainMs
     if (retainMs <= 0 || this.#closed) {
-      this.registry.unpin(name)
+      this.registry.unpin(name, owner.owner)
       this.closeRealtime(name)
       return
     }
-    if (this.#retiring.has(name)) return
+    if (this.#retiring.has(name)) {
+      this.registry.unpin(name, owner.owner)
+      return
+    }
+    // The last subscriber out keeps its pin for the retain window, because the window exists to
+    // keep the *ring* alive for a client that reconnects with `Last-Event-ID`, and an evicted
+    // tenant takes the ring with it. It is charged to that principal until the window closes,
+    // which is bounded by `[realtime] idleRetainMs` rather than by how long a client feels like
+    // staying — the distinction L4 is about.
     const timer = setTimeout(() => {
       this.#retiring.delete(name)
+      this.registry.unpin(name, owner.owner)
       if (this.#subscribers.has(name)) return
-      this.registry.unpin(name)
       this.closeRealtime(name)
     }, retainMs)
     timer.unref?.()
-    this.#retiring.set(name, timer)
+    this.#retiring.set(name, { timer, owner })
   }
 
   closeRealtime(name: string): void {
     const retiring = this.#retiring.get(name)
     if (retiring) {
-      clearTimeout(retiring)
+      clearTimeout(retiring.timer)
       this.#retiring.delete(name)
+      this.registry.unpin(name, retiring.owner.owner)
     }
     const realtime = this.#realtime.get(name)
     if (!realtime) return
@@ -1056,7 +1081,10 @@ export class ServerRuntime {
     })
     this.#tx.set(baton, session)
     this.#txByDb.set(tenant.name, session)
-    this.registry.pin(tenant.name)
+    // A baton pin is keyed by the principal too, so `pinnedBy` is a true account of what one
+    // client is holding — but it is not *capped*: a transaction is already leashed by
+    // `[limits] txIdleTimeoutMs`, and `maxOpenTx` is 1 per database, so it cannot accumulate.
+    this.registry.pin(tenant.name, pinOwner(principal).owner)
     this.metrics.transaction()
     return session
   }
@@ -1179,7 +1207,9 @@ export class ServerRuntime {
       tx,
     }
     this.#readTx.set(baton, session)
-    this.registry.pin(tenant.name)
+    // Bounded by `[limits] maxReadTx` and `readTxTimeoutMs`, so pinned by the principal and
+    // uncapped for the same reason a baton transaction is.
+    this.registry.pin(tenant.name, pinOwner(principal).owner)
     this.metrics.transaction()
     return session
   }
@@ -1213,9 +1243,7 @@ export class ServerRuntime {
     const session = this.#readTx.get(baton)
     if (!session) return
     this.#readTx.delete(baton)
-    if (!this.#subscribers.has(session.db) && !this.#txByDb.has(session.db)) {
-      this.registry.unpin(session.db)
-    }
+    this.registry.unpin(session.db, pinOwner(session.principal).owner)
   }
 
   /** The session behind a baton, or 404. */
@@ -1277,7 +1305,9 @@ export class ServerRuntime {
   #forgetTx(session: TxSession): void {
     this.#tx.delete(session.baton)
     if (this.#txByDb.get(session.db) === session) this.#txByDb.delete(session.db)
-    if (!this.#subscribers.has(session.db)) this.registry.unpin(session.db)
+    // Per-owner counts, so this releases exactly this transaction's claim: a subscription the same
+    // principal holds on the same database keeps its own, and another principal's is untouched.
+    this.registry.unpin(session.db, pinOwner(session.principal).owner)
     this.#wakeNextTx(session.db)
   }
 
