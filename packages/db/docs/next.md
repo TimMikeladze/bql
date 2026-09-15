@@ -24,8 +24,8 @@ Read this, then `docs/e2-windows-gate.md`, `docs/p5-deferred-compression.md` §6
 `docs/r9-segment-index.md`, `docs/r10-read-transactions.md`, `docs/p6-router-resolution.md`,
 `docs/e1-windows.md`, `docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/design.md` §0, §11
 and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster),
-`docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL) and **`docs/plan-limits.md` — the L track,
-admission control, written 2026-09-14 and not yet started. That is where the next session goes.**
+`docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL) and `docs/plan-limits.md` — the L track,
+admission control, **L1 through L7 built; L8 is the one still open.**
 
 ## Where things stand
 
@@ -509,9 +509,17 @@ What phase 1 added to the list:
 
 ## Start here
 
-**Nothing milestone-sized is open**, and the three things the last edition of this file called
-chores turned out to be bugs and are fixed. What is left is genuinely optional, and it is listed in
-the order it is worth doing.
+### 0. L8 — a change event per statement inside a fold
+
+The one milestone of `docs/plan-limits.md` still open, and the only thing here that is
+milestone-sized. Group commit is on by default, so folded writes share a txid and the change feed
+emits **one event per fold**. Emitting one event per statement, keyed `(txid, seq)`, loosens two
+things at once: the group-commit contract stops costing precision in the feed, and a downstream
+consumer gains a stable key it can dedupe on across a replay — which is what an in-memory ring that
+answers `reset` cannot support today. The two e2e tests that assert the fold are
+`test/e2e/scenario.test.ts` and `test/e2e/phase1.test.ts`.
+
+Everything below is genuinely optional, in the order it is worth doing.
 
 ### 1. Re-measure §5's worker ladder on a quiet machine
 
