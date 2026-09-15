@@ -1,5 +1,13 @@
 # Resume here — state of BunQL and what to do next
 
+**Updated 2026-09-14: the L track is built, L1 through L7.** Admission control — a ceiling on every
+shared resource, a typed refusal when it is reached, and a number that says how close it is. Three
+of the seven changed shape once they were measured, and two of them changed the *answer*: L5's
+shared fsync sweep is shipped **off**, because the benchmark says it loses at a hundred databases,
+and L6's premise turned out to be half false the way R9's was. `docs/plan-limits.md` is the plan;
+`docs/l1-result-budget.md` through `docs/l7-tarball.md` are what actually happened. **L8 is the
+only milestone of that plan still open.**
+
 Rewritten 2026-09-13, at the end of the session that went after the list the previous one left.
 **Three of the things on that list turned out to be bugs rather than chores**, and each was
 diagnosed wrongly before it was diagnosed rightly:
@@ -21,12 +29,67 @@ admission control, written 2026-09-14 and not yet started. That is where the nex
 
 ## Where things stand
 
-**Phases 0, 1 and 2 are complete, and so is the surfaces track, and Windows is a supported
-platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2. **CI green on macOS, Linux and
-Windows**, all three gating. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
-`bun test` → **1496 pass, 2 skip, 0 fail** across 125 files, and green again with
-`BUNQL_WAL_NATIVE=0` (run it both ways; the second is what proves the JavaScript fallback).
-`bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. Zero runtime dependencies.
+**Phases 0, 1 and 2 are complete, and so is the surfaces track, and the L track, and Windows is a
+supported platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2, **L1-L7**. **CI green on
+macOS, Linux and Windows**, all three gating, plus a fourth job as of L7 that packs the real
+tarball and builds SQLite from it. On `main`, pushed to
+**https://github.com/TimMikeladze/bunql** (private). `bun test` → **1524 pass, 2 skip, 0 fail**
+across 131 files, and green again with `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what
+proves the JavaScript fallback). `bun run typecheck`, `bun run bytes`, `bun run routes:check` and
+`bun run pack:check` clean. Zero runtime dependencies.
+
+### The L track, newest first
+
+**L7 — the tarball can build its own engine.** `package.json` `files` excluded `scripts/`, so
+`sqlite:build` — advertised in `package.json` and in the README — was not in the published package,
+and a clone with a built `vendor/` hid it completely. The gate is `bun run db pack:check`: pack,
+install the tarball into an empty directory as a dependency, build SQLite there, smoke it. It found
+a second bug on its first run, which would have shipped in the first release: `bun run
+sqlite:build` in a consumer's project resolves against *their* package.json. The command is the
+path. `docs/l7-tarball.md`.
+
+**L6 — a global upload budget, and the premise was half false.** `S3Store` has had bounded
+concurrency since R3, so a thousand shipping databases were never a thousand concurrent requests.
+What that gate does not do is what L6 built: order the queue by how far behind each database is
+(so a database behind for an hour is not starved by one that committed a moment ago), bound the
+wait so a shipper re-arms instead of growing a second queue, and report `bunql_upload_inflight` and
+`bunql_upload_waiting`. `docs/l6-upload-budget.md`.
+
+**L5 — the fsync sweep is built, measured, and left off.** The benchmark came first, as the plan
+demanded, and it decided against the plan's own default. Three findings: the write path already
+costs exactly 2.00 barriers per transaction and **group commit already amortises them** (0.13 per
+write at sixteen in flight); this disk is *fastest* issuing barriers serially (30 180/s against
+10 506 at a concurrency of sixty-four); and the herd is real but belongs to `ack: "local"` — 4 387
+barriers a second and 40.6 ms p99 at five hundred databases. `"shared"` wins hugely there (29 407
+writes/s against 23 867, p99 16.9 ms against 40.6) and **loses at a hundred**, so
+`[durability] fsyncSweep` stays `"per-db"`. It is also inert under the node's default ack, proved
+by a `kill -9`. `docs/l5-fsync-sweep.md`, `docs/performance.md` §9.
+
+**L4 — a pin is not a licence.** `#evict` skipped pinned tenants and admitted the new one anyway,
+on the grounds that "the cap is a target". True of `busy`, which lasts one statement; false of
+`pinned`, which a subscriber holds as long as it likes — so one client could pin two thousand
+databases past `maxOpen` and nothing refused it. Pins are now keyed by principal and capped at
+`[limits] maxPinnedPerPrincipal` (`429 PIN_LIMIT`), and an open the LRU cannot make room for is
+refused `503 TOO_MANY_OPEN`. `docs/l4-pin-limit.md`.
+
+**L3 — the fd budget is a node number.** Bun workers are threads sharing one descriptor table, so
+`workers: 8, maxOpen: 1024` held 8192 databases while each thread warned about its own eighth of
+the requirement. The router divides the budget and probes once. The plan's "at least 8 per worker"
+floor is **not** implemented — a per-worker floor is `8 * workers` wearing a disguise — and the
+node warns it will thrash instead. `docs/l3-fd-budget.md`.
+
+**L2 — write admission is bounded.** `writeQueued` pushed with no ceiling; `maxGroupCommit` bounds
+a drain, never the backlog. Three bounds, a `Retry-After` derived from the measured drain rate, and
+cancellation on the request's abort signal. The finding worth keeping: arming the deadline and the
+abort listener at push cost **6%** of the group-commit path at sixty-four concurrent clients —
+`addEventListener` is 137 ns and `Date.now()` 22 ns against a per-statement cost of 850 ns — so
+only an entry that cannot be in the next batch pays for any of it. `docs/l2-write-admission.md`.
+
+**L1 — a result is bounded while it is built.** `maxRows` was checked on `rows.length` after
+`values()` had materialised everything, so a five-million-row scan grew RSS by **286 MB** before
+answering with a correct 400. The ceiling is now armed on the statement and refused at the row that
+would cross it: under 1 MB. `[limits] maxResultBytes` and `413 RESULT_TOO_LARGE` are the byte half.
+`docs/l1-result-budget.md`.
 
 ### What this session changed, newest first
 
