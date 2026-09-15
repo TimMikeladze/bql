@@ -5,11 +5,21 @@
 //
 // Invariant: no dependencies and no framework. The flag parser below is twenty lines and the
 // output is either a line a human reads or, with `--json`, the server's own body.
+//
+// Second invariant: every remote command goes through the SDK — `client.admin.*` for the control
+// plane of design §6.5, `client.db()` for `exec` and the socket for `shell`. The CLI carried its
+// own fetch wrapper and its own copies of the response types until `docs/m9-client-admin.md`;
+// there is now one implementation of these routes, and it is the one the tests exercise.
 
-import { createClient } from "./client/index.ts"
+import { createClient, type Client } from "./client/index.ts"
 import { BunQLClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
-import type { QueryResult } from "./client/protocol.ts"
+import type {
+  CheckpointMode,
+  QueryResult,
+  Revision,
+  TableScope,
+} from "./client/protocol.ts"
 import { SocketClient, defaultWebSocketFactory } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
 import { loadConfig, type ServerConfigInput } from "./server/config.ts"
@@ -122,9 +132,9 @@ export function parseTtlMs(text: string): number {
   }
 }
 
-/** `todos:r,users:rw` — the table ACL of design §6. */
-export function parseTables(text: string): Record<string, "r" | "w" | "rw"> {
-  const out: Record<string, "r" | "w" | "rw"> = {}
+/** `todos:r,users:rw` — the table ACL of design §6, in the two scopes a token can carry. */
+export function parseTables(text: string): Record<string, TableScope> {
+  const out: Record<string, TableScope> = {}
   for (const entry of text.split(",")) {
     const trimmed = entry.trim()
     if (trimmed.length === 0) continue
@@ -132,8 +142,8 @@ export function parseTables(text: string): Record<string, "r" | "w" | "rw"> {
     if (colon <= 0) throw new CliError(`--tables wants name:scope entries, got ${trimmed}`)
     const table = trimmed.slice(0, colon)
     const scope = trimmed.slice(colon + 1)
-    if (scope !== "r" && scope !== "w" && scope !== "rw") {
-      throw new CliError(`table scope must be r, w or rw, got ${scope}`)
+    if (scope !== "r" && scope !== "rw") {
+      throw new CliError(`table scope must be r or rw, got ${scope}`)
     }
     out[table] = scope
   }
@@ -153,12 +163,14 @@ export function parseFrom(text: string): { db: string; at?: number | string } {
   return /^\d+$/.test(rev) ? { db, at: Number(rev) } : { db, at: rev }
 }
 
-// ── the HTTP side ──────────────────────────────────────────────────────────────────────────────
+// ── the remote side: one client, and the flags that point it somewhere ─────────────────────────
 
 interface Remote {
   url: string
   token: string | null
   json: boolean
+  /** The SDK this command runs through. Nothing is opened until a call is made. */
+  client: Client
 }
 
 /** An environment variable that is present but empty is not set, the way a shell means it. */
@@ -172,44 +184,14 @@ function remoteOf(args: ParsedArgs, env: Record<string, string | undefined>): Re
     "",
   )
   const token = str(args, "token") ?? set(env.BUNQL_TOKEN) ?? set(env.BUNQL_ADMIN_KEY) ?? null
-  return { url, token, json: args.flags.json === true }
-}
-
-async function api<T>(
-  remote: Remote,
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  const headers: Record<string, string> = {}
-  if (remote.token) headers.authorization = `Bearer ${remote.token}`
-  if (body !== undefined) headers["content-type"] = "application/json"
-  let response: Response
-  try {
-    response = await fetch(`${remote.url}${path}`, {
-      method,
-      headers,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-  } catch (err) {
-    throw new CliError(
-      `cannot reach ${remote.url}: ${err instanceof Error ? err.message : String(err)}`,
-    )
-  }
-  const text = await response.text()
-  let parsed: unknown = null
-  try {
-    parsed = text.length > 0 ? JSON.parse(text) : null
-  } catch {
-    parsed = null
-  }
-  if (!response.ok) {
-    const error = (parsed as { error?: { code: string; message: string } } | null)?.error
-    throw new CliError(
-      error ? `${error.code}: ${error.message}` : `${method} ${path} failed (${response.status})`,
-    )
-  }
-  return parsed as T
+  // `intMode: "string"` is for `exec`: a terminal prints an integer past 2^53 rather than throwing
+  // on it. The admin routes carry no SQLite values, so it changes nothing for them.
+  const client = createClient({
+    url,
+    ...(token ? { token } : {}),
+    intMode: "string",
+  })
+  return { url, token, json: args.flags.json === true, client }
 }
 
 function out(remote: Remote, payload: unknown, line: string): void {
@@ -394,31 +376,20 @@ function envSuppressions(overrides: ServerConfigInput): Record<string, string | 
   return cleared
 }
 
-interface DbStats {
-  name: string
-  txid: number
-  sizeBytes: number
-  walBytes: number
-  logBytes: number
-  liveQueries: number
-  subscribers: number
-}
-
 async function dbCommand(args: ParsedArgs, remote: Remote): Promise<void> {
   const [, action, name] = args.positional
+  const admin = remote.client.admin
   switch (action) {
     case "create": {
       if (!name) throw new CliError("db create needs a name")
       const from = str(args, "from")
-      const body = {
-        name,
+      const pageSize = num(args, "page-size")
+      const quotaBytes = num(args, "quota-bytes")
+      const stats = await admin.create(name, {
         ...(from ? { from: parseFrom(from) } : {}),
-        ...(num(args, "page-size") !== undefined ? { pageSize: num(args, "page-size") } : {}),
-        ...(num(args, "quota-bytes") !== undefined
-          ? { quotaBytes: num(args, "quota-bytes") }
-          : {}),
-      }
-      const stats = await api<DbStats>(remote, "POST", "/v1/db", body)
+        ...(pageSize !== undefined ? { pageSize } : {}),
+        ...(quotaBytes !== undefined ? { quotaBytes } : {}),
+      })
       out(remote, stats, `created ${stats.name} at txid ${stats.txid}`)
       return
     }
@@ -426,29 +397,28 @@ async function dbCommand(args: ParsedArgs, remote: Remote): Promise<void> {
       if (!name) throw new CliError("db fork needs a name")
       const from = str(args, "from")
       if (!from) throw new CliError("db fork needs --from <db>[@<txid|time>]")
-      const stats = await api<DbStats>(remote, "POST", "/v1/db", {
-        name,
-        from: parseFrom(from),
-      })
+      const source = parseFrom(from)
+      const stats = await admin.fork(name, source.db, source.at)
       out(remote, stats, `forked ${from} into ${stats.name} at txid ${stats.txid}`)
       return
     }
     case "list": {
-      const body = await api<{ databases: Record<string, unknown>[] }>(remote, "GET", "/v1/db")
+      const databases = await admin.list()
+      // `--json` prints the route's own body, envelope and all, which is what a script parses.
       if (remote.json) {
-        console.log(JSON.stringify(body, null, 2))
+        console.log(JSON.stringify({ databases }, null, 2))
         return
       }
-      if (body.databases.length === 0) {
+      if (databases.length === 0) {
         console.log("no databases")
         return
       }
-      console.log(Bun.inspect.table(body.databases))
+      console.log(Bun.inspect.table(databases))
       return
     }
     case "stat": {
       if (!name) throw new CliError("db stat needs a name")
-      const stats = await api<DbStats>(remote, "GET", `/v1/db/${name}`)
+      const stats = await admin.stat(name)
       out(
         remote,
         stats,
@@ -460,11 +430,7 @@ async function dbCommand(args: ParsedArgs, remote: Remote): Promise<void> {
     }
     case "delete": {
       if (!name) throw new CliError("db delete needs a name")
-      const body = await api<{ name: string; trash: string }>(
-        remote,
-        "DELETE",
-        `/v1/db/${name}`,
-      )
+      const body = await admin.delete(name)
       out(remote, body, `deleted ${body.name}; its files are in ${body.trash}`)
       return
     }
@@ -476,11 +442,7 @@ async function dbCommand(args: ParsedArgs, remote: Remote): Promise<void> {
 async function snapshot(args: ParsedArgs, remote: Remote): Promise<void> {
   const name = args.positional[1]
   if (!name) throw new CliError("snapshot needs a database")
-  const body = await api<{ snapshotId: string; txid: number; bytes: number }>(
-    remote,
-    "POST",
-    `/v1/db/${name}/snapshot`,
-  )
+  const body = await remote.client.admin.snapshot(name)
   out(remote, body, `snapshot ${body.snapshotId} at txid ${body.txid} (${body.bytes} B)`)
 }
 
@@ -498,22 +460,8 @@ export function parseS3Url(text: string): { bucket: string; prefix?: string } {
 }
 
 /** A txid stays a number so the server can tell it from a timestamp; anything else is a string. */
-function atValue(at: string): number | string {
+function atValue(at: string): Revision {
   return /^\d+$/.test(at) ? Number(at) : at
-}
-
-interface S3RestoreBody {
-  name: string
-  from: string
-  source?: string
-  bucket?: string
-  prefix?: string
-  generation?: string
-  txid: number
-  fromTxid?: number
-  applied?: number
-  objects?: number
-  at?: number
 }
 
 async function restore(args: ParsedArgs, remote: Remote): Promise<void> {
@@ -522,67 +470,32 @@ async function restore(args: ParsedArgs, remote: Remote): Promise<void> {
   const at = str(args, "at")
   const into = str(args, "into")
   const from = str(args, "from")
+  const generation = str(args, "generation")
 
   if (from !== undefined) {
-    const target = parseS3Url(from)
-    const body = await api<S3RestoreBody>(remote, "POST", `/v1/db/${name}/restore`, {
+    const body = await remote.client.admin.restore(name, {
       from: "s3",
-      ...target,
+      ...parseS3Url(from),
       ...(at !== undefined ? { at: atValue(at) } : {}),
       ...(into ? { into } : {}),
-      ...(str(args, "generation") ? { generation: str(args, "generation") } : {}),
+      ...(generation ? { generation } : {}),
     })
     out(
       remote,
       body,
-      `restored ${body.from} from s3://${body.bucket}/${body.prefix ?? ""} into ${body.name} ` +
-        `at txid ${body.txid} (${body.applied ?? 0} record(s) from ${body.objects ?? 0} object(s))`,
+      `restored ${body.from} from s3://${body.bucket}/${body.prefix} into ${body.name} ` +
+        `at txid ${body.txid} (${body.applied} record(s) from ${body.objects} object(s))`,
     )
     return
   }
 
   if (at === undefined) throw new CliError("restore needs --at <txid|time>, or --from s3://…")
-  const body = await api<{ name: string; txid: number; from: string; at: number }>(
-    remote,
-    "POST",
-    `/v1/db/${name}/restore`,
-    { at: atValue(at), ...(into ? { into } : {}) },
-  )
-  out(remote, body, `restored ${body.from}@${body.at} into ${body.name} (txid ${body.txid})`)
-}
-
-interface BackupStatusBody {
-  db: string
-  enabled: boolean
-  bucket: string | null
-  prefix: string | null
-  retention?: string
-  shipper: {
-    shippedTxid: number
-    pendingRecords: number
-    pendingBytes: number
-    behind: boolean
-    lastError: string | null
-    lastShipAtMs: number | null
-    bytesShipped: number
-    errors: number
-    snapshots: number
-    segments: number
-  } | null
-  manifest: { generation: string; shippedTxid: number; snapshots: number; segments: number } | null
-  error: string | null
-}
-
-interface VerifyBody {
-  ok: boolean
-  db: string
-  at: number
-  latest: number
-  generation: string
-  segments: number
-  records: number
-  bytes: number
-  missing: string[]
+  const body = await remote.client.admin.restore(name, {
+    at: atValue(at),
+    ...(into ? { into } : {}),
+  })
+  const at_ = "at" in body ? body.at : body.txid
+  out(remote, body, `restored ${body.from}@${at_} into ${body.name} (txid ${body.txid})`)
 }
 
 async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
@@ -590,10 +503,11 @@ async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
   if (!name) throw new CliError(`backup ${action ?? ""} needs a database`)
   const from = str(args, "from")
   const target = from === undefined ? {} : parseS3Url(from)
+  const admin = remote.client.admin
 
   switch (action) {
     case "status": {
-      const body = await api<BackupStatusBody>(remote, "GET", `/v1/db/${name}/backup`)
+      const body = await admin.backup(name)
       if (!body.enabled && !body.bucket) {
         out(remote, body, `${name}: no [s3] bucket configured on this node`)
         return
@@ -611,7 +525,7 @@ async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
     }
     case "verify": {
       const at = str(args, "at")
-      const body = await api<VerifyBody>(remote, "POST", `/v1/db/${name}/backup/verify`, {
+      const body = await admin.verifyBackup(name, {
         ...target,
         ...(at !== undefined ? { at: atValue(at) } : {}),
       })
@@ -626,11 +540,7 @@ async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
       return
     }
     case "generations": {
-      const body = await api<{ generations: Record<string, unknown>[] }>(
-        remote,
-        "GET",
-        `/v1/db/${name}/backup/generations`,
-      )
+      const body = await admin.generations(name)
       if (remote.json) {
         console.log(JSON.stringify(body, null, 2))
         return
@@ -647,13 +557,8 @@ async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
 async function checkpoint(args: ParsedArgs, remote: Remote): Promise<void> {
   const name = args.positional[1]
   if (!name) throw new CliError("checkpoint needs a database")
-  const mode = (str(args, "mode") ?? "PASSIVE").toUpperCase()
-  const body = await api<{ mode: string; walBytes: number; txid: number }>(
-    remote,
-    "POST",
-    `/v1/db/${name}/checkpoint`,
-    { mode },
-  )
+  const mode = (str(args, "mode") ?? "PASSIVE").toUpperCase() as CheckpointMode
+  const body = await remote.client.admin.checkpoint(name, mode)
   out(remote, body, `checkpoint ${body.mode} at txid ${body.txid}; wal is ${body.walBytes} B`)
 }
 
@@ -664,17 +569,12 @@ async function token(args: ParsedArgs, remote: Remote): Promise<void> {
   if (scope !== "ro" && scope !== "rw") throw new CliError("--scope must be ro or rw")
   const ttl = str(args, "ttl")
   const tables = str(args, "tables")
-  const body = await api<{ token: string; jti: string; exp: number | null }>(
-    remote,
-    "POST",
-    "/v1/tokens",
-    {
-      dbs: db.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
-      scope,
-      ...(ttl ? { ttlMs: parseTtlMs(ttl) } : {}),
-      ...(tables ? { tables: parseTables(tables) } : {}),
-    },
-  )
+  const body = await remote.client.admin.mintToken({
+    dbs: db.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
+    scope,
+    ...(ttl ? { ttlMs: parseTtlMs(ttl) } : {}),
+    ...(tables ? { tables: parseTables(tables) } : {}),
+  })
   // The bare token on stdout is what makes `TOKEN=$(bunql token --db acme)` work.
   out(remote, body, body.token)
 }
@@ -746,28 +646,10 @@ async function exec(args: ParsedArgs, remote: Remote): Promise<void> {
   const db = args.positional[1]
   const sql = str(args, "sql")
   if (!db || !sql) throw new CliError("exec needs a database and --sql")
-  const client = createClient({
-    url: remote.url,
-    ...(remote.token ? { token: remote.token } : {}),
-    intMode: "string",
-  })
-  try {
-    const rows = await client.db(db).unsafe(sql)
-    if (remote.json) console.log(JSON.stringify(rows, null, 2))
-    else if (rows.length > 0) console.log(Bun.inspect.table(rows))
-    else console.log(`ok — ${rows.affectedRows} row(s) affected, txid ${rows.txid}`)
-  } finally {
-    client.close()
-  }
-}
-
-interface PromoteBody {
-  db: string
-  promoted: boolean
-  role: string
-  epoch: number
-  txid: number
-  why: string
+  const rows = await remote.client.db(db).unsafe(sql)
+  if (remote.json) console.log(JSON.stringify(rows, null, 2))
+  else if (rows.length > 0) console.log(Bun.inspect.table(rows))
+  else console.log(`ok — ${rows.affectedRows} row(s) affected, txid ${rows.txid}`)
 }
 
 /**
@@ -778,8 +660,7 @@ interface PromoteBody {
 async function promote(args: ParsedArgs, remote: Remote): Promise<void> {
   const name = args.positional[1]
   if (!name) throw new CliError("promote needs a database")
-  const force = args.flags.force === true
-  const body = await api<PromoteBody>(remote, "POST", `/v1/db/${name}/promote`, { force })
+  const body = await remote.client.admin.promote(name, { force: args.flags.force === true })
   out(
     remote,
     body,
@@ -787,38 +668,9 @@ async function promote(args: ParsedArgs, remote: Remote): Promise<void> {
   )
 }
 
-interface ClusterBody {
-  id: string
-  role: string
-  term: number
-  leader: string | null
-  commitIndex: number
-  appliedIndex: number
-  voters: string[]
-  learners: string[]
-  nowMs: number
-  nodes: {
-    id: string
-    advertise: string
-    zone: string
-    status: string
-    reachable: boolean
-  }[]
-  dbs: {
-    db: string
-    primary: string | null
-    replicas: string[]
-    epoch: number
-    lease: { node: string; until: number } | null
-    acked: Record<string, string>
-    generation: string | null
-    leaseHeldHere: boolean
-  }[]
-}
-
 /** `bunql cluster` — the observable surface of the control plane (`docs/plan-phase2.md` C1). */
 async function cluster(args: ParsedArgs, remote: Remote): Promise<void> {
-  const body = await api<ClusterBody>(remote, "GET", "/v1/cluster")
+  const body = await remote.client.admin.cluster()
   if (remote.json) {
     console.log(JSON.stringify(body, null, 2))
     return
@@ -918,12 +770,20 @@ export async function main(argv: readonly string[]): Promise<number> {
       err instanceof CliError
         ? err.message
         : err instanceof BunQLClientError
-          ? `${err.code}: ${err.message}`
+          ? // A request that never reached the server is an operator's typo or a server that is
+            // not running, so it names the URL rather than the route.
+            err.code === "NETWORK"
+            ? `cannot reach ${remote.url}: ${err.message}`
+            : `${err.code}: ${err.message}`
           : err instanceof Error
             ? err.message
             : String(err)
     console.error(`bunql: ${message}`)
     return 1
+  } finally {
+    // `serve` is the one command still doing its job after `main` returns, and it never used the
+    // client; everything else is finished with it here.
+    if (!serving) remote.client.close()
   }
 }
 

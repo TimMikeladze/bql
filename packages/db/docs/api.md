@@ -1261,6 +1261,48 @@ goes out; calling `key` after that is an error rather than a silent no-op.
 Every failure a caller sees is a `BunQLClientError` carrying the server's `code`, `status` and
 `txid`.
 
+### Admin
+
+`client.admin` is the control plane of §6.5 as methods: the same routes, over the same transport,
+with the same errors. It needs the admin key rather than a scoped token, and it is built on first
+use — a client that only ever queries never constructs it.
+
+```ts
+const admin = client.admin
+
+await admin.list()                                    // every database on this node
+await admin.create("acme", { pageSize: 4096, quotaBytes: 0 })
+await admin.fork("acme-copy", "acme", 4812)           // a txid, or an ISO-8601 instant
+await admin.stat("acme")                              // size, position, subscribers, replicas
+await admin.configure("acme", { foreignKeys: true })  // null on a field follows the config again
+await admin.delete("acme")                            // → { name, deleted, trash }
+
+await admin.snapshot("acme")                          // → { snapshotId, txid, bytes, checksum, … }
+await admin.restore("acme", { at: 4800, into: "acme-recovered" })
+await admin.restore("acme", { from: "s3", at: 4800, into: "acme-recovered" })
+await admin.checkpoint("acme", "TRUNCATE")
+
+const { txid, bytes, stream } = await admin.dump("acme")   // the SQLite file, and its txid
+await admin.import("acme-copy", file)                 // a Blob, ArrayBuffer, view or stream
+
+await admin.replication("acme")                       // role, position, replicas or lag
+await admin.promote("acme", { force: false })         // this node, for this database
+await admin.cluster()                                 // the raft view
+
+await admin.backup("acme")                            // shipper position and bucket manifest
+await admin.verifyBackup("acme", { at: 4800 })
+await admin.generations("acme")
+
+const { token, jti, exp } = await admin.mintToken({ dbs: ["acme"], scope: "ro", ttlMs: 86_400_000 })
+await admin.revokeToken(jti)
+```
+
+Two rules worth knowing. **`restore` always builds a new database**, here as everywhere else, so
+`restored.name` is what to query. And **an admin call is never replayed against another node**: a
+statement may follow a `NOT_PRIMARY` once (C2), but `promote` addresses the node it is sent to and
+`snapshot` and `checkpoint` are node-local, so a `NOT_PRIMARY` reaches the caller as a throw whose
+`.primary` names where to go instead. `docs/m9-client-admin.md` is the plan of record.
+
 ---
 
 ## ORM adapters
@@ -1327,6 +1369,9 @@ bq.db("acme")                       // a handle; the tenant opens on first use
 bq.list()                           // [{ name, txid, epoch, pageSize, quotaBytes, createdAtMs, open }]
 bq.stat("acme")                     // the stats body of GET /v1/db/{db}
 bq.delete("acme")                   // → the trash path
+await bq.snapshot("acme")           // → { snapshotId, txid, bytes, checksum, createdAtMs }
+await bq.restore("acme", { at: 4800, into: "acme-recovered" })   // into a new database, as ever
+bq.checkpoint("acme", "TRUNCATE")   // → { mode, busy, log, checkpointed, walBytes, txid }
 bq.tenantOf("acme")                 // the Tenant itself, for code that wants the driver
 bq.on("commit", ({ db, txid }) => …)   // every durable commit on every database this process opened
 
@@ -1334,6 +1379,10 @@ const handle = await bq.serve({ port: 4321, host: "0.0.0.0" })   // the same eng
 await handle.close()
 await bq.close()
 ```
+
+`snapshot`, `restore` and `checkpoint` are the node-local three, with the shapes the routes answer.
+Restoring from an S3 bucket stays on the server route, which is where the store is built; an
+embedded caller that wants it can `serve()`.
 
 `db` is the client's `Db` interface, so code written against the client runs here unchanged, and
 results are decoded through the same codec — `bq.db(x).sql\`…\`` and `client.db(x).sql\`…\`` return

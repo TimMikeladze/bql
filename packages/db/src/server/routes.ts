@@ -605,7 +605,7 @@ const TIMESTAMP_FLOOR = 1_000_000_000_000
  * microsecond timestamp. The search is a binary one over dense txids, so it costs a handful of
  * record reads rather than a scan.
  */
-function resolveAt(tenant: Tenant, at: number | string): bigint {
+export function resolveAt(tenant: Tenant, at: number | string): bigint {
   if (typeof at === "number" && Number.isFinite(at) && at < TIMESTAMP_FLOOR) {
     return BigInt(Math.floor(at))
   }

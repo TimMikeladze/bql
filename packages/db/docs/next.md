@@ -23,11 +23,22 @@ and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluste
 **Phases 0, 1 and 2 are complete, and so is the surfaces track, and Windows is a supported
 platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2. **CI green on macOS, Linux and
 Windows**, all three gating. On `main`, pushed to **https://github.com/TimMikeladze/bunql** (private).
-`bun test` → **1485 pass, 2 skip, 0 fail** across 124 files, and green again with
+`bun test` → **1496 pass, 2 skip, 0 fail** across 125 files, and green again with
 `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what proves the JavaScript fallback).
 `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean. Zero runtime dependencies.
 
 ### What this session changed, newest first
+
+**The client SDK has the control plane too, and the CLI stopped carrying a second one.**
+`client.admin` covers all nineteen admin routes of §6.5 — create, fork, stat, configure, delete,
+snapshot, restore, checkpoint, dump, import, replication, promote, cluster, the three backup
+routes, mint and revoke — over the same `HttpClient` a statement uses, so one error mapping and one
+token. `src/cli.ts` now calls it: its own `api()` helper and its five hand-written copies of the
+response types are gone, and the CLI's output, exit codes and flags are unchanged. The wire shapes
+live in `src/client/protocol.ts`, beside every other description of the wire format. Embedded got
+the three node-local operations for parity — `bq.snapshot`, `bq.restore`, `bq.checkpoint`. One
+behaviour change, in the same direction: `--tables x:w` is now refused by the CLI rather than by
+the server, because `TableScope` only ever had `r` and `rw`. `docs/m9-client-admin.md`.
 
 **At txid 0 the catalog is the position, not the file.** A sharded cluster test failed about one CI
 run in three with `ChecksumMismatch: pre-transaction checksum mismatch at txid 1: expected

@@ -18,6 +18,9 @@ import { HEADERS, type ErrorBody } from "./protocol.ts"
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
+/** Whatever this runtime's `fetch` accepts as a body, without naming a DOM-only type. */
+export type RawBody = NonNullable<RequestInit["body"]>
+
 export interface HttpConfig {
   /** Base URL of the server, without a trailing slash. */
   base: string
@@ -41,6 +44,11 @@ export interface RequestInitLike {
    * paths and by nothing else — see the invariant at the top of this file.
    */
   retryOnMoved?: boolean
+  /**
+   * A body sent as-is rather than as JSON, for the two admin routes that carry a raw SQLite file.
+   * The caller sets `content-type` in `headers`; nothing here guesses one.
+   */
+  raw?: RawBody
 }
 
 /** Trailing slashes make `${base}/v1/...` ambiguous, so they are removed once, here. */
@@ -94,8 +102,10 @@ export class HttpClient {
 
   async #sendTo(base: string, path: string, init: RequestInitLike): Promise<Response> {
     const headers = this.headersFor(init)
-    let body: string | undefined
-    if (init.body !== undefined) {
+    let body: RawBody | undefined
+    if (init.raw !== undefined) {
+      body = init.raw
+    } else if (init.body !== undefined) {
       body = JSON.stringify(init.body)
       if (!headers.has("content-type")) headers.set("content-type", "application/json")
     }
@@ -104,8 +114,10 @@ export class HttpClient {
         method: init.method ?? (body === undefined ? "GET" : "POST"),
         headers,
         ...(body === undefined ? {} : { body }),
+        // A stream body is a half-duplex request; fetch refuses one without this.
+        ...(init.raw instanceof ReadableStream ? { duplex: "half" } : {}),
         ...(init.signal ? { signal: init.signal } : {}),
-      })
+      } as RequestInit)
     } catch (err) {
       throw asClientError(err, `${init.method ?? "GET"} ${path}`)
     }

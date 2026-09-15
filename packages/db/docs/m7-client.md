@@ -14,9 +14,10 @@ open, and every deviation.
 | `src/client/socket.ts` | one socket per client, opened lazily; every subscription is an intent that survives a reconnect |
 | `src/client/stream.ts` | an SSE reader that owns its reconnect and resumes from the last txid it saw |
 | `src/client/feed.ts` | a subscription is an emitter and an async iterable at once, and one delivery point feeds both |
+| `src/client/admin.ts` | the control plane of §6.5 as methods, over the same `HttpClient`; no admin request is ever replayed against another node (`docs/m9-client-admin.md`) |
 | `src/client/index.ts` | `Db` is the same interface whether it is backed by HTTP, a socket, or the engine in this process |
 | `src/embedded.ts` | one `ServerRuntime` owns the registry; `serve()` mounts the HTTP surface over that same runtime rather than opening a second one |
-| `src/cli.ts` | `serve` runs in-process, every other command is an HTTP client of a running server |
+| `src/cli.ts` | `serve` runs in-process, every other command goes through the SDK — `client.admin` for the control plane, `client.db()` for `exec`, the socket for `shell` |
 
 ## The `Db` interface
 
@@ -140,7 +141,8 @@ the same pairing for every other key.
 | `test/client/client.test.ts` | every verb over a live server: tagged templates, `values`/`first`/`run`, exotic values under each `intMode`, named and positional arguments, batch atomic and not, errors as `BunQLClientError`, the `BunQL-Min-Txid` header, `client.txid` |
 | `test/client/realtime.test.ts` | `changes` as an iterable and as an emitter, resume after a dropped stream, `live` rows and diff over WS and over the SSE fallback |
 | `test/client/tx.test.ts` | `transaction` over the socket and over the baton, rollback on throw |
-| `test/embedded/embedded.test.ts` | async and sync parity, create/fork/list/delete, `on("commit")`, in-process changes and live, `serve()` answered over HTTP |
+| `test/client/admin.test.ts` | `client.admin`: the lifecycle round trip, a fork and a restore at a txid, dump and import, mint and revoke, and the failure codes (`docs/m9-client-admin.md`) |
+| `test/embedded/embedded.test.ts` | async and sync parity, create/fork/list/delete, snapshot/restore/checkpoint, `on("commit")`, in-process changes and live, `serve()` answered over HTTP |
 | `test/cli/cli.test.ts` | `db create`, `list`, `stat`, `fork`, `delete`, `exec`, `snapshot`, `checkpoint` and `token` as spawned processes against a running server, plus the flag parsers |
 
 `bun test` runs 486 tests across the repository in about 12 s; `bun run typecheck` is clean. The

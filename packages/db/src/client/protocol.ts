@@ -408,3 +408,331 @@ export const HEADERS = {
   durationUs: "BunQL-Duration-Us",
   primary: "BunQL-Primary",
 } as const
+
+// ── Admin routes (design §6.5) ─────────────────────────────────────────────────────────────────
+//
+// The bodies of the lifecycle, replication, backup and token routes. `src/server/registry.ts` is
+// where they are declared and enforced; these are the same shapes as the client reads them, and
+// `src/client/admin.ts` is the only thing that asks for them.
+
+/** One row of `GET /v1/db`. */
+export interface DatabaseInfo {
+  name: string
+  txid: number
+  epoch: number
+  role: string
+  pageSize: number
+  quotaBytes: number
+  createdAtMs: number
+  /** Whether this node has the database open right now. */
+  open: boolean
+}
+
+/** One replica attached to a primary, as `GET /v1/db/{db}` reports it. */
+export interface ReplicaPosition {
+  node: string
+  txid: number
+  lag: number
+}
+
+/** `GET /v1/db/{db}`, and the answer to every route that creates a database. */
+export interface DatabaseStats {
+  name: string
+  role: string
+  sizeBytes: number
+  walBytes: number
+  logBytes: number
+  txid: number
+  epoch: number
+  /** The rolling database checksum, as a decimal string. */
+  checksum: string
+  openConns: number
+  liveQueries: number
+  subscribers: number
+  lastSnapshotTxid: number | null
+  /** This database's own `PRAGMA foreign_keys`, or null when it follows `[sqlite] foreignKeys`. */
+  foreignKeys: boolean | null
+  /** Null when it follows `[replication] ackWithoutReplicas`. */
+  ackWithoutReplicas: "error" | "allow" | null
+  /** Replicas only: the apply mechanism actually running. */
+  apply?: string
+  replicas: ReplicaPosition[]
+}
+
+/** A point in a database's history: a txid, or an ISO-8601 instant the server resolves. */
+export type Revision = number | string
+
+export interface CreateDatabaseOptions {
+  pageSize?: number
+  quotaBytes?: number
+  /** Fork of an existing database, optionally as of a txid or an instant. */
+  from?: { db: string; at?: Revision }
+}
+
+/** `PATCH /v1/db/{db}`. Null clears the override and follows the node's config again. */
+export interface DatabaseSettings {
+  foreignKeys?: boolean | null
+  ackWithoutReplicas?: "error" | "allow" | null
+}
+
+export interface DeleteResult {
+  name: string
+  deleted: boolean
+  /** Where the files went; `[durability] retention` sweeps it. */
+  trash: string
+}
+
+export interface SnapshotInfo {
+  snapshotId: string
+  txid: number
+  bytes: number
+  checksum: string
+  createdAtMs: number
+}
+
+export interface RestoreOptions {
+  /** The point to restore to. Omitted, it means the newest the source holds. */
+  at?: Revision
+  /** Name of the database to create. Default `<db>-restore-<txid>`. */
+  into?: string
+  /** `"s3"` restores from the bucket rather than the local log. */
+  from?: "s3"
+  /** Override the node's own `[s3]` bucket, prefix and timeline. Credentials stay the node's. */
+  bucket?: string
+  prefix?: string
+  generation?: string
+}
+
+/** A restore from the local log. */
+export interface LocalRestoreResult {
+  name: string
+  from: string
+  txid: number
+  at: number
+}
+
+/** A restore from the backup bucket. */
+export interface S3RestoreResult {
+  name: string
+  from: string
+  source: "s3"
+  bucket: string
+  prefix: string
+  generation: string
+  txid: number
+  /** The snapshot the replay started from. */
+  fromTxid: number
+  /** Records replayed on top of it. */
+  applied: number
+  objects: number
+  bytes: number
+}
+
+export type RestoreResult = LocalRestoreResult | S3RestoreResult
+
+export type CheckpointMode = "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE"
+
+export interface CheckpointResult {
+  mode: CheckpointMode
+  /** Whether SQLite found the WAL busy; a `PASSIVE` checkpoint then moves nothing. */
+  busy: boolean
+  /** Frames in the WAL, and frames moved into the database. */
+  log: number
+  checkpointed: number
+  walBytes: number
+  txid: number
+}
+
+/** `GET /v1/db/{db}/dump`: the file, and the txid it is consistent at. */
+export interface DatabaseDump {
+  txid: number
+  /** `Content-Length`, or null when the server did not send one. */
+  bytes: number | null
+  stream: ReadableStream<Uint8Array>
+}
+
+/** What every `GET /v1/db/{db}/replication` carries, whatever the role. */
+export interface ReplicationCommon {
+  db: string
+  txid: number
+  epoch: number
+  checksum: string
+  lastSnapshot: { txid: number; bytes: number; at: number } | null
+  s3: ShipperState | null
+}
+
+export interface PrimaryReplication extends ReplicationCommon {
+  role: "primary"
+  replicas: {
+    node: string
+    stream: number
+    txid: number
+    lag: number
+    ackedAt: number
+    fsynced: boolean
+  }[]
+}
+
+export interface ReplicaReplication extends ReplicationCommon {
+  role: "replica"
+  primary: string
+  connected: boolean
+  applied: number
+  lagTxid: number
+  bootstrapping: boolean
+  lastError: string | null
+}
+
+export type ReplicationStatus = PrimaryReplication | ReplicaReplication
+
+/** The S3 shipper's own view, without touching the bucket. */
+export interface ShipperState {
+  db: string
+  bucket: string
+  prefix: string
+  endpoint: string | null
+  generation: string | null
+  /** Highest txid in the bucket. */
+  shippedTxid: number
+  /** Records committed since `shippedTxid`. */
+  pendingRecords: number
+  pendingBytes: number
+  /** True once the queue overflowed or an upload failed and the bucket is behind the tenant. */
+  behind: boolean
+  lastError: string | null
+  /** How long the last successful drain took, in milliseconds. */
+  lastShipMs: number
+  lastShipAtMs: number | null
+  bytesShipped: number
+  errors: number
+  snapshots: number
+  segments: number
+  lastSnapshotTxid: number | null
+}
+
+export interface PromoteResult {
+  db: string
+  promoted: boolean
+  role: string
+  epoch: number
+  txid: number
+  /** Why it was accepted, or refused. */
+  why: string
+}
+
+/** `GET /v1/db/{db}/backup`. */
+export interface BackupStatus {
+  db: string
+  enabled: boolean
+  bucket: string | null
+  prefix: string | null
+  retention?: string
+  shipper: ShipperState | null
+  manifest: {
+    generation: string
+    shippedTxid: number
+    snapshots: number
+    segments: number
+  } | null
+  error: string | null
+}
+
+export interface VerifyBackupOptions {
+  at?: Revision
+  bucket?: string
+  prefix?: string
+  generation?: string
+}
+
+/** `POST /v1/db/{db}/backup/verify`. Writes nothing. */
+export interface BackupVerification {
+  ok: boolean
+  db: string
+  at: number
+  latest: number
+  generation: string
+  segments: number
+  records: number
+  bytes: number
+  /** The objects a restore to `at` would need and the bucket does not hold. */
+  missing: string[]
+}
+
+/** One timeline in the bucket. `firstTxid` and `lastTxid` are decimal strings. */
+export interface GenerationInfo {
+  id: string
+  startedAtMs: number
+  firstTxid: string
+  lastTxid: string
+}
+
+export interface BackupGenerations {
+  db: string
+  bucket: string
+  prefix: string
+  generations: GenerationInfo[]
+}
+
+/** One node in the control plane's view of itself. */
+export interface ClusterNode {
+  id: string
+  advertise: string
+  zone: string
+  status: string
+  reachable: boolean
+}
+
+/** Where one database is placed, and who holds its lease. */
+export interface ClusterPlacement {
+  db: string
+  primary: string | null
+  replicas: string[]
+  epoch: number
+  /** `until` is the leader's wall clock, so read it against the view's own `nowMs`. */
+  lease: { node: string; until: number } | null
+  acked: Record<string, string>
+  generation: string | null
+  leaseHeldHere: boolean
+}
+
+/** `GET /v1/cluster`. */
+export interface ClusterView {
+  id: string
+  role: string
+  term: number
+  leader: string | null
+  commitIndex: number
+  appliedIndex: number
+  voters: string[]
+  learners: string[]
+  nowMs: number
+  nodes: ClusterNode[]
+  dbs: ClusterPlacement[]
+}
+
+/** Per-table narrowing of a token, beyond its database scope. */
+export type TableScope = "r" | "rw"
+
+export interface TokenOptions {
+  /** Database globs. `db` is the one-database spelling of the same thing. */
+  dbs?: string[]
+  db?: string
+  scope?: "ro" | "rw"
+  tables?: Record<string, TableScope>
+  /** Default `[auth] defaultTokenTtlMs`. */
+  ttlMs?: number
+  /** Subject claim, for an audit trail. */
+  sub?: string
+}
+
+export interface MintedToken {
+  token: string
+  jti: string
+  /** JWT `exp`: expiry in epoch **seconds**, or null for a token that does not expire. */
+  exp: number | null
+}
+
+export interface RevokedToken {
+  jti: string
+  revoked: boolean
+}

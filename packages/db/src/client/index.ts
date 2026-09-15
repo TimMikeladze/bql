@@ -10,6 +10,7 @@
 // as `BunQL-Min-Txid` on the next request to it, which is exactly what design §5.4 asks a client
 // to do.
 
+import { Admin } from "./admin.ts"
 import { BunQLClientError, asClientError } from "./errors.ts"
 import {
   ChangeFeed,
@@ -151,6 +152,11 @@ export interface Db {
 export interface Client {
   readonly url: string
   db(name?: string): Db
+  /**
+   * The control plane of design §6.5 — create, fork, snapshot, restore, promote, backup, tokens.
+   * Built on first use, and needs the admin key rather than a scoped token.
+   */
+  readonly admin: Admin
   /** Last txid this client observed for `db`; what `consistency: "ryw"` sends. */
   txid(db: string): number
   close(): void
@@ -573,8 +579,14 @@ export function createClient(options: ClientOptions): Client {
   }
 
   const dbs = new Map<string, Db>()
+  let admin: Admin | null = null
   return {
     url: base,
+    // Lazy: a browser that only ever queries never builds it, and it holds nothing of its own.
+    get admin(): Admin {
+      admin ??= new Admin(core.http)
+      return admin
+    },
     db(name?: string): Db {
       const target = name ?? options.db
       if (!target) {
@@ -597,6 +609,7 @@ export function createClient(options: ClientOptions): Client {
   }
 }
 
+export { Admin, type FileBody } from "./admin.ts"
 export { BunQLClientError } from "./errors.ts"
 export {
   ChangeFeed,

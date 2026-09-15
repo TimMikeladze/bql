@@ -240,6 +240,31 @@ describe("lifecycle", () => {
     expect(bq2.list().map((row) => row.name)).toEqual(["one"])
   })
 
+  test("snapshot, restore and checkpoint, the node-local three", async () => {
+    const bq4 = await openBunQL()
+    const source = await bq4.create("local")
+    await source.sql`create table t(id integer primary key, v text)`.run()
+    const at = (await source.sql`insert into t(v) values (${"first"})`.run()).txid
+    const tip = (await source.sql`insert into t(v) values (${"second"})`.run()).txid
+
+    const snapshot = await bq4.snapshot("local")
+    expect(snapshot.txid).toBe(tip)
+    expect(snapshot.bytes).toBeGreaterThan(0)
+    expect(bq4.stat("local").lastSnapshotTxid).toBe(tip)
+
+    // Never in place: a restore names a new database, as the route does.
+    const restored = await bq4.restore("local", { at })
+    expect(restored.name).toBe(`local-restore-${at}`)
+    expect(await restored.sql`select count(*) as n from t`.first()).toEqual({ n: 1 })
+    const named = await bq4.restore("local", { at, into: "rewound-here" })
+    expect(named.name).toBe("rewound-here")
+
+    const checkpoint = bq4.checkpoint("local", "TRUNCATE")
+    expect(checkpoint.mode).toBe("TRUNCATE")
+    expect(checkpoint.walBytes).toBe(0)
+    expect(checkpoint.txid).toBe(tip)
+  })
+
   test("a fork at a txid keeps only what was committed by then", async () => {
     const bq3 = await openBunQL()
     const source = await bq3.create("source")

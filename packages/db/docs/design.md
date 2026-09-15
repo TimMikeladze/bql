@@ -664,6 +664,9 @@ const live = db.live<Todo>`select * from todos where done = 0`.key("id")
 live.on("rows", rows => ...); live.on("diff", d => ...); live.close()
 
 client.txid("acme")   // last observed txid; sent as BunQL-Min-Txid automatically
+
+await client.admin.create("acme", { pageSize: 4096 })   // the control plane of §6.5, same client
+await client.admin.fork("acme-copy", "acme", 4812)      // …snapshot, restore, promote, backup, tokens
 ```
 
 `consistency: "ryw"` (default) tracks txid per db in the client; `"primary"` forces primary;
@@ -681,6 +684,7 @@ await db.sql`select 1`                              // resolves synchronously un
 db.sync.sql`select 1`.all()                         // zero-overhead path for hot loops
 db.sync.transaction(() => { ... })
 bq.on("commit", ({ db, txid }) => ...)
+await bq.snapshot("acme"); await bq.restore("acme", { at: 4800 }); bq.checkpoint("acme")
 
 bq.serve({ port: 4321, hrana: true })               // expose the same engine over HTTP/WS/SSE
 ```

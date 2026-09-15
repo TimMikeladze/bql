@@ -9,6 +9,7 @@
 // open; a token here would be a lock with its key taped to it. Tokens start applying again at
 // `serve()`, which is the network surface.
 
+import { basename } from "node:path"
 import {
   ChangeFeed,
   LiveQuery,
@@ -22,11 +23,14 @@ import { BunQLClientError } from "./client/errors.ts"
 import type {
   Args,
   ChangeEvent,
+  CheckpointMode,
+  CheckpointResult,
   LiveDiffEvent,
   LiveRowsEvent,
   QueryResult,
   RequestOptions,
   RowsMode,
+  SnapshotInfo,
   StatementRequest,
 } from "./client/protocol.ts"
 import {
@@ -56,9 +60,9 @@ import { ADMIN } from "./server/auth.ts"
 import { loadConfig, type ServerConfig, type ServerConfigInput } from "./server/config.ts"
 import { mapError } from "./server/errors.ts"
 import { executeBatch, executeInTx, executeStatement, resolveOptions } from "./server/exec.ts"
-import { statsOf } from "./server/routes.ts"
+import { resolveAt, statsOf } from "./server/routes.ts"
 import { mapTenantError, type ServerRuntime, type TxSession } from "./server/runtime.ts"
-import type { CommitEvent, Tenant, TenantRow } from "./tenant/index.ts"
+import { assertValidName, type CommitEvent, type Tenant, type TenantRow } from "./tenant/index.ts"
 
 export interface OpenOptions extends ServerConfigInput {
   /** Data root. Shorthand for `data: { dir }`. */
@@ -544,6 +548,75 @@ export class BunQL {
   /** Design §4.4: O(1) where the filesystem reflinks, and at a txid when one is given. */
   fork(name: string, from: string, at?: number | bigint): Promise<EmbeddedDb> {
     return this.create(name, { from: { db: from, ...(at !== undefined ? { at } : {}) } })
+  }
+
+  /**
+   * Force a snapshot, as `POST /v1/db/{db}/snapshot` does. A process that neither ships to a
+   * bucket nor serves a replica takes none on its own, and without one there is no floor for the
+   * log to retain — so there is nothing to restore from either.
+   */
+  async snapshot(name: string): Promise<SnapshotInfo> {
+    const tenant = this.tenantOf(name)
+    try {
+      const ref = await tenant.snapshot()
+      return {
+        snapshotId: basename(ref.path),
+        txid: Number(ref.txid),
+        bytes: ref.bytes,
+        checksum: ref.checksum,
+        createdAtMs: ref.createdAtMs,
+      }
+    } catch (err) {
+      throw toClientError(err)
+    }
+  }
+
+  /**
+   * Point-in-time restore into a **new** database, as `POST /v1/db/{db}/restore` does — the log
+   * behind this one still describes the timeline it actually had. `at` is a txid or an instant
+   * (an ISO-8601 string, or epoch milliseconds), resolved against the log. The bucket-sourced
+   * restore stays on the server route, which is where the S3 store is built.
+   */
+  async restore(
+    name: string,
+    options: { at?: number | bigint | string; into?: string } = {},
+  ): Promise<EmbeddedDb> {
+    const tenant = this.tenantOf(name)
+    let at: bigint
+    try {
+      at =
+        options.at === undefined
+          ? tenant.txid
+          : typeof options.at === "bigint"
+            ? options.at
+            : resolveAt(tenant, options.at)
+    } catch (err) {
+      throw toClientError(err)
+    }
+    if (at <= 0n) throw BunQLClientError.client("restore needs a positive txid in `at`")
+    const into = options.into ?? `${name}-restore-${at}`.slice(0, 64)
+    try {
+      assertValidName(into)
+      await this.runtime.registry.create(into, { from: { db: name, at } })
+    } catch (err) {
+      throw toClientError(err)
+    }
+    return this.db(into)
+  }
+
+  /** Checkpoint the WAL. `TRUNCATE` and `RESTART` need the database quiet. */
+  checkpoint(name: string, mode: CheckpointMode = "PASSIVE"): CheckpointResult {
+    const tenant = this.tenantOf(name)
+    try {
+      return {
+        mode,
+        ...tenant.checkpoint(mode),
+        walBytes: tenant.walBytes,
+        txid: Number(tenant.txid),
+      }
+    } catch (err) {
+      throw toClientError(err)
+    }
   }
 
   /** Closes the database and moves its directory to `trash/`, as `DELETE /v1/db/{db}` does. */
