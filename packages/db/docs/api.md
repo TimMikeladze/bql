@@ -388,7 +388,7 @@ nothing else — a plain `*/*` gets the stream.
 | parameter | meaning |
 |---|---|
 | `tables` | comma-separated; only these tables |
-| `since` | replay from this txid; `Last-Event-ID` does the same |
+| `since` | replay from this position — a txid, or `<txid>.<seq>` to resume mid-transaction; `Last-Event-ID` does the same |
 | `include` | `none`, `pk` (default), `row`, `row+old` |
 | `wait` | long-poll instead of streaming; milliseconds, capped at 60000 |
 | `token` | the bearer token, for `EventSource` |
@@ -399,9 +399,13 @@ GET /v1/db/acme/changes?tables=users,orders&since=4800&include=row
 retry: 1000
 : open
 
-id: 4813
+id: 4813.0
 event: change
-data: {"txid":4813,"changes":[{"table":"users","op":"insert","rowid":13,"pk":{"id":13},"row":{"id":13,"name":"cy"}}]}
+data: {"txid":4813,"seq":0,"changes":[{"table":"users","op":"insert","rowid":13,"pk":{"id":13},"row":{"id":13,"name":"cy"}}]}
+
+id: 4813.1
+event: change
+data: {"txid":4813,"seq":1,"changes":[{"table":"orders","op":"insert","rowid":91,"pk":{"id":91}}]}
 
 id: 4814
 event: schema
@@ -417,7 +421,7 @@ The long poll returns a JSON array of the same `change` objects:
 
 ```http
 GET /v1/db/acme/changes?since=4800&wait=30000
-→ 200 [ {"txid":4801,"changes":[…]}, … ]
+→ 200 [ {"txid":4801,"seq":0,"changes":[…]}, … ]
    BunQL-Txid: 4805
    Cache-Control: public, max-age=31536000, immutable     ← a `since` in the past is immutable
 ```
@@ -1158,9 +1162,19 @@ A `RowChange` is `{table, op: "insert"|"update"|"delete", rowid, pk?, row?, old?
 `null` for a `WITHOUT ROWID` table, where `pk` is the identity and is always filled. `row` and
 `old` appear at capture levels `row` and `row+old`.
 
-`id:` on a `change` event is its txid, which is what `Last-Event-ID` resumes from. The ring lives
-in memory: a position it cannot serve — too old, or from before a restart — answers `reset`, and
-the client must re-query.
+**One event per statement, keyed `(txid, seq)`.** `[limits] groupCommit` folds writes that arrive
+together into one transaction, so a txid can cover fifty writers. `seq` is which statement of that
+transaction the event is, from 0, and `(txid, seq)` is therefore a **stable key**: distinct across
+the feed, and the same on a replay, which is what a durable downstream consumer dedupes on. A
+transaction that ran one statement has one event with `seq: 0`; an atomic batch of ten has ten; a
+replica's txid-only events carry no `seq`, because they have no statements to number.
+
+`id:` on a `change` event is that position, written `<txid>.<seq>`, and it is what `Last-Event-ID`
+resumes from. **A bare txid is still accepted** and means "the whole of that transaction has been
+seen" — which is what every position issued before this change meant, so a client written against
+the old feed resumes correctly. `?since=` takes either spelling, and so does the WebSocket
+`subscribe` frame's `since`. The ring lives in memory: a position it cannot serve — too old, or
+from before a restart — answers `reset`, and the client must re-query.
 
 ---
 
@@ -1599,8 +1613,11 @@ arrive one per iteration.
 statement still gets its own result, its own `rowsAffected` and its own failure; what is no longer
 one-to-one is the *transaction*. Two consequences:
 
-- **The change feed emits one event per fold**, not one per write. A CDC consumer sees fewer, fatter
-  events carrying every row change in the fold.
+- ~~**The change feed emits one event per fold.**~~ **No longer true, as of L8.** It emits one event
+  per *statement*, keyed `(txid, seq)` — so a fold of fifty writes is fifty events sharing one txid
+  with distinct sequences, and a CDC consumer has a stable key it can dedupe on across a replay.
+  This is the one consequence of group commit that was worth removing rather than documenting.
+  `docs/l8-change-seq.md`.
 - **`BunQL-Min-Txid` is coarser.** A txid you were handed covers your write and possibly others, so
   reading at it is still read-your-writes — it cannot be *weaker*, only less precise about whose
   other writes came with yours.

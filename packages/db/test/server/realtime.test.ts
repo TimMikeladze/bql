@@ -40,7 +40,7 @@ async function fresh(name: string): Promise<void> {
 }
 
 describe("change feed over SSE", () => {
-  test("a commit arrives as one event stamped with its txid", async () => {
+  test("a commit arrives as one event stamped with its position", async () => {
     await fresh("feed")
     const stream = await sse("/v1/db/feed/changes?include=row")
     expect(stream.headers.get("content-type")).toBe("text/event-stream; charset=utf-8")
@@ -55,7 +55,10 @@ describe("change feed over SSE", () => {
     expect(data.changes).toHaveLength(1)
     expect(data.changes[0]).toMatchObject({ table: "todos", op: "insert", rowid: 1 })
     expect(data.changes[0]?.row).toEqual({ id: 1, title: "one", done: 0 })
-    expect(event?.id).toBe(String(data.txid))
+    // L8: one event per statement, so the id is the position `txid.seq` rather than the txid. One
+    // statement in this transaction, so the sequence is 0.
+    expect(data.seq).toBe(0)
+    expect(event?.id).toBe(`${data.txid}.0`)
   })
 
   test("DDL arrives as a schema event, not only on the WebSocket", async () => {

@@ -1048,6 +1048,17 @@ export class ServerRuntime {
     return this.#realtime.get(name)
   }
 
+  /**
+   * L8: records that one statement of the open transaction has finished, so a group commit of
+   * fifty writes reaches the change feed as fifty events keyed `(txid, seq)` rather than one.
+   *
+   * A `Map.get` and, when somebody is actually subscribed, one `push`. A database with no realtime
+   * engine — which is every database nobody is watching — costs the `Map.get` and nothing else.
+   */
+  markStatement(db: string): void {
+    this.#realtime.get(db)?.markStatement()
+  }
+
   // ── interactive transactions (design §6.3) ───────────────────────────────────────────────────
 
   /**

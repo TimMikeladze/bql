@@ -4,6 +4,8 @@
 // cleans up through exactly one path — `close()` — whether the client went away, the subscription
 // ended, or the server is shutting down.
 
+import { parsePosition, type RingPosition } from "../realtime/ring.ts"
+
 /** Headers design §6.4 asks for: never cached, never transformed, never buffered by a proxy. */
 export const SSE_HEADERS: Readonly<Record<string, string>> = {
   "content-type": "text/event-stream; charset=utf-8",
@@ -139,10 +141,12 @@ export function openSse(host: TimeoutHost, options: SseOptions): SseStream {
 }
 
 /** `Last-Event-ID`, or the `since` query parameter, as the position to resume from. */
-export function resumeFrom(request: Request, url: URL): number | undefined {
+export function resumeFrom(request: Request, url: URL): RingPosition | undefined {
   const header = request.headers.get("last-event-id")
   const raw = header ?? url.searchParams.get("since")
   if (raw === null || raw === "") return undefined
-  const value = Number(raw)
-  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+  // L8: `5` is "everything in transaction 5 has been seen" and `5.2` is "up to its third
+  // statement". Both spellings are accepted wherever a position is; the bare one is what every
+  // client sent before L8 and what a client that has seen a whole transaction still sends.
+  return parsePosition(raw) ?? undefined
 }

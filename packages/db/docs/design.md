@@ -534,15 +534,19 @@ An open write tx holds the tenant's single writer, so the server enforces `txIdl
 GET /v1/db/acme/changes?tables=users,orders&since=4800&include=row
 ```
 ```
-id: 4813
+id: 4813.0
 event: change
-data: {"txid":4813,"changes":[{"table":"users","op":"insert","rowid":13,"row":{"id":13,"name":"cy"}},
-                              {"table":"orders","op":"delete","rowid":7,"pk":{"id":7}}]}
+data: {"txid":4813,"seq":0,"changes":[{"table":"users","op":"insert","rowid":13,"row":{"id":13,"name":"cy"}},
+                                      {"table":"orders","op":"delete","rowid":7,"pk":{"id":7}}]}
 
 : ping                       ← every 15 s
 event: reset                 ← ring buffer can't serve `since`; client must re-query
 ```
-`Last-Event-ID` works as `since`. Headers: `Content-Type: text/event-stream; charset=utf-8`,
+**One event per statement, keyed `(txid, seq)` (L8).** Group commit folds concurrent writes into one
+transaction, so a txid alone is not a key; `seq` numbers the statements within it, from 0, and the
+pair is stable across a replay — which is what a durable downstream consumer needs and what an
+in-memory ring answering `reset` cannot otherwise provide. `Last-Event-ID` works as `since` and
+takes either `<txid>` — "the whole of that transaction" — or `<txid>.<seq>`. Headers: `Content-Type: text/event-stream; charset=utf-8`,
 `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`; never compressed. `EventSource`
 cannot set headers, so SSE routes also accept `?token=` (scoped read tokens only). Bun's
 `idleTimeout` is capped at 255 s, so every SSE response calls `server.timeout(req, 0)` and keeps

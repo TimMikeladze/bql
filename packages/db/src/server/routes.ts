@@ -30,7 +30,7 @@ import {
   type StatementRequest,
   type TxBeginRequest,
 } from "../client/protocol.ts"
-import type { IncludeLevel, LiveEvent } from "../realtime/index.ts"
+import { positionOf, type IncludeLevel, type LiveEvent, type RingPosition } from "../realtime/index.ts"
 import {
   listGenerations,
   readManifest,
@@ -421,7 +421,7 @@ export const changes: Handler = async (ctx) => {
     // Long poll: an immutable, cacheable answer for a `since` in the past, and a wait on the tail.
     try {
       const waitMs = Math.max(0, Math.min(Number(wait) || 0, 60_000))
-      const events = await longPoll(realtime, since ?? Number(tenant.txid), tables, waitMs)
+      const events = await longPoll(realtime, since ?? { txid: Number(tenant.txid) }, tables, waitMs)
       ctx.txid = Number(tenant.txid)
       const historical = events.length > 0
       return json(events, 200, {
@@ -463,7 +463,10 @@ export const changes: Handler = async (ctx) => {
         },
       },
       (event) => {
-        stream.send("change", event, event.txid)
+        // L8: the id is `txid.seq`, so a client that drops mid-transaction resumes at the
+        // statement it reached rather than at the start of the next transaction. A bare txid is
+        // still accepted on the way back in, and is what a `schema` frame still sends.
+        stream.send("change", event, positionOf(event))
       },
     )
   } catch (err) {
@@ -478,7 +481,7 @@ export const changes: Handler = async (ctx) => {
       reason: "the change ring no longer holds that position",
     })
   }
-  for (const event of subscription.backlog) stream.send("change", event, event.txid)
+  for (const event of subscription.backlog) stream.send("change", event, positionOf(event))
   ctx.streaming = true
   ctx.txid = Number(tenant.txid)
   return stream.response({ [HEADERS.txid]: String(tenant.txid) })
@@ -487,7 +490,7 @@ export const changes: Handler = async (ctx) => {
 /** Resolves with the events after `since`, waiting up to `waitMs` for the first one. */
 function longPoll(
   realtime: ReturnType<ServerRuntime["realtimeFor"]>,
-  since: number,
+  since: RingPosition,
   tables: string[] | undefined,
   waitMs: number,
 ): Promise<ChangeEvent[]> {

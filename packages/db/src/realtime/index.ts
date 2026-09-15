@@ -41,7 +41,7 @@ import {
   type LiveSubscribeOptions,
   type Scheduler,
 } from "./live.ts"
-import { ChangeRing, type ChangeRingOptions } from "./ring.ts"
+import { ChangeRing, type ChangeRingOptions, type RingPosition } from "./ring.ts"
 
 export { AuthorizerHub } from "./authorizer.ts"
 export {
@@ -70,7 +70,13 @@ export {
   type Scheduler,
 } from "./live.ts"
 export { readSetOf, readSetTouched, type ReadSet } from "./readset.ts"
-export { ChangeRing, type ChangeRingOptions } from "./ring.ts"
+export {
+  ChangeRing,
+  type ChangeRingOptions,
+  parsePosition,
+  positionOf,
+  type RingPosition,
+} from "./ring.ts"
 
 /** How much of each row a change subscriber wants; the tenant runs at the highest one asked for. */
 export type { IncludeLevel }
@@ -110,8 +116,11 @@ export interface TenantRealtimeOptions {
 export interface ChangesSubscribeOptions {
   /** Only these tables; every table when absent. */
   tables?: string[]
-  /** Replay from this txid. */
-  since?: number
+  /**
+   * Replay from this position. A bare number is a txid and means "the whole of that transaction
+   * has been seen", which is what it meant before L8; `{ txid, seq }` resumes mid-transaction.
+   */
+  since?: number | RingPosition
   include?: IncludeLevel
   /**
    * DDL on this database, delivered beside the row changes. A table filter does not narrow it:
@@ -236,6 +245,15 @@ export class TenantRealtime {
    * durable — never from inside a hook. Any transaction the owner did not drain earlier is folded
    * into this one, so the feed stays ordered and lossless.
    */
+  /**
+   * L8: "a statement inside the open transaction just finished." The request layer calls it after
+   * each statement it runs on the writer, and `afterCommit` turns the boundaries into one event
+   * per statement. A transaction nobody marks publishes exactly as it did before L8.
+   */
+  markStatement(): void {
+    this.capture.mark()
+  }
+
   afterCommit(txid: number): CommitReport {
     this.setTxid(txid)
     const drained = this.capture.takeAllCommitted()
@@ -249,21 +267,35 @@ export class TenantRealtime {
       for (let i = 0; i < merged.rows.length; i++) {
         changes[i] = toRowChange(merged.rows[i] as CapturedRow)
       }
-      const event: ChangeEvent = { txid, changes }
-      report.change = event
-      this.ring.push(txid, event)
+      // L8: one event per statement, keyed `(txid, seq)`. Group commit folds concurrent writes
+      // into one transaction, so one event per transaction meant a client could not tell fifty
+      // writers apart and a durable consumer had no key to dedupe on across a replay. The slices
+      // come from `marks`, which the request layer recorded as each statement finished; a
+      // transaction nobody marked is one slice, which is exactly what it was before.
       const all = changesTopic(this.name)
-      if (this.bus.hasAudience(all)) this.bus.publish(all, event)
-      if (merged.tables.size === 1) {
-        const table = report.tables[0] as string
-        const topic = tableTopic(this.name, table)
-        if (this.bus.hasAudience(topic)) this.bus.publish(topic, event)
-      } else {
+      const single = merged.tables.size === 1 ? (report.tables[0] as string) : null
+      let seq = 0
+      let from = 0
+      for (const to of sliceEnds(merged.marks, changes.length)) {
+        if (to <= from) continue
+        const slice = from === 0 && to === changes.length ? changes : changes.slice(from, to)
+        from = to
+        const event: ChangeEvent = { txid, seq: seq++, changes: slice }
+        // The report carries the *first* event, which is what a single-statement write has and
+        // what every caller of `CommitReport.change` already expects.
+        report.change ??= event
+        this.ring.push(txid, event)
+        if (this.bus.hasAudience(all)) this.bus.publish(all, event)
+        if (single !== null) {
+          const topic = tableTopic(this.name, single)
+          if (this.bus.hasAudience(topic)) this.bus.publish(topic, event)
+          continue
+        }
         for (const table of merged.tables.keys()) {
           const topic = tableTopic(this.name, table)
           if (!this.bus.hasAudience(topic)) continue
-          const rows = changes.filter((c) => c.table === table)
-          this.bus.publish(topic, { txid, changes: rows })
+          const rows = slice.filter((c) => c.table === table)
+          if (rows.length > 0) this.bus.publish(topic, { txid, seq: event.seq, changes: rows })
         }
       }
     }
@@ -427,15 +459,34 @@ function filterTables(events: ChangeEvent[], tables: string[]): ChangeEvent[] {
   return out
 }
 
+/**
+ * Where each statement's slice of the row list ends. `marks` is what the request layer recorded;
+ * an unmarked transaction, and one whose last statement wrote rows after the final mark, both end
+ * at `total` — so the tail is never dropped whatever the caller did or did not mark.
+ */
+function sliceEnds(marks: readonly number[], total: number): number[] {
+  if (marks.length === 0) return [total]
+  const ends = marks.filter((at) => at <= total)
+  if (ends[ends.length - 1] !== total) ends.push(total)
+  return ends
+}
+
 function mergeChanges(list: TxnChanges[]): TxnChanges {
   const merged: TxnChanges = {
     tables: new Map(),
     rows: [],
+    marks: [],
     rowsTruncated: false,
     schemaChanged: false,
     ddl: [],
   }
   for (const one of list) {
+    // L8: the marks are offsets into each transaction's own rows, so they shift by however many
+    // rows are already merged. A transaction with no marks contributes one boundary at its end,
+    // because it *is* one statement as far as anything downstream can tell.
+    const base = merged.rows.length
+    if (one.marks.length === 0) merged.marks.push(base + one.rows.length)
+    else for (const at of one.marks) merged.marks.push(base + at)
     for (const row of one.rows) merged.rows.push(row)
     merged.rowsTruncated ||= one.rowsTruncated
     merged.schemaChanged ||= one.schemaChanged

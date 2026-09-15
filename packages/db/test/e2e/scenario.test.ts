@@ -181,22 +181,41 @@ describe("bunql end to end", () => {
         )
       }
 
-      // Every SSE subscriber saw every commit, once — one event per *transaction*, which under a
-      // fold is fewer events than writes and never fewer than transactions.
+      // Every SSE subscriber saw every write, once — **one event per statement** since L8, keyed
+      // `(txid, seq)`. Group commit folds concurrent writes into one transaction, so the txids
+      // repeat; what does not repeat is the key, which is the point of it.
       for (const name of DBS) {
-        const expected = [...new Set(committed.get(name) as number[])].sort((a, b) => a - b)
+        const txids = (committed.get(name) as number[]).sort((a, b) => a - b)
+        const lastTxid = txids[txids.length - 1] as number
         for (const collector of feeds.get(name) as SseCollector[]) {
           await collector.waitFor(
-            () => collector.of("change").length >= expected.length,
+            () => collector.of("change").length >= txids.length,
             15_000,
-            `${expected.length} change events on ${name}`,
+            `${txids.length} change events on ${name}`,
           )
-          const seen = collector.of("change").map((e) => e.data.txid as number)
-          expect(seen).toEqual(expected)
-          expect(new Set(seen).size).toBe(seen.length)
+          const seen = collector.of("change")
+          // One event per write, and every one of them carries the txid it committed in.
+          expect(seen.length).toBe(txids.length)
+          expect(seen.map((e) => e.data.txid as number)).toEqual(txids)
+          // `(txid, seq)` is distinct across the whole feed: the key a downstream consumer dedupes
+          // on, which `txid` alone could not be once a fold shares one.
+          const keys = seen.map((e) => `${e.data.txid}.${e.data.seq}`)
+          expect(new Set(keys).size).toBe(keys.length)
+          // Within one transaction the sequence is dense and ascending from 0.
+          const bySeq = new Map<number, number[]>()
+          for (const event of seen) {
+            const txid = event.data.txid as number
+            const list = bySeq.get(txid) ?? []
+            list.push(event.data.seq as number)
+            bySeq.set(txid, list)
+          }
+          for (const [, seqs] of bySeq) {
+            expect(seqs).toEqual(seqs.map((_, i) => i))
+          }
           expect(collector.errors).toEqual([])
-          // `id:` is the txid, which is what a `Last-Event-ID` resume is built on.
-          expect(collector.lastId).toBe(String(expected[expected.length - 1]))
+          // `id:` is the position, `txid.seq`, which is what a `Last-Event-ID` resume is built on.
+          const tail = bySeq.get(lastTxid) as number[]
+          expect(collector.lastId).toBe(`${lastTxid}.${tail[tail.length - 1]}`)
         }
       }
 
@@ -350,7 +369,9 @@ describe("bunql end to end", () => {
     }
     await first.waitFor(() => first.of("change").length >= 3, 10_000, "three change events")
     const resumeFrom = first.lastId as string
-    expect(resumeFrom).toBe(String(early[2]))
+    // L8: the id is `txid.seq`. These writes are serialised — each awaits the last — so each is
+    // its own transaction and its own single statement, which is `seq: 0`.
+    expect(resumeFrom).toBe(`${early[2]}.0`)
     first.close()
 
     // Two commits land while nobody is listening. The engine is retained past its last subscriber
@@ -370,7 +391,19 @@ describe("bunql end to end", () => {
     openFeeds.push(second)
     await second.waitFor(() => second.of("change").length >= 2, 10_000, "the two missed events")
     expect(second.of("change").map((e) => e.data.txid)).toEqual(missed)
+    expect(second.of("change").map((e) => e.data.seq)).toEqual([0, 0])
     expect(second.of("reset").length).toBe(0)
+
+    // And a bare txid still resumes, which is what every client written before L8 sends.
+    const bare = await openSse(`${url}/v1/db/gamma/changes?include=pk`, {
+      token: adminKey,
+      lastEventId: String(early[2]),
+    })
+    openFeeds.push(bare)
+    await bare.waitFor(() => bare.of("change").length >= 2, 10_000, "the same two, by bare txid")
+    expect(bare.of("change").map((e) => e.data.txid)).toEqual(missed)
+    expect(bare.of("reset").length).toBe(0)
+    bare.close()
 
     const next = (
       await client.db("gamma").sql`insert into items(owner, n) values (${7}, ${0})`.run()

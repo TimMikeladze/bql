@@ -27,7 +27,9 @@ import {
   schemaTopic,
   tableTopic,
   type LiveEvent,
+  parsePosition,
   type Publisher,
+  type RingPosition,
 } from "../realtime/index.ts"
 import type { PinHolder, Principal } from "./auth.ts"
 import { pinOwner, requireScope } from "./auth.ts"
@@ -273,7 +275,11 @@ interface WsAny {
   mode?: "deferred" | "immediate" | "exclusive"
   kind?: "changes" | "live"
   tables?: string[]
-  since?: number
+  /**
+   * L8: a txid, or `"<txid>.<seq>"` to resume mid-transaction. A number means the whole of that
+   * transaction has been seen, which is what it meant before L8.
+   */
+  since?: number | string
   include?: "none" | "pk" | "row" | "row+old"
   key?: string
   rows?: "array" | "object"
@@ -535,6 +541,12 @@ function subscribe(ws: Socket, message: WsAny, db: string): void {
   subscribeChanges(ws, message, tenant)
 }
 
+/** `5` or `"5.2"` from a client frame, as a ring position. Undefined for anything unparseable. */
+function resumePosition(raw: number | string | undefined): RingPosition | undefined {
+  if (raw === undefined) return undefined
+  return parsePosition(typeof raw === "number" ? String(raw) : raw) ?? undefined
+}
+
 function subscribeChanges(ws: Socket, message: WsAny, tenant: TxSession["tenant"]): void {
   const runtime = ws.data.runtime
   const db = tenant.name
@@ -554,7 +566,7 @@ function subscribeChanges(ws: Socket, message: WsAny, tenant: TxSession["tenant"
     backlog = realtime.subscribeChanges(
       {
         ...(message.tables?.length ? { tables: message.tables } : {}),
-        ...(message.since !== undefined ? { since: message.since } : {}),
+        ...(resumePosition(message.since) ? { since: resumePosition(message.since) } : {}),
         include: message.include ?? "pk",
       },
       () => {},

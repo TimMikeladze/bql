@@ -308,6 +308,8 @@ export function executeStatement(
         return step(db, request, options.writeTimeoutMs, options)
       } finally {
         handle.release()
+        // L8: the statement boundary, recorded where it is known. See `runtime.markStatement`.
+        runtime.markStatement(tenant.name)
       }
     },
     { ack: options.ack },
@@ -364,6 +366,9 @@ export async function executeStatementQueued(
           return step(db, request, options.writeTimeoutMs, options)
         } finally {
           handle.release()
+          // L8: this is *the* statement boundary the milestone exists for — a fold of fifty
+          // writes marks fifty times and reaches the feed as fifty events.
+          runtime.markStatement(tenant.name)
         }
       },
       signal === undefined
@@ -449,6 +454,9 @@ export function executeBatch(
           } catch (err) {
             throw markFailedIndex(err, i)
           }
+          // L8: an atomic batch is many statements in one transaction, which is the same shape a
+          // fold is, so it is numbered the same way.
+          runtime.markStatement(tenant.name)
         }
         return stepped
       } finally {
@@ -484,6 +492,9 @@ export function executeInTx(
       return step(db, request, timeoutMs, options)
     } finally {
       handle.release()
+      // L8: a baton transaction is statements arriving one request at a time, and each of them is
+      // a boundary just as much as a folded write is.
+      runtime.markStatement(tenant.name)
     }
   })
   const result = toResult(stepped, options.rows, tenant.txid, startedNs)

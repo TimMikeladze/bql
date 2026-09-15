@@ -123,6 +123,15 @@ export interface RowChange {
 
 export interface ChangeEvent {
   txid: number
+  /**
+   * L8: which statement of the transaction this event is, from 0. Group commit folds concurrent
+   * writes into one transaction, so `txid` alone does not identify an event — `(txid, seq)` does,
+   * and it stays the same across a replay, which is what a durable downstream consumer dedupes on.
+   *
+   * A transaction that ran one statement has exactly one event, with `seq: 0`. Absent on a
+   * replica's txid-only events, which have no statements to number.
+   */
+  seq?: number
   changes: RowChange[]
 }
 

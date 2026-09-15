@@ -79,6 +79,15 @@ export interface TableChange {
 export interface TxnChanges {
   tables: Map<string, TableChange>
   rows: CapturedRow[]
+  /**
+   * L8: where one statement's rows end and the next one's begin, as offsets into `rows`. Recorded
+   * by `mark()` from the one place that knows — the request layer, which runs the statements — so
+   * a group commit of fifty writes can be published as fifty events rather than one.
+   *
+   * Empty means "nobody marked anything", which is a single-statement transaction and every
+   * transaction written before L8. It is not the same as `[0]`.
+   */
+  marks: number[]
   /** True when the transaction changed more rows than `maxRowsPerTxn` and `rows` is short. */
   rowsTruncated: boolean
   schemaChanged: boolean
@@ -136,6 +145,8 @@ interface PendingTxn {
   tables: Map<string, RawTable>
   ddl: SchemaChange[]
   truncated: boolean
+  /** Statement boundaries as offsets into `rows`; see `TxnChanges.marks`. */
+  marks: number[]
 }
 
 interface TableMeta {
@@ -251,6 +262,25 @@ export class ChangeCapture {
     return this.#committed.length
   }
 
+  /**
+   * L8: "a statement just finished." Records where its rows end, so a transaction that folded
+   * several statements can be published as one event per statement rather than one per fold.
+   *
+   * Called from the request layer, which is the only place that knows where a statement begins and
+   * ends — the preupdate hooks see rows, not statements. A transaction nobody marks yields no
+   * marks and is published exactly as it was before L8, which is what keeps the embedded API, the
+   * replica apply path and every internal write unchanged.
+   *
+   * A statement that changed nothing leaves a mark equal to the one before it, which is an empty
+   * slice and therefore no event: `seq` numbers the *events*, which is what a dedupe key needs,
+   * not the statements, which a consumer cannot see anyway.
+   */
+  mark(): void {
+    const txn = this.#pending
+    if (!txn) return
+    txn.marks.push(txn.rows.length)
+  }
+
   set trackColumns(on: boolean) {
     this.#trackColumns = on
   }
@@ -294,6 +324,7 @@ export class ChangeCapture {
     return {
       tables,
       rows,
+      marks: txn.marks,
       rowsTruncated: txn.truncated,
       schemaChanged,
       ddl: schemaChanged ? txn.ddl : [],
@@ -518,7 +549,7 @@ export class ChangeCapture {
   #ensure(): PendingTxn {
     let txn = this.#pending
     if (!txn) {
-      txn = { rows: [], tables: new Map(), ddl: [], truncated: false }
+      txn = { rows: [], tables: new Map(), ddl: [], truncated: false, marks: [] }
       this.#pending = txn
     }
     return txn

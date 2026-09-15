@@ -1,12 +1,12 @@
 # Resume here — state of BunQL and what to do next
 
-**Updated 2026-09-14: the L track is built, L1 through L7.** Admission control — a ceiling on every
+**Updated 2026-09-14: the L track is built, L1 through L8.** Admission control — a ceiling on every
 shared resource, a typed refusal when it is reached, and a number that says how close it is. Three
 of the seven changed shape once they were measured, and two of them changed the *answer*: L5's
 shared fsync sweep is shipped **off**, because the benchmark says it loses at a hundred databases,
 and L6's premise turned out to be half false the way R9's was. `docs/plan-limits.md` is the plan;
-`docs/l1-result-budget.md` through `docs/l7-tarball.md` are what actually happened. **L8 is the
-only milestone of that plan still open.**
+`docs/l1-result-budget.md` through `docs/l8-change-seq.md` are what actually happened. **Every
+milestone of that plan is closed.**
 
 Rewritten 2026-09-13, at the end of the session that went after the list the previous one left.
 **Three of the things on that list turned out to be bugs rather than chores**, and each was
@@ -25,20 +25,29 @@ Read this, then `docs/e2-windows-gate.md`, `docs/p5-deferred-compression.md` §6
 `docs/e1-windows.md`, `docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/design.md` §0, §11
 and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster),
 `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL) and `docs/plan-limits.md` — the L track,
-admission control, **L1 through L7 built; L8 is the one still open.**
+admission control, **L1 through L8, all built**.
 
 ## Where things stand
 
 **Phases 0, 1 and 2 are complete, and so is the surfaces track, and the L track, and Windows is a
-supported platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2, **L1-L7**. **CI green on
+supported platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2, **L1-L8**. **CI green on
 macOS, Linux and Windows**, all three gating, plus a fourth job as of L7 that packs the real
 tarball and builds SQLite from it. On `main`, pushed to
-**https://github.com/TimMikeladze/bunql** (private). `bun test` → **1524 pass, 2 skip, 0 fail**
-across 131 files, and green again with `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what
+**https://github.com/TimMikeladze/bunql** (private). `bun test` → **1528 pass, 2 skip, 0 fail**
+across 132 files, and green again with `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what
 proves the JavaScript fallback). `bun run typecheck`, `bun run bytes`, `bun run routes:check` and
 `bun run pack:check` clean. Zero runtime dependencies.
 
 ### The L track, newest first
+
+**L8 — one change event per statement, keyed `(txid, seq)`.** Group commit folds concurrent writes
+into one transaction, so the feed emitted one event per *fold*: fifty writers, one fat event, and
+`txid` was not a key anything could dedupe on. It is now one event per statement, and the position
+on the wire is `<txid>.<seq>` — the SSE `id:`, `Last-Event-ID`, `?since=` and the WebSocket
+`subscribe` frame all take it, and **a bare txid still means "the whole of that transaction"**, so a
+client written before L8 resumes unchanged. The ring's eviction watermark became a position too,
+which is what lets it serve a client that had `(5, 0)` while `(5, 1)` is still retained.
+`docs/l8-change-seq.md`.
 
 **L7 — the tarball can build its own engine.** `package.json` `files` excluded `scripts/`, so
 `sqlite:build` — advertised in `package.json` and in the README — was not in the published package,
@@ -509,17 +518,14 @@ What phase 1 added to the list:
 
 ## Start here
 
-### 0. L8 — a change event per statement inside a fold
+**Nothing milestone-sized is open.** `docs/plan-limits.md` is finished, and so is everything before
+it. What is left is genuinely optional, in the order it is worth doing.
 
-The one milestone of `docs/plan-limits.md` still open, and the only thing here that is
-milestone-sized. Group commit is on by default, so folded writes share a txid and the change feed
-emits **one event per fold**. Emitting one event per statement, keyed `(txid, seq)`, loosens two
-things at once: the group-commit contract stops costing precision in the feed, and a downstream
-consumer gains a stable key it can dedupe on across a replay — which is what an in-memory ring that
-answers `reset` cannot support today. The two e2e tests that assert the fold are
-`test/e2e/scenario.test.ts` and `test/e2e/phase1.test.ts`.
-
-Everything below is genuinely optional, in the order it is worth doing.
+The one thing L8 makes newly *worth* doing: **the change ring is still in memory**, so a
+`Last-Event-ID` from before a restart is answered with `reset`. That was unfixable-in-principle
+while a position was a bare txid — a durable feed needs a key that survives a replay, and there
+was none. There is one now, so spilling the ring to disk, or serving old positions from the log,
+is a design that can actually be written. It is the first item under "the bounded ones" below.
 
 ### 1. Re-measure §5's worker ladder on a quiet machine
 
