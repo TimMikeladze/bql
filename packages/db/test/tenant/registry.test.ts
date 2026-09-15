@@ -2,7 +2,13 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import path from "node:path"
 import { BunQLError } from "../../src/server/errors.ts"
-import { assertValidName, TenantError, TenantRegistry, tenantDir } from "../../src/tenant/index.ts"
+import {
+  assertValidName,
+  fileDescriptorLimit,
+  TenantError,
+  TenantRegistry,
+  tenantDir,
+} from "../../src/tenant/index.ts"
 import { cleanupTempDirs, tempDir } from "./tmp.ts"
 
 afterAll(cleanupTempDirs)
@@ -55,15 +61,25 @@ describe("tenant registry", () => {
     reg.close()
   })
 
-  test("warns when maxOpen outruns the file-descriptor limit", () => {
+  test("warns when maxOpen outruns the file-descriptor limit, where there is one to read", () => {
     const warnings: string[] = []
     const reg = TenantRegistry.open({
       dir: tempDir(),
       maxOpen: 10_000_000,
       warn: (message) => warnings.push(message),
     })
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain("file descriptors")
+    // L3: the rule is "warn when there is a limit and the budget outruns it", and on Windows there
+    // is no limit to read — Win32 has no per-process descriptor rlimit. The test asserts the rule
+    // rather than the platform, because the platform is what it used to get wrong: before L3 this
+    // shelled out to `sh -c "ulimit -n"` on every platform, and on a Windows runner that finds Git
+    // Bash and returns *its* MSYS limit, which says nothing about a Bun process.
+    if (fileDescriptorLimit() === null) {
+      expect(process.platform).toBe("win32")
+      expect(warnings).toHaveLength(0)
+    } else {
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain("file descriptors")
+    }
     reg.close()
   })
 

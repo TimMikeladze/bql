@@ -222,6 +222,42 @@ describe("replica-mode tenants", () => {
     replicaReg.registry.close()
   })
 
+  test("a pin survives installSnapshot exactly once, and one unpin releases it", async () => {
+    // The regression L4 introduced and Windows CI found. Pins became *counted* per owner, so a
+    // holder that pinned, had its pin restored by `installSnapshot`, and then pinned again held
+    // two — and the single `unpin` when its stream closed left the database pinned open for the
+    // life of the process. `ReplicaClient.#snapshotEnd` was doing exactly that.
+    const primaryReg = registry()
+    const replicaReg = registry()
+    const primary = await primaryReg.registry.create("acme")
+    primary.write((db) => db.exec("create table t (id integer primary key, v text)"))
+    primary.write((db) => db.run("insert into t (v) values ('one')"))
+    const ref = await primary.snapshot()
+
+    replicaReg.registry.createReplica("acme")
+    replicaReg.registry.pin("acme", "replication")
+    expect(replicaReg.registry.pinned.has("acme")).toBe(true)
+
+    const staging = path.join(replicaReg.dir, "incoming.db")
+    fs.copyFileSync(ref.path, staging)
+    replicaReg.registry.installSnapshot("acme", {
+      file: staging,
+      txid: BigInt(ref.txid),
+      epoch: ref.epoch,
+      checksum: BigInt(ref.checksum),
+      pages: ref.pages,
+      pageSize: ref.pageSize,
+    })
+    // Still pinned — the install closed and reopened the tenant, and the holder never let go.
+    expect(replicaReg.registry.pinned.has("acme")).toBe(true)
+    // And exactly once: one release is all it takes, because one claim is all that was made.
+    replicaReg.registry.unpin("acme", "replication")
+    expect(replicaReg.registry.pinned.has("acme")).toBe(false)
+
+    primaryReg.registry.close()
+    replicaReg.registry.close()
+  })
+
   test("a record that does not follow is refused and nothing is written", async () => {
     const primaryReg = registry()
     const replicaReg = registry()

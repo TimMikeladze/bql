@@ -1531,7 +1531,11 @@ export class ReplicaClient {
       pages: begin.pages,
       pageSize: begin.pageSize,
     })
-    this.registry.pin(stream.db, PIN_OWNER)
+    // No re-pin here. `installSnapshot` closes the tenant and reopens it, and since L4 it puts
+    // every holder's pins back exactly as it found them — so pinning again would leave this stream
+    // holding *two*, and the single `unpin` when it closes would leave the database pinned open
+    // for the life of the process. Before L4 pins were set membership, which made the second one a
+    // no-op under this owner and merely leaked a `"default"` pin nothing ever released.
     // C4c §3.2: the ledger is the router's, so the install is *reported* rather than recorded —
     // and reported **before** the `ACK`, because `postMessage` to one port is FIFO and that is what
     // makes the router write the ledger before the ack reaches the wire. A copy on disk with no

@@ -12,9 +12,9 @@ check under-reported by exactly the worker count, and the ceiling an operator co
 the ceiling the node enforced.
 
 The probe was also `Bun.spawnSync(["sh", "-c", "ulimit -n"])` — once per registry, so N subprocess
-spawns on an N-worker node. On Windows, a gating platform since E2, there is no `sh`, so it
-returned null and warned nobody: the right answer reached by accident, at the cost of a failed
-spawn.
+spawns on an N-worker node. And on Windows, a gating platform since E2, it did not fail the way
+this document first claimed: a runner has Git Bash on `PATH`, so the probe *succeeded* and returned
+an MSYS shell's descriptor limit, which has nothing to do with a Bun process on Win32. §3b.
 
 ## 2. What it is now
 
@@ -61,6 +61,18 @@ of libc on every start, for a warning. So it is still `ulimit -n` on POSIX — m
 per node rather than once per thread — and a documented null on Windows, where Win32 has no
 per-process descriptor rlimit at all: `_setmaxstdio` bounds only stdio-style handles and a kernel
 handle is bounded by paged-pool memory rather than by a count.
+
+## 3b. What Windows CI corrected about "a documented null"
+
+The first push failed the Windows gate on `warns when maxOpen outruns the file-descriptor limit`,
+and the reason is worth keeping: **a `windows-latest` runner does have `sh`**, because Git for
+Windows puts Git Bash on `PATH`. So the pre-L3 probe did not fail there at all — it ran, and
+returned Git Bash's own MSYS descriptor limit, which says nothing whatsoever about a Bun process on
+Win32. The test passed on a number that was meaningless.
+
+Returning null is therefore *more* correct, not merely equivalent. What had to change was the test,
+which encoded the platform rather than the rule: it now asks `fileDescriptorLimit()` and asserts a
+warning where there is a limit to read and none where there is not.
 
 ## 4. Done when — against the plan's criteria
 

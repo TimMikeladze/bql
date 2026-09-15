@@ -591,4 +591,26 @@ describe("fan-out", () => {
       "the primary to see both replicas",
     )
   })
+
+  test("a snapshot bootstrap leaves exactly one pin on the database", async () => {
+    // The regression L4 introduced and Windows CI found. Pins became *counted* per owner, and
+    // `#snapshotEnd` pinned again on top of the pins `installSnapshot` now restores — so a stream
+    // that bootstrapped by snapshot held two, its single `unpin` on close released one, and the
+    // database stayed pinned open for the life of the process. Nothing could evict it, and once
+    // enough of them piled up L4's own `TOO_MANY_OPEN` refused new opens.
+    const primary = await startPrimary()
+    await createDb(primary, "acme", SCHEMA)
+    // Data before the replica exists, so it has to bootstrap by snapshot rather than by records.
+    for (let i = 0; i < 20; i++) {
+      await query(primary, "acme", "insert into t (v) values (?)", [`v${i}`])
+    }
+    const replica = await startReplica(primary)
+    await untilSynced(primary, replica, "acme")
+
+    const registry = replica.handle.runtime.registry
+    expect(registry.pinned.has("acme")).toBe(true)
+    // One claim, so one release. A second pin would leave it here after this line.
+    registry.unpin("acme", "replication")
+    expect(registry.pinned.has("acme")).toBe(false)
+  })
 })

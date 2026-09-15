@@ -68,6 +68,29 @@ subscribers release theirs immediately.
 All three cases were run against a tree with the two refusals disabled: the first two answer 200
 and the third answers `BUSY` rather than `TOO_MANY_OPEN`, so the test discriminates.
 
+## 4b. What counted pins broke, and how it was found
+
+Windows CI caught it on the push, and it is the one risk the counted-pin change carried.
+
+Pins used to be `Map<name, Set<owner>>`, so a holder pinning twice was idempotent and one `unpin`
+released it. Counting them made a double-pin real — and `ReplicaClient.#snapshotEnd` was doing
+exactly that: `installSnapshot` closes the tenant and reopens it, and L4 taught it to put every
+holder's pins back, while the caller went on pinning again afterwards as it had to before. A stream
+that bootstrapped by snapshot therefore held **two** pins, its single `unpin` on close released one,
+and the database stayed pinned open for the life of the process — unevictable, and eventually
+enough of them to make L4's own `TOO_MANY_OPEN` refuse new opens. The cluster test that noticed was
+`a node in two replica sets holds one client per upstream node`, which timed out waiting for nodes
+to hold their upstreams.
+
+The fix is one deletion: the registry preserves pins across an install, so the caller does not
+re-pin. It also closes an older, harmless leak — before L4 `installSnapshot` re-pinned under
+`"default"`, which nothing ever released.
+
+Two tests, at both levels: `test/tenant/replica.test.ts` pins the registry contract (a pin survives
+`installSnapshot` exactly once), and `test/replication/stream.test.ts` pins the caller (a snapshot
+bootstrap leaves exactly one pin). The second fails against the unfixed tree; the first does not,
+which is why both are there.
+
 ## 5. What it touched
 
 `src/tenant/registry.ts` (counted per-owner pins, `#pinnedByOwner`, `pinnedBy`, `#clearPins`,
@@ -79,4 +102,5 @@ holder, the retain window carries one, baton and read-transaction pins keyed by 
 `src/server/config.ts` (`[limits] maxPinnedPerPrincipal`), `src/server/errors.ts` (`PIN_LIMIT`,
 `TOO_MANY_OPEN`), `src/server/metrics.ts` (`bunql_tenants_pinned`, `bunql_open_refused_total`),
 `src/server/workers/{protocol,pool,entry,router}.ts` (both sum across the disjoint shards),
-`src/server/registry.ts`, `src/client/protocol.ts`, `docs/api.md`, `docs/design.md` §4.7 and §6.6.
+`src/server/registry.ts`, `src/client/protocol.ts`, `src/replication/replica.ts` (the double pin in
+§4b), `docs/api.md`, `docs/design.md` §4.7 and §6.6.

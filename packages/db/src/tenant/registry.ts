@@ -158,9 +158,9 @@ let fdLimitCache: number | null | undefined
  * **Null on Windows, and that is the answer rather than a failure.** Win32 has no per-process
  * descriptor rlimit: the CRT's `_setmaxstdio` bounds only stdio-style handles, and a kernel handle
  * is bounded by paged-pool memory rather than by a count. Before L3 this shelled out to
- * `sh -c "ulimit -n"` on every platform, which on Windows found no `sh`, returned null, and warned
- * nobody about anything — the same outcome, reached by accident and at the cost of a failed
- * subprocess spawn per registry.
+ * `sh -c "ulimit -n"` on every platform — and on Windows that does not fail, because Git for
+ * Windows puts Git Bash on `PATH`: it returned an MSYS shell's limit and warned against a number
+ * that describes nothing this process is subject to.
  *
  * On POSIX it is still `ulimit -n`, because Bun's `process.report.getReport()` carries no `rlimit`
  * section (checked on Bun 1.4) and reaching `getrlimit(2)` would mean a second `dlopen` of libc on
