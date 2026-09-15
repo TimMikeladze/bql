@@ -21,7 +21,7 @@ The handler runs in the bus's own process and writes to the same SQLite file, so
 transaction and nothing to reconcile. No two-phase commit, no idempotency key, no compensation.
 
 ```ts
-import { createBus } from "agenticbus";
+import { createBus } from "@bunql/bus";
 
 const bus = createBus({ path: "./data/bus.db", blobDirectory: "./data/blobs" });
 bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");

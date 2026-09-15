@@ -201,7 +201,7 @@ Full details, including the keyword list: [docs/schemas.md](docs/schemas.md).
 ## Writing a consumer
 
 ```ts
-import { BusClient, BusConsumer, FatalError } from "agenticbus/client";
+import { BusClient, BusConsumer, FatalError } from "@bunql/bus/client";
 
 const client = new BusClient({ url: "http://127.0.0.1:4317", token: process.env.BUS_TOKEN! });
 
@@ -253,7 +253,7 @@ If the message carried a `reply-to`, whatever the handler returns becomes its re
 writing to the same SQLite file — which is what makes the ack genuinely transactional.
 
 ```ts
-import { createBus } from "agenticbus";
+import { createBus } from "@bunql/bus";
 
 const bus = createBus({ path: "./data/bus.db", blobDirectory: "./data/blobs" });
 bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");
@@ -366,7 +366,7 @@ instead.
 
 ```sh
 bun run typecheck
-bun test tests
+bun test tests           # 137 across 13 files
 bun run build
 bun run test:e2e
 bun run verify-pack

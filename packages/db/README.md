@@ -26,7 +26,7 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | — | one operation model rendered as REST + OpenAPI + GraphQL (`@bunql/db/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1486 tests across 124 files, gating on macOS (arm64), Linux (x64) and Windows (x64).
+1496 tests across 125 files, gating on macOS (arm64), Linux (x64) and Windows (x64).
 
 ## Install
 
@@ -144,6 +144,21 @@ A subscription is an emitter *and* an async iterable, so either style works. `db
 delivers a `schema` event when DDL runs — a `tables` filter does not hide it, because the shape you
 decode rows into has moved whether or not it was your table that changed.
 
+The control plane is on the same client, under `client.admin` — provisioning a database is not a
+reason to leave the SDK and hand-write a `fetch`:
+
+```ts
+await client.admin.create("acme", { pageSize: 4096 })
+await client.admin.fork("acme-copy", "acme", 4812)          // a txid, or an ISO-8601 instant
+await client.admin.snapshot("acme")
+await client.admin.restore("acme", { at: 4800, into: "acme-recovered" })   // a new database
+const { token, jti } = await client.admin.mintToken({ dbs: ["acme"], scope: "ro" })
+```
+
+Nineteen methods, one for each route of the admin surface: lifecycle, dump and import, replication
+and promotion, the backup bucket, tokens. It needs the admin key, and it is built on first use, so
+a browser that only queries never constructs it.
+
 `consistency: "ryw"` (the default) remembers the highest txid it has seen per database and sends it
 as `BunQL-Min-Txid`, so a read never goes backwards. `intMode: "bigint" | "string"` decides what an
 integer beyond 2^53 becomes; the default refuses to round it. A write answered `307` or
@@ -173,7 +188,10 @@ await bq.serve({ port: 4321 })                       // the same engine, now ove
 
 `db` is the same interface the client exposes, so code written against one runs against the other.
 `db.sync` is the escape hatch for hot loops. The embedded caller is the admin principal; tokens
-start applying at `serve()`.
+start applying at `serve()`. The lifecycle calls are here too — `bq.create`, `bq.fork`, `bq.list`,
+`bq.stat`, `bq.delete`, `bq.snapshot`, `bq.restore`, `bq.checkpoint` — with the same shapes
+`client.admin` answers. Restoring from an S3 bucket stays on the server route, which is where the
+store is built.
 
 ## ORMs
 
@@ -547,7 +565,7 @@ to do about each ceiling.
 
 ```sh
 bun run sqlite:build  # the libsqlite3 everything below runs on; once per machine
-bun test              # 1486 across 124 files; BUNQL_WAL_NATIVE=0 proves the JavaScript fallback
+bun test              # 1496 across 125 files; BUNQL_WAL_NATIVE=0 proves the JavaScript fallback
 bun run typecheck
 bun run bytes         # no raw control bytes in source
 bun run routes:check  # docs/api.md covers every route
