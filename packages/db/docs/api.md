@@ -206,6 +206,8 @@ that were once refused and is gone with the last of them.
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
 | `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, a snapshot in progress, or too many forwards in flight |
 | `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it, or an admin write reached one at all; carries `BunQL-Primary` |
+| `WRITE_QUEUE_FULL` | 503 | the database's write queue is at `[limits] maxQueuedWrites` or `maxQueuedWriteBytes`; carries `Retry-After` |
+| `WRITE_QUEUE_TIMEOUT` | 503 | queued past `[limits] queueWaitMs` without reaching the writer |
 | `NO_REPLICAS` | 503 | `ack: "replica"`/`"quorum"` on a node with no replica attached |
 | `ACK_TIMEOUT` | 503 | committed and locally durable, but not enough replica acks in time |
 | `FORWARD_TIMEOUT` | 504 | the primary never answered a write a replica forwarded to it |
@@ -1744,6 +1746,9 @@ the canonical one wins when both are set.
 | `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
 | `[limits] groupCommit` | `true` | `BUNQL_LIMITS_GROUP_COMMIT` | — |
+| `[limits] maxQueuedWrites` | `256` | `BUNQL_LIMITS_MAX_QUEUED_WRITES` | — |
+| `[limits] maxQueuedWriteBytes` | `8388608` | `BUNQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
+| `[limits] queueWaitMs` | `5000` | `BUNQL_LIMITS_QUEUE_WAIT_MS` | — |
 | `[limits] maxReadTx` | `16` | `BUNQL_LIMITS_MAX_READ_TX` | — |
 | `[limits] readTxTimeoutMs` | `30000` | `BUNQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
 | `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |
@@ -1902,6 +1907,17 @@ really send) and `docs/r5-orm.md` (the two adapters).
 - **A forwarded write is not retried.** A replica sends it once. `FORWARD_TIMEOUT` and a socket
   that drops mid-flight both mean "this may or may not have committed on the primary" — read the
   txid back rather than sending it again.
+- **A database's write queue is bounded, and both refusals mean the write never started.**
+  `WRITE_QUEUE_FULL` when it is at `[limits] maxQueuedWrites` or `maxQueuedWriteBytes`,
+  `WRITE_QUEUE_TIMEOUT` when an entry waited past `[limits] queueWaitMs`. Neither can have
+  committed, so either is safe to retry — unlike `FORWARD_TIMEOUT`, which cannot say.
+  `WRITE_QUEUE_FULL` carries a `Retry-After` derived from that database's **measured** drain rate,
+  and the same number rides in the body as `retryAfterSec`, because a WebSocket client has no
+  headers. `docs/l2-write-admission.md`.
+- **A client that disconnects while its write is queued has the write dropped, not committed.**
+  Over HTTP the request's own abort signal is what says so. A write that has already reached the
+  writer is not cancellable and still commits, which is the same "may or may not have committed"
+  a dropped socket has always meant.
 - **The long poll's `wait` is capped at 60 s**, so a client cannot pin a subscription open.
 - **`wait` is what switches `/changes` between SSE and the long poll**, not `Accept`.
 - **`maxRows` fails a one-shot query and truncates a live one.** `400 TOO_MANY_ROWS` on `/query`;

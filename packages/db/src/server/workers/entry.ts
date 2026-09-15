@@ -543,13 +543,19 @@ function closeVirtual(current: WorkerState, id: string): void {
   else closeWsSocket(entry.socket as unknown as Socket)
 }
 
-/** Only the three numbers `Metrics.render` reads; the full stats carry an array per tenant. */
-function pick(stats: { open: number; tenants: number; evictions: number }): {
+/** Only the numbers `Metrics.render` reads; the full stats carry an array per tenant. */
+function pick(stats: {
   open: number
   tenants: number
   evictions: number
-} {
-  return { open: stats.open, tenants: stats.tenants, evictions: stats.evictions }
+  writeQueueDepth: number
+}): { open: number; tenants: number; evictions: number; writeQueueDepth: number } {
+  return {
+    open: stats.open,
+    tenants: stats.tenants,
+    evictions: stats.evictions,
+    writeQueueDepth: stats.writeQueueDepth,
+  }
 }
 
 // ── the message loop ───────────────────────────────────────────────────────────────────────────

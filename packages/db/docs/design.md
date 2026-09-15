@@ -363,6 +363,7 @@ chunked per event-loop tick and bounded by `streamTimeoutMs`, which is what boun
 | table/column ACL for browser tokens | authorizer: `SQLITE_DENY` or `SQLITE_IGNORE` (column reads become NULL) |
 | SQL bombs | `sqlite3_limit` (length, expr depth, compound, variables), `maxRows` and `[limits] maxResultBytes` per response, both refused *inside* the step loop so the ceiling bounds allocation rather than describing it |
 | noisy neighbour | per-tenant token bucket on writes; per-tenant `maxLiveQueries`, `maxSubscribers` |
+| unbounded write backlog | the write queue is bounded by `[limits] maxQueuedWrites`, `maxQueuedWriteBytes` and `queueWaitMs`, and an entry whose caller has disconnected is dropped before the writer sees it (L2) |
 | memory | `cache_size` per connection, `soft_heap_limit64` process-wide |
 | cross-tenant access | authorizer denies `ATTACH`/`DETACH`; `PRAGMA` allow-list (`SQLITE_PRAGMA` action); `load_extension` off; `SQLITE_DBCONFIG_DEFENSIVE` on for non-admin tokens |
 
@@ -574,7 +575,8 @@ event: diff      data: {"txid":4820,"added":[...],"removed":[[7]],"updated":[...
 HTTP status maps: 400 SQL/parse errors, 401/403 auth, 404 unknown db, 409 constraint,
 408 timeout (`QUERY_TIMEOUT`), 413 `RESULT_TOO_LARGE` (`[limits] maxResultBytes` reached mid-step),
 425 `TXID_NOT_AVAILABLE` (replica couldn't reach `minTxid`), 503 `NOT_PRIMARY` with
-`BunQL-Primary` header, 507 `QUOTA_EXCEEDED`.
+`BunQL-Primary` header, 503 `WRITE_QUEUE_FULL` with `Retry-After` and `WRITE_QUEUE_TIMEOUT`
+(admission control, L2), 507 `QUOTA_EXCEEDED`.
 
 ### 6.7 Compatibility surface: Hrana (libsql wire protocol)
 
@@ -713,7 +715,8 @@ bunql cluster status|join|leave
 [durability] defaultAck = "fsync"  checkpointWalBytes = 4_000_000  retention = "7d"
 [realtime] ringBytes = 10_000_000  maxLiveQueries = 1000  maxRowsPerLive = 1000
 [limits]  queryTimeoutMs = 10_000  writeTimeoutMs = 30_000  txIdleTimeoutMs = 5_000  maxRows = 10_000
-          maxResultBytes = 67_108_864
+          maxResultBytes = 67_108_864  maxQueuedWrites = 256  maxQueuedWriteBytes = 8_388_608
+          queueWaitMs = 5_000
 [s3]      bucket = "backups"  endpoint = "https://…"  prefix = "bunql/"  shipIntervalMs = 1000
 [replication] role = "primary"        # or "replica"; primary = "wss://…"
 [cluster] enabled = false  rf = 2  peers = ["…"]  leaseTtlMs = 3000

@@ -15,8 +15,9 @@ Read this, then `docs/e2-windows-gate.md`, `docs/p5-deferred-compression.md` §6
 `docs/performance.md` §8 — the three above — then `docs/r8-per-db-ack.md`,
 `docs/r9-segment-index.md`, `docs/r10-read-transactions.md`, `docs/p6-router-resolution.md`,
 `docs/e1-windows.md`, `docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/design.md` §0, §11
-and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster) and
-`docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL).
+and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster),
+`docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL) and **`docs/plan-limits.md` — the L track,
+admission control, written 2026-09-14 and not yet started. That is where the next session goes.**
 
 ## Where things stand
 
@@ -320,10 +321,12 @@ Added by the performance session (2026-09-12):
   validated inside `readJson`, which keeps `routes.ts`'s ordering invariant: principal, then tenant,
   then body. Two bodies stay described and unchecked on purpose — `importDatabase` streams a raw
   SQLite file, `databaseGraphql` must refuse in GraphQL's own envelope.
-- **Group commit is off by default** (`[limits] groupCommit`) because folded writes share a txid
-  and the change feed emits one event per fold. Two e2e scenarios assert a txid per write and fail
-  with it on — which is the honest signal that it is a contract change, not an optimisation. If
-  that contract is ever renegotiated, those two tests are where it is written down.
+- **Group commit is on by default** (`[limits] groupCommit`, `config.ts:470`). This line said
+  "off" until 2026-09-14, contradicting "The three defaults, settled" above, which is the correct
+  one. What remains true is the contract it names: folded writes share a txid and the change feed
+  emits one event per fold, and two e2e scenarios assert a txid per write. `docs/plan-limits.md`
+  L8 is the fix — one event per statement, keyed `(txid, seq)`, which is also what a durable
+  downstream feed needs.
 - **A single client is 15% slower with group commit on**, because the drain costs an event-loop
   iteration and one socket's messages arrive one per iteration. `docs/p2-group-commit.md`.
 - **`bench/http.ts` authenticates with the admin key**, which is a constant-time compare, so its

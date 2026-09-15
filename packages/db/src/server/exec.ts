@@ -133,6 +133,38 @@ interface Stepped {
 const isZero = (v: number | bigint): boolean => v === 0 || v === 0n
 
 /**
+ * What a statement weighs while it waits in a tenant's write queue: its SQL and its bound
+ * arguments. The queue holds a closure and cannot weigh it, so the caller says — and the caller is
+ * here, where the request is still a request (L2, `[limits] maxQueuedWriteBytes`).
+ *
+ * One pass over the arguments, never a `JSON.stringify`: this runs on every queued write.
+ */
+function requestWeight(request: StatementRequest): number {
+  let bytes = request.sql.length
+  const args = request.args as unknown
+  if (Array.isArray(args)) {
+    for (const arg of args) bytes += valueWeight(arg)
+  } else if (args && typeof args === "object") {
+    for (const key of Object.keys(args)) {
+      bytes += key.length + valueWeight((args as Record<string, unknown>)[key])
+    }
+  }
+  return bytes
+}
+
+function valueWeight(value: unknown): number {
+  if (typeof value === "string") return value.length
+  if (value && typeof value === "object") {
+    // A base64 or typed-array argument; either way its length is what it costs to hold.
+    const view = value as { byteLength?: number; base64?: string }
+    if (typeof view.byteLength === "number") return view.byteLength
+    if (typeof view.base64 === "string") return view.base64.length
+    return 32
+  }
+  return 8
+}
+
+/**
  * Binds, arms the deadline and the result budget, and steps.
  *
  * L1: the budget is what makes `maxRows` a memory bound rather than a report. It used to be
@@ -302,6 +334,7 @@ export async function executeStatementQueued(
   principal: Principal,
   request: StatementRequest,
   options: ResolvedOptions,
+  signal?: AbortSignal,
 ): Promise<Executed> {
   if (!runtime.config.limits.groupCommit) {
     return executeStatement(runtime, tenant, principal, request, options)
@@ -320,19 +353,35 @@ export async function executeStatementQueued(
   requireScope(principal, tenant.name, "rw")
   runtime.assertWritable(tenant.name)
   runtime.assertAckAvailable(tenant.name, options.ack)
-  const written = await tenant.writeQueued(
-    (db) => {
-      // Per statement, inside the shared transaction: each folded write is authorised as its own
-      // caller, so two principals in one transaction never borrow each other's rights.
-      const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
-      try {
-        return step(db, request, options.writeTimeoutMs, options)
-      } finally {
-        handle.release()
-      }
-    },
-    { ack: options.ack },
-  )
+  let written
+  try {
+    written = await tenant.writeQueued(
+      (db) => {
+        // Per statement, inside the shared transaction: each folded write is authorised as its own
+        // caller, so two principals in one transaction never borrow each other's rights.
+        const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
+        try {
+          return step(db, request, options.writeTimeoutMs, options)
+        } finally {
+          handle.release()
+        }
+      },
+      signal === undefined
+        ? { ack: options.ack, bytes: requestWeight(request) }
+        : { ack: options.ack, bytes: requestWeight(request), signal },
+    )
+  } catch (err) {
+    // L2: the refusal is counted here rather than in the tenant, which has no metrics — and this
+    // is the one place both refusals surface, since `WRITE_QUEUE_TIMEOUT` is raised on a timer
+    // inside the tenant and still lands on this await.
+    if (
+      err instanceof BunQLError &&
+      (err.code === "WRITE_QUEUE_FULL" || err.code === "WRITE_QUEUE_TIMEOUT")
+    ) {
+      runtime.metrics.writeQueueRejected()
+    }
+    throw err
+  }
   const result = toResult(written.result, options.rows, written.txid, startedNs)
   runtime.metrics.statement("write", result.vmSteps, written.result.resultBytes)
   return { result, kind: "write" }

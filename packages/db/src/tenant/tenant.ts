@@ -19,6 +19,12 @@
 // snapshot that *survived* the prune is one of them — held the other way round, the log would be
 // pinned to a base that is already gone. See `docs/r6-retention.md`.
 //
+// Fifth invariant (L2): the write queue is bounded in three ways at once — entries, bytes, and how
+// long an entry may wait. A tenant whose disk has stalled refuses admission rather than growing a
+// backlog of pending promises until the heap ends, and an entry whose caller has gone is dropped
+// before the writer sees it rather than committed for nobody. `maxGroupCommit` bounds a *drain*,
+// which is a different thing and always was. See `docs/l2-write-admission.md`.
+//
 // Hook slots: the tenant takes the writer's WAL hook and nothing else. The commit, rollback and
 // authorizer slots belong to `src/realtime` and the route layer (docs/m6-realtime.md), which is
 // why `onCommit` here is a list of listeners this class calls after `log.append` rather than
@@ -141,6 +147,21 @@ export interface TenantOptions {
    */
   maxGroupCommit?: number
   /**
+   * Entries `writeQueued` will hold waiting for the writer. Default 256. Past it, `WRITE_QUEUE_FULL`
+   * with a `Retry-After` derived from the measured drain rate (L2).
+   */
+  maxQueuedWrites?: number
+  /**
+   * Bytes those entries may hold between them — the caller's account of its SQL and bound
+   * arguments, since the queue holds closures and cannot weigh them itself. Default 8 MiB.
+   *
+   * An entry larger than the whole budget is admitted when the queue is **empty**, because
+   * refusing it would make it unserveable at any time rather than at a busy one.
+   */
+  maxQueuedWriteBytes?: number
+  /** How long a queued write waits before it is refused `WRITE_QUEUE_TIMEOUT`. Default 5000. */
+  queueWaitMs?: number
+  /**
    * Compress record bodies with zstd. Default true. It is a third of a single-row write
    * (`docs/performance.md` §1) against 4.3x on disk and on every replica's socket, so it is a
    * deployment choice rather than a constant. Per record and in the header: turning it off leaves
@@ -210,10 +231,29 @@ export interface TenantStats {
   openReaders: number
   logBytes: number
   lastSnapshotTxid: bigint | null
+  /** Writes queued for this tenant right now (L2). */
+  queuedWrites: number
+  /** Bytes those entries hold between them. */
+  queuedWriteBytes: number
 }
 
 export interface WriteOptions {
   ack?: AckLevel
+}
+
+export interface QueuedWriteOptions extends WriteOptions {
+  /**
+   * What this entry weighs while it waits — the caller's SQL and its bound arguments. The queue
+   * holds a closure and cannot weigh it, so the caller says; 0 means "charge nothing", which is
+   * what an internal write that is not holding a client's bytes should pass.
+   */
+  bytes?: number
+  /**
+   * The caller's lifetime. A request whose socket closes while its write is queued has the entry
+   * dropped before the writer sees it — committing it would be work done for nobody, and on a
+   * backlog it is the difference between a queue that drains and one that does not.
+   */
+  signal?: AbortSignal
 }
 
 export interface TxBeginOptions extends WriteOptions {
@@ -274,6 +314,16 @@ interface QueuedWrite {
   ack: AckLevel
   resolve: (value: WriteResult<unknown>) => void
   reject: (err: unknown) => void
+  /** What this entry was charged against `maxQueuedWriteBytes`, refunded when it leaves. */
+  bytes: number
+  /** `Date.now()` past which it is refused `WRITE_QUEUE_TIMEOUT`, or Infinity. */
+  deadlineAt: number
+  /** The caller's lifetime, held until the entry is actually going to wait. */
+  signal: AbortSignal | null
+  /** Drops the abort listener, once one has been attached. */
+  detach: (() => void) | null
+  /** Set when the caller went away or the deadline passed; the drain steps over it. */
+  done: boolean
 }
 
 /** Strictest first. `replica` and `quorum` are waited for above the tenant and cost an fsync here. */
@@ -381,6 +431,12 @@ export class Tenant {
   readonly maxReaders: number
   /** Most statements one group commit folds; see `writeQueued`. */
   readonly maxGroupCommit: number
+  /** Entries the write queue admits; past it, `WRITE_QUEUE_FULL` (L2). */
+  readonly maxQueuedWrites: number
+  /** Bytes those entries may hold between them. */
+  readonly maxQueuedWriteBytes: number
+  /** How long a queued write waits before `WRITE_QUEUE_TIMEOUT`. */
+  readonly queueWaitMs: number
   readonly checkpointWalBytes: number
   readonly idleCheckpointMs: number
   readonly defaultAck: AckLevel
@@ -397,6 +453,21 @@ export class Tenant {
   #listeners = new Set<CommitListener>()
   /** Writes waiting to be folded into one transaction; see `writeQueued`. */
   #queue: QueuedWrite[] = []
+  /** Sum of `bytes` over `#queue`, kept rather than recomputed so admission is an integer compare. */
+  #queuedBytes = 0
+  /**
+   * One timer for the whole queue: deadlines are armed at push with the same `queueWaitMs`, so
+   * they are monotonic and the head is always the earliest. Armed only when the queue is actually
+   * backed up, so the ordinary fold — queued and drained inside one event-loop turn — never
+   * creates a timer at all.
+   */
+  #queueTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Milliseconds per entry the last drains took, smoothed. It is what `Retry-After` is derived
+   * from: a constant would tell a client to come back at a time that has nothing to do with how
+   * fast this tenant is actually committing.
+   */
+  #msPerQueuedWrite = 0
   #draining = false
   #drainScheduled = false
   #waiters: Waiter[] = []
@@ -456,6 +527,9 @@ export class Tenant {
     this.quotaBytes = options.quotaBytes ?? 0
     this.maxReaders = options.readers ?? 2
     this.maxGroupCommit = Math.max(1, options.maxGroupCommit ?? 64)
+    this.maxQueuedWrites = Math.max(1, options.maxQueuedWrites ?? 256)
+    this.maxQueuedWriteBytes = Math.max(1, options.maxQueuedWriteBytes ?? 8 * 1024 * 1024)
+    this.queueWaitMs = Math.max(0, options.queueWaitMs ?? 5000)
     this.checkpointWalBytes = options.checkpointWalBytes ?? 4_000_000
     this.idleCheckpointMs = options.idleCheckpointMs ?? 1000
     this.defaultAck = options.defaultAck ?? "local"
@@ -600,6 +674,8 @@ export class Tenant {
       openReaders: this.#openReaders,
       logBytes: this.log.bytes,
       lastSnapshotTxid: this.#lastSnapshotTxid,
+      queuedWrites: this.#queue.length,
+      queuedWriteBytes: this.#queuedBytes,
     }
   }
 
@@ -641,7 +717,10 @@ export class Tenant {
    * What a caller does see: **the txid is shared**, because one transaction is one txid. It stays
    * monotonic and it is the txid the write really landed in, which is what read-your-writes needs.
    */
-  writeQueued<T>(fn: (db: Database) => T, options: WriteOptions = {}): Promise<WriteResult<T>> {
+  writeQueued<T>(
+    fn: (db: Database) => T,
+    options: QueuedWriteOptions = {},
+  ): Promise<WriteResult<T>> {
     this.#assertOpen()
     this.#assertPrimary()
     // **A snapshot is not a refusal.** It holds the writer for a bounded moment — a TRUNCATE
@@ -655,15 +734,175 @@ export class Tenant {
     // long as its client likes, so queuing would turn a 409 into a wait of up to
     // `txIdleTimeoutMs`, which is a worse answer rather than a better one.
     if (this.#txOpen) return Promise.reject(txBusy(this.name))
+    // L2: admission. `maxGroupCommit` bounds a drain, never the backlog, so before this the only
+    // thing standing between a stalled disk and the heap was how long the client kept sending.
+    const bytes = Math.max(0, options.bytes ?? 0)
+    if (this.#queue.length >= this.maxQueuedWrites) {
+      return Promise.reject(this.#queueFull(`${this.maxQueuedWrites} writes are already queued`))
+    }
+    // The empty-queue exemption: a body larger than the whole byte budget is served rather than
+    // made permanently unserveable. `[limits] maxBodyBytes` is what bounds it in that case.
+    if (this.#queue.length > 0 && this.#queuedBytes + bytes > this.maxQueuedWriteBytes) {
+      return Promise.reject(
+        this.#queueFull(`${this.#queuedBytes} bytes of writes are already queued`),
+      )
+    }
+    const signal = options.signal ?? null
+    if (signal?.aborted) return Promise.reject(abandonedWrite(this.name))
     return new Promise<WriteResult<T>>((resolve, reject) => {
-      this.#queue.push({
+      const entry: QueuedWrite = {
         run: fn as (db: Database) => unknown,
         ack: options.ack ?? this.defaultAck,
         resolve: resolve as (value: WriteResult<unknown>) => void,
         reject,
-      })
+        bytes,
+        deadlineAt: Infinity,
+        signal,
+        detach: null,
+        done: false,
+      }
+      // Past a full fold, this entry cannot be in the next batch, so it is going to wait. That —
+      // not "the queue is non-empty" — is what makes the waiting machinery worth its cost: a burst
+      // of sixty-four concurrent writes against a `maxGroupCommit` of sixty-four is drained whole
+      // on the next turn and pays for none of it.
+      const willWait = this.#queue.length >= this.maxGroupCommit
+      this.#queue.push(entry)
+      this.#queuedBytes += bytes
+      if (willWait) this.#beginWait(entry)
       this.#scheduleDrain()
     })
+  }
+
+  /**
+   * Marks one entry as *waiting*: stamps its deadline, subscribes it to its caller's signal, and
+   * makes sure a timer is armed for whatever expires first.
+   *
+   * All three are deferred rather than done at push, and the reason is measurement. A write that
+   * is queued and drained inside one event-loop turn cannot wait past `queueWaitMs` and cannot
+   * outlive its caller, so every one of them is dead weight on the path group commit exists to
+   * make fast — and `Date.now()` and `AbortSignal.addEventListener` are both real money against a
+   * per-write cost of 0.85 µs at sixty-four concurrent clients. Doing it at push cost **6%** there
+   * (`docs/l2-write-admission.md` §4).
+   *
+   * The deadline therefore runs from the moment the entry was found to be waiting rather than from
+   * the moment it was queued. The two differ by at most one event-loop turn, and only for an entry
+   * that a stalled writer deferred.
+   */
+  #beginWait(entry: QueuedWrite): void {
+    if (entry.done) return
+    if (entry.deadlineAt === Infinity && this.queueWaitMs > 0) {
+      entry.deadlineAt = Date.now() + this.queueWaitMs
+    }
+    const signal = entry.signal
+    if (signal !== null && entry.detach === null) {
+      if (signal.aborted) {
+        this.#finish(entry)
+        entry.reject(abandonedWrite(this.name))
+        return
+      }
+      const onAbort = (): void => {
+        this.#finish(entry)
+        entry.reject(abandonedWrite(this.name))
+      }
+      signal.addEventListener("abort", onAbort, { once: true })
+      entry.detach = () => signal.removeEventListener("abort", onAbort)
+    }
+    this.#armQueueTimer()
+  }
+
+  /**
+   * The same for every entry still queued — the genuine-backlog paths, where a drain has left work
+   * behind or the writer is not moving at all. Entries already waiting are skipped, so a
+   * persistent backlog costs one pass per drain rather than one subscription per drain.
+   */
+  #beginWaitAll(): void {
+    for (const entry of [...this.#queue]) this.#beginWait(entry)
+  }
+
+  /**
+   * `WRITE_QUEUE_FULL`, carrying a `Retry-After` derived from how fast this tenant is actually
+   * draining rather than from a constant. With no measurement yet — the first burst — it is one
+   * second, which is the honest floor of "come back later".
+   */
+  #queueFull(detail: string): BunQLError {
+    const perEntry = this.#msPerQueuedWrite
+    const clearMs = perEntry > 0 ? this.#queue.length * perEntry : 0
+    const seconds = Math.min(60, Math.max(1, Math.ceil(clearMs / 1000)))
+    return new BunQLError(
+      "WRITE_QUEUE_FULL",
+      `${this.name} cannot accept another write: ${detail}`,
+      503,
+      { retryAfterSec: seconds },
+    )
+  }
+
+  /** Takes an entry out of the accounting exactly once, whatever removed it. */
+  #finish(entry: QueuedWrite): void {
+    if (entry.done) return
+    entry.done = true
+    entry.detach?.()
+    entry.detach = null
+    entry.signal = null
+    this.#queuedBytes -= entry.bytes
+    if (this.#queuedBytes < 0) this.#queuedBytes = 0
+  }
+
+  /**
+   * One timer for the whole queue, armed for whichever waiting entry expires first. Entries that
+   * are not waiting yet carry `Infinity`, so they are simply not candidates. The scan is O(queue)
+   * and runs only on the paths that already know there is a backlog.
+   */
+  #armQueueTimer(): void {
+    if (this.#queueTimer !== null) return
+    let earliest = Infinity
+    for (const entry of this.#queue) {
+      if (!entry.done && entry.deadlineAt < earliest) earliest = entry.deadlineAt
+    }
+    if (earliest === Infinity) return
+    const delay = Math.max(0, earliest - Date.now())
+    const timer = setTimeout(() => {
+      this.#queueTimer = null
+      this.#expireQueued()
+    }, delay)
+    timer.unref?.()
+    this.#queueTimer = timer
+  }
+
+  #clearQueueTimer(): void {
+    if (this.#queueTimer === null) return
+    clearTimeout(this.#queueTimer)
+    this.#queueTimer = null
+  }
+
+  /**
+   * Refuses every entry that has waited past `queueWaitMs` and re-arms for the next one. The timer
+   * may fire early — the head it was armed for has usually been drained by then — in which case
+   * nothing expires and it simply re-arms, which is cheaper than re-arming on every drain.
+   */
+  #expireQueued(): void {
+    const now = Date.now()
+    const expired: QueuedWrite[] = []
+    const kept: QueuedWrite[] = []
+    for (const entry of this.#queue) {
+      if (entry.done) continue
+      if (entry.deadlineAt <= now) {
+        this.#finish(entry)
+        expired.push(entry)
+      } else {
+        kept.push(entry)
+      }
+    }
+    this.#queue = kept
+    for (const entry of expired) {
+      entry.reject(
+        new BunQLError(
+          "WRITE_QUEUE_TIMEOUT",
+          `${this.name} did not reach this write within ${this.queueWaitMs}ms`,
+          503,
+        ),
+      )
+    }
+    if (this.#queue.length > 0) this.#armQueueTimer()
   }
 
   /**
@@ -705,21 +944,80 @@ export class Tenant {
     if (this.#draining || this.#queue.length === 0) return
     if (this.#closed) {
       const closed = new TenantError("CLOSED", `database ${this.name} is closed`)
-      for (const entry of this.#queue.splice(0)) entry.reject(closed)
+      for (const entry of this.#takeAll()) entry.reject(closed)
       return
     }
     // A transaction opened after these were queued: refuse them the way `write` would have, so
     // the answer does not depend on which of the two arrived first.
     if (this.#txOpen) {
-      for (const entry of this.#queue.splice(0)) entry.reject(txBusy(this.name))
+      for (const entry of this.#takeAll()) entry.reject(txBusy(this.name))
       return
     }
     // A synchronous write or a snapshot holds the writer for a bounded moment; both schedule
-    // another drain when they let go.
-    if (this.#writing || this.#exclusive) return
+    // another drain when they let go. The queue outlives this turn, so the wait deadline needs a
+    // timer behind it — this is the path a stalled writer takes.
+    if (this.#writing || this.#exclusive) {
+      this.#beginWaitAll()
+      return
+    }
 
-    const batch = this.#queue.splice(0, this.maxGroupCommit)
-    if (this.#queue.length > 0) this.#scheduleDrain()
+    // One forward scan and one splice, rather than a shift per entry: the queue can hold
+    // `maxQueuedWrites` and repeated shifts on it would be quadratic in the size of the backlog,
+    // which is the case this whole milestone exists for.
+    const now = Date.now()
+    const batch: QueuedWrite[] = []
+    let taken = 0
+    const stale: QueuedWrite[] = []
+    while (batch.length < this.maxGroupCommit && taken < this.#queue.length) {
+      const entry = this.#queue[taken] as QueuedWrite
+      taken++
+      // A caller that has gone: its promise is settled and its bytes are back already. Running it
+      // would be a transaction committed for nobody.
+      if (entry.done) continue
+      // `done` is only ever read by something that could settle this entry from elsewhere, and
+      // only an entry that waited long enough to be subscribed has such a thing. Setting it — and
+      // dropping the listener — is therefore on the slow path, not on the fold.
+      if (entry.detach !== null) {
+        entry.done = true
+        entry.detach()
+        entry.detach = null
+        entry.signal = null
+      }
+      // The deadline is checked here as well as on the timer, so a queue that is draining — just
+      // not fast enough — refuses a stale entry rather than committing it late. The timer is for
+      // the queue that is not draining at all.
+      if (entry.deadlineAt <= now) {
+        entry.done = true
+        stale.push(entry)
+        continue
+      }
+      batch.push(entry)
+    }
+    this.#queue.splice(0, taken)
+    // The byte account is rebuilt from what is left rather than decremented per entry: in the case
+    // this path is written for the queue is now empty, which makes it one assignment instead of
+    // one subtraction per folded statement.
+    if (this.#queue.length === 0) {
+      this.#queuedBytes = 0
+      this.#clearQueueTimer()
+    } else {
+      let held = 0
+      for (const entry of this.#queue) if (!entry.done) held += entry.bytes
+      this.#queuedBytes = held
+      this.#scheduleDrain()
+      this.#beginWaitAll()
+    }
+    for (const entry of stale) {
+      entry.reject(
+        new BunQLError(
+          "WRITE_QUEUE_TIMEOUT",
+          `${this.name} did not reach this write within ${this.queueWaitMs}ms`,
+          503,
+        ),
+      )
+    }
+    if (batch.length === 0) return
+    const startedNs = Bun.nanoseconds()
     this.#draining = true
     try {
       // `fsync` beats `local`; `replica` and `quorum` are waited for a layer up and cost an fsync
@@ -760,8 +1058,34 @@ export class Tenant {
       }
     } finally {
       this.#draining = false
+      this.#recordDrain(batch.length, (Bun.nanoseconds() - startedNs) / 1_000_000)
       if (this.#queue.length > 0) this.#scheduleDrain()
     }
+  }
+
+  /** Empties the queue for a refusal path, leaving the accounting consistent. */
+  #takeAll(): QueuedWrite[] {
+    const all = this.#queue.splice(0)
+    this.#clearQueueTimer()
+    const live: QueuedWrite[] = []
+    for (const entry of all) {
+      if (entry.done) continue
+      this.#finish(entry)
+      live.push(entry)
+    }
+    return live
+  }
+
+  /**
+   * The drain rate `Retry-After` is derived from, as an exponential moving average of milliseconds
+   * per entry. A quarter weight on the newest drain: fast enough to follow a disk that has just
+   * stalled, slow enough that one unlucky transaction does not tell every client to wait a minute.
+   */
+  #recordDrain(count: number, ms: number): void {
+    if (count <= 0) return
+    const perEntry = ms / count
+    this.#msPerQueuedWrite =
+      this.#msPerQueuedWrite === 0 ? perEntry : this.#msPerQueuedWrite * 0.75 + perEntry * 0.25
   }
 
   /**
@@ -1523,7 +1847,7 @@ export class Tenant {
       waiter.reject(new TenantError("CLOSED", `${this.name} was abandoned while waiting`))
     }
     this.#waiters = []
-    for (const entry of this.#queue.splice(0)) {
+    for (const entry of this.#takeAll()) {
       entry.reject(new TenantError("CLOSED", `database ${this.name} is closed`))
     }
     this.#clearTxTimer()
@@ -1932,6 +2256,15 @@ async function copyFile(from: string, to: string): Promise<void> {
 /** Design §6.3: the tenant has one writer, so a second interactive transaction has to wait. */
 function txBusy(name: string): BunQLError {
   return new BunQLError("TX_BUSY", `${name} already has an open transaction`, 409)
+}
+
+/**
+ * The caller of a queued write went away before the writer reached it. It is a 499-shaped event
+ * with no 499 in the vocabulary, and nobody is listening for the answer anyway — what matters is
+ * that the entry is off the queue and its bytes are back.
+ */
+function abandonedWrite(name: string): BunQLError {
+  return new BunQLError("BAD_REQUEST", `the caller of a queued write on ${name} disconnected`, 400)
 }
 
 function noTx(name: string): BunQLError {

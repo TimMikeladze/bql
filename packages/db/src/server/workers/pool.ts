@@ -496,7 +496,7 @@ export class WorkerPool {
     storage: StorageMetrics | null
   }> {
     const merged = new Metrics()
-    const registry: RegistryShare = { open: 0, tenants: 0, evictions: 0 }
+    const registry: RegistryShare = { open: 0, tenants: 0, evictions: 0, writeQueueDepth: 0 }
     let replication: { lagTxid: number; records: number } | null = null
     let storage: StorageMetrics | null = null
     await Promise.all(
@@ -508,6 +508,7 @@ export class WorkerPool {
               merged.absorb(reply.metrics)
               registry.open += reply.registry.open
               registry.evictions += reply.registry.evictions
+              registry.writeQueueDepth += reply.registry.writeQueueDepth
               registry.tenants = Math.max(registry.tenants, reply.registry.tenants)
               if (reply.replication) {
                 replication ??= { lagTxid: 0, records: 0 }
@@ -819,6 +820,8 @@ export interface RegistryShare {
   open: number
   tenants: number
   evictions: number
+  /** Writes queued across this thread's tenants; disjoint shards, so it sums (L2). */
+  writeQueueDepth: number
 }
 
 /** One worker's answer to a `metrics` ask. */

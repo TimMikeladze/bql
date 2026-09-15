@@ -61,6 +61,10 @@ export interface RegistryOptions {
   deferAppend?: boolean
   /** Most statements one group commit folds; see `TenantOptions.maxGroupCommit`. */
   maxGroupCommit?: number
+  /** Write-queue ceilings, one tenant at a time; see `TenantOptions` (L2). */
+  maxQueuedWrites?: number
+  maxQueuedWriteBytes?: number
+  queueWaitMs?: number
   /** Replica apply mechanism and its lock wait; see `TenantOptions.applyMechanism`. */
   applyMechanism?: ApplyMechanism
   applyBusyMs?: number
@@ -115,6 +119,8 @@ export interface RegistryStats {
   maxOpen: number
   tenants: number
   evictions: number
+  /** Writes queued across every open tenant right now (L2). */
+  writeQueueDepth: number
   /** Per-tenant stats for everything currently open. */
   openTenants: TenantStats[]
 }
@@ -500,12 +506,16 @@ export class TenantRegistry {
 
   stats(): RegistryStats {
     this.#assertOpen()
+    const openTenants = [...this.#open.values()].map((tenant) => tenant.stats())
+    let writeQueueDepth = 0
+    for (const one of openTenants) writeQueueDepth += one.queuedWrites
     return {
       open: this.#open.size,
       maxOpen: this.maxOpen,
       tenants: this.catalog.listTenants().length,
       evictions: this.#evictions,
-      openTenants: [...this.#open.values()].map((tenant) => tenant.stats()),
+      writeQueueDepth,
+      openTenants,
     }
   }
 
@@ -592,6 +602,15 @@ export class TenantRegistry {
         : {}),
       ...(this.#options.maxGroupCommit !== undefined
         ? { maxGroupCommit: this.#options.maxGroupCommit }
+        : {}),
+      ...(this.#options.maxQueuedWrites !== undefined
+        ? { maxQueuedWrites: this.#options.maxQueuedWrites }
+        : {}),
+      ...(this.#options.maxQueuedWriteBytes !== undefined
+        ? { maxQueuedWriteBytes: this.#options.maxQueuedWriteBytes }
+        : {}),
+      ...(this.#options.queueWaitMs !== undefined
+        ? { queueWaitMs: this.#options.queueWaitMs }
         : {}),
       ...(this.#options.applyMechanism !== undefined
         ? { applyMechanism: this.#options.applyMechanism }

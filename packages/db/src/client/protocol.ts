@@ -178,6 +178,10 @@ export type BunQLErrorCode =
   | "TOO_MANY_ROWS"
   /** One result reached `[limits] maxResultBytes` while it was being built. */
   | "RESULT_TOO_LARGE"
+  /** The database's write queue is at `[limits] maxQueuedWrites` or `maxQueuedWriteBytes`. */
+  | "WRITE_QUEUE_FULL"
+  /** Queued past `[limits] queueWaitMs` without reaching the writer. */
+  | "WRITE_QUEUE_TIMEOUT"
   | "TXID_NOT_AVAILABLE"
   | "NOT_PRIMARY"
   | "RESET_REQUIRED"
@@ -204,6 +208,12 @@ export interface ErrorInfo {
   failedIndex?: number
   /** Where to go instead, for `NOT_PRIMARY`. */
   primary?: string
+  /**
+   * Seconds to wait before retrying, for a refusal that can say — `WRITE_QUEUE_FULL` derives it
+   * from the database's measured drain rate. Mirrors the `Retry-After` header, and is how a
+   * WebSocket client, which has no headers, receives the same hint.
+   */
+  retryAfterSec?: number
   /**
    * Every way the request failed the schema this route publishes, not only the first — a client
    * fixing three of them should be told about three. Present on a `BAD_REQUEST` core refused.

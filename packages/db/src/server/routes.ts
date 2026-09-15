@@ -214,7 +214,16 @@ export const query: Handler = async (ctx) => {
       ctx.txid = forwarded.txid
       return json(forwarded)
     }
-    const { result, kind } = await executeStatementQueued(runtime, tenant, principal, body, options)
+    // The request's own lifetime, so a client that disconnects while its write is queued has the
+    // entry dropped before the writer reaches it rather than committed for nobody (L2).
+    const { result, kind } = await executeStatementQueued(
+      runtime,
+      tenant,
+      principal,
+      body,
+      options,
+      ctx.request.signal,
+    )
     ctx.txid = result.txid
     if (kind === "write") await runtime.awaitDurable(tenant.name, BigInt(result.txid), options.ack)
     return json(result)

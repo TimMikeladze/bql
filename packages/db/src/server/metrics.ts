@@ -63,6 +63,8 @@ export interface MetricsSnapshot {
   txQueued: number
   /** Largest result footprint any statement has accounted for, in bytes. */
   resultBytesMax: number
+  /** Writes refused `WRITE_QUEUE_FULL` or `WRITE_QUEUE_TIMEOUT` (L2). */
+  writeQueueRejected: number
   openTenants: number
   tenants: number
   evictions: number
@@ -84,6 +86,7 @@ export interface MetricsState {
   ackTimeouts: number
   txQueued: number
   resultBytesMax: number
+  writeQueueRejected: number
   errors: number
   wsConnections: number
   wsOpen: number
@@ -111,6 +114,7 @@ export class Metrics {
   #ackTimeouts = 0
   #txQueued = 0
   #resultBytesMax = 0
+  #writeQueueRejected = 0
   #errors = 0
   #wsConnections = 0
   #wsOpen = 0
@@ -143,6 +147,7 @@ export class Metrics {
       ackTimeouts: this.#ackTimeouts,
       txQueued: this.#txQueued,
       resultBytesMax: this.#resultBytesMax,
+      writeQueueRejected: this.#writeQueueRejected,
       errors: this.#errors,
       wsConnections: this.#wsConnections,
       wsOpen: this.#wsOpen,
@@ -176,6 +181,7 @@ export class Metrics {
     // A high-water mark, so the merge across disjoint shards is a max rather than a sum: the
     // largest result any worker built is the largest result this node built.
     if (state.resultBytesMax > this.#resultBytesMax) this.#resultBytesMax = state.resultBytesMax
+    this.#writeQueueRejected += state.writeQueueRejected
     this.#errors += state.errors
     this.#wsConnections += state.wsConnections
     this.#wsOpen += state.wsOpen
@@ -265,7 +271,17 @@ export class Metrics {
     this.#txQueued++
   }
 
-  snapshot(registry: { open: number; tenants: number; evictions: number }): MetricsSnapshot {
+  /** A write the tenant's admission control refused, full or timed out (L2). */
+  writeQueueRejected(): void {
+    this.#writeQueueRejected++
+  }
+
+  snapshot(registry: {
+    open: number
+    tenants: number
+    evictions: number
+    writeQueueDepth?: number
+  }): MetricsSnapshot {
     return {
       requests: this.#requests,
       requestsByClass: Object.fromEntries(this.#byClass),
@@ -285,6 +301,7 @@ export class Metrics {
       ackTimeouts: this.#ackTimeouts,
       txQueued: this.#txQueued,
       resultBytesMax: this.#resultBytesMax,
+      writeQueueRejected: this.#writeQueueRejected,
       openTenants: registry.open,
       tenants: registry.tenants,
       evictions: registry.evictions,
@@ -294,7 +311,7 @@ export class Metrics {
 
   /** Prometheus text exposition format, version 0.0.4. */
   render(
-    registry: { open: number; tenants: number; evictions: number },
+    registry: { open: number; tenants: number; evictions: number; writeQueueDepth?: number },
     node: string,
     replication?: ReplicationMetrics | null,
     storage?: StorageMetrics | null,
@@ -364,11 +381,21 @@ export class Metrics {
       this.#txQueued,
     )
     counter("bunql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
+    counter(
+      "bunql_write_queue_rejected_total",
+      "Writes refused admission to a database's write queue, full or timed out.",
+      this.#writeQueueRejected,
+    )
 
     gauge(
       "bunql_result_bytes_max",
       "Largest result footprint any statement has built, against [limits] maxResultBytes.",
       this.#resultBytesMax,
+    )
+    gauge(
+      "bunql_write_queue_depth",
+      "Writes queued for a writer across every open database.",
+      registry.writeQueueDepth ?? 0,
     )
     gauge("bunql_open_tenants", "Databases currently open.", registry.open)
     gauge("bunql_tenants", "Databases in the catalog.", registry.tenants)

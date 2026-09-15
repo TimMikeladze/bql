@@ -27,6 +27,12 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   TOO_MANY_REQUESTS: 429,
   BUSY: 503,
   NOT_PRIMARY: 503,
+  // L2's write-admission refusals. Both mean "this write never started", so a client may retry
+  // either of them without wondering whether it committed.
+  /** `[limits] maxQueuedWrites` or `maxQueuedWriteBytes` reached; carries `Retry-After`. */
+  WRITE_QUEUE_FULL: 503,
+  /** Queued past `[limits] queueWaitMs` without reaching the writer. */
+  WRITE_QUEUE_TIMEOUT: 503,
   // R2's durability answers. Both mean "the transaction committed, on this node, at this txid" —
   // they are refusals of the *promise* the request asked for, never of the write itself.
   ACK_TIMEOUT: 503,
@@ -57,6 +63,11 @@ export interface ErrorDetails {
   acks?: number
   /** How many were needed. */
   needed?: number
+  /**
+   * Seconds a client should wait before retrying, for the refusals that can say. It becomes the
+   * `Retry-After` header and travels in the body too, since a WebSocket client has no headers.
+   */
+  retryAfterSec?: number
 }
 
 /** An error the server raises itself, as opposed to one SQLite raised. */
@@ -272,6 +283,7 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   const location = details?.location ?? own?.location
   const acks = details?.acks ?? own?.acks
   const needed = details?.needed ?? own?.needed
+  const retryAfterSec = details?.retryAfterSec ?? own?.retryAfterSec
   if (txid !== undefined) error.txid = txid
   if (failedIndex !== undefined) error.failedIndex = failedIndex
   if (primary !== undefined) error.primary = primary
@@ -281,6 +293,7 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
   const extra = error as unknown as Record<string, unknown>
   if (acks !== undefined) extra.acks = acks
   if (needed !== undefined) extra.needed = needed
+  if (retryAfterSec !== undefined) extra.retryAfterSec = retryAfterSec
   const problems = problemsOf(err)
   if (problems) error.problems = problems as ErrorInfo["problems"]
   return { status, body: { error } }
@@ -293,6 +306,8 @@ export function errorResponse(err: unknown, details?: ErrorDetails, extra?: Bun.
   headers.set("content-type", "application/json; charset=utf-8")
   if (body.error.txid !== undefined) headers.set(HEADERS.txid, String(body.error.txid))
   if (body.error.primary !== undefined) headers.set(HEADERS.primary, body.error.primary)
+  const retryAfter = (body.error as unknown as { retryAfterSec?: number }).retryAfterSec
+  if (retryAfter !== undefined) headers.set("retry-after", String(retryAfter))
   const location = (body.error as unknown as { location?: string }).location
   if (location !== undefined) headers.set("location", location)
   return new Response(JSON.stringify(body), { status, headers })

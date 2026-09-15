@@ -225,6 +225,26 @@ export interface LimitsSection {
   /** Most statements one group commit folds. Default 64. */
   groupCommitMax: number
   /**
+   * Writes one database will hold queued for its writer (L2, `docs/l2-write-admission.md`).
+   * `groupCommitMax` bounds a *drain*, never the backlog: without this, a tenant whose disk has
+   * stalled accumulates pending promises until the heap ends. Past it, `503 WRITE_QUEUE_FULL` with
+   * a `Retry-After` derived from that database's measured drain rate.
+   */
+  maxQueuedWrites: number
+  /**
+   * Bytes those queued writes may hold between them — each caller's SQL and bound arguments. Two
+   * hundred and fifty-six eight-megabyte statements are two gigabytes, so the count alone is not a
+   * bound. An entry larger than the whole budget is admitted when the queue is empty, so a large
+   * write is refused at a busy moment rather than at every moment.
+   */
+  maxQueuedWriteBytes: number
+  /**
+   * How long a queued write waits for the writer before it is refused `503 WRITE_QUEUE_TIMEOUT`.
+   * An unbounded wait is the other half of an unbounded queue: the caller learns nothing and holds
+   * a connection while it learns it.
+   */
+  queueWaitMs: number
+  /**
    * Read transactions open at once, per database (`docs/r10-read-transactions.md`). Each holds a
    * SQLite connection for its whole life and `acquireReader` opens one past the pool rather than
    * failing, so without a bound one client can exhaust the node's file descriptors. Past this,
@@ -480,6 +500,9 @@ export const DEFAULT_CONFIG: ServerConfig = {
     maxImportBytes: 1024 * 1024 * 1024,
     groupCommit: true,
     groupCommitMax: 64,
+    maxQueuedWrites: 256,
+    maxQueuedWriteBytes: 8 * 1024 * 1024,
+    queueWaitMs: 5000,
     maxReadTx: 16,
     readTxTimeoutMs: 30_000,
   },
