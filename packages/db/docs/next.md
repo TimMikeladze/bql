@@ -518,8 +518,15 @@ What phase 1 added to the list:
 
 ## Start here
 
-**Nothing milestone-sized is open.** `docs/plan-limits.md` is finished, and so is everything before
-it. What is left is genuinely optional, in the order it is worth doing.
+**Phase 3 is what is next, and `docs/prompt-phase3.md` is the prompt for it** — design §11's four
+"frontier extras": WAL-decoded logical CDC, snapshot reads across requests, per-tenant encryption
+at rest, and a query-plan cache. That file is a prompt rather than a plan: its first instruction is
+to write `docs/plan-phase3.md` from a real read of the tree. It is worth reading before starting,
+because two of the four look on inspection like they should be **refused** rather than built — the
+plan cache appears to exist already (`Database.#cache`), and encryption at rest has no
+zero-dependency answer that also covers the WAL, the log and the bucket.
+
+Everything below phase 3 is genuinely optional, in the order it is worth doing.
 
 The one thing L8 makes newly *worth* doing: **the change ring is still in memory**, so a
 `Last-Event-ID` from before a restart is answered with `reset`. That was unfixable-in-principle
