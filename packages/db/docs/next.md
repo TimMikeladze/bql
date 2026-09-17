@@ -490,17 +490,31 @@ Added by phase 3 (2026-09-16), and the first is the one to act on:
   means "not *the* writer") and `applyPragmas` sets no `query_only`. **Both callers now guard it
   themselves** — Hrana's `assertReadOnly` and P8's `assertReadOnlyStatement` — so nothing is
   exposed today. The gap is that the guard is in two places and not in the one function both go
-  through, so the third caller will be the one that forgets. `docs/p8-read-sessions.md` §4.
-- **A token-authenticated write expires its own statement cache, twice per request.** `applyPolicy`
+  through, so the third caller will be the one that forgets. **The fix is duplication, not speed**:
+  `step()` already computes `const writes = !stmt.readonly` (`src/server/exec.ts:197`) on the
+  statement it is about to run, so a "refuse a write" flag on `executeInReadTx` would move the
+  check to where both surfaces already pass and delete two of the four authorizer calls — worth
+  17 ns and one class of future bug. `docs/p8-read-sessions.md` §4.
+- **A token-authenticated statement expires its own connection's statement cache.** `applyPolicy`
   installs a policy and `handle.release()` takes it off in a `finally` (`src/server/exec.ts:310`),
   and re-arming `sqlite3_set_authorizer` is precisely what expires statements compiled under the
   old verdicts — so the cache reports a **hit** and SQLite recompiles inside `sqlite3_step`
-  regardless. 0.81 µs against 2.76 µs on a point read. The read path does not pay it:
-  `withReader` (`src/server/runtime.ts:896`) scopes a connection once and never releases. No
-  benchmark has ever shown this because benchmarks authenticate with the admin key, and an admin
-  principal installs no policy at all. **Not fixed**, deliberately: leaving a connection scoped to
-  the last request's token is a security decision rather than a tuning one, and it wants its own
-  milestone. `docs/p7-plan-cache.md` §4.
+  regardless. **0.777 µs on the admin path against 2.264 µs on the token path**, per point-read
+  statement, with 87 999 hits and 1 miss recorded across the run that measured it.
+
+  **Read the number before optimising it.** The recompile is *lazy* — it happens once, inside the
+  next `step` — so a second cycle-pair on the same statement costs **0.017 µs**, not another
+  1.5. P8's read-session guard performs exactly that second pair and is therefore ~17 ns, not the
+  2 µs a first reading suggests. What costs the ~1.5 µs is that a token principal cycles the
+  authorizer *at all*; removing one of two cycles buys nothing. The read path does not pay it —
+  `withReader` (`src/server/runtime.ts:896`) scopes a connection once and never releases — and an
+  **admin principal pays nothing anywhere**, because `AuthorizerHub.#sync` makes no FFI call when
+  nothing is installed and nothing is wanted. That is why no benchmark has ever shown this: they
+  all authenticate with the admin key.
+
+  **Not fixed**, deliberately: leaving a connection scoped to the last request's token is a
+  security decision rather than a tuning one, and it wants its own milestone.
+  `docs/p7-plan-cache.md` §4, `docs/p8-read-sessions.md` §4.
 - **`[sqlite] statementCache` = 64 is smaller than it sounds, and the cliff is vertical.** Six
   tables of six columns take the generated data API from a 100% hit rate to 0%, because the text
   varies per *shape* — a `?select=` list, a filter set, an order, a bulk-insert row count are each
