@@ -227,6 +227,141 @@ if (primaryChecksum !== replicaChecksum) {
   throw new Error("the replica diverged during the benchmark")
 }
 
+// ── P9: what the logical section costs, in bytes ───────────────────────────────────────────────
+//
+// A count, not a timing, so it resolves on a loaded machine where a latency figure would not. The
+// same transactions are written on two standalone primaries, one recording row changes and one
+// not, and what is compared is the total encoded record bytes — the thing that goes on the wire,
+// into the log and into the bucket. Three shapes, because the ratio is entirely a function of how
+// much row there is per page touched: a narrow single-row insert is the cheap end and a wide row
+// is where the logical bytes overtake the page bytes.
+
+type Run = (sql: string, args: unknown[]) => void
+
+interface SizeShape {
+  name: string
+  schema: string
+  /** Rows to put there before the measurement starts, in one untimed transaction. */
+  setup?: (run: Run) => void
+  /** One transaction. */
+  write(run: Run, round: number): void
+  rounds: number
+  /** What to record when the flag is on. Default `"row"`. */
+  level?: "pk" | "row" | "row+old"
+}
+
+/**
+ * 200 bytes of deterministic high-entropy text. A repeated character would be squashed by the
+ * zstd the record body already pays for — in both halves — and would report a ratio a real
+ * payload never sees. This is the shape where the logical bytes genuinely compete with the page
+ * bytes, because the same row is in both and neither compresses.
+ */
+function wideValue(round: number): string {
+  let out = ""
+  let state = (round * 2654435761) >>> 0
+  for (let i = 0; i < 200; i++) {
+    state = (state * 1664525 + 1013904223) >>> 0
+    out += String.fromCharCode(33 + (state >>> 25) % 90)
+  }
+  return out
+}
+
+const SHAPES: SizeShape[] = [
+  {
+    name: "single-row insert",
+    schema: "create table t (id integer primary key, v text, n real)",
+    write: (run, round) => run("insert into t (v, n) values (?, ?)", [`row-${round}`, round]),
+    rounds: 200,
+  },
+  {
+    name: "wide row, 200 B random",
+    schema: "create table t (id integer primary key, v text, n real)",
+    write: (run, round) => run("insert into t (v, n) values (?, ?)", [wideValue(round), round]),
+    rounds: 200,
+  },
+  {
+    // The expensive end, and the reason the flag is off by default: small rows pack many to a
+    // page, so a transaction that touches a thousand of them writes a handful of pages and a
+    // thousand row changes. The logical section is then paying per row where the pages pay per
+    // page.
+    name: "1000 small rows, 1 txn",
+    schema: "create table t (id integer primary key, v text, n real)",
+    write: (run, round) => {
+      for (let i = 0; i < 1000; i++) run("insert into t (v, n) values (?, ?)", [`b${round}-${i}`, i])
+    },
+    rounds: 10,
+  },
+  {
+    // `row+old` is the whole row twice on the wire, which is why the recorded level is its own
+    // setting rather than whatever the primary happens to be capturing.
+    name: "1000 updates, row+old",
+    schema: "create table t (id integer primary key, v text, n real)",
+    level: "row+old",
+    setup: (run) => {
+      for (let i = 0; i < 1000; i++) run("insert into t (v, n) values (?, ?)", [`seed-${i}`, i])
+    },
+    write: (run, round) => {
+      for (let i = 1; i <= 1000; i++) run("update t set v = ? where id = ?", [`u${round}-${i}`, i])
+    },
+    rounds: 10,
+  },
+]
+
+/** Total encoded record bytes for one shape on a node with `logicalChanges` set as given. */
+async function recordBytes(shape: SizeShape, on: boolean, tag: string): Promise<number> {
+  const logical = on ? (shape.level ?? "row") : false
+  const node = await startNode(`size-${tag}`, { replication: { logicalChanges: logical } })
+  try {
+    await api(node, "/v1/db", { name: DB })
+    await api(node, `/v1/db/${DB}/query`, { sql: shape.schema })
+    const tenant = node.registry.open(DB)
+    // Opening the tenant through the registry is what installs the recorder, exactly as a request
+    // would; the first write then carries rows whether or not anything is subscribed.
+    const setup = shape.setup
+    if (setup) {
+      tenant.write((db) => {
+        setup((sql, args) => {
+          db.prepare(sql).run(...(args as never[]))
+        })
+      })
+      tenant.drain()
+    }
+    let total = 0
+    const off = tenant.onCommit((event) => {
+      total += event.bytes.byteLength
+    })
+    for (let round = 0; round < shape.rounds; round++) {
+      tenant.write((db) => {
+        shape.write((sql, args) => {
+          db.prepare(sql).run(...(args as never[]))
+        }, round)
+      })
+    }
+    tenant.drain()
+    off()
+    return total
+  } finally {
+    await node.close()
+  }
+}
+
+const sizes: { name: string; off: number; on: number; ratio: number }[] = []
+for (const shape of SHAPES) {
+  const plain = await recordBytes(shape, false, `${shape.name.replace(/[^a-z]/gi, "")}-off`)
+  const withRows = await recordBytes(shape, true, `${shape.name.replace(/[^a-z]/gi, "")}-on`)
+  sizes.push({ name: shape.name, off: plain, on: withRows, ratio: withRows / plain })
+}
+
+console.log("\nP9 record size, [replication] logicalChanges off vs row\n")
+console.log("shape                        off B      on B     ratio")
+console.log("-".repeat(56))
+for (const size of sizes) {
+  console.log(
+    `${size.name.padEnd(24)}${String(size.off).padStart(9)}${String(size.on).padStart(10)}` +
+      `${`${size.ratio.toFixed(2)}x`.padStart(10)}`,
+  )
+}
+
 emit({
   bench: "replication",
   info: {
@@ -234,6 +369,9 @@ emit({
     records,
     recordsPerSecond: Math.round(records / drainSeconds),
     primary: primaryUrl,
+    ...Object.fromEntries(
+      sizes.map((size) => [`logical size, ${size.name}`, `${size.off} B -> ${size.on} B, ${size.ratio.toFixed(2)}x`]),
+    ),
   },
   legs: {
     "primary write (HTTP)": distribution(httpWrite),

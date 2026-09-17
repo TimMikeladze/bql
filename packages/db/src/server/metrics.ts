@@ -323,6 +323,7 @@ export class Metrics {
       pinned?: number
       openRefused?: number
       fsync?: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
+      statementCache?: { hits: number; misses: number; evictions: number }
     },
     node: string,
     replication?: ReplicationMetrics | null,
@@ -408,6 +409,27 @@ export class Metrics {
         "bunql_fsync_pending",
         "Logs with bytes the disk has not been told about, waiting for the next sweep.",
         registry.fsync.pending,
+      )
+    }
+    if (registry.statementCache) {
+      // P7. Per connection, summed over every connection this node has opened — a tenant holds one
+      // writer and `[data] readers` pooled readers, each with its own cache of `[sqlite]
+      // statementCache` entries. A *rising* eviction rate is the thrash: past the ceiling every
+      // prepare compiles and finalizes a victim instead of returning a cached statement.
+      counter(
+        "bunql_statement_cache_hits_total",
+        "prepare() calls answered from a connection's statement cache.",
+        registry.statementCache.hits,
+      )
+      counter(
+        "bunql_statement_cache_misses_total",
+        "prepare() calls that compiled, because the text was not cached.",
+        registry.statementCache.misses,
+      )
+      counter(
+        "bunql_statement_cache_evictions_total",
+        "Statements finalized to stay within [sqlite] statementCache. Rising means thrashing.",
+        registry.statementCache.evictions,
       )
     }
     counter(

@@ -86,6 +86,12 @@ const DbStats = s
     openConns: s.int(),
     liveQueries: s.int(),
     subscribers: s.int(),
+    readSessions: s
+      .int()
+      .describe(
+        "Read sessions open on this database right now, against `[limits] maxReadTx`. Counts " +
+          "`/v1/db/{db}/read` and Hrana read transactions alike: one mechanism, one bound.",
+      ),
     lastSnapshotTxid: s.union([s.int(), s.null()]),
     foreignKeys: s
       .union([s.boolean(), s.null()])
@@ -322,6 +328,57 @@ const SPECS: Spec[] = [
     handler: handlers.txRollback,
   },
 
+  // ── read sessions (docs/p8-read-sessions.md) ────────────────────────────────────────────────
+  {
+    id: "readBegin",
+    bodyOptional: true,
+    method: "post",
+    path: "/v1/db/:db/read",
+    summary: "Open a read session",
+    description:
+      "One consistent snapshot held across several requests, on a pooled reader. It takes no " +
+      "writer, so it neither blocks writes on a primary nor is refused on a replica, and it is " +
+      "not `BunQL-Min-Txid`: that header is a floor two reads can satisfy while seeing different " +
+      "databases, and a session is a point. `[limits] maxReadTx` (16 per database) answers the " +
+      "next one `409 TX_BUSY`. `docs/p8-read-sessions.md`.",
+    tags: ["transactions"],
+    security: "bearer",
+    body: s.object({ rows: s.enum(["array", "object"] as const).optional() }),
+    response: s.object({ read: s.string(), expiresInMs: s.int(), idleTimeoutMs: s.int() }),
+    errors: [...ON_DB, "TX_BUSY", "BUSY"],
+    handler: handlers.readBegin,
+  },
+  {
+    id: "readQuery",
+    method: "post",
+    path: "/v1/db/:db/read/:read",
+    summary: "Run a statement inside an open read session",
+    description:
+      "A write is refused `403 SQLITE_READONLY`: the session holds a reader, not the writer. " +
+      "After `[limits] readTxTimeoutMs` (30 s) or `txIdleTimeoutMs` (5 s) the session is gone " +
+      "and this answers `404 TX_NOT_FOUND`.",
+    tags: ["transactions"],
+    security: "bearer",
+    body: statementBody,
+    response: QueryResult,
+    errors: [...ON_STATEMENT, "TX_NOT_FOUND", "SQLITE_READONLY"],
+    handler: handlers.readQuery,
+  },
+  {
+    id: "readEnd",
+    method: "delete",
+    path: "/v1/db/:db/read/:read",
+    summary: "End a read session",
+    description:
+      "`DELETE`, not commit or rollback: a read session has nothing to commit, so there is one " +
+      "verb for ending it rather than two names for the same act.",
+    tags: ["transactions"],
+    security: "bearer",
+    response: s.object({ read: s.string(), ended: s.boolean() }),
+    errors: [...ON_DB, "TX_NOT_FOUND"],
+    handler: handlers.readEnd,
+  },
+
   // ── realtime ────────────────────────────────────────────────────────────────────────────────
   {
     id: "changes",
@@ -331,7 +388,12 @@ const SPECS: Spec[] = [
     description:
       "Design §6.4. Server-sent events by default; `?wait=<ms>` turns it into a long poll that " +
       "answers with a JSON array, which is what an HTTP-only client or a CDN in front of one " +
-      "gets. `Last-Event-ID` resumes from the ring.",
+      "gets. `Last-Event-ID` resumes from the ring.\n\n" +
+      "On a **replica**, the rows come from the primary's transaction records, which it writes " +
+      "only with `[replication] logicalChanges` set. Without them the feed can still say *that* a " +
+      "transaction happened but not what it changed, so anything but `include=none` is refused " +
+      "`501 LOGICAL_UNAVAILABLE` rather than answered with an empty `changes` array " +
+      "(`docs/p9-logical-cdc.md`).",
     tags: ["realtime"],
     security: "bearer",
     query: s.object({
@@ -342,7 +404,7 @@ const SPECS: Spec[] = [
     }),
     response: s.array(ChangeEvent),
     responseType: "text/event-stream",
-    errors: [...ON_DB, "RESET_REQUIRED"],
+    errors: [...ON_DB, "RESET_REQUIRED", "LOGICAL_UNAVAILABLE"],
     handler: handlers.changes,
   },
   {

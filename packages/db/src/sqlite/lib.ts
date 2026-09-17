@@ -172,6 +172,23 @@ const SESSION = {
   sqlite3changeset_invert: { args: [T.i32, T.ptr, T.ptr, T.ptr], returns: T.i32 },
 } as const
 
+/**
+ * **Bound on purpose and wired nowhere on purpose.** These are not unfinished work.
+ *
+ * Design §11 asked for "snapshot reads across requests (`sqlite3_snapshot`)". P8 measured it and
+ * refused it: `experiments/snapshot.ts` (about four seconds) shows that *every* checkpoint mode
+ * invalidates a handle, PASSIVE included — a handle held outside a read transaction has no read
+ * mark, so SQLite backfills over it — and that suppressing all checkpointing to keep one alive
+ * leaves the WAL at exactly the same 12 304 KiB over 3 000 writes as simply holding a read
+ * transaction does. It buys one pooled connection, and costs the whole checkpoint policy, a
+ * second WAL-pinning mechanism to keep in step with SQLite's, and a correctness hole on a replica,
+ * where the page applier writes straight into the database file and there is no old page version
+ * for a snapshot to name.
+ *
+ * The consistent read across requests that §11 wanted is built instead on the read transaction of
+ * `docs/r10-read-transactions.md`, surfaced at `POST /v1/db/{db}/read`. `docs/p8-read-sessions.md`
+ * is the measurement and the argument. They stay bound because re-deriving the spike needs them.
+ */
 const SNAPSHOT = {
   sqlite3_snapshot_get: { args: [T.ptr, T.ptr, T.ptr], returns: T.i32 },
   sqlite3_snapshot_open: { args: [T.ptr, T.ptr, T.ptr], returns: T.i32 },

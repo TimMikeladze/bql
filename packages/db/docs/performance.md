@@ -603,3 +603,134 @@ Two further reasons, both measured rather than argued:
 the median of three interleaved A-B rounds, and the 500-database result is the one that survives
 that noise by a wide margin; the 100-database result is a 10% effect at a 20% resolution, which is
 one more reason the default did not move on it.
+
+## 10. What the statement cache is worth, and where 64 runs out (P7)
+
+`bench/cache.ts`, five interleaved rounds of 20 000 `prepare()` calls a sample. The full finding is
+`docs/p7-plan-cache.md`; these are the numbers.
+
+**A `prepare()` hit is 48–80 ns and a `prepare()` past the ceiling is 4.0 µs.** Three runs at three
+machine loads:
+
+| leg | load 31 | load 15–17 | load 9 |
+|---|---|---|---|
+| `hit` | 0.053 µs | 0.080 µs | 0.048 µs |
+| `working 64` | 0.034 µs | 0.049 µs | 0.028 µs |
+| `working 65` | **6.318 µs** | **4.018 µs** | **4.075 µs** |
+| ratio, 64 → 65 | **186x** | 82x | 146x |
+
+It is a cliff rather than a slope because a working set cycled round-robin is the LRU's worst case:
+past the ceiling, the text about to come round again is always the one just evicted, so every
+`prepare()` compiles *and* finalizes a victim and the hit rate is zero rather than degraded. The
+`working 8/32/64` legs read *faster* than `hit` in every run — all four are tens of nanoseconds and
+the ordering between them changes run to run, which is this machine's noise floor rather than a
+result.
+
+**The generated data API crosses it at six tables.** Twelve texts per table — a get, a narrowed
+get, four list shapes, an update, a delete and four bulk-insert widths — replayed warm against one
+connection:
+
+| tables | texts | `statementCache` | hit rate |
+|---|---|---|---|
+| 5 | 60 | 64 | **100.0%** |
+| 6 | 72 | 64 | **0.0%** |
+| 30 | 360 | 64 | 0.0% |
+| 30 | 360 | 512 | **100.0%** |
+
+`bunql_statement_cache_evictions_total` rising while the node is serving is the symptom; raising
+`[sqlite] statementCache` is the answer. It is per connection, so a tenant pays it once for the
+writer and once per pooled reader.
+
+**A token-authenticated write recompiles its statement whether or not the cache had it.**
+`sqlite3_set_authorizer` expires every statement on a connection, and scoping a connection to a
+token cycles it. A cached hit whose statement has been expired costs 5.119 µs against 0.843 µs, of
+which the two FFI calls are 0.021 µs — the rest is the recompile inside `sqlite3_step`. Readers are
+scoped once and stay scoped, so this is the write path only, and an admin principal pays none of
+it. `docs/p7-plan-cache.md` §4.
+
+**Conditions.** §8's bar was not met: these ran at load 9–31, deliberately, because the effect is
+three orders of magnitude and resolves anyway. The one thing that could *not* be resolved here is
+small: fifteen interleaved A-B rounds of the 100-row driver scan put the counter-carrying tree at
+9.08 µs p50 against the parent's 9.24, inside a within-leg spread of 21%. A 2% gate cannot be
+resolved by an instrument whose noise is twenty-one, and that is the reported answer.
+
+## 11. What a recorded row change costs, in bytes (P9)
+
+`bench/replication.ts`, the last section: the same transactions written on two standalone
+primaries, one with `[replication] logicalChanges` set and one without, comparing the **total
+encoded record bytes** — what goes on the wire, into the log and into the bucket. The full finding
+is `docs/p9-logical-cdc.md`.
+
+A count, not a timing, so it resolves on a machine a latency figure would not: these were taken at
+load average 10.6–11.9 and two runs of the unchanged shapes agreed to the byte (157 478 → 174 251
+both times). §8's bar does not apply to a number that is deterministic.
+
+| shape | off | on | ratio |
+|---|---|---|---|
+| single-row insert, 200 txns | 157 478 B | 174 251 B | **1.11x** |
+| wide row, 200 B of random text, 200 txns | 410 065 B | 425 285 B | **1.04x** |
+| 1000 small rows in one txn, 10 txns | 92 931 B | 119 006 B | **1.28x** |
+| 1000 updates at `row+old`, 10 txns | 80 061 B | 108 477 B | **1.35x** |
+
+**The plan expected worse than this, and the reason it is not worse is zstd.** `docs/plan-phase3.md`
+warned that "a row-heavy transaction can carry more logical bytes than page bytes", which would be
+a ratio above 2x. It never approaches one. The record body is compressed as a whole, and the row
+values are *already in the page images* the same body carries — so the logical section is largely a
+second copy of bytes zstd has just seen, and it codes as a back-reference rather than as itself.
+
+The wide-row row is where this is most visible and most counter-intuitive: 200 bytes of
+incompressible text per row adds **76 bytes** to the record, not 250. The worst shape is the
+opposite one — a thousand *small* rows in one transaction, where the pages are few and the row
+count is what the logical section is paid per — and even that is 1.28x.
+
+### The write path, which did not resolve
+
+The flag also makes the primary capture rows for every database it opens, whether or not anything
+local is subscribed, and raises the level it captures at from `pk` to `row`. Four interleaved A-B
+rounds of 3 000 single-row writes straight at the writer, at load 11–13:
+
+| | p50, mean of the rounds | spread across rounds |
+|---|---|---|
+| `logicalChanges` off | 81.2 µs | **25.2%** |
+| `logicalChanges = "row"` | 83.5 µs | 6.3% |
+
+**2.9% against a 25% instrument. That is not a number; it is noise, and it is reported as noise.**
+Two interleaved rounds of the same script said 15.5% — the run-to-run movement is larger than the
+effect, which is L5's outcome and the reason §8 exists.
+
+### Preupdate capture is not ~50 ns a row
+
+Design §4.6 and §4.7 both say "hook cost is ~50 ns per row", and **this does not reproduce.** Five
+thousand inserts in one transaction, fifteen interleaved rounds on one connection, the level
+changed between rounds and the delta taken *within* each round so a machine whose load moves
+between rounds cannot carry it:
+
+| capture level | median | paired cost over `off` — median (min, max) |
+|---|---|---|
+| `off` | 244.7 ns/row | — |
+| `pk` | 498.9 ns/row | **252.0** (26.9, 565.2) ns/row |
+| `row` | 619.1 ns/row | **349.4** (227.8, 478.1) ns/row |
+
+**Where the 50 ns came from: the other hook.** Run again with `engine: "update"` — the fallback for
+a libsqlite3 built without `SQLITE_ENABLE_PREUPDATE_HOOK` — the same script reports a paired cost
+of **84.9 ns/row at `pk` and 75.9 ns/row at `row`**, with a paired *minimum* that goes negative,
+which is what an effect too small for this instrument looks like. That is the ~50 ns figure.
+Design §2.3's own table is where it came from: 0.18 µs for an insert against 0.23 µs "with JS
+`update_hook` firing". The number is real and it is the update hook's; §4.6 attached it to the
+preupdate bullet, and the preupdate hook is the engine BunQL actually runs.
+
+| engine | `pk` | `row` | reads values? | `WITHOUT ROWID`? |
+|---|---|---|---|---|
+| preupdate (default) | 252 ns/row | 349 ns/row | yes | yes |
+| update (fallback) | 85 ns/row | 76 ns/row | no | no |
+
+So the preupdate hook roughly **doubles** a bulk insert's per-row cost at `pk` and roughly triples
+it at `row`, and the values are what it buys. The floor across fifteen rounds — 227.8 ns/row for
+`row` — is 4.5x the documented figure, and the machine's load biases *upward*, so load cannot
+explain a gap in this direction. §8's bar was not met (load 9–13) and the paired minimum is quoted
+for that reason: the claim is "at least this much", which noise does not manufacture.
+
+This is a correction to design §4.6, not a cost P9 introduced: it is the price of the change feed
+as a whole, which any database with a subscriber has been paying since phase 0. What P9's flag adds
+on top is the `pk` → `row` step, about 100 ns a row, and the same capture on databases that had no
+subscriber at all.

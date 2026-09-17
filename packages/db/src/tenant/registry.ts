@@ -145,6 +145,12 @@ export interface RegistryStats {
   openRefused: number
   /** L5's sweep, absent under `"per-db"`. */
   fsync: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
+  /**
+   * P7: every connection this registry has opened, added up — including those of tenants it has
+   * since evicted, which is why the counters live here rather than being summed from `openTenants`.
+   * Rising `evictions` is the thrash `[sqlite] statementCache` raises.
+   */
+  statementCache: { hits: number; misses: number; evictions: number }
   /** Per-tenant stats for everything currently open. */
   openTenants: TenantStats[]
 }
@@ -281,6 +287,12 @@ export class TenantRegistry {
   #ackOverrides = new Map<string, AckWithoutReplicas | null>()
   #sweeper: ReturnType<typeof setInterval> | null = null
   #evictions = 0
+  /**
+   * P7: one object handed to every connection every tenant opens, so the node's totals are
+   * monotonic across an open, an evict and a close. Three integer increments per `prepare()`,
+   * which is noise against the `Map` lookup beside them.
+   */
+  #statementCache = { hits: 0, misses: 0, evictions: 0 }
   #closed = false
 
   private constructor(options: RegistryOptions, catalog: Catalog) {
@@ -698,6 +710,7 @@ export class TenantRegistry {
             deferred: this.fsyncSweep.deferred,
           }
         : null,
+      statementCache: { ...this.#statementCache },
       openTenants,
     }
   }
@@ -798,6 +811,7 @@ export class TenantRegistry {
         ? { queueWaitMs: this.#options.queueWaitMs }
         : {}),
       ...(this.fsyncSweep ? { fsyncSweep: this.fsyncSweep } : {}),
+      statementCacheCounters: this.#statementCache,
       ...(this.#options.applyMechanism !== undefined
         ? { applyMechanism: this.#options.applyMechanism }
         : {}),

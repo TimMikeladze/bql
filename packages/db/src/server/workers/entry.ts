@@ -555,6 +555,7 @@ function pick(stats: RegistryStats): MetricsReply["registry"] {
     pinned: stats.pinned,
     openRefused: stats.openRefused,
     fsync: stats.fsync,
+    statementCache: stats.statementCache,
   }
 }
 

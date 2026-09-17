@@ -98,6 +98,18 @@ export interface HelloBody {
    * peer that predates R7, which a replica reads as "no identity to check" (`docs/r7-unfollow.md`).
    */
   generations?: Record<string, string>
+  /**
+   * P9: the newest `TxnRecord` version this peer can decode. **Absent means 1**, which is what
+   * every replica built before P9 sends and what a primary must assume of one.
+   *
+   * A primary never streams a record past what its peer announced: a version-2 record bound for a
+   * replica that did not ask for one is downgraded to version 1 before it is sent, losing the row
+   * changes and nothing else. "Upgrade the replica first" is an operational rule this field exists
+   * to make unnecessary.
+   *
+   * Optional and additive, so `PROTO_VERSION` stays 1 — the same call R7 made for `generations`.
+   */
+  maxRecordVersion?: number
 }
 
 export interface SubscribeBody {
@@ -134,6 +146,16 @@ export interface SubscribedBody {
   pageSize: number
   /** This node's generation id for `db`; the replica records it against the copy it ends up with. */
   generation?: string
+  /**
+   * P9: this primary records row changes in its transaction records, so the replica's change feed
+   * can carry rows. Absent means it does not, which is what every peer built before P9 says by
+   * saying nothing.
+   *
+   * It is announced rather than inferred from the first record because a replica that has just
+   * bootstrapped holds no record yet, and refusing a subscription for the length of one idle
+   * database would be a wrong answer with a long tail.
+   */
+  logical?: boolean
 }
 
 export interface SnapshotBeginBody {

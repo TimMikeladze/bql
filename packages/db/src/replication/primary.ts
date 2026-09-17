@@ -21,7 +21,10 @@ import type { Tenant, TenantRegistry } from "../tenant/index.ts"
 import {
   encode,
   listSnapshots,
+  RECORD_VERSION,
+  RECORD_VERSION_LOGICAL,
   type SnapshotRef,
+  stripLogical,
   type TxnRecordInput,
 } from "../wal/index.ts"
 import {
@@ -94,6 +97,11 @@ export interface ReplicationServerOptions {
   /** Close a socket that has been backpressured for this long. */
   slowReplicaMs?: number
   /**
+   * P9: `[replication] logicalChanges` is on, so this node's records carry row changes and every
+   * `SUBSCRIBED` says so. The server does not read the config itself; the runtime passes it.
+   */
+  recordsLogical?: boolean
+  /**
    * C4b: this server's connections are *adopted* from a router that owns the real socket. It does
    * no handshake, mints no nonce, runs no heartbeat timer and builds no announcement — the router
    * does all four, once for the node — and this server only holds streams for the databases its
@@ -163,6 +171,8 @@ class Conn {
   readonly streams = new Map<number, Stream>()
   node = "?"
   authed = false
+  /** P9: the newest record version this peer announced it can decode. 1 until it says otherwise. */
+  maxRecordVersion = RECORD_VERSION
   paused = false
   pausedSinceMs = 0
   /** Frames the socket refused outright (`send` returned 0), replayed on `drain`. */
@@ -182,6 +192,8 @@ export class ReplicationServer {
   readonly slowReplicaMs: number
   /** True when a router owns the sockets and this server only holds streams (C4b). */
   readonly hosted: boolean
+  /** P9: whether this node's records carry row changes. Announced on every `SUBSCRIBED`. */
+  readonly recordsLogical: boolean
 
   /** Bytes handed to `ws.send`, for `bunql_replication_bytes_total`. */
   bytesSent = 0
@@ -210,6 +222,7 @@ export class ReplicationServer {
     this.heartbeatMs = options.heartbeatMs ?? 5000
     this.slowReplicaMs = options.slowReplicaMs ?? 30_000
     this.hosted = options.hosted === true
+    this.recordsLogical = options.recordsLogical === true
     this.#onForward = options.onForward ?? null
     this.#onDisconnect = options.onDisconnect ?? null
     this.#onEpochAhead = options.onEpochAhead ?? (() => {})
@@ -492,6 +505,11 @@ export class ReplicationServer {
       return
     }
     conn.node = typeof hello.node === "string" && hello.node ? hello.node : "?"
+    // P9: absent means 1. A peer that predates the field cannot read a version-2 record, so its
+    // records are downgraded on the way out — see `#emit`.
+    const announced = hello.maxRecordVersion
+    conn.maxRecordVersion =
+      typeof announced === "number" && announced >= RECORD_VERSION ? announced : RECORD_VERSION
     conn.authed = true
     const announcement = this.#announcement()
     this.#send(
@@ -732,6 +750,7 @@ export class ReplicationServer {
           epoch: tenant.epoch,
           pageSize: tenant.pageSize,
           generation,
+          ...(this.recordsLogical ? { logical: true } : {}),
         } satisfies SubscribedBody),
       )
       stream.sentTxid = fromTxid
@@ -845,6 +864,7 @@ export class ReplicationServer {
         epoch: tenant.epoch,
         pageSize,
         generation: stream.generation,
+        ...(this.recordsLogical ? { logical: true } : {}),
       } satisfies SubscribedBody),
     )
 
@@ -995,7 +1015,11 @@ export class ReplicationServer {
     if (txid <= stream.sentTxid) return
     stream.sentTxid = txid
     this.recordsSent += 1
-    this.#send(conn, encodeTxn(stream.id, bytes))
+    // P9: never stream a record the peer will reject. `stripLogical` returns a version-1 record
+    // untouched, so this costs one byte comparison on every record a current replica receives and
+    // a zstd round trip only for an old one that is actually attached.
+    const out = conn.maxRecordVersion >= RECORD_VERSION_LOGICAL ? bytes : stripLogical(bytes)
+    this.#send(conn, encodeTxn(stream.id, out))
   }
 
   // ── sending ──────────────────────────────────────────────────────────────────────────────────

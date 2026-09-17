@@ -218,6 +218,7 @@ that were once refused and is gone with the last of them.
 | `NO_COPY` | 404 | `promote` for a database this node holds no copy of |
 | `GENERATION_MISMATCH`, `STREAM_LIVE`, `ALREADY_PRIMARY`, `BEHIND` | 409 | `promote` refused; see [Promotion and failover](#promotion-and-failover) |
 | `LEASE_HELD`, `NO_LEADER`, `NOT_COMMITTED` | 503 | `promote` refused by the control plane |
+| `LOGICAL_UNAVAILABLE` | 501 | row events asked of a replica whose primary does not record them; see [The change feed on a replica](#the-change-feed-on-a-replica) |
 | `QUOTA_EXCEEDED` | 507 | `max_page_count` reached, or `SQLITE_FULL` |
 | `INTERNAL` | 500 | a bug; the client is told nothing more, the server logs the rest |
 
@@ -264,6 +265,9 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `POST /v1/db/:db/tx/:tx` | one statement in it | `rw` |
 | `POST /v1/db/:db/tx/:tx/commit` | commit | `rw` |
 | `POST /v1/db/:db/tx/:tx/rollback` | roll back | `rw` |
+| `POST /v1/db/:db/read` | open a read session | `ro` |
+| `POST /v1/db/:db/read/:read` | one statement in it | `ro` |
+| `DELETE /v1/db/:db/read/:read` | end it | `ro` |
 | `GET /v1/cluster` | control-plane membership, term and placement | admin |
 | `GET /v1/cluster/raft` | node-to-node raft socket (WebSocket) | cluster secret, in-band |
 | `POST /v1/tokens` | mint a scoped token | admin |
@@ -379,6 +383,86 @@ The transaction is rolled back after `[limits] txIdleTimeoutMs` (5 s) without a 
 WebSocket that opened it closes, and — for one a replica forwarded — when that replica's
 replication socket drops. A failed statement leaves the transaction usable.
 
+### Read sessions
+
+A **read session** is one consistent snapshot of a database held across several HTTP requests. Every
+statement in it sees the database as of the session's first read, whatever commits underneath.
+
+```http
+POST /v1/db/acme/read
+→ 200 { "read": "9c2e…", "expiresInMs": 30000, "idleTimeoutMs": 5000 }
+
+POST /v1/db/acme/read/9c2e…   { "sql": "select id, v from t where id > ? order by id limit 100", "args": [0] }
+→ 200 { … a normal query result … }
+
+DELETE /v1/db/acme/read/9c2e…
+→ 200 { "read": "9c2e…", "ended": true }
+```
+
+**It is not `BunQL-Min-Txid`**, which is the thing to reach for first and the wrong tool for this.
+That header is a **floor** — "do not answer until the tenant has reached txid N" — so two reads that
+both satisfy it can see different databases, because the second sees every write that landed in
+between. A read session is a **point**.
+
+**It is not the baton transaction above.** It takes no writer, which is why the two differ
+everywhere it matters:
+
+| | `POST /v1/db/{db}/tx` | `POST /v1/db/{db}/read` |
+|---|---|---|
+| holds | the single writer | one pooled reader |
+| how many per database | 1 (`[limits] maxOpenTx`) | 16 (`[limits] maxReadTx`) |
+| scope needed | `rw` | `ro` |
+| on a replica | forwarded to the primary, or `503 NOT_PRIMARY` | served locally |
+| blocks concurrent writes | yes | no |
+| ends with | `commit` or `rollback` | `DELETE` |
+
+A write inside a session is refused `403 SQLITE_READONLY`. A pooled reader is not opened
+`SQLITE_OPEN_READONLY` — it is simply not the writer — so this is a check the server makes, not
+something SQLite does for it: a write that got through would land outside the writer, the WAL
+tailer and the log, and be invisible to all three.
+
+The session ends after `[limits] readTxTimeoutMs` (30 s) however busy it is, after
+`[limits] txIdleTimeoutMs` (5 s) without a statement, or when you `DELETE` it — always as a
+rollback, because there is nothing to commit. Afterwards its baton answers `404 TX_NOT_FOUND`, the
+same as a baton that never existed: once a session is over there is no record of it, and a client's
+recovery is the same either way — open a new session and start again.
+
+`GET /v1/db/{db}` reports `readSessions`, the number open on that database right now, counting both
+these routes and Hrana read transactions — they are one mechanism against one bound.
+
+#### Why it exists: pagination that neither skips nor duplicates
+
+Keyset pagination across requests is the caller this is for. Without a session each page is its own
+snapshot, and a concurrent writer breaks the scan in ways the client cannot detect: a row inserted
+below the cursor is **skipped**, and — with any sort key that is not immutable, `order by
+updated_at, id` being the usual one — a row updated between pages moves and is **duplicated** or
+**skipped**. Inside a session the set and the order are fixed for the whole scan, so neither can
+happen whatever the key is.
+
+```ts
+const { read } = await post("/v1/db/acme/read", {})
+try {
+  let after = 0
+  for (;;) {
+    const page = await post(`/v1/db/acme/read/${read}`, {
+      sql: "select id, v from t where id > ? order by id limit 100",
+      args: [after],
+    })
+    if (page.rows.length === 0) break
+    emit(page.rows)
+    after = page.rows[page.rows.length - 1][0] as number
+  }
+} finally {
+  // Always. A session left to expire holds a reader and, on a replica, delays the applier.
+  await del(`/v1/db/acme/read/${read}`)
+}
+```
+
+The bound is the honest cost: a scan that cannot finish inside `readTxTimeoutMs` cannot hold one
+session for all of it, and gets `404 TX_NOT_FOUND` mid-scan. Such a scan has to restart, or accept
+per-page snapshots and the skips that come with them. Thirty seconds of one snapshot is already
+past any interactive use, and on a replica every second of it is a second the applier is deferring.
+
 ### `GET /v1/db/:db/changes`
 
 The row-level change feed. Server-sent events by default; adding `wait` turns it into the
@@ -428,6 +512,31 @@ GET /v1/db/acme/changes?since=4800&wait=30000
 
 A `since` the ring no longer holds is `409 RESET_REQUIRED` on the long poll, and a `reset` event
 on the stream.
+
+#### The change feed on a replica
+
+A replica does not run the capture hooks — its transactions arrive as WAL frames, not as
+statements — so the rows in its feed can only be rows its **primary** recorded. That is
+`[replication] logicalChanges`, which is **off by default**:
+
+| `logicalChanges` on the primary | `include=none` on the replica | `include=pk`, `row`, `row+old` |
+|---|---|---|
+| unset (default) | served: `{"txid":…,"changes":[]}` | **`501 LOGICAL_UNAVAILABLE`** |
+| `"pk"` / `"row"` / `"row+old"` (or `true`, meaning `"row"`) | served | served, up to the level the primary recorded |
+
+The refusal is the point. Before this the feed answered `changes: []` for every transaction, which
+a subscriber cannot tell from "that transaction changed nothing" — so a consumer built on a
+replica's feed was silently wrong and had no way to find out. `include=none` promises no rows and
+is therefore still served, which is what a live-query client and a "something changed, re-read"
+consumer use.
+
+With it on, the replica's events carry the **same `(txid, seq)` and the same `changes` as the
+primary's own feed**, because both are sliced once, on the primary, from one capture. A fold of
+fifty concurrent writes is fifty events on both nodes. The recorded level caps what a replica can
+show: a primary recording `pk` cannot serve `row` on a replica however a subscriber asks, because
+those bytes never left the primary. `docs/p9-logical-cdc.md` has the record format, the size cost
+and the version negotiation that lets an older replica keep replicating against a primary that has
+it on.
 
 ### `GET /v1/db/:db/live`
 
@@ -689,6 +798,15 @@ Three more counters cover R2's paths: `bunql_forwarded_writes_total` (writes thi
 to its primary), `bunql_ack_timeouts_total` (writes that committed locally and then ran out of
 patience waiting for replica acks) and `bunql_tx_queued_total` (interactive transactions that
 waited for the writer instead of failing `TX_BUSY`).
+
+Three counters cover the prepared-statement cache (P7): `bunql_statement_cache_hits_total`,
+`bunql_statement_cache_misses_total` and `bunql_statement_cache_evictions_total`, summed over every
+connection the node has opened — including those of databases since evicted, so they never go
+backwards. **Alert on the eviction rate, not on the hit rate**: evictions rising while the node is
+serving means a connection's working set is past `[sqlite] statementCache` and every `prepare` is
+paying a compile, which is 81x a hit. A hit counted here is a hit in BunQL's cache and not proof
+SQLite did not recompile — an authorizer change expires every statement on the connection, and a
+token-authenticated write cycles the authorizer (`docs/p7-plan-cache.md` §4).
 
 A node with `[s3] bucket` set adds five: `bunql_s3_shipped_txid` (the highest txid any database
 has in the bucket), `bunql_s3_pending_records` and `bunql_s3_behind` (gauges), and
@@ -1657,7 +1775,10 @@ diverges. A client that only wants a consistent read does not need a transaction
 statement on a replica is a snapshot read, and `BunQL-Min-Txid` pins which snapshot.
 
 The native `/v1/db/{db}/tx` keeps its three writer modes (`deferred`, `immediate`, `exclusive`) and
-has no read mode; `BunQL-Min-Txid` is its answer.
+has no read mode. It does not need one: `POST /v1/db/{db}/read` is the native surface's consistent
+read, on this same mechanism and served locally on a replica. R10 recorded `BunQL-Min-Txid` as the
+answer here; it is not, because a floor is not a point — see **Read sessions** above and
+`docs/p8-read-sessions.md`.
 
 With `[replication] forwardWrites = false` a replica is read-only and a write is refused with
 `503 NOT_PRIMARY` and `BunQL-Primary`.
@@ -1737,6 +1858,7 @@ the canonical one wins when both are set.
 | `[data] readers` | `2` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |
 | `[data] pageSize` | `4096` | `BUNQL_DATA_PAGE_SIZE` | `BUNQL_PAGE_SIZE` |
 | `[data] quotaBytes` | `0` (unlimited) | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
+| `[sqlite] statementCache` | `64` (per connection) | `BUNQL_SQLITE_STATEMENT_CACHE` | — |
 | `[sqlite] writerCacheBytes` | `8388608` | `BUNQL_SQLITE_WRITER_CACHE_BYTES` | — |
 | `[sqlite] readerCacheBytes` | `2097152` | `BUNQL_SQLITE_READER_CACHE_BYTES` | — |
 | `[sqlite] readerMmapBytes` | `0` (off) | `BUNQL_SQLITE_READER_MMAP_BYTES` | — |
@@ -1795,6 +1917,7 @@ the canonical one wins when both are set.
 | `[replication] forwardWrites` | `true` | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
 | `[replication] forwardTimeoutMs` | `10000` | `BUNQL_REPLICATION_FORWARD_TIMEOUT_MS` | — |
 | `[replication] maxForwards` | `256` | `BUNQL_REPLICATION_MAX_FORWARDS` | — |
+| `[replication] logicalChanges` | `false`; `true`, `"pk"`, `"row"` or `"row+old"` | `BUNQL_REPLICATION_LOGICAL_CHANGES` | — |
 | `[cluster] enabled` | `false`; `true` once `peers` is set | `BUNQL_CLUSTER_ENABLED` | — |
 | `[cluster] id` | `""` → `[server] node` | `BUNQL_CLUSTER_ID` | — |
 | `[cluster] advertise` | `""` | `BUNQL_CLUSTER_ADVERTISE` | — |
@@ -1949,6 +2072,15 @@ really send) and `docs/r5-orm.md` (the two adapters).
   and re-arms rather than queueing a second drain. The queue is ordered by the caller's shipped
   txid, so a database that has been behind for an hour is served before one that committed a moment
   ago. `bunql_upload_inflight` and `bunql_upload_waiting` report it. `docs/l6-upload-budget.md`.
+- **`[sqlite] statementCache` is per connection, and 64 is smaller than it sounds.** It bounds the
+  distinct SQL texts one connection keeps compiled; a tenant holds one writer plus `[data] readers`
+  pooled readers, each with its own cache of this size, because a `sqlite3_stmt*` belongs to the
+  connection it was compiled against and SQLite has no way to share one. Crossing it is a cliff
+  rather than a slope: **six tables** of six columns take the generated data API from a 100% hit
+  rate to **0%**, at 81x a hit per `prepare`, because a working set cycled round-robin evicts each
+  text just before it is wanted again. `POST` of N rows is N distinct texts for one table, since
+  the placeholder group repeats per row. Watch `bunql_statement_cache_evictions_total`;
+  `docs/p7-plan-cache.md`.
 - **`[durability] fsyncSweep` is off, and the number is why.** `"shared"` puts every log's
   `"interval"` barrier on one per-thread sweep, off the event loop. It wins at five hundred
   write-active databases on one thread — 23% more throughput, a fifth of the barriers, p99 40.6 ms

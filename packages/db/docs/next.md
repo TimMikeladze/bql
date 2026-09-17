@@ -1,5 +1,17 @@
 # Resume here — state of BunQL and what to do next
 
+**Updated 2026-09-16: phase 3 is run, and it is the last named phase.** Design §11 listed four
+"frontier extras" and **three of them were not what that row thought they were**: the query-plan
+cache was already built (P7), the snapshot read was a real caller served by the wrong mechanism
+(P8), and logical CDC needed a change to what the primary *records* rather than a decoder (P9).
+Per-tenant encryption at rest is designed, costed, and deliberately **not built** (P10). **Design
+§11's phase-3 row lost three of its four bullets and the fourth lost two words** — a phase-3 item
+that turns out not to exist gets removed rather than left for the next reader to believe.
+`docs/plan-phase3.md` is the plan; `docs/p7-plan-cache.md`, `docs/p8-read-sessions.md`,
+`docs/p9-logical-cdc.md` and `docs/p10-encryption.md` are what actually happened. **Every milestone
+of that plan is closed.** Two of them found a bug nobody was looking for — see "What phase 3 found
+that nobody asked it to" below.
+
 **Updated 2026-09-14: the L track is built, L1 through L8.** Admission control — a ceiling on every
 shared resource, a typed refusal when it is reached, and a number that says how close it is. Three
 of the seven changed shape once they were measured, and two of them changed the *answer*: L5's
@@ -19,24 +31,89 @@ diagnosed wrongly before it was diagnosed rightly:
 - The retention test's "race" was the node refusing a client's write because it had decided, on
   its own timer, to snapshot itself.
 
-Read this, then `docs/e2-windows-gate.md`, `docs/p5-deferred-compression.md` §6 and
-`docs/performance.md` §8 — the three above — then `docs/r8-per-db-ack.md`,
-`docs/r9-segment-index.md`, `docs/r10-read-transactions.md`, `docs/p6-router-resolution.md`,
-`docs/e1-windows.md`, `docs/c5-apply-pages.md`, `docs/p4-router-hop.md`, `docs/design.md` §0, §11
-and §14, then `docs/api.md`. Plans of record: `docs/plan-phase2.md` (the cluster),
-`docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL) and `docs/plan-limits.md` — the L track,
-admission control, **L1 through L8, all built**.
+Read this, then **`docs/plan-phase3.md`** and the four milestones it names — `docs/p7-plan-cache.md`,
+`docs/p8-read-sessions.md`, `docs/p9-logical-cdc.md`, `docs/p10-encryption.md`. Read at least P8 §2
+and P9 §2 whatever else you skip: they are the two places a design-§11 item was measured and found
+to be the wrong instrument, and both arguments are short. Then `docs/e2-windows-gate.md`,
+`docs/p5-deferred-compression.md` §6 and `docs/performance.md` §8 and §11, then
+`docs/r8-per-db-ack.md`, `docs/r9-segment-index.md`, `docs/r10-read-transactions.md` (§4 of which
+P8 overturns), `docs/p6-router-resolution.md`, `docs/e1-windows.md`, `docs/c5-apply-pages.md`,
+`docs/p4-router-hop.md`, `docs/design.md` §0, §11 and §14, then `docs/api.md`. Plans of record:
+`docs/plan-phase2.md` (the cluster), `docs/plan-surfaces.md` (HTTP, OpenAPI, GraphQL),
+`docs/plan-limits.md` (the L track, **L1-L8**) and `docs/plan-phase3.md` (the P track, **P7-P10**).
+**All four are closed.**
 
 ## Where things stand
 
-**Phases 0, 1 and 2 are complete, and so is the surfaces track, and the L track, and Windows is a
-supported platform.** C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2, **L1-L8**. **CI green on
-macOS, Linux and Windows**, all three gating, plus a fourth job as of L7 that packs the real
-tarball and builds SQLite from it. On `main`, pushed to
-**https://github.com/TimMikeladze/bunql** (private). `bun test` → **1528 pass, 2 skip, 0 fail**
-across 132 files, and green again with `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what
+**Every named phase is complete.** Phases 0, 1, 2, the surfaces track, the L track, **phase 3**, and
+Windows is a supported platform. C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2, L1-L8,
+**P7-P10**. **CI green on macOS, Linux and Windows**, all three gating, plus a fourth job as of L7
+that packs the real tarball and builds SQLite from it. On `main`, pushed to
+**https://github.com/TimMikeladze/bunql** (private). `bun test` → **1563 pass, 2 skip, 0 fail**
+across 138 files, and green again with `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what
 proves the JavaScript fallback). `bun run typecheck`, `bun run bytes`, `bun run routes:check` and
 `bun run pack:check` clean. Zero runtime dependencies.
+
+### The P track (phase 3), newest first
+
+**P10 — encryption at rest is designed, costed, and refused for this phase.** Nothing existed; the
+primitive was never the problem (Bun ships WebCrypto) — **BunQL does not own the writes.** A design
+that covers the whole path *does* exist and keeps zero runtime dependencies: a page-encrypting VFS
+shim in C compiled into the vendored artefact beside `walsum.c`, with the three components that
+bypass the VFS — the WAL tailer, the page applier, and the log and bucket that carry page images —
+sharing the key, and the rolling checksum folding **ciphertext** so a replica proves what it holds
+without one. It is a track, not a milestone: a keyring, rotation-as-a-fork, a startup refusal on a
+distro libsqlite3, a Windows gate. Until somebody pays for it the honest answer is full-disk
+encryption plus bucket SSE, which covers everything except the threat model where the operator is
+the adversary — the only one a per-tenant key improves on. `docs/p10-encryption.md`.
+
+**P9 — a replica's change feed carries rows, and the decoder is refused rather than deferred.**
+`[replication] logicalChanges` (a *level*: `false` | `"pk"` | `"row"` | `"row+old"`, default off),
+record version 2 carrying a length-suffixed logical section after a byte-identical page region, and
+`HELLO.maxRecordVersion` so a primary never streams a record its peer will reject. **A WAL page
+decoder cannot satisfy the acceptance criterion** — a replica gets one folded transaction and no
+statement boundaries, so it cannot produce the per-statement `(txid, seq)` L8 made the contract, and
+a net page delta loses a row inserted-then-deleted entirely. With the flag off, a row subscription
+on a replica is now `501 LOGICAL_UNAVAILABLE` rather than the empty `changes: []` that was
+indistinguishable from "nothing changed". **Record size is 1.04-1.35x, not the >2x the plan
+feared**, because zstd sees the row bytes twice. `docs/p9-logical-cdc.md`.
+
+**P8 — a consistent read across requests, on R10 rather than on `sqlite3_snapshot`.** `POST
+/v1/db/{db}/read`, no engine change, no new error code, R10's bounds unchanged. The mechanism
+design §11 named was **measured and refused**: every checkpoint mode invalidates a snapshot handle,
+PASSIVE included, and suppressing all checkpointing to keep one alive pins the WAL at *exactly* the
+same 12 304 KiB that holding a read transaction does — while being absent from every distro
+libsqlite3 and **wrong on a replica**, where the page applier leaves no old page version to name.
+`experiments/snapshot.ts` reproduces both in four seconds. `docs/p8-read-sessions.md`.
+
+**P7 — the query-plan cache existed; what was missing was a ceiling you could see.** The cache is
+`Database.#cache`, `SQLITE_PREPARE_PERSISTENT` was already set, and sharing one across connections
+is **impossible in SQLite** rather than unbuilt. What binds is the ceiling: **six tables** take the
+generated data API from a 100% hit rate to **0%**, at 81x a hit per `prepare` (186x under load),
+because a round-robin working set evicts each text just before it is wanted again. `[sqlite]
+statementCache` and three `bunql_statement_cache_*` counters are the answer — **alert on the
+eviction rate.** `docs/p7-plan-cache.md`.
+
+### What phase 3 found that nobody asked it to
+
+Three findings outlived their milestones. Each is in the gap list below with its number.
+
+1. **A write inside a read session landed** — as the session's *first* statement, `200
+   rowsAffected: 1`, on a pooled reader, outside the writer, the WAL tailer, the log, the change
+   feed and replication, **on a replica included**. A pooled reader is not opened
+   `SQLITE_OPEN_READONLY` and no `query_only` is set; Hrana already guarded it and the new `/v1`
+   route had to. `executeInReadTx` still does not, which is arguably where the guard belongs.
+2. **A token-authenticated write expires its own statement cache twice per request.**
+   `applyPolicy` installs a policy and `handle.release()` takes it off in a `finally`
+   (`src/server/exec.ts:310`), and re-arming `sqlite3_set_authorizer` is exactly what expires
+   compiled statements. BunQL's cache still records a **hit** and SQLite recompiles behind it —
+   measured 0.81 µs against 2.76 µs on a point read. The read path does not do it (`withReader`
+   scopes once and never releases), and no benchmark ever showed it because benchmarks use the
+   admin key, which installs no policy at all.
+3. **Design §4.6's "≈ 50 ns/row" was the *update* hook's number.** The preupdate hook costs
+   **252 ns/row at `pk` and 349 at `row`**, measured over fifteen interleaved rounds; the update
+   hook reproduces the ~50 ns. §2.3's own table is where the confusion came from. Both design lines
+   are corrected.
 
 ### The L track, newest first
 
@@ -401,10 +478,42 @@ Added by the performance session (2026-09-12):
   downstream feed needs.
 - **A single client is 15% slower with group commit on**, because the drain costs an event-loop
   iteration and one socket's messages arrive one per iteration. `docs/p2-group-commit.md`.
-- **`bench/http.ts` authenticates with the admin key**, which is a constant-time compare, so its
-  numbers are still the best case rather than what a token-bearing client sees. The token path is
-  now cached (45.3 µs against 44.2), so the gap is small — but the benchmark still does not measure
-  what deployments do.
+
+Added by phase 3 (2026-09-16), and the first is the one to act on:
+
+- **`executeInReadTx` does not refuse a write, and a pooled reader will happily perform one.**
+  P8 found that a write as a read session's *first* statement returns `200 rowsAffected: 1` — on a
+  pooled reader, outside the tenant's writer and therefore outside the WAL tailer, the log, the
+  change feed and replication. On a replica it is a row the primary has never heard of and never
+  will; the replica answered `200` to exactly that under `apply = "pages"`. A pooled reader is not
+  opened `SQLITE_OPEN_READONLY` (`Tenant.acquireReader` passes `{ writer: false }`, which only
+  means "not *the* writer") and `applyPragmas` sets no `query_only`. **Both callers now guard it
+  themselves** — Hrana's `assertReadOnly` and P8's `assertReadOnlyStatement` — so nothing is
+  exposed today. The gap is that the guard is in two places and not in the one function both go
+  through, so the third caller will be the one that forgets. `docs/p8-read-sessions.md` §4.
+- **A token-authenticated write expires its own statement cache, twice per request.** `applyPolicy`
+  installs a policy and `handle.release()` takes it off in a `finally` (`src/server/exec.ts:310`),
+  and re-arming `sqlite3_set_authorizer` is precisely what expires statements compiled under the
+  old verdicts — so the cache reports a **hit** and SQLite recompiles inside `sqlite3_step`
+  regardless. 0.81 µs against 2.76 µs on a point read. The read path does not pay it:
+  `withReader` (`src/server/runtime.ts:896`) scopes a connection once and never releases. No
+  benchmark has ever shown this because benchmarks authenticate with the admin key, and an admin
+  principal installs no policy at all. **Not fixed**, deliberately: leaving a connection scoped to
+  the last request's token is a security decision rather than a tuning one, and it wants its own
+  milestone. `docs/p7-plan-cache.md` §4.
+- **`[sqlite] statementCache` = 64 is smaller than it sounds, and the cliff is vertical.** Six
+  tables of six columns take the generated data API from a 100% hit rate to 0%, because the text
+  varies per *shape* — a `?select=` list, a filter set, an order, a bulk-insert row count are each
+  one — and `POST` of N rows is N distinct texts for one table. Past the ceiling every `prepare`
+  costs 81x a hit. Nothing about this is wrong; it is a default that wants raising on any node
+  serving the data API, and `bunql_statement_cache_evictions_total` is how you know.
+  `docs/p7-plan-cache.md`.
+- ~~**`bench/http.ts` authenticates with the admin key**, which is a constant-time compare, so its
+  numbers are still the best case rather than what a token-bearing client sees.~~ **Closed.**
+  `bench/http.ts:162-172` mints a token and measures a leg with it, and the answer is that the gap
+  is about 5 µs (45.3 µs against 44.2) rather than the 1.7x the old arithmetic implied — the
+  verification cache is doing its job. Duplicated under "Closed since the last edition", which is
+  the correct entry.
 
 Carried forward from phase 0, still true:
 
@@ -427,7 +536,8 @@ Carried forward from phase 0, still true:
   SQLite, which turned out not to be the lever, but by computing the frame checksum in C.
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a server restart. Spill
   it to disk or serve old positions from the log.
-- **`schema` events reach WebSocket subscribers only**, not the SSE change feed.
+- ~~**`schema` events reach WebSocket subscribers only**, not the SSE change feed.~~ **Closed.**
+  The SSE feed carries them too. Duplicated under "Closed since the last edition".
 - **WS mixed-throughput budget missed** (130k vs 150k msg/s) because writes serialise on the
   single writer. Batch commits or pipeline the write path. Unchanged by phase 1.
 - ~~**No CI.**~~ **Done (C6).** `.github/workflows/ci.yml` runs install, the vendored SQLite
@@ -480,27 +590,31 @@ What phase 1 added to the list:
   `[s3]` one, taken locally with the reflink copy `src/wal/snapshot.ts` already does, which makes
   it nearly free. Until then, a node that wants PITR needs `[s3]` configured or a replica attached.
 
-- **A database deleted on the primary is never dropped by a replica, and the name can be reused
-  underneath it.** Verified by hand: create `beta` on the primary, let a `follow: ["*"]` replica
-  bootstrap it, `DELETE /v1/db/beta` on the primary, then re-create `beta` and write to it. The
-  primary serves `NEW-GENERATION`; the replica serves `OLD-GENERATION` — *at the same txid*, with
-  no error and nothing in either log. Because the txids match, a `minTxid` read-your-writes check
-  is satisfied by the stale replica, so the consistency mechanism vouches for wrong data. Two
-  causes: `ReplicaClient.#resolveFollow` (`src/replication/replica.ts:616`) only ever adds streams
-  and never drops one for a database that has left the announcement — and `#subscribe` pins the
-  tenant, so it cannot even be evicted — and database identity on the wire is the bare name: the
-  catalog `tenants` table has no generation id, and `HELLO`/`HEARTBEAT` announce
-  `databases?: string[]`. The S3 layout already mints generation ids; the catalog and the protocol
-  do not. This has to land before phase-2 milestone 2, since promoting a replica holding a stale
-  generation would promote wrong data.
-- **A replica cannot be promoted.** Recovery from a lost primary today is a new node pointed at
-  the bucket. This is the headline gap and it is phase-2 milestone 2.
+- ~~**A database deleted on the primary is never dropped by a replica, and the name can be reused
+  underneath it.**~~ **Closed (R7, `docs/r7-unfollow.md`).** The bug was real and its severity was
+  that both nodes stood at the same txid, so a `minTxid` read-your-writes check was *satisfied* by
+  the stale replica and the consistency mechanism certified wrong data. Both causes are fixed:
+  `ReplicaClient.#resolveFollow` drops a stream for a database that has left the announcement, and
+  database identity on the wire is no longer the bare name — `generations` rides `HELLO` and
+  `HEARTBEAT` and `generation` rides `SUBSCRIBE`/`SUBSCRIBED`
+  (`src/replication/protocol.ts:96-136`), all optional, so the protocol version is still 1.
+- ~~**A replica cannot be promoted.**~~ **Closed (C2, `docs/c2-promotion.md`)** — it was
+  phase-2 milestone 2 and that milestone is done, as the "Phase 2 — what is left" table above
+  says. Verified by hand on real nodes, including an old primary restarted with no `--replica-of`
+  at all, which still reads `BunQL-Role: replica` and refuses a write with `NOT_PRIMARY` because
+  the demotion is persisted rather than held in memory.
 - ~~**The Hrana surface does not forward writes.**~~ **Closed (R4b)**, and the read half with it:
   `BEGIN TRANSACTION READONLY` on a replica is served on a pooled reader rather than refused
   (R10, `docs/r10-read-transactions.md`). The native `/v1/db/{db}/tx` keeps its three writer modes
-  and has no read mode; `BunQL-Min-Txid` is its answer, and that is the one part of R10 not built.
-- **A replica's change feed is txid-only** (`changes: []`). Row-level CDC on a replica needs
-  logical decoding of the WAL, which design §11 puts in phase 3.
+  and has no read mode, and needs none: `POST /v1/db/{db}/read` is the native consistent read, on
+  the same mechanism and served locally on a replica (P8, `docs/p8-read-sessions.md`).
+- ~~**A replica's change feed is txid-only** (`changes: []`).~~ **Closed (P9,
+  `docs/p9-logical-cdc.md`)**, and not by the method design §11 named. `[replication]
+  logicalChanges` makes the primary record the rows it already captures into the `TxnRecord`
+  (version 2), and the replica publishes them under the same `(txid, seq)`. The WAL decoder is
+  **refused, not deferred**: it cannot produce a per-statement key, because a replica receives one
+  folded transaction with no statement boundaries in it. With the flag off a row subscription is
+  now `501 LOGICAL_UNAVAILABLE` rather than an empty array that meant two different things.
 - **A forwarded write is not retried**, by design: `FORWARD_TIMEOUT` or a dropped socket means "may
   or may not have committed". A client that cares reads the txid back. If phase 2 adds idempotency
   keys, this is where they go.
@@ -518,21 +632,29 @@ What phase 1 added to the list:
 
 ## Start here
 
-**Phase 3 is what is next, and `docs/prompt-phase3.md` is the prompt for it** — design §11's four
-"frontier extras": WAL-decoded logical CDC, snapshot reads across requests, per-tenant encryption
-at rest, and a query-plan cache. That file is a prompt rather than a plan: its first instruction is
-to write `docs/plan-phase3.md` from a real read of the tree. It is worth reading before starting,
-because two of the four look on inspection like they should be **refused** rather than built — the
-plan cache appears to exist already (`Database.#cache`), and encryption at rest has no
-zero-dependency answer that also covers the WAL, the log and the bucket.
+**Phase 3 is done and it was the last named phase. `docs/design.md` §11 has no unbuilt row left.**
+`docs/plan-phase3.md` is the plan of record and `docs/p7-plan-cache.md` … `docs/p10-encryption.md`
+are the four milestones. `docs/prompt-phase3.md` is the prompt that commissioned it, kept because
+its guess — "two of the four look like they should be refused" — was right about the count and
+wrong about which two.
 
-Everything below phase 3 is genuinely optional, in the order it is worth doing.
+**So there is no next phase, and that is the real state of the project.** What is left is a list
+rather than a plan, and the first two items are worth more than the rest of it put together:
 
-The one thing L8 makes newly *worth* doing: **the change ring is still in memory**, so a
-`Last-Event-ID` from before a restart is answered with `reset`. That was unfixable-in-principle
-while a position was a bare txid — a durable feed needs a key that survives a replay, and there
-was none. There is one now, so spilling the ring to disk, or serving old positions from the log,
-is a design that can actually be written. It is the first item under "the bounded ones" below.
+1. **The durable change ring**, below. The last realtime gap and the only one that changes what a
+   client can rely on.
+2. **The npm release, which is blocked on Tim and not on the code.** `NPM_TOKEN` in the
+   repository's settings, then set `version` and push a `v` tag. Everything else is built and has
+   never run. **One secret away.**
+
+The first is newly *possible* rather than newly worth doing: **the change ring is still in
+memory**, so a `Last-Event-ID` from before a restart is answered with `reset`. That was
+unfixable-in-principle while a position was a bare txid — a durable feed needs a key that survives
+a replay, and there was none. L8 made `(txid, seq)` that key, and P9 gave a replica's feed real
+rows to be durable *about*, so a downstream consumer now has both a thing worth resuming and a
+position to resume from. Spill the ring to disk, or serve old positions from the log.
+
+Everything else below is genuinely optional, in the order it is worth doing.
 
 ### 1. Re-measure §5's worker ladder on a quiet machine
 
@@ -608,11 +730,12 @@ and §6. **CI is green on macOS, Linux and Windows.**
   signal EOF, which is worth perhaps 0.3 µs of 1.98 on the most correctness-critical loop in the
   system, and could not be told from noise on this machine today. Do it when §8's conditions hold,
   or leave it. `docs/p3-wal-checksum.md` §2.
-- ~~**A read mode for the native `/v1/db/{db}/tx`.**~~ **Not a gap — a decision.**
-  `docs/r10-read-transactions.md` §4 already argues it the other way: the native surface's
-  consistent-read answer is `BunQL-Min-Txid`, which needs no transaction at all, and a fourth mode
-  means a baton dispatch across two session kinds for something nothing asks for. Listing it here
-  as an open item was this file misreading its own source.
+- ~~**A read mode for the native `/v1/db/{db}/tx`.**~~ **Closed (P8)** — as a *separate* surface,
+  not a fourth writer mode. `docs/r10-read-transactions.md` §4 argued it away on the grounds that
+  `BunQL-Min-Txid` is the native consistent-read answer; it is not. That header is a **floor**, so
+  two reads that both satisfy it can see different databases, and a consistent read is a **point**.
+  `POST /v1/db/{db}/read` is the point, on R10's leased reader with no new primitive under it.
+  `docs/p8-read-sessions.md` §1.
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a restart. Spill it to
   disk or serve old positions from the log. This is the last of the realtime gaps — schema events
   now reach the SSE feed as well as the socket.

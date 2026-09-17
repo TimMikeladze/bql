@@ -44,6 +44,7 @@ import {
 import { assertValidName, type Tenant } from "../tenant/index.ts"
 import { listSnapshots } from "../wal/index.ts"
 import {
+  applyPolicy,
   pinOwner,
   type Principal,
   type Scope,
@@ -56,13 +57,14 @@ import {
   assertStatement,
   awaitTxid,
   executeBatch,
+  executeInReadTx,
   executeInTx,
   executeStatement,
   executeStatementQueued,
   resolveOptions,
 } from "./exec.ts"
 import { type ReplicationMetrics, type StorageMetrics } from "./metrics.ts"
-import { mapTenantError, type ServerRuntime } from "./runtime.ts"
+import { mapTenantError, type ReadTxSession, type ServerRuntime } from "./runtime.ts"
 import { openSse, resumeFrom, type TimeoutHost } from "./sse.ts"
 
 /** What a route handler is handed. `txid` is filled in so the wrapper can stamp the header. */
@@ -368,6 +370,138 @@ function endTx(how: "commit" | "rollback"): Handler {
 
 export const txCommit = endTx("commit")
 export const txRollback = endTx("rollback")
+
+// ── read sessions (docs/p8-read-sessions.md) ───────────────────────────────────────────────────
+
+/**
+ * A read session is one SQLite snapshot held across several HTTP requests, on R10's leased reader
+ * (`docs/r10-read-transactions.md`) and with no new consistency primitive under it. Design §11's
+ * `sqlite3_snapshot` is measured and refused; `experiments/snapshot.ts` is the measurement.
+ *
+ * It is **not** `BunQL-Min-Txid`, which is the thing a reader will reach for first. That header is
+ * a *floor* — "do not answer until the tenant has reached txid N" — so two reads that both satisfy
+ * it can see different databases, because the second sees everything that landed in between. A
+ * read session is a *point*: every statement in it sees the database as of the session's first
+ * read, whatever commits underneath.
+ *
+ * It is also not the baton transaction above with a flag on it, and the routes say so: no `mode`,
+ * no commit, and ending it is a `DELETE`. A read session has nothing to commit, so two verbs for
+ * ending one would be two names for the same act.
+ */
+export const readBegin: Handler = async (ctx) => {
+  const { principal, tenant } = await open(ctx, "ro")
+  const body = await readJson<{ rows?: "array" | "object" }>(
+    ctx,
+    ctx.runtime.config.limits.maxBodyBytes,
+  )
+  try {
+    // Deliberately not forwarded, on either role. A read session takes no writer, so a replica
+    // serves it from its own copy — which is the whole reason it is not the transaction above,
+    // and the case `sqlite3_snapshot` could not have served at all (`docs/p8-read-sessions.md` §3).
+    const session = ctx.runtime.beginReadTx(tenant, principal, {
+      ...(body.rows ? { rows: body.rows } : {}),
+    })
+    return json({
+      read: session.baton,
+      expiresInMs: ctx.runtime.config.limits.readTxTimeoutMs,
+      idleTimeoutMs: ctx.runtime.config.limits.txIdleTimeoutMs,
+    })
+  } catch (err) {
+    const mapped = mapTenantError(err, ctx.runtime.primaryUrlFor(tenant.name))
+    // `[limits] maxReadTx` is R10's bound, unchanged, and answers R10's code. The shape is the
+    // writer's, down to `Retry-After`, because to a client it means the same thing: come back.
+    if (mapped instanceof BunQLError && mapped.code === "TX_BUSY") {
+      return json(
+        {
+          error: {
+            code: "TX_BUSY",
+            message: mapped.message,
+            status: 409,
+            txid: Number(tenant.txid),
+          },
+        },
+        409,
+        { "retry-after": "1" },
+      )
+    }
+    throw mapped
+  }
+}
+
+/**
+ * Refuses a write inside a read session, the way Hrana's read transaction already does.
+ *
+ * This is not decoration. A pooled reader is not opened `SQLITE_OPEN_READONLY` — it is simply not
+ * the writer (`Tenant.acquireReader`) — so SQLite would let an `rw` principal write through one,
+ * outside the tenant's writer, the WAL tailer and the log, and the write would be invisible to
+ * every one of them. The test is `sqlite3_stmt_readonly`, compiled on the **session's own**
+ * connection rather than the writer, because the writer may be busy with somebody else's write,
+ * which is the point of the move. P7's cache makes the compile a hit for the statement that
+ * follows it.
+ */
+function assertReadOnlyStatement(
+  runtime: ServerRuntime,
+  session: ReadTxSession,
+  principal: Principal,
+  sql: string,
+): void {
+  const readonly = session.tenant.readTxExec(session.tx, (db) => {
+    const handle = applyPolicy(db, runtime.hubFor(db), principal, session.db)
+    try {
+      return db.prepare(sql).readonly
+    } finally {
+      handle.release()
+    }
+  })
+  if (readonly) return
+  throw new BunQLError("SQLITE_READONLY", "attempt to write in a read session", 403)
+}
+
+/** A statement inside a read session. The baton alone identifies the database. */
+export const readQuery: Handler = async (ctx) => {
+  const principal = await principalOf(ctx)
+  const baton = ctx.params.read as string
+  const session = ctx.runtime.readTxSession(baton)
+  requireScope(principal, session.db, "ro")
+  ctx.txid = Number(session.tenant.txid)
+  const body = await readJson<QueryRequest>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+  assertStatement(body, "request")
+  const options = resolveOptions(
+    { rows: session.rowsMode, ...body },
+    ctx.request.headers,
+    ctx.runtime.config,
+  )
+  try {
+    assertReadOnlyStatement(ctx.runtime, session, principal, body.sql)
+    const result = executeInReadTx(ctx.runtime, session.tenant, session.tx, principal, body, options)
+    // The tenant's txid, not the session's snapshot: a client that wants to know how far the
+    // database has moved *outside* its session is asking a fair question, and the session's own
+    // position is the one it already knows.
+    ctx.txid = result.txid
+    return json(result)
+  } catch (err) {
+    throw mapTenantError(err, primaryOf(ctx))
+  }
+}
+
+/**
+ * Ends a read session. There is no commit and no rollback: a read session has nothing to commit,
+ * and `endReadTx` rolls back whatever it did, which is the only ending that is correct whether or
+ * not it ever read anything.
+ */
+export const readEnd: Handler = async (ctx) => {
+  const principal = await principalOf(ctx)
+  const baton = ctx.params.read as string
+  const session = ctx.runtime.readTxSession(baton)
+  requireScope(principal, session.db, "ro")
+  ctx.txid = Number(session.tenant.txid)
+  try {
+    ctx.runtime.endReadTx(session)
+  } catch (err) {
+    throw mapTenantError(err, primaryOf(ctx))
+  }
+  return json({ read: baton, ended: true })
+}
 
 // ── realtime (design §6.4) ─────────────────────────────────────────────────────────────────────
 
@@ -761,6 +895,10 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
     openConns: stats.openReaders + 1,
     liveQueries: realtime?.live.size ?? 0,
     subscribers: realtime?.subscriberCount ?? 0,
+    // P8: read sessions open on this database right now, against `[limits] maxReadTx`. It counts
+    // both surfaces, because `/v1/db/:db/read` and Hrana's read transaction are one mechanism and
+    // one bound — a client refused `TX_BUSY` on one of them wants to see the other's share.
+    readSessions: tenant.openReadTx,
     lastSnapshotTxid: stats.lastSnapshotTxid === null ? null : Number(stats.lastSnapshotTxid),
     // Replicas only: which of design §4.5's two apply mechanisms is live, which is not always the
     // one configured — `docs/c5-apply-pages.md` §4.6.

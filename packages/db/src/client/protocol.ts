@@ -198,6 +198,8 @@ export type BunQLErrorCode =
   | "TXID_NOT_AVAILABLE"
   | "NOT_PRIMARY"
   | "RESET_REQUIRED"
+  /** P9: this feed's primary does not record row changes, so it cannot deliver them. */
+  | "LOGICAL_UNAVAILABLE"
   | "QUOTA_EXCEEDED"
   | "BUSY"
   | "INTERNAL"

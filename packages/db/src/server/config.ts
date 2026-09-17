@@ -47,8 +47,9 @@ export interface DataSection {
 }
 
 /**
- * SQLite settings BunQL states rather than inherits (`docs/p1-pragmas.md`). Everything here is a
- * pragma applied per connection, so the values a connection carries do not depend on which
+ * SQLite settings BunQL states rather than inherits (`docs/p1-pragmas.md`). Everything here is
+ * applied per connection — all of it pragmas but `statementCache`, which bounds BunQL's own
+ * prepared-statement cache — so the values a connection carries do not depend on which
  * libsqlite3 was found — Apple's defaults `cache_size` to pages where upstream defaults it to KiB,
  * which is four times the cache and a different moment for dirty pages to reach the `-wal`.
  *
@@ -58,6 +59,21 @@ export interface DataSection {
  * behaviour, per the rule in `docs/c6-packaging.md`.
  */
 export interface SqliteSection {
+  /**
+   * Distinct SQL texts one connection keeps compiled (`docs/p7-plan-cache.md`). Default 64.
+   *
+   * **Per connection, not per database.** A tenant holds one writer plus up to `[data] readers`
+   * (default 2) pooled readers, so a hot database holds three independent caches of this size —
+   * and it can hold no fewer, because a `sqlite3_stmt*` belongs to the `sqlite3*` it was compiled
+   * against and no SQLite API runs one statement on two connections.
+   *
+   * It is a **cliff, not a slope**: a working set of 65 texts on one connection costs 82x what 64
+   * costs on an idle machine and 186x on a loaded one, because every `prepare()` past the ceiling
+   * compiles *and* finalizes a victim. `bunql_statement_cache_evictions_total` rising on a live
+   * node is the symptom; raising this is the answer. Each entry costs a compiled statement's
+   * memory, which for the data API's generated SQL is single-digit KiB.
+   */
+  statementCache: number
   /** `PRAGMA cache_size` on the writer, in bytes. Allocated lazily, so an idle tenant pays none. */
   writerCacheBytes: number
   /** The same on each pooled reader. Reads barely move past 2 MiB; `readerMmapBytes` is the lever. */
@@ -329,7 +345,29 @@ export interface ReplicationSection {
   forwardTimeoutMs: number
   /** R2: forwarded writes in flight at once, per replica node. Past this, `503 BUSY`. */
   maxForwards: number
+  /**
+   * P9: record the row changes each transaction made inside its transaction record, so a replica's
+   * change feed carries the same `RowChange[]` under the same `(txid, seq)` the primary published
+   * rather than an empty array (`docs/p9-logical-cdc.md`).
+   *
+   * The value is the level recorded — `"pk"`, `"row"` or `"row+old"` — and `true` means `"row"`.
+   * It is a level and not a boolean because `row+old` puts the whole row on the wire twice, and
+   * the primary's own capture level is set by whatever its local subscribers asked for, which is
+   * no basis for deciding what leaves the node.
+   *
+   * **Off by default, and the reason is size.** A row-heavy transaction can carry more logical
+   * bytes than page bytes; `docs/performance.md` §9 has the measured ratio. Turning it on also
+   * makes the primary capture rows for every database it opens whether or not anything local is
+   * subscribed, because the record is the subscriber.
+   *
+   * A replica with `[replication] logicalChanges` off still receives and publishes them: this
+   * setting says what a node *records* for its own databases, not what it accepts.
+   */
+  logicalChanges: LogicalChangeLevel
 }
+
+/** P9: how much of each row a transaction record carries. `false` records none. */
+export type LogicalChangeLevel = false | "pk" | "row" | "row+old"
 
 /**
  * The built-in Raft control plane (design §5.3, `docs/plan-phase2.md` C1/C2). Off by default:
@@ -485,7 +523,17 @@ export interface ServerConfig {
 
 /** The same shape with every field optional, which is what a TOML file or a caller supplies. */
 export type ServerConfigInput = {
-  [K in keyof ServerConfig]?: Partial<ServerConfig[K]>
+  [K in Exclude<keyof ServerConfig, "replication">]?: Partial<ServerConfig[K]>
+} & {
+  /**
+   * P9: `[replication] logicalChanges` is a *level*, and `true` is accepted for "the sensible
+   * one", which is `"row"`. `validate` resolves it before anything reads the config, so the
+   * resolved `ServerConfig` only ever holds a `LogicalChangeLevel`; this widening is for what a
+   * caller and a TOML file may write.
+   */
+  replication?: Partial<Omit<ReplicationSection, "logicalChanges">> & {
+    logicalChanges?: LogicalChangeLevel | true
+  }
 }
 
 export const DEFAULT_CONFIG: ServerConfig = {
@@ -499,6 +547,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
   },
   data: { dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },
   sqlite: {
+    statementCache: 64,
     writerCacheBytes: 8_388_608,
     readerCacheBytes: 2_097_152,
     readerMmapBytes: 0,
@@ -569,6 +618,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     forwardWrites: true,
     forwardTimeoutMs: 10_000,
     maxForwards: 256,
+    logicalChanges: false,
   },
   cluster: {
     enabled: false,
@@ -717,6 +767,15 @@ function coerce(target: unknown, raw: string): unknown {
 function setPath(config: ServerConfig, dotted: string, raw: string): void {
   const [section, key] = dotted.split(".") as [keyof ServerConfig, string]
   const target = config[section] as unknown as Record<string, unknown>
+  // P9: `[replication] logicalChanges` is a *level* or `false`, and its default is the boolean, so
+  // `coerce` would take "row" for "not true" and silently turn the feature off — a wrong answer an
+  // operator would find out about from a replica's 501 rather than from a message. It is the only
+  // key whose type is a union of a boolean and a string, so it takes its own line rather than a
+  // general rule; `validate` normalises the strings from here.
+  if (dotted === "replication.logicalChanges") {
+    target[key] = raw
+    return
+  }
   target[key] = coerce(target[key], raw)
 }
 
@@ -786,7 +845,13 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       realtime: mergeSection(config.realtime, patch.realtime, env),
       limits: mergeSection(config.limits, patch.limits, env),
       auth: mergeSection(config.auth, patch.auth, env),
-      replication: mergeSection(config.replication, patch.replication, env),
+      // P9: `logicalChanges` is widened to accept `true` on the way in and narrowed by `validate`
+      // on the way out, so the merge sees a shape the resolved section does not have yet.
+      replication: mergeSection(
+        config.replication,
+        patch.replication as Partial<ReplicationSection> | undefined,
+        env,
+      ),
       cluster: mergeSection(config.cluster, patch.cluster, env),
       s3: mergeSection(config.s3, patch.s3, env),
       api: mergeSection(config.api, patch.api, env),
@@ -847,6 +912,19 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     )
   }
   if (config.replication.follow.length === 0) config.replication.follow = ["*"]
+  // P9. `true` is "the sensible level", which is `row`; the string spellings are what the
+  // environment can carry, since `BUNQL_*` values are always strings.
+  const logical = config.replication.logicalChanges as LogicalChangeLevel | true | string
+  if (logical === true || logical === "true" || logical === "1") {
+    config.replication.logicalChanges = "row"
+  } else if (logical === "false" || logical === "0" || logical === "off") {
+    config.replication.logicalChanges = false
+  } else if (logical !== false && logical !== "pk" && logical !== "row" && logical !== "row+old") {
+    throw BunQLError.badRequest(
+      '[replication] logicalChanges must be false, true, "pk", "row" or "row+old", got ' +
+        JSON.stringify(logical),
+    )
+  }
 
   // `[cluster] peers` is the whole decision, as `--replica-of` is: a node told who its peers are
   // is in a cluster. `enabled = false` in the file is still honoured, so a config can keep the

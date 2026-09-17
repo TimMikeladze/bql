@@ -14,7 +14,10 @@ import {
   LivePageSource,
   pageHash,
   RECORD_HEADER_SIZE,
+  RECORD_VERSION,
+  RECORD_VERSION_LOGICAL,
   RollingChecksum,
+  stripLogical,
   TxnRecorder,
   type TxnRecordInput,
   WalFormatError,
@@ -232,5 +235,82 @@ describe("rolling checksum", () => {
 
     source.close()
     db.close()
+  })
+})
+
+describe("the logical section (P9)", () => {
+  const rows = new TextEncoder().encode(
+    JSON.stringify({ v: 1, level: "row", stmts: [[{ table: "t", op: "insert", rowid: 1 }]] }),
+  )
+
+  test("a record with no logical changes is byte-identical to what v1 always wrote", () => {
+    // The point of the milestone's format decision: a primary with `[replication] logicalChanges`
+    // off writes exactly the bytes it wrote before P9. `logical: null` and the field being absent
+    // have to agree too, because `#file` passes one or the other.
+    const input = sampleRecord()
+    const before = encode(input)
+    expect(encode({ ...input, logical: null })).toEqual(before)
+    expect(encode({ ...input, logical: new Uint8Array(0) })).toEqual(before)
+    expect(before[4]).toBe(RECORD_VERSION)
+  })
+
+  test("the page region of a v2 record is byte-identical to the v1 one", () => {
+    // The trailer states its length *last*, so the pages keep offset 0 and their exact bytes; a
+    // reader that knows where the pages end reads the same pages out of either record.
+    const input = sampleRecord()
+    const v1 = decode(encode(input))
+    const v2 = decode(encode({ ...input, logical: rows }))
+    expect(v2.record.version).toBe(RECORD_VERSION_LOGICAL)
+    expect(v1.record.version).toBe(RECORD_VERSION)
+    expect([...v2.record.pages.keys()].sort()).toEqual([...v1.record.pages.keys()].sort())
+    for (const [pgno, page] of v1.record.pages) {
+      expect(v2.record.pages.get(pgno)).toEqual(page)
+    }
+    expect(v2.record.logical).toEqual(rows)
+    expect(v1.record.logical).toBeUndefined()
+  })
+
+  test("a v2 record round-trips uncompressed too", () => {
+    const bytes = encode(sampleRecord({ logical: rows }), { compress: false })
+    const { record } = decode(bytes)
+    expect(record.flags & FLAG_ZSTD).toBe(0)
+    expect(record.logical).toEqual(rows)
+    expect(record.pages.size).toBe(4)
+  })
+
+  test("a reader that cannot parse the version says so by name", () => {
+    const bytes = encode(sampleRecord({ logical: rows, version: 3 }))
+    expect(() => decodeHeader(bytes)).toThrow("unsupported transaction record version 3")
+  })
+
+  test("stripLogical downgrades a v2 record and leaves a v1 one alone", () => {
+    const input = sampleRecord()
+    const v1 = encode(input)
+    const v2 = encode({ ...input, logical: rows })
+    // The downgrade a primary performs for a replica that announced `maxRecordVersion: 1`: the
+    // same transaction, the same pages, no rows, and byte-identical to the v1 record — so the
+    // replica cannot tell it apart from one written by a primary with the flag off.
+    expect(stripLogical(v2)).toEqual(v1)
+    expect(stripLogical(v1)).toBe(v1)
+    const downgraded = decode(stripLogical(v2)).record
+    expect(downgraded.logical).toBeUndefined()
+    expect(downgraded.postChecksum).toBe(input.postChecksum)
+  })
+
+  test("a v2 body whose trailer lies about its length is refused", () => {
+    // The body hash is checked before the split, so this has to be a *consistent* corruption: a
+    // plain body, re-hashed, with only the trailing length wrong. That is what proves the split
+    // itself is bounds-checked rather than relying on the hash to catch everything.
+    const input = sampleRecord({ logical: rows })
+    const bytes = encode(input, { compress: false })
+    const view = new DataView(bytes.buffer, bytes.byteOffset)
+    const plain = bytes.subarray(RECORD_HEADER_SIZE)
+    new DataView(plain.buffer, plain.byteOffset).setUint32(plain.byteLength - 4, 0xffff, true)
+    view.setBigUint64(80, Bun.hash.xxHash3(plain), true)
+    view.setBigUint64(88, Bun.hash.xxHash3(plain, 0x9e3779b1n), true)
+    view.setBigUint64(96, Bun.hash.xxHash3(bytes.subarray(0, 96)), true)
+    // The specific guard, named: the split is bounds-checked on its own rather than left to the
+    // page-count assertion downstream, which would refuse it with the wrong reason.
+    expect(() => decode(bytes)).toThrow(/logical section is 65535 bytes/)
   })
 })

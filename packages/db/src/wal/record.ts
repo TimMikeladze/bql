@@ -12,10 +12,10 @@
 //   4   version u8              1     96  headerHash (xxh3-64)   8
 //   5   flags u8                1    104  body
 //   6   pageSize u16            2
-//   8   txid u64                8    body = zstd([pgno u32 | page]* ascending by pgno)
+//   8   txid u64                8    body = zstd(plain)
 //   16  prevTxid u64            8
-//   24  epoch u32               4
-//   28  frameCount u32          4
+//   24  epoch u32               4    v1: plain = [pgno u32 | page]* ascending by pgno
+//   28  frameCount u32          4    v2: plain = [pgno u32 | page]* | logical | logicalLength u32
 //   32  timestampUs u64         8
 //   40  commitSizePages u32     4
 //   44  walSalt1 u32            4
@@ -29,6 +29,24 @@
 // `bodyLength` and the hash placement are additions to the listing in design §4.3: a segment is
 // records back to back, so a record has to state its own length, and putting the hashes in the
 // fixed header makes `decodeHeader` a single self-validating read.
+//
+// **Version 2 (P9, `docs/p9-logical-cdc.md`).** A record may carry the row changes the primary's
+// capture saw, so a replica's change feed can publish rows instead of an empty array. They ride in
+// the body rather than in the header because the body is what zstd already compresses and what the
+// body hash already covers — a record stays self-verifying with no new hash and no new field.
+//
+// The region is a **trailer with its length last**, and that placement is the whole trick: the
+// page region keeps byte offset 0 and byte-for-byte content, so encoding a transaction with and
+// without logical changes produces the same first `pages * (4 + pageSize)` bytes. `logicalLength`
+// is read from the final four bytes of `plain`, which names where the page region ended.
+//
+// It is **version 2 and not a flag bit**, because an old reader must refuse it by name. `decode`
+// asserts `plain.byteLength % (4 + pageSize) === 0` — "a whole number of pages" — so a trailer
+// behind a flag is not invisible to a reader that ignores the flag: it fails that assertion with a
+// message about page sizes. `unsupported transaction record version 2` is the message an operator
+// needs. A v2 record is written **only when there are rows to carry**, so a primary with
+// `[replication] logicalChanges` off writes v1 forever and a mixed log, stream and bucket read
+// exactly as a mixed `FLAG_ZSTD` one already does.
 
 import fs from "node:fs"
 import {
@@ -47,6 +65,16 @@ import { WalFormatError } from "./errors.ts"
 export const RECORD_MAGIC = 0x314c5142 // "BQL1" read as a little-endian u32
 export const RECORD_HEADER_SIZE = 104
 export const RECORD_VERSION = 1
+
+/** P9: a record that carries logical row changes after its pages. */
+export const RECORD_VERSION_LOGICAL = 2
+
+/**
+ * The newest version this build can read. A replica announces it on `HELLO` as `maxRecordVersion`
+ * and a primary never streams a record past what its peer announced, so an old replica against a
+ * new primary keeps replicating rather than failing on a version it never asked for.
+ */
+export const MAX_RECORD_VERSION = RECORD_VERSION_LOGICAL
 
 export const FLAG_ZSTD = 0x01
 export const FLAG_SNAPSHOT_BOUNDARY = 0x02
@@ -83,6 +111,12 @@ export interface TxnRecordHeader {
 export interface TxnRecord extends TxnRecordHeader {
   /** Page number to page image, one entry per distinct page the transaction wrote. */
   pages: Map<number, Uint8Array>
+  /**
+   * P9: the transaction's row changes, opaque here. Present only on a version-2 record. This
+   * module frames and verifies the bytes and never looks inside them: what is in there is the
+   * change feed's shape, which `src/realtime/` owns and `src/wal/` has no business knowing.
+   */
+  logical?: Uint8Array
 }
 
 export type TxnRecordInput = Omit<
@@ -90,6 +124,8 @@ export type TxnRecordInput = Omit<
   "version" | "flags" | "bodyLength" | "bodyPlainLength"
 > & {
   pages: ReadonlyMap<number, Uint8Array>
+  /** P9: see `TxnRecord.logical`. An empty or absent value writes a version-1 record. */
+  logical?: Uint8Array | null
   version?: number
   flags?: number
 }
@@ -132,7 +168,13 @@ export interface EncodeOptions {
 export function encode(record: TxnRecordInput, options: EncodeOptions = {}): Uint8Array {
   const pageSize = record.pageSize
   const pgnos = [...record.pages.keys()].sort((a, b) => a - b)
-  const plain = new Uint8Array(pgnos.length * (4 + pageSize))
+  // P9: the logical trailer goes *after* the pages and states its own length last, so these first
+  // bytes are identical whether or not one follows. A record encoded with the flag off is
+  // therefore byte-identical to what this function wrote before P9, which `test/wal/record.test.ts`
+  // proves by encoding the same transaction both ways.
+  const logical = record.logical && record.logical.byteLength > 0 ? record.logical : null
+  const pagesLength = pgnos.length * (4 + pageSize)
+  const plain = new Uint8Array(pagesLength + (logical ? logical.byteLength + 4 : 0))
   const plainView = new DataView(plain.buffer)
   let at = 0
   for (const pgno of pgnos) {
@@ -143,6 +185,10 @@ export function encode(record: TxnRecordInput, options: EncodeOptions = {}): Uin
     plainView.setUint32(at, pgno, true)
     plain.set(page, at + 4)
     at += 4 + pageSize
+  }
+  if (logical) {
+    plain.set(logical, pagesLength)
+    plainView.setUint32(pagesLength + logical.byteLength, logical.byteLength, true)
   }
 
   const flags =
@@ -157,7 +203,7 @@ export function encode(record: TxnRecordInput, options: EncodeOptions = {}): Uin
   const out = new Uint8Array(RECORD_HEADER_SIZE + body.byteLength)
   const view = new DataView(out.buffer)
   view.setUint32(0, RECORD_MAGIC, true)
-  view.setUint8(4, record.version ?? RECORD_VERSION)
+  view.setUint8(4, record.version ?? (logical ? RECORD_VERSION_LOGICAL : RECORD_VERSION))
   view.setUint8(5, flags)
   view.setUint16(6, pageSize === 65536 ? 0 : pageSize, true)
   view.setBigUint64(8, record.txid, true)
@@ -222,7 +268,7 @@ export function decodeHeader(bytes: Uint8Array, offset = 0): DecodedHeader | nul
     bodyLength: view.getUint32(72, true),
     bodyPlainLength: view.getUint32(76, true),
   }
-  if (header.version !== RECORD_VERSION) {
+  if (header.version !== RECORD_VERSION && header.version !== RECORD_VERSION_LOGICAL) {
     throw new WalFormatError(`unsupported transaction record version ${header.version}`)
   }
   return { header, byteLength: RECORD_HEADER_SIZE + header.bodyLength }
@@ -258,17 +304,55 @@ export function decode(bytes: Uint8Array, offset = 0): DecodedRecord {
     throw new WalFormatError(`transaction record body hash mismatch at txid ${header.txid}`)
   }
 
+  const plainView = new DataView(plain.buffer, plain.byteOffset, plain.byteLength)
+  // P9: a version-2 body ends with the length of its logical trailer, which is what says where the
+  // page region stopped. A version-1 body is all pages, exactly as it has always been.
+  let pagesLength = plain.byteLength
+  let logical: Uint8Array | undefined
+  if (header.version === RECORD_VERSION_LOGICAL) {
+    if (plain.byteLength < 4) {
+      throw new WalFormatError(`transaction record body has no logical length at txid ${header.txid}`)
+    }
+    const logicalLength = plainView.getUint32(plain.byteLength - 4, true)
+    if (logicalLength > plain.byteLength - 4) {
+      throw new WalFormatError(
+        `transaction record logical section is ${logicalLength} bytes of a ${plain.byteLength}-byte body`,
+      )
+    }
+    pagesLength = plain.byteLength - 4 - logicalLength
+    logical = plain.subarray(pagesLength, pagesLength + logicalLength)
+  }
+
   const stride = 4 + header.pageSize
-  if (plain.byteLength % stride !== 0) {
+  if (pagesLength % stride !== 0) {
     throw new WalFormatError(`transaction record body is not a whole number of pages`)
   }
   const pages = new Map<number, Uint8Array>()
-  const plainView = new DataView(plain.buffer, plain.byteOffset, plain.byteLength)
-  for (let at = 0; at < plain.byteLength; at += stride) {
+  for (let at = 0; at < pagesLength; at += stride) {
     const pgno = plainView.getUint32(at, true)
     pages.set(pgno, plain.subarray(at + 4, at + stride))
   }
-  return { record: { ...header, pages }, byteLength }
+  const record: TxnRecord = { ...header, pages }
+  if (logical !== undefined) record.logical = logical
+  return { record, byteLength }
+}
+
+/**
+ * P9: the same transaction as a version-1 record, for a replica that announced
+ * `maxRecordVersion: 1`. A version-1 record is returned untouched — the common case, and the only
+ * one on a primary with `[replication] logicalChanges` off.
+ *
+ * It costs a zstd round trip, which is why the caller checks the version byte first rather than
+ * calling this for every record: the downgrade is paid once per record per old peer, and only
+ * while one is attached.
+ */
+export function stripLogical(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength < RECORD_HEADER_SIZE) return bytes
+  if (bytes[4] !== RECORD_VERSION_LOGICAL) return bytes
+  const { record } = decode(bytes)
+  const { logical: _dropped, ...rest } = record
+  const input = { ...rest, version: RECORD_VERSION } as unknown as TxnRecordInput
+  return encode(input, { compress: (record.flags & FLAG_ZSTD) !== 0 })
 }
 
 // ---------------------------------------------------------------------------

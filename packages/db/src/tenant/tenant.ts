@@ -29,6 +29,11 @@
 // authorizer slots belong to `src/realtime` and the route layer (docs/m6-realtime.md), which is
 // why `onCommit` here is a list of listeners this class calls after `log.append` rather than
 // SQLite's own commit hook — `write()` is synchronous, so it can.
+//
+// P9 adds one more slot in the same spirit: `setLogicalRecorder` hands this class a function that
+// returns opaque bytes for each record's logical section. It is called from `#file` *before* the
+// append, because that is the last moment the row changes still exist, and it is opaque because
+// this file must not learn what a change event looks like. See `docs/p9-logical-cdc.md`.
 
 import fs from "node:fs"
 import path from "node:path"
@@ -39,6 +44,7 @@ import {
   type CheckpointResult,
   Database,
   type LimitName,
+  type StatementCacheCounters,
   type TransactionMode,
 } from "../sqlite/index.ts"
 import {
@@ -90,6 +96,23 @@ export interface CommitEvent {
 }
 
 export type CommitListener = (event: CommitEvent) => void
+
+/**
+ * P9: the row changes a batch of about-to-be-filed transactions made, as opaque bytes for each
+ * record's logical section. Installed by the server runtime when `[replication] logicalChanges` is
+ * on, and called once per batch with the txids in order, immediately before the records are
+ * encoded.
+ *
+ * Opaque on purpose. `src/tenant/` knows nothing about `src/realtime/` — the commit, rollback and
+ * authorizer hook slots belong to the realtime layer and the tenant deliberately does not reach
+ * into them — so this is an option the runtime installs rather than a new dependency edge, and the
+ * tenant never learns what is in the bytes it files.
+ *
+ * Returning null records nothing for the whole batch, which is what the source answers when it
+ * cannot line its transactions up with these records. That is a refusal, not a failure: rows filed
+ * under the wrong txid would be worse than no rows at all.
+ */
+export type LogicalRecorder = (txids: readonly bigint[]) => (Uint8Array | null)[] | null
 
 /** What `Tenant.open` found when it reconciled the log, the catalog and the database. */
 export type ReconcileOutcome =
@@ -192,6 +215,12 @@ export interface TenantOptions {
    * different moment for dirty pages to reach the `-wal`.
    */
   sqlite?: SqlitePragmas
+  /**
+   * P7: where every connection this tenant opens reports its statement-cache activity. One object
+   * shared by a registry's tenants, so the node's totals survive an eviction; left undefined, each
+   * connection keeps its own and nothing reads them.
+   */
+  statementCacheCounters?: StatementCacheCounters
   /** Where a throwing commit hook goes. Defaults to `console.error`. */
   onError?: (err: unknown) => void
   /**
@@ -203,10 +232,19 @@ export interface TenantOptions {
 }
 
 /**
- * Per-connection pragmas, in bytes where SQLite takes a count. `undefined` leaves the library's
+ * Per-connection settings, in bytes where SQLite takes a count. `undefined` leaves the library's
  * own default in place, which is what every path that does not come from `[sqlite]` wants.
+ *
+ * All of these are pragmas but `statementCache`, which bounds BunQL's own prepared-statement cache
+ * rather than anything SQLite knows about; it travels here because it is `[sqlite]`'s key and takes
+ * the same route to the connection.
  */
 export interface SqlitePragmas {
+  /**
+   * Distinct SQL texts one connection keeps compiled. Default 64 (`docs/p7-plan-cache.md`).
+   * Per connection: a tenant holds one writer and up to `readers` of these.
+   */
+  statementCache?: number
   writerCacheBytes?: number
   readerCacheBytes?: number
   /** Readers only, and off by default: a read error on a mapped page is a SIGBUS, not an error. */
@@ -501,6 +539,10 @@ export class Tenant {
   #snapshotting: Promise<SnapshotRef> | null = null
   /** `[durability] deferAppend`, resolved once. */
   readonly #deferAppend: boolean
+  /** P9: where a record's logical section comes from, when anything installed one. */
+  #logicalRecorder: LogicalRecorder | null = null
+  /** P9: `lastRecordVersion`, computed once and kept current by `applyRecord`. */
+  #lastRecordVersion: number | null = null
   #lastActivityMs = Date.now()
   #maintainedAt = 0
   #lastSnapshotTxid: bigint | null
@@ -690,6 +732,38 @@ export class Tenant {
   /** Snapshots this database holds, oldest first. */
   snapshots(): SnapshotRef[] {
     return listSnapshots(this.dir)
+  }
+
+  /**
+   * P9: installs the source of the row changes records carry, or removes it with null. The runtime
+   * calls this when it creates the realtime engine for a primary and `[replication] logicalChanges`
+   * is on; nothing else has any business doing so.
+   */
+  setLogicalRecorder(recorder: LogicalRecorder | null): void {
+    this.#logicalRecorder = recorder
+  }
+
+  /**
+   * P9: the version of the newest record in this database's log, or 0 when the log is empty. A
+   * replica reads it to know whether its primary records row changes across a restart, so a
+   * subscription between two transactions is not refused `LOGICAL_UNAVAILABLE` for a feed that can
+   * in fact carry rows. Cached: the read is one record header, and `applyRecord` keeps it current.
+   */
+  get lastRecordVersion(): number {
+    const cached = this.#lastRecordVersion
+    if (cached !== null) return cached
+    let version = 0
+    const last = this.log.lastTxid
+    if (last !== 0n) {
+      try {
+        for (const record of this.log.iterate(last)) version = record.version
+      } catch {
+        // An aged-out or unreadable tail answers "no version", which is the conservative reading.
+        version = 0
+      }
+    }
+    this.#lastRecordVersion = version
+    return version
   }
 
   /** Subscribes to durable commits. Returns the unsubscribe function. */
@@ -1721,6 +1795,7 @@ export class Tenant {
     }
     const applier = this.applier as WalApplier
     applier.apply(record)
+    this.#lastRecordVersion = record.version
     const encoded = bytes ?? encode(record)
     this.#appendReplicated(encoded, record.txid)
     // The applier's own `meta.json` is the durable position and is already fsynced by `apply`;
@@ -1936,8 +2011,16 @@ export class Tenant {
   /** Encode, append, save the position, and tell the subscribers. The deferred half of P5. */
   #file(records: TxnRecordInput[]): void {
     if (records.length === 0) return
+    // P9. This runs *before* `#publish`, and `#publish` is what drains the capture buffer through
+    // the realtime layer's `afterCommit` — so the rows are still in hand here, and whichever of
+    // the two paths reaches them first must leave the other something to publish. The recorder
+    // drains once and stages what it drained for `afterCommit`; see `TenantRealtime.recordLogical`.
+    const logical = this.#logicalRecorder?.(records.map((record) => record.txid)) ?? null
     const events: CommitEvent[] = []
-    for (const record of records) {
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i] as TxnRecordInput
+      const rows = logical?.[i]
+      if (rows) record.logical = rows
       const bytes = this.log.append(record)
       events.push({ txid: record.txid, record, bytes })
     }
@@ -2167,6 +2250,14 @@ function openConnection(
   const db = Database.open(dbPath, {
     busyTimeoutMs: options.busyTimeoutMs ?? 5000,
     wal: false,
+    // P7: the ceiling is per connection, so the writer and every pooled reader each get one of
+    // this size. Absent, the driver's own default of 64 applies and nothing changes.
+    ...(options.sqlite?.statementCache !== undefined
+      ? { statementCache: options.sqlite.statementCache }
+      : {}),
+    ...(options.statementCacheCounters !== undefined
+      ? { cacheCounters: options.statementCacheCounters }
+      : {}),
   })
   try {
     if (role.writer) {

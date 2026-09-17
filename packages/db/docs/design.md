@@ -9,10 +9,15 @@ eyes most. Section 2 is what was actually proven on real bits before writing any
 
 ---
 
-## 0. Status — phase 1 is built (2026-09-12)
+## 0. Status — phases 0 through 3 are built (2026-09-16)
 
-Everything in §11 phase 0 and phase 1 exists, is tested, and runs: `bun test` → 861 pass, 2 skip,
-0 fail across 62 files; `bun run typecheck` clean. The as-built API reference is `docs/api.md`
+**Phases 0, 1, 2, the surfaces track, the L track and phase 3 all exist, are tested, and run**, on
+macOS, Linux and Windows: `bun test` → 1563 pass, 2 skip, 0 fail across 138 files; `bun run
+typecheck`, `bytes`, `routes:check` and `pack:check` clean. Of phase 3's four items only one was
+built as written — the other three are settled below and in §11, and one of them is designed,
+costed and deliberately not built. `docs/next.md` is the handoff and `docs/plan-phase3.md` the plan
+of record. **The paragraphs below were written when phase 1 was the frontier and are kept for the
+shape of the argument; each one now says where it stands.** The as-built API reference is `docs/api.md`
 (every route, the Hrana surface, WS ops, SSE events, SDK/embedded/ORM/CLI surfaces, config keys,
 and a "differences from the design" list); measured numbers are in `docs/benchmarks.md`; each
 milestone's deviations are in `docs/m3-wal.md` … `docs/m8-e2e.md` (phase 0) and
@@ -45,24 +50,34 @@ replica costs 49 µs more than the same write on the primary; `ack: "replica"` c
 the Hrana pipeline costs under 1 µs more than the native route for the same statement; the S3
 shipper keeps up with 29k single-row commits a second against an in-process bucket.
 
-**Deferred to phase 2 (§5.3, §11).** The cluster: a Raft control plane, placement, leases,
-failover and `moved`, plus `POST /v1/db/{db}/promote`, `bunql promote`, `bunql cluster`, the
-`[cluster]` config section and `workers: N`. A replica cannot be promoted today, which is the one
-thing standing between phase 1 and HA: a primary that dies is recovered by pointing a new node at
-the bucket, not by electing one of its replicas. Also phase 2: replica apply mechanism A (§4.5),
-`BunQL.open({s3})` for the embedded engine, and forwarding admin routes from a replica.
+**Deferred to phase 2 (§5.3, §11) — and phase 2 has since been built; every item below shipped.**
+The cluster: a Raft control plane, placement, leases, failover and `moved`, plus
+`POST /v1/db/{db}/promote`, `bunql promote`, `bunql cluster`, the `[cluster]` config section and
+`workers: N`. **A replica can be promoted** — C2, `docs/c2-promotion.md`; the demotion is persisted,
+so an old primary restarted with no `--replica-of` still reads `BunQL-Role: replica` and refuses a
+write. Also built: replica apply mechanism A (§4.5, C5), `BunQL.open({s3})` for the embedded
+engine, and forwarding admin routes from a replica.
 
-**Deferred to phase 3.** WAL-decoded logical CDC, which is what would give a replica the row-level
-change feed it answers today with txids and an empty `changes` array; snapshot reads across
-requests over `sqlite3_snapshot`; per-tenant encryption at rest; a query-plan cache.
+**Phase 3, as run (§11).** Logical CDC shipped (`docs/p9-logical-cdc.md`): a replica's change feed
+carries rows when its primary records them, and refuses row subscriptions `501
+LOGICAL_UNAVAILABLE` when it does not, instead of the empty `changes` array it used to send — by a
+change to what the primary *records*, the WAL decoder this section used to name being refused
+rather than deferred. The **consistent read across requests** shipped as `POST /v1/db/{db}/read`
+over R10's read transaction, and `sqlite3_snapshot` was measured and refused
+(`docs/p8-read-sessions.md`). The **query-plan cache** was already built; what P7 found was a
+ceiling with no setting (`docs/p7-plan-cache.md`). **Per-tenant encryption at rest** is designed and
+costed but not built: `docs/p10-encryption.md`.
 
-**Notable as-built differences.** Replica apply ships mechanism B (§4.5), which rescans the WAL per
-apply. The change ring is in memory, so `Last-Event-ID` resumes gaplessly across a dropped
-connection but returns `reset` across a server restart. `schema` events reach WebSocket subscribers
-only. A replica's change feed carries txids with no rows. The Hrana surface does not forward
-writes from a replica. `lastInsertRowid` is exact as of phase 1: the prepared statement carries
-what SQLite's authorizer said about its program, so a rowid that repeats the connection's previous
-one is still reported and an upsert that updated is not.
+**Notable as-built differences.** Replica apply ships **mechanism A** (§4.5, C5) — the replica's
+`-wal` is always zero bytes and no reader rescans anything; B is the configured back-out and the
+automatic fallback where `xShmLock` cannot be reached. The change ring is in memory, so
+`Last-Event-ID` resumes gaplessly across a dropped connection but returns `reset` across a server
+restart — the last realtime gap, and newly fixable since L8 gave a position a key that survives a
+replay. `schema` events reach the SSE feed as well as the socket. A replica's change feed carries
+rows only when its primary records them (P9). The Hrana surface **does** forward writes from a
+replica (R4b), and serves `BEGIN TRANSACTION READONLY` on a pooled reader (R10). `lastInsertRowid` is exact as of phase 1: the
+prepared statement carries what SQLite's authorizer said about its program, so a rowid that repeats
+the connection's previous one is still reported and an upsert that updated is not.
 
 ## 1. Goals / non-goals
 
@@ -138,7 +153,10 @@ limit), but that table has no session/preupdate entries.
 | insert inside txn with JS `update_hook` firing | 0.23 µs | — |
 | single-row autocommit insert (WAL, sync=NORMAL) | 6.2 µs | 11.1 µs |
 
-Hook cost is ~50 ns per row. This is what makes "realtime driven by hooks" free.
+Hook cost is ~50 ns per row — **for the `update_hook` in the row above, which is the fallback
+engine.** The preupdate hook BunQL actually runs costs 250–350 ns a row, measured in
+`docs/performance.md` §11; it reads the values, which is what the change feed is for. Realtime
+driven by hooks is cheap, not free.
 
 ### 2.4 Transport and OS numbers (`experiments/bench.ts`, `experiments/misc.ts`)
 
@@ -342,7 +360,9 @@ chunked per event-loop tick and bounded by `streamTimeoutMs`, which is what boun
   hook by itself disables SQLite's truncate optimisation, so `DELETE FROM t` reports every row
   (verified in `test/sqlite/hooks.test.ts`); in the update-hook fallback mode the authorizer
   answers `SQLITE_IGNORE` to `SQLITE_DELETE` to get the same effect. Buffered per transaction,
-  published once with the txid after the record is durable. Cost ≈ 50 ns/row.
+  published once with the txid after the record is durable. Cost ≈ 250 ns/row at `pk` and
+  ≈ 350 ns/row at `row`, measured in `docs/performance.md` §11 — the ≈ 50 ns/row this line used to
+  claim is the *update* hook's cost, which is the fallback engine and reads no values.
 - **Live queries**: on subscribe, prepare the statement with the authorizer capturing every
   `SQLITE_READ (table, column)` → exact read-set, column-precise, no parsing. Each commit's
   write-set (tables, and changed columns when preupdate is on) is intersected with read-sets;
@@ -552,6 +572,13 @@ cannot set headers, so SSE routes also accept `?token=` (scoped read tokens only
 `idleTimeout` is capped at 255 s, so every SSE response calls `server.timeout(req, 0)` and keeps
 its own 15 s `: ping`. Bun.serve is HTTP/1.1 (no h2 server); SSE and WS are unaffected.
 
+**On a replica (P9).** The rows come from the primary's transaction records, which it writes only
+with `[replication] logicalChanges` set; the events then carry the same `(txid, seq)` and the same
+`changes` the primary published, because both are sliced once from one capture. Without it, a
+subscription asking for rows is refused `501 LOGICAL_UNAVAILABLE` rather than answered with an
+empty `changes` array a subscriber could not tell from "nothing changed"; `include=none` is still
+served. `docs/p9-logical-cdc.md`.
+
 Same feed without SSE, ElectricSQL-style long-poll for HTTP-only clients and CDNs:
 `GET /v1/db/acme/changes?since=4800&wait=30000` returns a JSON array of the same `change` objects
 plus `BunQL-Txid`; responses for a `since` in the past are immutable and cacheable, only the
@@ -759,7 +786,47 @@ bunql cluster status|join|leave
 | 0 (2 wks) | FFI driver + engine, registry, HTTP/WS/SSE, JSON codec, tokens, WAL tailer + log + snapshots + PITR (local), changes + live queries, CLI `serve/db/token`, embedded API | standalone product usable end to end |
 | 1 (2 wks) | replica streaming, bootstrap, forwarding, `ack` levels, RYW, S3 shipper/restore, Hrana compat, client SDK + Kysely/Drizzle, fork | primary/replica in production shape |
 | 2 (2 wks) | cluster: Raft control plane, placement, leases, failover, `moved`; `workers: N` (built, `docs/c4-workers.md`) | HA |
-| 3 | WAL-decoded logical CDC (row events on replicas without hooks), snapshot reads across requests (`sqlite3_snapshot`), per-tenant encryption at rest, query-plan cache | frontier extras |
+| 3 | logical CDC (row events on replicas without hooks) — **built** | frontier extras, and three of the four turned out not to be what this row thought they were |
+
+The **query-plan cache** this row used to name is struck rather than deferred: it is built
+(`Database.#cache`, an LRU of prepared statements with `SQLITE_PREPARE_PERSISTENT` already set),
+and sharing one across connections — the improvement the name implies — is impossible in SQLite
+rather than unbuilt. What P7 found instead was a ceiling with no setting and no metric: six tables
+take the data API's generated workload from a 100% hit rate to 0%, at 81x a hit per `prepare`.
+`[sqlite] statementCache` and `bunql_statement_cache_*` are the answer; `docs/p7-plan-cache.md` is
+the measurement.
+
+**"WAL-decoded"** has gone from this row's CDC bullet, and the words are the whole correction. The
+mechanism is built — a replica's change feed carries the same `RowChange[]` under the same
+`(txid, seq)` as its primary's, behind `[replication] logicalChanges` — but a WAL page decoder is
+not what does it, and could not have. A decoder sees one transaction's net page delta, which has no
+statement boundaries in it; group commit folds fifty writers into one transaction, so the primary
+emits fifty events for the one record the replica receives, and `seq` is which statement the event
+is. The primary records the rows it already captures instead. The decoder is **refused, not
+deferred**: `docs/p9-logical-cdc.md` §2 is the argument, and §5 records two places where the plan
+that commissioned it turned out to be wrong.
+
+**Snapshot reads across requests (`sqlite3_snapshot`)** is struck the same way, and for the
+opposite reason: the caller is real and the mechanism this row named is not the way to serve it.
+Measured, a snapshot handle is invalidated by every checkpoint mode including PASSIVE, and
+suppressing all checkpointing to keep one alive pins the WAL at exactly the same 12 304 KiB that
+simply holding a read transaction does — while being absent from every distribution libsqlite3 and
+wrong on a replica, where the page applier leaves no old page version for a snapshot to name. The
+consistent read is shipped on R10's read transaction instead, as `POST /v1/db/{db}/read`;
+`docs/p8-read-sessions.md` is the measurement and `experiments/snapshot.ts` reproduces it.
+
+**Per-tenant encryption at rest** is struck too, and it is the one that is a *cost* rather than a
+correction. A design exists that covers the whole path and keeps zero runtime dependencies — a
+page-encrypting VFS shim in C, compiled into the vendored artefact beside `scripts/native/walsum.c`,
+with the three components that bypass the VFS (the WAL tailer, the page applier, and the log and
+bucket that carry page images) sharing the key, and the rolling checksum folding ciphertext so a
+replica can still prove what it holds without one. It is a track rather than a milestone: a keyring,
+a rotation story that is a fork under a new key, a startup refusal on a distribution libsqlite3 that
+has no such VFS, and a Windows gate. `docs/p10-encryption.md` is the design and the price, and until
+somebody decides to pay it the honest answer for a deployment is full-disk encryption plus bucket
+SSE — which covers every path except the one where the operator is the adversary, and that is the
+only threat model a per-tenant key improves on, since a live node holds decrypted pages in SQLite's
+page cache either way.
 
 Tests: WAL codec property tests against SQLite's own files; a deterministic replication
 simulator (fault injection: dropped frames, restarts, stale epochs); Jepsen-style linearizability

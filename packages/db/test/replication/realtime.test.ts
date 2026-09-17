@@ -1,7 +1,12 @@
 // Realtime on a replica (`plan-phase1.md` finding 3). A replica has no preupdate hooks — its
 // transactions arrive as WAL frames — so its feed is driven by `applyRecord`: live queries re-run
-// and converge on the primary's state, and the change feed carries txids with an empty `changes`
-// array, which is the phase-1 limitation `docs/api.md` documents.
+// and converge on the primary's state without the replica ever being told which rows moved.
+//
+// P9 changed what the *change* feed does with that. It used to answer `changes: []`, which a
+// subscriber cannot tell from "nothing changed"; it now refuses row subscriptions outright unless
+// the primary records rows. `test/replication/logical.test.ts` covers the refusal and the feed it
+// refuses on behalf of; what is asserted here is the half that did not change — a subscription
+// that asks for no rows is served, and carries the txids.
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { WS_PROTOCOL } from "../../src/client/protocol.ts"
@@ -97,21 +102,23 @@ describe("replica realtime", () => {
     socket.close()
   })
 
-  test("the change feed on a replica carries txids with no rows", async () => {
+  test("a change feed that asks for no rows carries the txids", async () => {
     const primary = track(await startPrimary())
     await createDb(primary, "acme", SCHEMA)
     const replica = track(await startReplica(primary))
     await untilSynced(primary, replica, "acme")
 
     const socket = await socketOn(replica)
-    socket.send({ id: 1, op: "subscribe", kind: "changes", db: "acme" })
+    // `include: "none"` is the subscription P9 still serves on a replica whose primary records
+    // nothing: it promises a txid and no rows, and that is exactly what arrives. Anything above
+    // `none` is refused `LOGICAL_UNAVAILABLE` instead of being answered with an empty array.
+    socket.send({ id: 1, op: "subscribe", kind: "changes", db: "acme", include: "none" })
     await until(() => socket.frames.some((f) => f.id === 1 && f.ok), "the change subscription")
 
     const written = await query(primary, "acme", "insert into t (v) values ('row')")
     await until(() => socket.frames.some((f) => f.event === "change"), "a change event")
     const change = socket.frames.find((f) => f.event === "change") as Frame
     expect(change.data?.txid).toBe(written.txid)
-    // The phase-1 limitation, asserted so it cannot regress silently into a lie about the rows.
     expect(change.data?.changes).toEqual([])
     socket.close()
   })

@@ -574,6 +574,8 @@ export interface MetricsReply {
     pinned: number
     openRefused: number
     fsync: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
+    /** P7: this thread's connections. Disjoint shards, so all three sum. */
+    statementCache: { hits: number; misses: number; evictions: number }
   }
   /**
    * C4b: this worker's share of the replication figures. `connected` is not here — the router owns

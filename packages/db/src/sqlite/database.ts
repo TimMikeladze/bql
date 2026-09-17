@@ -59,6 +59,35 @@ export interface OpenOptions {
   busyTimeoutMs?: number
   /** Return every INTEGER as a bigint instead of narrowing safe values to numbers. */
   safeIntegers?: boolean
+  /**
+   * Distinct SQL texts `prepare()` keeps compiled on this connection. Default 64.
+   *
+   * The ceiling is a cliff rather than a slope: one text past it and every `prepare()` compiles
+   * and finalizes a victim instead of returning a `Map` hit, which measured 82x on this machine
+   * and 186x on a loaded one (`docs/p7-plan-cache.md`).
+   */
+  statementCache?: number
+  /**
+   * Where this connection reports its cache activity. Supply one object to several connections to
+   * get a total that survives them — which is what a registry does, so `bunql_statement_cache_*`
+   * does not go backwards when a tenant is evicted. Omitted, the connection keeps its own.
+   */
+  cacheCounters?: StatementCacheCounters
+}
+
+/**
+ * Statement-cache activity, counted per `prepare()`. `hits + misses` is every call; `evictions`
+ * is how many compiled statements the ceiling has finalized, and a non-zero and *rising* eviction
+ * count on a live connection is the thrash `[sqlite] statementCache` exists to raise.
+ *
+ * A hit here is a hit in *this* cache, not proof SQLite did not recompile: `sqlite3_set_authorizer`
+ * expires every statement on the connection, so a cached hit that has been expired still pays a
+ * compile inside `sqlite3_step`. `docs/p7-plan-cache.md` §4 has the number and where it bites.
+ */
+export interface StatementCacheCounters {
+  hits: number
+  misses: number
+  evictions: number
 }
 
 export type TransactionMode = "deferred" | "immediate" | "exclusive"
@@ -126,6 +155,7 @@ export interface ChangesetSession {
   enable(on: boolean): void
 }
 
+/** `OpenOptions.statementCache` when the caller does not say; `[sqlite] statementCache`'s default. */
 const CACHE_LIMIT = 64
 const SQLITE_CHANGESET_OMIT = 0
 const SQLITE_CHANGESET_REPLACE = 1
@@ -139,9 +169,13 @@ export class Database implements StatementHost {
   readonly safeIntegers: boolean
   readonly filename: string
 
+  /** Statement-cache activity; shared with the registry's total when one was supplied. */
+  readonly cacheCounters: StatementCacheCounters
+
   #handle: number
   #closed = false
   #cache = new Map<string, Statement>()
+  #cacheLimit: number
   #txDepth = 0
 
   // Retained so SQLite never holds a pointer to a collected callback.
@@ -168,11 +202,19 @@ export class Database implements StatementHost {
   #probeInserts = false
   #probeReadsRowid = false
 
-  private constructor(handle: number, filename: string, safeIntegers: boolean) {
+  private constructor(
+    handle: number,
+    filename: string,
+    safeIntegers: boolean,
+    cacheLimit: number,
+    counters: StatementCacheCounters,
+  ) {
     this.lib = sqlite()
     this.#handle = handle
     this.filename = filename
     this.safeIntegers = safeIntegers
+    this.#cacheLimit = cacheLimit
+    this.cacheCounters = counters
   }
 
   /** Opens (and by default creates) a database file. `":memory:"` is supported. */
@@ -195,7 +237,15 @@ export class Database implements StatementHost {
     }
     s.sqlite3_extended_result_codes(handle, 1)
 
-    const db = new Database(handle, path, options.safeIntegers === true)
+    const limit = options.statementCache
+    const db = new Database(
+      handle,
+      path,
+      options.safeIntegers === true,
+      // Zero and below would evict the statement `prepare` is about to return, so one is the floor.
+      limit === undefined ? CACHE_LIMIT : Math.max(1, Math.floor(limit)),
+      options.cacheCounters ?? { hits: 0, misses: 0, evictions: 0 },
+    )
     try {
       db.#installAuthorizer()
       db.busyTimeout(options.busyTimeoutMs ?? 5000)
@@ -281,8 +331,10 @@ export class Database implements StatementHost {
       // Refresh recency.
       this.#cache.delete(sql)
       this.#cache.set(sql, hit)
+      this.cacheCounters.hits++
       return hit
     }
+    this.cacheCounters.misses++
     this.#probing = true
     this.#probeInserts = false
     this.#probeReadsRowid = false
@@ -293,15 +345,26 @@ export class Database implements StatementHost {
       this.#probing = false
     }
     this.#cache.set(sql, stmt)
-    if (this.#cache.size > CACHE_LIMIT) {
+    if (this.#cache.size > this.#cacheLimit) {
       const oldest = this.#cache.keys().next()
       if (!oldest.done) {
         const victim = this.#cache.get(oldest.value)
         this.#cache.delete(oldest.value)
+        this.cacheCounters.evictions++
         victim?.finalize()
       }
     }
     return stmt
+  }
+
+  /** Distinct SQL texts this connection keeps compiled; `OpenOptions.statementCache`. */
+  get statementCacheLimit(): number {
+    return this.#cacheLimit
+  }
+
+  /** How many it is holding right now. At the limit, the next new text evicts. */
+  get statementCacheSize(): number {
+    return this.#cache.size
   }
 
   /** Alias for `prepare`, matching the bun:sqlite spelling. */

@@ -113,4 +113,33 @@ describe("serve flags", () => {
     })
     expect(suppressed.replication.secret).toBe("from-flag")
   })
+
+  test("[replication] logicalChanges is a level, from the file or the environment", () => {
+    // P9. The default's type is a boolean, so the generic `BUNQL_*` coercion would read "row" as
+    // "not true" and turn the feature off without saying so. Each spelling is pinned here because
+    // the failure it prevents is silent: a replica answering 501 for a primary that was configured.
+    expect(loadConfig({ env: {} }).replication.logicalChanges).toBe(false)
+    expect(
+      loadConfig({ env: {}, overrides: { replication: { logicalChanges: true } } }).replication
+        .logicalChanges,
+    ).toBe("row")
+    expect(
+      loadConfig({ env: {}, overrides: { replication: { logicalChanges: "pk" } } }).replication
+        .logicalChanges,
+    ).toBe("pk")
+    expect(
+      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "row+old" } }).replication
+        .logicalChanges,
+    ).toBe("row+old")
+    expect(
+      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "true" } }).replication.logicalChanges,
+    ).toBe("row")
+    expect(
+      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "false" } }).replication
+        .logicalChanges,
+    ).toBe(false)
+    expect(() =>
+      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "rows" } }),
+    ).toThrow("[replication] logicalChanges")
+  })
 })

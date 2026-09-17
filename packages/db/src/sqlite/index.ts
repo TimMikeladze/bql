@@ -12,6 +12,7 @@ export type {
   PreupdateAccessor,
   PreupdateHook,
   RollbackHook,
+  StatementCacheCounters,
   TransactionMode,
   UpdateHook,
   WalHook,

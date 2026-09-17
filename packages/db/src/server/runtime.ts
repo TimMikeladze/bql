@@ -43,6 +43,7 @@ import {
 } from "../realtime/index.ts"
 import type { Publisher } from "../realtime/index.ts"
 import type { Database } from "../sqlite/index.ts"
+import { RECORD_VERSION_LOGICAL } from "../wal/index.ts"
 import { parseRetentionMs, S3Store, ShipperPool } from "../storage/index.ts"
 import {
   type AckLevel,
@@ -309,6 +310,8 @@ export class ServerRuntime {
             heartbeatMs: options.config.replication.heartbeatMs,
             slowReplicaMs: options.config.replication.slowReplicaMs,
             hosted: this.replicationMode === "hosted",
+            // P9: every `SUBSCRIBED` tells the replica whether this node's records carry rows.
+            recordsLogical: options.config.replication.logicalChanges !== false,
             onForward: (request, node) => runForward(this, request, node),
             onDisconnect: (node) => this.rollbackOrigin(node),
             // C2's fencing signal: a peer subscribed claiming an epoch this node does not hold, so
@@ -595,6 +598,17 @@ export class ServerRuntime {
     } catch (err) {
       this.#onError(err)
     }
+    // P9: with `[replication] logicalChanges` on, every database this node owns must capture rows
+    // from its first write, whether or not anything local is watching — the record is the
+    // subscriber, and a database whose engine is created lazily on the first HTTP subscription
+    // would ship empty records until someone happened to subscribe.
+    if (this.config.replication.logicalChanges !== false && !tenant.isReplica) {
+      try {
+        this.realtimeFor(tenant)
+      } catch (err) {
+        this.#onError(err)
+      }
+    }
     try {
       this.storage?.attach(tenant)
     } catch (err) {
@@ -784,6 +798,18 @@ export class ServerRuntime {
     return this.#clients.get(url) ?? null
   }
 
+  /**
+   * P9: whether the primary this node follows `db` from announced that its records carry row
+   * changes. Every upstream is asked, not just `replica`, because C4c lets one node follow several
+   * and only one of them holds any given database.
+   */
+  recordsLogicalUpstream(db: string): boolean {
+    for (const client of this.#clients.values()) {
+      if (client.recordsLogical(db)) return true
+    }
+    return false
+  }
+
   /** Stops following `url` and forgets its client. The copies it bootstrapped are left alone. */
   dropUpstream(url: string): void {
     const client = this.#clients.get(url)
@@ -913,6 +939,8 @@ export class ServerRuntime {
   realtimeFor(tenant: Tenant): TenantRealtime {
     const existing = this.#realtime.get(tenant.name)
     if (existing) return existing
+    const configured = this.config.replication.logicalChanges
+    const logicalLevel: IncludeLevel | null = configured === false ? null : configured
     const realtime = new TenantRealtime({
       name: tenant.name,
       db: tenant.writer,
@@ -929,6 +957,17 @@ export class ServerRuntime {
       // when the truth is "I stopped looking".
       autoDisable: false,
       includeRows: "pk",
+      replica: tenant.isReplica,
+      // P9: two things can answer "can this feed carry rows" before a record arrives on it. The
+      // link is the better one — the primary says what it records, per database, on `SUBSCRIBED` —
+      // and the local log covers a replica that is up but not currently connected: the version of
+      // the last record it applied is what its primary was recording when it last spoke.
+      logicalSeen: () =>
+        this.recordsLogicalUpstream(tenant.name) ||
+        tenant.lastRecordVersion >= RECORD_VERSION_LOGICAL,
+      // P9: a replica records nothing — it publishes what it is sent. `logicalChanges` says what a
+      // node records for the databases it *owns*.
+      logicalChanges: tenant.isReplica ? null : logicalLevel,
       publisher: this.#publisher,
       onError: (id, error) => this.#onError(new Error(`live query ${id}: ${String(error)}`)),
     })
@@ -937,6 +976,11 @@ export class ServerRuntime {
     // now is unservable rather than "nothing happened".
     realtime.ring.seal(Number(tenant.txid))
     this.#realtime.set(tenant.name, realtime)
+    // P9: the record is the subscriber. The recorder drains the capture on the write path and
+    // stages what it drained for `afterCommit`, so the primary's own feed is untouched.
+    if (logicalLevel !== null && !tenant.isReplica) {
+      tenant.setLogicalRecorder((txids) => realtime.recordLogical(txids))
+    }
     // A replica has no preupdate hooks to drain — its transactions arrive as WAL frames through
     // `applyRecord` — so its realtime is driven by `afterApply`, which re-runs every live query
     // and emits a txid-only change event (`plan-phase1.md` finding 3).
@@ -945,7 +989,8 @@ export class ServerRuntime {
       tenant.name,
       tenant.onCommit((event) => {
         try {
-          if (replicaMode) realtime.afterApply(Number(event.txid))
+          // P9: `event.record.logical` is the row changes the primary recorded, when it did.
+          if (replicaMode) realtime.afterApply(Number(event.txid), event.record.logical ?? null)
           else realtime.afterCommit(Number(event.txid))
         } catch (err) {
           this.#onError(err)

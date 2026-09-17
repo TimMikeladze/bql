@@ -519,6 +519,7 @@ export class WorkerPool {
       pinned: 0,
       openRefused: 0,
       fsync: null,
+      statementCache: { hits: 0, misses: 0, evictions: 0 },
     }
     let replication: { lagTxid: number; records: number } | null = null
     let storage: StorageMetrics | null = null
@@ -534,6 +535,10 @@ export class WorkerPool {
               registry.writeQueueDepth += reply.registry.writeQueueDepth
               registry.pinned += reply.registry.pinned
               registry.openRefused += reply.registry.openRefused
+              // P7: disjoint shards hold disjoint connections, so all three add up.
+              registry.statementCache.hits += reply.registry.statementCache.hits
+              registry.statementCache.misses += reply.registry.statementCache.misses
+              registry.statementCache.evictions += reply.registry.statementCache.evictions
               // One sweep per thread, so the node's numbers are the sum of its threads' — except
               // the pass duration, which is a duration and takes the worst.
               if (reply.registry.fsync) {
@@ -879,6 +884,8 @@ export interface RegistryShare {
   openRefused: number
   /** This thread's fsync sweep, when it has one. Null on every thread means the node has none. */
   fsync: { total: number; lastDurationUs: number; pending: number; deferred: number } | null
+  /** Statement-cache activity on this thread's connections; disjoint shards, so it sums (P7). */
+  statementCache: { hits: number; misses: number; evictions: number }
 }
 
 /** One worker's answer to a `metrics` ask. */

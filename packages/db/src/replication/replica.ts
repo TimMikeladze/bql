@@ -34,7 +34,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { Tenant, TenantRegistry } from "../tenant/index.ts"
-import { ApplyBusy, decode, type TxnRecord } from "../wal/index.ts"
+import { ApplyBusy, decode, MAX_RECORD_VERSION, type TxnRecord } from "../wal/index.ts"
 import {
   ACK_FSYNCED,
   decodeJson,
@@ -338,6 +338,8 @@ export class ReplicaClient {
   #socket: ClientSocket | null = null
   #reader = new FrameReader()
   #streams = new Map<number, Stream>()
+  /** P9: databases whose primary announced that its records carry row changes. */
+  #logical = new Set<string>()
   #byDb = new Map<string, Stream>()
   /**
    * `db -> generation id` for every local copy this client holds, persisted beside the bootstrap
@@ -709,6 +711,16 @@ export class ReplicaClient {
   /** Databases this node has a stream for. */
   get followed(): string[] {
     return [...this.#byDb.keys()]
+  }
+
+  /**
+   * P9: whether this database's primary announced that its transaction records carry row changes.
+   * The local change feed asks before it refuses a subscription `LOGICAL_UNAVAILABLE`, so a replica
+   * that has just bootstrapped an idle database does not answer "unavailable" for a feed that is
+   * merely quiet.
+   */
+  recordsLogical(db: string): boolean {
+    return this.#logical.has(db)
   }
 
   /** What `GET /v1/db/:db/replication` and `/metrics` report on a replica. */
@@ -1150,6 +1162,10 @@ export class ReplicaClient {
           proto: PROTO_VERSION,
           node: this.node,
           proof: makeProof(this.secret, hello.nonce),
+          // P9: the primary strips the logical section from anything newer than this, so a build
+          // that cannot read version 2 keeps replicating rather than failing on a record it never
+          // asked for.
+          maxRecordVersion: MAX_RECORD_VERSION,
         } satisfies HelloBody),
       )
       return
@@ -1437,6 +1453,10 @@ export class ReplicaClient {
     const stream = this.#streams.get(body.stream)
     if (!stream) return
     stream.primaryTxid = big(body.txid)
+    // P9: what the primary says it records for this database, which is what the local change feed
+    // can promise before the first record has arrived.
+    if (body.logical === true) this.#logical.add(stream.db)
+    else this.#logical.delete(stream.db)
     const theirs = typeof body.generation === "string" && body.generation ? body.generation : null
     stream.generation = theirs
     if (!theirs) return

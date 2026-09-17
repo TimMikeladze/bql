@@ -51,6 +51,12 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // C4b lifted serving replicas, C4c lifted following an upstream, C4d lifted the cluster. A code
   // nothing can raise is a lie in the vocabulary, so it is gone rather than kept for symmetry.
   QUOTA_EXCEEDED: 507,
+  /**
+   * P9: row events were asked of a feed whose primary does not record them — a replica whose
+   * primary has `[replication] logicalChanges` off. 501 and not 400: the request is well formed
+   * and would be served on a primary; it is this node that cannot implement it.
+   */
+  LOGICAL_UNAVAILABLE: 501,
   INTERNAL: 500,
 }
 
