@@ -91,6 +91,7 @@
     "site:og": "bun run --filter 'bql-site' og",
     "prepack": "bun run --filter 'bql-bus' build:dashboard",
     "pack:check": "bun run scripts/pack-check.ts",
+    "pre:release": "bun install --frozen-lockfile && bun run db sqlite:build && bun run bytes && bun run typecheck && bun run db test && bun run bus test && bun run db routes:check && bun run pack:check",
     "release": "bumpp --commit --push --tag"
   },
   "peerDependencies": {

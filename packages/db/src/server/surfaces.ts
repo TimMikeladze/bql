@@ -54,9 +54,11 @@ import {
 } from "./exec.ts"
 import { dbName, type Handler, json, type RouteContext } from "./routes.ts"
 import { mapTenantError, type ServerRuntime } from "./runtime.ts"
+// The root manifest ships in the tarball, so the version has one source: what `bun run release` bumps.
+import manifest from "../../../../package.json" with { type: "json" }
 
 /** Published in the documents this module emits; `test/package/exports.test.ts` keeps it honest. */
-export const VERSION = "0.1.0"
+export const VERSION: string = manifest.version
 
 /** `api` + `/v1/db/:db` → `/v1/db/:db/api`, which is what `src/dataapi/` generates paths under. */
 export function apiPrefixOf(prefix: string): string {

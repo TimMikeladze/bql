@@ -3,12 +3,8 @@
 Published by hand; there is no release workflow. Run from a clean `main` that CI passed on.
 
 ```sh
-bun install --frozen-lockfile
-bun run db sqlite:build
-bun run bytes && bun run typecheck
-bun run db test && bun run bus test
-bun run db routes:check
-bun run pack:check          # tarball carries the dashboard, installs, runs `bql` and `bql bus`
+bun run pre:release         # frozen install, sqlite build, bytes, typecheck, db + bus tests,
+                            # routes:check, pack:check (packs, installs, runs `bql` and `bql bus`)
 
 npm publish --dry-run       # packing errors surface before anything uploads
 bun run release             # bumpp: pick the version, commit, tag v<version>, push both

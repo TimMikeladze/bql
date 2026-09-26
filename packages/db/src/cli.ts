@@ -24,8 +24,8 @@ import { SocketClient, defaultWebSocketFactory } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
 import { loadConfig, type ServerConfigInput } from "./server/config.ts"
 import { walChecksumIsNative } from "./wal/native.ts"
+import { VERSION } from "./server/surfaces.ts"
 
-const VERSION = "0.0.0"
 
 /** Set by `serve`, which is the one command that is still doing its job when `main` returns. */
 let serving = false
