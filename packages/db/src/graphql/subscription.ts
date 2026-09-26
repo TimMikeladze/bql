@@ -26,7 +26,7 @@ export interface ChangeFeedHost {
    *
    * The host is what enforces scope: `ro` on the database to subscribe at all, and `ro` on a table
    * before its rows may be carried (§5). A subscription must not be a way around the check
-   * `src/realtime/authorizer.ts` already applies to the `bunql.v1` socket.
+   * `src/realtime/authorizer.ts` already applies to the `bql.v1` socket.
    */
   open(
     db: string,

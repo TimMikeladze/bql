@@ -49,7 +49,7 @@ point-read target, which `bench/driver.ts` enforces itself.
 | recorded | 2026-09-12, end of phase 1 |
 
 Apple's system SQLite is built without the session and preupdate extensions, so a Homebrew build is
-what the realtime engine needs. `BUNQL_SQLITE_LIB` overrides the search.
+what the realtime engine needs. `BQL_SQLITE_LIB` overrides the search.
 
 ## Design §10 performance budget
 
@@ -118,7 +118,7 @@ Three things worth knowing about these:
 - **Hrana costs under a microsecond.** The compatibility layer decodes its own value encoding and
   opens and closes a stream per request; `@libsql/client` keeps a baton alive instead, which saves
   the close. Everything underneath is the same `exec.ts` the native route uses.
-- **The S3 numbers are against `test/storage/fake-s3.ts`**, in this process. They measure BunQL's
+- **The S3 numbers are against `test/storage/fake-s3.ts`**, in this process. They measure bql.sh's
   side — batching, the segment layout, the manifest write and `Bun.S3Client`'s request path — with
   the network taken out. A real bucket is slower and is a different question.
 
@@ -127,7 +127,7 @@ Three things worth knowing about these:
 The `bun:ffi` driver against `bun:sqlite` on the same file, same schema, same pragmas, 100 000
 rows. µs per operation.
 
-| op | bunql | bun:sqlite | speedup |
+| op | bql | bun:sqlite | speedup |
 |---|---|---|---|
 | point read by primary key → object | 0.77 | 1.77 | 2.30x |
 | point read, 3 columns | 0.82 | 1.78 | 2.19x |
@@ -154,7 +154,7 @@ replica position fsynced on every transaction. µs.
 Both of design §4.5's apply mechanisms, since C5 made `"pages"` (A) the default and kept `"wal"`
 (B) behind `[replication] apply`. `bun run bench/wal.ts each pages` and `… each wal`. The tail leg
 is the P3 figure — the frame checksum in C (`docs/p3-wal-checksum.md`); with
-`BUNQL_WAL_NATIVE=0` it is 10.3 µs rather than 5.3.
+`BQL_WAL_NATIVE=0` it is 10.3 µs rather than 5.3.
 
 | leg | A p50 | A p90 | A p99 | B p50 | B p90 | B p99 |
 |---|---|---|---|---|---|---|
@@ -167,7 +167,7 @@ is the P3 figure — the frame checksum in C (`docs/p3-wal-checksum.md`); with
 | replica read sees the row | **6.4** | 8.8 | 12.5 | 47.2 | 74.3 | 82.5 |
 | **end to end** | **210.8** | **270.5** | **413.8** | 290.8 | 364.6 | 489.0 |
 
-Records compress 4.8x: 923 bytes on the wire for 4 440 bytes of pages. Everything BunQL controls
+Records compress 4.8x: 923 bytes on the wire for 4 440 bytes of pages. Everything bql.sh controls
 costs about 40 µs a transaction; the rest is the fsync, and — under mechanism B — the wal-index
 rebuild it forces on the next replica reader. **Mechanism A takes that read leg from 47.2 µs to
 6.4, a 7.4x cut**, and takes 34 µs off the apply because there are no WAL frames to checksum.
@@ -216,7 +216,7 @@ long segment would push more than it retains.
 2 000 rounds of one-row transactions through the tenant owner — the whole design §4.3 write path,
 `BEGIN IMMEDIATE` → `COMMIT` → tail → record → log append → position save. µs.
 
-| leg | p50 | p90 | p99 | with `BUNQL_WAL_NATIVE=0` |
+| leg | p50 | p90 | p99 | with `BQL_WAL_NATIVE=0` |
 |---|---|---|---|---|
 | `write`, `ack: "local"` | **24.0** | 29.9 | 50.8 | 28.9 |
 | `write`, `ack: "fsync"` | 63.5 | 78.2 | 109.3 | 66.1 |

@@ -2,7 +2,7 @@
 import { dlopen, FFIType, ptr, CString, toArrayBuffer, JSCallback, read } from "bun:ffi";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
-const LIB = process.env.BUNQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib";
+const LIB = process.env.BQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib";
 const L = dlopen(LIB, {
   sqlite3_open_v2: { args: [FFIType.cstring, FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
   sqlite3_prepare_v3: { args: [FFIType.ptr, FFIType.cstring, FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },

@@ -18,8 +18,8 @@ Three sentences, because the third is the one that is new:
   carry over untouched and **no error code was added**, which §5 argues is the right outcome rather
   than a corner cut.
 - `docs/r10-read-transactions.md` §4 declined this surface because "the native surface's
-  consistent-read answer is `BunQL-Min-Txid`". **That is wrong, and this milestone overturns it.**
-  `BunQL-Min-Txid` (`src/server/exec.ts:262-263`) is a *floor* — "do not answer until the tenant has
+  consistent-read answer is `BQL-Min-Txid`". **That is wrong, and this milestone overturns it.**
+  `BQL-Min-Txid` (`src/server/exec.ts:262-263`) is a *floor* — "do not answer until the tenant has
   reached txid N" — so two reads that both satisfy it can see different databases, because the
   second sees everything that landed in between. A read session is a *point*. A floor is not a
   point, and no amount of the first adds up to the second.
@@ -48,7 +48,7 @@ A handle held outside a read transaction has no read mark, so SQLite does not kn
 and backfills straight over it. Keeping one alive means suppressing *all* checkpointing, by hand,
 for the session's lifetime.
 
-**And that buys nothing.** 3 000 writes, autocheckpoint off as a BunQL tenant has it:
+**And that buys nothing.** 3 000 writes, autocheckpoint off as a bql.sh tenant has it:
 
 | | isolation holds | WAL after 3 000 writes |
 |---|---|---|
@@ -69,7 +69,7 @@ The snapshot API buys one pooled reader connection — ~17 µs to open, and a ha
    transaction works there, and works *because* the lease makes the applier answer `ApplyBusy` and
    back off — which `test/server/read-session-replica.test.ts` now asserts directly.
 3. **It means hand-rolling read-mark protection**, in a node that would then have two mechanisms
-   pinning the WAL — SQLite's and BunQL's — that must agree. Getting that wrong is a torn read.
+   pinning the WAL — SQLite's and bql.sh's — that must agree. Getting that wrong is a torn read.
 4. **It would need its own bounds**, its own metric and its own expiry, duplicating `maxReadTx`,
    `readTxTimeoutMs` and `TX_BUSY`, which exist and are tested.
 
@@ -79,7 +79,7 @@ explanation read as unfinished work to the next person — which is the whole re
 has the shape it does.
 
 *(One thing the spike does not settle, recorded so nobody claims it was: whether a checkpoint policy
-aware of open read marks could let a snapshot outlive a PASSIVE pass. It could not without BunQL
+aware of open read marks could let a snapshot outlive a PASSIVE pass. It could not without bql.sh
 writing read marks into the wal-index for readers that do not exist, which is the same class of
 trick E2 spent a session undoing on Windows.)*
 
@@ -170,7 +170,7 @@ dangerous case behind a lock.
 The guard runs inside an `applyPolicy(...)` / `handle.release()` pair, and `release` calls
 `AuthorizerHub.setBase(null)`. For a token-authenticated principal that is a real
 `sqlite3_set_authorizer` call, which **expires every statement prepared on that connection** — so
-the execution that follows recompiles inside `sqlite3_step`. **BunQL's cache still records a hit**;
+the execution that follows recompiles inside `sqlite3_step`. **bql.sh's cache still records a hit**;
 the `Statement` comes back from `Database.#cache` untouched, and SQLite recompiles behind it
 anyway. That is `docs/p7-plan-cache.md` §4's finding, and an earlier draft of this section had it
 backwards.
@@ -272,7 +272,7 @@ says they do.
 ## 8. What contradicts the plan, and what it overturns
 
 **`docs/r10-read-transactions.md` §4 is now wrong** where it says the native surface needs no read
-mode because `BunQL-Min-Txid` is its answer. `docs/api.md`'s replica section repeated that sentence
+mode because `BQL-Min-Txid` is its answer. `docs/api.md`'s replica section repeated that sentence
 and has been corrected in place rather than deleted, because it is the contract this milestone
 changed. R10's reasoning was right about read-your-writes, which is what it was actually deciding;
 it was extended to a question it had not measured.

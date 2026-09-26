@@ -1179,17 +1179,17 @@ function renderMetrics(
   // not get them, for the same reason.
   if (only === undefined) {
     const sizes = store.sizes();
-    gauges.gauge("agenticbus.db_bytes", sizes.dbBytes);
-    gauges.gauge("agenticbus.wal_bytes", sizes.walBytes);
-    gauges.gauge("agenticbus.disk_free_bytes", sizes.freeBytes);
-    gauges.gauge("agenticbus.writable", store.capacity().ok ? 1 : 0);
+    gauges.gauge("bql-bus.db_bytes", sizes.dbBytes);
+    gauges.gauge("bql-bus.wal_bytes", sizes.walBytes);
+    gauges.gauge("bql-bus.disk_free_bytes", sizes.freeBytes);
+    gauges.gauge("bql-bus.writable", store.capacity().ok ? 1 : 0);
   }
   for (const workspace of store.workspaces()) {
     if (only !== undefined && workspace !== only) continue;
     const stats = store.stats(workspace);
-    gauges.gauge("agenticbus.messages", stats.messages, { workspace });
-    gauges.gauge("agenticbus.last_seq", stats.lastSeq, { workspace });
-    gauges.gauge("agenticbus.consumers", stats.consumers.length, { workspace });
+    gauges.gauge("bql-bus.messages", stats.messages, { workspace });
+    gauges.gauge("bql-bus.last_seq", stats.lastSeq, { workspace });
+    gauges.gauge("bql-bus.consumers", stats.consumers.length, { workspace });
     // Only where a quota exists. `usage` sums `body_bytes` across the
     // workspace's whole log, which is a full scan — worth paying to show a
     // tenant how close they are to a ceiling, not worth paying on every scrape
@@ -1197,24 +1197,24 @@ function renderMetrics(
     const quota = store.quota(workspace);
     if (quota.maxBytes > 0 || quota.maxMessages > 0) {
       const used = store.usage(workspace);
-      gauges.gauge("agenticbus.workspace.bytes", used.bytes, { workspace });
-      gauges.gauge("agenticbus.workspace.quota_bytes", quota.maxBytes, { workspace });
-      gauges.gauge("agenticbus.workspace.quota_messages", quota.maxMessages, {
+      gauges.gauge("bql-bus.workspace.bytes", used.bytes, { workspace });
+      gauges.gauge("bql-bus.workspace.quota_bytes", quota.maxBytes, { workspace });
+      gauges.gauge("bql-bus.workspace.quota_messages", quota.maxMessages, {
         workspace,
       });
     }
     gauges.gauge(
-      "agenticbus.consumers_live",
+      "bql-bus.consumers_live",
       stats.consumers.filter((c) => !c.paused && stats.now - c.lastSeen < 60_000)
         .length,
       { workspace },
     );
     for (const subscription of stats.subscriptions) {
       const tags = { workspace, subscription: subscription.name };
-      gauges.gauge("agenticbus.subscription.lag", subscription.lag, tags);
-      gauges.gauge("agenticbus.subscription.paused", subscription.paused ? 1 : 0, tags);
+      gauges.gauge("bql-bus.subscription.lag", subscription.lag, tags);
+      gauges.gauge("bql-bus.subscription.paused", subscription.paused ? 1 : 0, tags);
       for (const status of ["pending", "leased", "acked", "dead", "cancelled"] as const)
-        gauges.gauge("agenticbus.subscription.deliveries", subscription[status], {
+        gauges.gauge("bql-bus.subscription.deliveries", subscription[status], {
           ...tags,
           status,
         });

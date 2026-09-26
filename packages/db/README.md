@@ -1,4 +1,4 @@
-# BunQL
+# bql.sh
 
 SQLite as a multi-tenant database server for Bun. Thousands of small databases in one process,
 their WAL frames streamed to replicas over a socket, backed up continuously to any S3-compatible
@@ -10,7 +10,8 @@ The engine is a `bun:ffi` driver over a shared libsqlite3. It matches or beats `
 every operation the benchmark measures, and exposes what `bun:sqlite` does not: hooks, the
 authorizer, query cancellation, per-connection limits, session changesets.
 
-Zero runtime dependencies.
+Zero runtime dependencies. It publishes as `bql.sh` — this tree is the database half of that one
+package, and [`packages/bus`](../bus) is the bus half, under `bql.sh/bus`.
 
 [**docs/api.md**](docs/api.md) is the API as built — every route, the Hrana surface, the WebSocket
 protocol, the SSE formats, the SDKs, the CLI, every config key.
@@ -23,38 +24,39 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | 0 | engine, tenancy, HTTP/WS/SSE, tokens, WAL log, snapshots, PITR, realtime, client, embedded, CLI | built |
 | 1 | replica streaming and bootstrap, write forwarding, `ack` levels, read-your-writes across nodes, S3 shipper and restore, Hrana, Kysely and Drizzle | built |
 | 2 | Raft control plane, per-database leases, promotion and failover, placement, replica apply mechanism A, `workers: N`, packaging and CI | built |
-| — | one operation model rendered as REST + OpenAPI + GraphQL (`@bunql/db/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
+| — | one operation model rendered as REST + OpenAPI + GraphQL (`bql.sh/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
 1496 tests across 125 files, gating on macOS (arm64), Linux (x64) and Windows (x64).
 
 ## Install
 
-BunQL needs **Bun 1.4 or newer** and a C compiler — the compiler once, to build the libsqlite3 the
+bql.sh needs **Bun 1.4 or newer** and a C compiler — the compiler once, to build the libsqlite3 the
 driver loads (see [The driver](#the-driver) for why a system one will not do).
 
-The package is `@bunql/db`. It is **not on npm yet**; until the first release, use it from a clone:
+The package is `bql.sh`. It is **not on npm yet**; until the first release, use it from a clone:
 
 ```sh
-git clone https://github.com/TimMikeladze/bunql && cd bunql
+git clone https://github.com/TimMikeladze/bql && cd bql
 bun install
 bun run db sqlite:build     # once per machine → packages/db/vendor/sqlite/libsqlite3.{dylib,so,dll}
 bun run db test             # optional, and the fastest way to know the build is good
 ```
 
-BunQL is one of two packages in this repository — [`@bunql/bus`](../bus) is the other, and
-[docs/monorepo.md](../../docs/monorepo.md) is why. `bun run db <script>` forwards from the root to
-this package; from inside `packages/db`, every script still runs by its own name.
+This tree is the database half of one package, `bql.sh` — [`packages/bus`](../bus) is the bus half,
+under `bql.sh/bus`, and [docs/monorepo.md](../../docs/monorepo.md) is why they ship together. `bun run
+db <script>` forwards from the root to this tree; from inside `packages/db`, every script still runs
+by its own name.
 
-Once published, `bun add @bunql/db`, then build the engine **by path**:
+Once published, `bun add bql.sh`, then build the engine **by path**:
 
 ```sh
-bun run node_modules/@bunql/db/scripts/sqlite.ts
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
 ```
 
 `npm run` cannot reach a dependency's own scripts, so `bun run sqlite:build` in your project would
 look for a script of yours by that name and find none — the path above is the contract. CI proves
-it on the real tarball on every push (`bun run db pack:check`, `docs/l7-tarball.md`).
+it on the real tarball on every push (`bun run pack:check`, `docs/l7-tarball.md`).
 
 ## Getting started
 
@@ -63,10 +65,10 @@ Start a server. The first start generates an admin key and an Ed25519 signing ke
 
 ```sh
 bun start                   # or: bun run src/cli.ts serve --dir ./data --port 4321
-# bunql: generated an admin key and wrote it to ./data/keys.json
-# bunql: admin key: <43 url-safe base64 characters, printed this once and never again>
-# bunql http://localhost:4321  node=bunql-f22305a8  data=./data
-# bunql: 0 database(s), maxOpen 1024, ack fsync
+# bql: generated an admin key and wrote it to ./data/keys.json
+# bql: admin key: <43 url-safe base64 characters, printed this once and never again>
+# bql http://localhost:4321  node=bql-f22305a8  data=./data
+# bql: 0 database(s), maxOpen 1024, ack fsync
 ```
 
 Create a database and write to it. Every response carries the `txid` the write landed in.
@@ -121,7 +123,7 @@ statement's metadata, subscriptions that are both emitters and async iterables. 
 and Workers — no Bun or Node imports in it.
 
 ```ts
-import { createClient } from "@bunql/db/client"
+import { createClient } from "bql.sh/client"
 
 const client = createClient({ url: "http://localhost:4321", token })   // token, or the admin key
 const db = client.db("acme")
@@ -168,7 +170,7 @@ and promotion, the backup bucket, tokens. It needs the admin key, and it is buil
 a browser that only queries never constructs it.
 
 `consistency: "ryw"` (the default) remembers the highest txid it has seen per database and sends it
-as `BunQL-Min-Txid`, so a read never goes backwards. `intMode: "bigint" | "string"` decides what an
+as `BQL-Min-Txid`, so a read never goes backwards. `intMode: "bigint" | "string"` decides what an
 integer beyond 2^53 becomes; the default refuses to round it. A write answered `307` or
 `NOT_PRIMARY` is retried once against the node the answer names — and nothing else is retried, see
 [docs/c2-promotion.md](docs/c2-promotion.md#retrying-a-write--the-sharp-edge).
@@ -179,9 +181,9 @@ The same engine in your own process — no server, no socket, no HTTP. `bq.serve
 in front of it later without changing a line of the code above it.
 
 ```ts
-import { BunQL } from "@bunql/db"
+import { Bql } from "bql.sh"
 
-const bq = await BunQL.open({ dir: "./data" })
+const bq = await Bql.open({ dir: "./data" })
 const db = await bq.create("acme")                   // or bq.db("acme") for one that exists
 
 await db.sql`create table todos(id integer primary key, title text)`.run()
@@ -203,19 +205,19 @@ store is built.
 
 ## ORMs
 
-`@bunql/db/kysely` is a Kysely dialect, `@bunql/db/drizzle` a Drizzle driver. Both take a client `Db`, an
+`bql.sh/kysely` is a Kysely dialect, `bql.sh/drizzle` a Drizzle driver. Both take a client `Db`, an
 embedded `Db`, or `{url, token, db}`. `kysely` and `drizzle-orm` are optional peers.
 
 ```ts
 import { Kysely, type Generated } from "kysely"
-import { BunQLDialect } from "@bunql/db/kysely"
+import { BqlDialect } from "bql.sh/kysely"
 
 interface Database {
   todos: { id: Generated<number>; title: string; done: Generated<number> }
 }
 
 const db = new Kysely<Database>({
-  dialect: new BunQLDialect({ url: "http://localhost:4321", token, db: "acme" }),
+  dialect: new BqlDialect({ url: "http://localhost:4321", token, db: "acme" }),
 })
 
 const written = await db
@@ -224,7 +226,7 @@ const written = await db
   .returningAll()
   .executeTakeFirstOrThrow()
 
-await db.transaction().execute(async (trx) => {        // one BunQL transaction, not a loose begin
+await db.transaction().execute(async (trx) => {        // one bql.sh transaction, not a loose begin
   await trx.updateTable("todos").set({ done: 1 }).where("id", "=", written.id).execute()
 })
 ```
@@ -232,7 +234,7 @@ await db.transaction().execute(async (trx) => {        // one BunQL transaction,
 ```ts
 import { eq } from "drizzle-orm"
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { drizzle } from "@bunql/db/drizzle"
+import { drizzle } from "bql.sh/drizzle"
 
 const todos = sqliteTable("todos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -248,9 +250,9 @@ await db.transaction(async (tx) => {
 })
 ```
 
-Transactions, savepoints, `db.batch()` and both migrators run on BunQL's own transaction and batch
+Transactions, savepoints, `db.batch()` and both migrators run on bql.sh's own transaction and batch
 routes rather than on `begin`/`commit` sent as loose statements. Streaming is not implemented —
-BunQL answers with whole result sets, so Kysely's `.stream()` says so.
+bql.sh answers with whole result sets, so Kysely's `.stream()` says so.
 [docs/r5-orm.md](docs/r5-orm.md) has the mapping and every limitation.
 
 ## A primary and a replica
@@ -264,7 +266,7 @@ bun run src/cli.ts serve --dir ./p --port 4501 --admin-key $KEY --cluster-secret
 bun run src/cli.ts serve --dir ./r --port 4502 --admin-key $KEY --cluster-secret $SECRET \
     --replica-of ws://127.0.0.1:4501/v1/replication
 
-BUNQL_TOKEN=$KEY BUNQL_URL=http://127.0.0.1:4501 bun run src/cli.ts db create acme
+BQL_TOKEN=$KEY BQL_URL=http://127.0.0.1:4501 bun run src/cli.ts db create acme
 ```
 
 A write sent to the **replica** comes back with the primary's txid, already applied locally:
@@ -273,9 +275,9 @@ A write sent to the **replica** comes back with the primary's txid, already appl
 curl -sD- -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
      -d '{"sql":"insert into notes (body) values (@1)","args":["through the replica"]}' \
      http://127.0.0.1:4502/v1/db/acme/query
-# BunQL-Role: replica
-# BunQL-Primary: ws://127.0.0.1:4501/v1/replication
-# BunQL-Txid: 2
+# BQL-Role: replica
+# BQL-Primary: ws://127.0.0.1:4501/v1/replication
+# BQL-Txid: 2
 
 curl -s -H "authorization: Bearer $KEY" http://127.0.0.1:4502/v1/db/acme/replication
 # {"role":"replica","connected":true,"applied":2,"lagTxid":0,"bootstrapping":false,...}
@@ -302,10 +304,10 @@ waits for a majority. Per request, per node default, or a header.
 
 A replica becomes the primary for one database. The old primary is fenced by an epoch it no longer
 holds, and the demotion is persisted — a node restarted with no `--replica-of` at all still reads
-`BunQL-Role: replica` and refuses writes.
+`BQL-Role: replica` and refuses writes.
 
 ```sh
-bunql promote acme --url http://127.0.0.1:4502        # addresses the candidate, not the cluster
+bql promote acme --url http://127.0.0.1:4502        # addresses the candidate, not the cluster
 # acme promoted on http://127.0.0.1:4502: epoch 4, txid 918
 # n2 takes acme at epoch 4, fencing n1
 ```
@@ -313,7 +315,7 @@ bunql promote acme --url http://127.0.0.1:4502        # addresses the candidate,
 Promotion is refused rather than risked: `NO_COPY`, `GENERATION_MISMATCH`, `STREAM_LIVE`,
 `ALREADY_PRIMARY`, `BEHIND`, `LEASE_HELD`. `--force` overrides exactly three of them —
 `STREAM_LIVE`, `LEASE_HELD`, `BEHIND` — and nothing else. Clients see `307` + `Location` where the
-node knows the new primary's HTTP base, `503 NOT_PRIMARY` + `BunQL-Primary` where it knows only a
+node knows the new primary's HTTP base, `503 NOT_PRIMARY` + `BQL-Primary` where it knows only a
 replication URL, and a `moved` frame on a WebSocket.
 
 The default `ack` is `"fsync"`, so a write is on the primary's disk before it is answered. That
@@ -334,7 +336,7 @@ bun run src/cli.ts serve --dir ./n1 --port 4321 --cluster-secret $SECRET \
     --cluster-peers n1=ws://10.0.0.1:4321,n2=ws://10.0.0.2:4321,n3=ws://10.0.0.3:4321 \
     --advertise ws://10.0.0.1:4321 --zone us-east-1a
 
-bunql cluster --watch
+bql cluster --watch
 ```
 
 ```toml
@@ -369,13 +371,13 @@ unreachable bucket makes the node report `behind` while writes are answered at t
 and it catches up from the local log.
 
 ```sh
-export BUNQL_S3_ACCESS_KEY_ID=… BUNQL_S3_SECRET_ACCESS_KEY=…
+export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…
 bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
 
-bunql backup status acme
+bql backup status acme
 # acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)
 
-bunql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+bql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
 ```
 
 The restore runs on a node that has never seen the database: it reads the manifest, downloads the
@@ -385,33 +387,33 @@ loudly. The bucket layout is a documented contract ([docs/r3-storage.md](docs/r3
 
 ## The CLI
 
-`bunql` is the package's `bin`. From a clone, `bun run src/cli.ts <command>` is the same thing, or
-`bun link` once to put `bunql` on your `PATH`.
+`bql` is the package's `bin`. From a clone, `bun run src/cli.ts <command>` is the same thing, or
+`bun link` once to put `bql` on your `PATH`.
 
 ```sh
-bunql serve --dir ./data --port 4321
-bunql serve --dir ./r --replica-of ws://primary:4321/v1/replication --cluster-secret $SECRET
-bunql serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
-bunql db create acme                          # also: list, stat, delete, fork
-bunql db fork acme-copy --from acme@4812      # a txid, or @2026-09-11T10:00:00Z
-bunql snapshot acme
-bunql restore acme --at 2026-09-11T10:00:00Z --into acme-recovered
-bunql backup status acme                      # also: verify, generations
-bunql checkpoint acme --mode TRUNCATE
-bunql promote acme [--force]
-bunql cluster [--watch]
-bunql token --db acme --scope ro --ttl 30d --tables 'todos:r'
-bunql exec acme --sql "select 1"
-bunql shell acme                              # a REPL over the WebSocket protocol
+bql serve --dir ./data --port 4321
+bql serve --dir ./r --replica-of ws://primary:4321/v1/replication --cluster-secret $SECRET
+bql serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
+bql db create acme                          # also: list, stat, delete, fork
+bql db fork acme-copy --from acme@4812      # a txid, or @2026-09-11T10:00:00Z
+bql snapshot acme
+bql restore acme --at 2026-09-11T10:00:00Z --into acme-recovered
+bql backup status acme                      # also: verify, generations
+bql checkpoint acme --mode TRUNCATE
+bql promote acme [--force]
+bql cluster [--watch]
+bql token --db acme --scope ro --ttl 30d --tables 'todos:r'
+bql exec acme --sql "select 1"
+bql shell acme                              # a REPL over the WebSocket protocol
 ```
 
-Every command but `serve` talks to a running server: `--url` (or `$BUNQL_URL`) and `--token` (or
-`$BUNQL_TOKEN`, else `$BUNQL_ADMIN_KEY`). `--json` prints the server's own body.
+Every command but `serve` talks to a running server: `--url` (or `$BQL_URL`) and `--token` (or
+`$BQL_TOKEN`, else `$BQL_ADMIN_KEY`). `--json` prints the server's own body.
 
-Configuration is `bunql.toml` in the working directory, then `BUNQL_*` in the environment. Every
-key has an override named after its section and its key — `BUNQL_DATA_DIR`, `BUNQL_SERVER_PORT`,
-`BUNQL_LIMITS_QUERY_TIMEOUT_MS` — plus the short forms `BUNQL_DIR`, `BUNQL_PORT`,
-`BUNQL_ADMIN_KEY`. Every key and its default is in [docs/api.md](docs/api.md#configuration).
+Configuration is `bql.toml` in the working directory, then `BQL_*` in the environment. Every
+key has an override named after its section and its key — `BQL_DATA_DIR`, `BQL_SERVER_PORT`,
+`BQL_LIMITS_QUERY_TIMEOUT_MS` — plus the short forms `BQL_DIR`, `BQL_PORT`,
+`BQL_ADMIN_KEY`. Every key and its default is in [docs/api.md](docs/api.md#configuration).
 
 ## Generated REST, OpenAPI and GraphQL
 
@@ -422,7 +424,7 @@ introspects a tenant's own tables into such a registry; `src/graphql/` generates
 schema from the OpenAPI document, resolving in-process through the same dispatcher.
 
 ```ts
-import { DataApiCache } from "@bunql/db/dataapi"
+import { DataApiCache } from "bql.sh/dataapi"
 
 const cache = new DataApiCache({ defaultLimit: 100, maxLimit: 1000 })
 const { schema, registry } = await cache.for("acme", exec)   // exec closes over src/server/exec.ts
@@ -434,8 +436,8 @@ deadline, the row cap, the quota, the txid, the ack level and write forwarding a
 `src/server/exec.ts` rather than reimplemented. `graphql` and `openapi-x-graphql` are optional
 peers, loaded through `import()` at the first request that needs a schema.
 
-The package publishes them as `@bunql/db/core`, `@bunql/db/http`, `@bunql/db/openapi`, `@bunql/db/dataapi` and
-`@bunql/db/graphql`, and the server mounts all three surfaces:
+The package publishes them as `bql.sh/core`, `bql.sh/http`, `bql.sh/openapi`, `bql.sh/dataapi` and
+`bql.sh/graphql`, and the server mounts all three surfaces:
 
 ```http
 GET    /v1/db/acme/api/users?name=like.ann*&order=name.asc&limit=20
@@ -457,7 +459,7 @@ change feed are H7 in [docs/plan-surfaces.md](docs/plan-surfaces.md).
 ## The driver
 
 ```ts
-import { Database } from "@bunql/db/sqlite"
+import { Database } from "bql.sh/sqlite"
 
 const db = Database.open("app.db")
 db.exec("create table t(id integer primary key, v text)")
@@ -476,7 +478,7 @@ bun run sqlite:build          # needs a C compiler; writes vendor/sqlite/libsqli
 
 That fetches a hash-pinned SQLite 3.53.4 amalgamation, compiles it with the flags the driver
 resolves symbols against, verifies the result, and is then found automatically. Failing that, the
-library comes from `BUNQL_SQLITE_LIB`, else the usual Homebrew and Linux paths. Homebrew's build
+library comes from `BQL_SQLITE_LIB`, else the usual Homebrew and Linux paths. Homebrew's build
 qualifies and Debian's and Ubuntu's do; no distro build carries `sqlite3_snapshot_*`.
 
 Apple's `/usr/lib/libsqlite3.dylib` is the one to avoid, and not for the reason it looks like:
@@ -490,12 +492,12 @@ dirty pages reach the `-wal` at different moments and six WAL and snapshot tests
 
 `src/wal` reads committed transactions out of a primary's `-wal`, turns each into a self-verifying
 record, keeps them in a segment log, and applies them to a replica. No triggers, no logical
-replication, no `_bunql` bookkeeping table: the pages SQLite wrote are the pages the replica gets.
+replication, no `_bql` bookkeeping table: the pages SQLite wrote are the pages the replica gets.
 Snapshots, point-in-time restore and O(1) forks are built on the same log.
 
 ```ts
-import { Database } from "@bunql/db/sqlite"
-import { computeFull, decode, TxnLog, TxnRecorder, WalApplier } from "@bunql/db/wal"
+import { Database } from "bql.sh/sqlite"
+import { computeFull, decode, TxnLog, TxnRecorder, WalApplier } from "bql.sh/wal"
 
 const db = Database.open("primary/main.db")
 db.exec("pragma wal_autocheckpoint = 0")            // we own checkpoints
@@ -531,7 +533,7 @@ Byte layouts are in [docs/m3-wal.md](docs/m3-wal.md).
 [docs/performance.md §8](docs/performance.md) for how much a busy machine moves an absolute number
 here, and [docs/benchmarks.md](docs/benchmarks.md) for one coherent run's worth of them.
 
-| op | bunql vs `bun:sqlite` |
+| op | bql vs `bun:sqlite` |
 |---|---|
 | point read by primary key | 1.02 – 1.14x |
 | 100-row scan to objects | 1.17 – 1.39x |
@@ -573,7 +575,7 @@ to do about each ceiling.
 
 ```sh
 bun run sqlite:build  # the libsqlite3 everything below runs on; once per machine
-bun test              # 1496 across 125 files; BUNQL_WAL_NATIVE=0 proves the JavaScript fallback
+bun test              # 1496 across 125 files; BQL_WAL_NATIVE=0 proves the JavaScript fallback
 bun run typecheck
 bun run bytes         # no raw control bytes in source
 bun run routes:check  # docs/api.md covers every route

@@ -23,7 +23,7 @@ function trashed(dir: string, name: string, at: number, bytes = 0): string {
 
 describe("trash sweep", () => {
   test("removes what is past the retention and keeps what is not", () => {
-    const dir = tempDir("bunql-trash-")
+    const dir = tempDir("bql-trash-")
     const now = 1_800_000_000_000
     const old = trashed(dir, "acme", now - 8 * DAY, 4096)
     const recent = trashed(dir, "beta", now - 1 * DAY, 4096)
@@ -37,7 +37,7 @@ describe("trash sweep", () => {
   })
 
   test("leaves an entry whose name carries no timestamp alone", () => {
-    const dir = tempDir("bunql-trash-")
+    const dir = tempDir("bql-trash-")
     const now = 1_800_000_000_000
     // Three shapes the sweep must not guess at, all older than any retention would allow.
     const root = trashDir(dir)
@@ -56,7 +56,7 @@ describe("trash sweep", () => {
   })
 
   test("retentionMs <= 0 keeps everything, and an empty trash is not a failure", () => {
-    const dir = tempDir("bunql-trash-")
+    const dir = tempDir("bql-trash-")
     const now = 1_800_000_000_000
     const ancient = trashed(dir, "acme", now - 3650 * DAY, 512)
 
@@ -66,11 +66,11 @@ describe("trash sweep", () => {
     }
 
     // A node that has never deleted anything has no trash directory at all.
-    expect(sweepTrash(tempDir("bunql-trash-"), 7 * DAY, now)).toEqual({ removed: [], bytes: 0 })
+    expect(sweepTrash(tempDir("bql-trash-"), 7 * DAY, now)).toEqual({ removed: [], bytes: 0 })
   })
 
   test("sweeps what the registry actually trashed", async () => {
-    const dir = tempDir("bunql-trash-")
+    const dir = tempDir("bql-trash-")
     const reg = TenantRegistry.open({ dir })
     const tenant = await reg.create("acme")
     tenant.write((db) => db.exec("create table t(v integer)"))

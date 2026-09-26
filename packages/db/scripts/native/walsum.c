@@ -1,5 +1,5 @@
 /*
-** SQLite's WAL frame checksum, in C, for BunQL's WAL tailer.
+** SQLite's WAL frame checksum, in C, for bql.sh's WAL tailer.
 **
 ** Why this file exists: the same loop in JavaScript costs 4.79 µs for a 4 KiB page and is 71% of
 ** a `WalTailer.poll()`; here it is a few dozen vector loads. Four ways of writing it in JS were
@@ -7,7 +7,7 @@
 ** same artefact as the amalgamation so that there is one library, one dlopen and one capability
 ** check.
 **
-** The second thing here is `bunql_db_config_int`, a three-line non-variadic shim over
+** The second thing here is `bql_db_config_int`, a three-line non-variadic shim over
 ** `sqlite3_db_config`. `SQLITE_DBCONFIG_DEFENSIVE` has no pragma and is reachable only through
 ** that variadic function, which bun:ffi cannot express — declaring it fixed-arity was *tried* and
 ** fails three ways, because on arm64 a variadic argument goes on the stack where a fixed one goes
@@ -36,8 +36,8 @@
 ** beside this file. Everywhere else a shared object exports every non-static symbol and this is
 ** nothing at all.
 */
-#ifndef BUNQL_API
-#define BUNQL_API
+#ifndef BQL_API
+#define BQL_API
 #endif
 
 /* Declared rather than included: this file is compiled beside the amalgamation, which defines
@@ -53,7 +53,7 @@ extern int sqlite3_db_config(struct sqlite3 *, int op, ...);
 ** -1 to leave unchanged and only read back; `*out` receives the setting as it stands afterwards,
 ** which is how the caller learns whether the build honoured it at all.
 */
-BUNQL_API int bunql_db_config_int(struct sqlite3 *db, int op, int v, int *out) {
+BQL_API int bql_db_config_int(struct sqlite3 *db, int op, int v, int *out) {
   int settled = 0;
   int rc = sqlite3_db_config(db, op, v, &settled);
   if (out) *out = settled;
@@ -64,7 +64,7 @@ BUNQL_API int bunql_db_config_int(struct sqlite3 *db, int op, int v, int *out) {
 ** of 8: SQLite only ever checksums the 8-byte frame prefix, the 24-byte header prefix, and whole
 ** pages. The source is read through memcpy rather than a cast, so an unaligned frame buffer is
 ** defined behaviour rather than merely one that happens to work on this architecture. */
-static void bunql_sum(const uint8_t *a, uint32_t n, int native, uint32_t *s0io, uint32_t *s1io) {
+static void bql_sum(const uint8_t *a, uint32_t n, int native, uint32_t *s0io, uint32_t *s1io) {
   uint32_t s0 = *s0io;
   uint32_t s1 = *s1io;
   uint32_t w0, w1;
@@ -89,8 +89,8 @@ static void bunql_sum(const uint8_t *a, uint32_t n, int native, uint32_t *s0io, 
 }
 
 /* Continues the chain over `n` bytes. io[0] and io[1] are the chain, in and out. */
-BUNQL_API void bunql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io) {
-  bunql_sum(a, n, native, &io[0], &io[1]);
+BQL_API void bql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io) {
+  bql_sum(a, n, native, &io[0], &io[1]);
 }
 
 /* One whole frame: salts, page number, and the chain continued over the 8-byte prefix and then
@@ -102,7 +102,7 @@ BUNQL_API void bunql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint
 **
 ** On an invalid frame the chain is returned unadvanced, as the JavaScript does, so a caller that
 ** ignores `out[0]` cannot silently walk past a torn tail. */
-BUNQL_API void bunql_wal_check_frame(const uint8_t *frame, uint32_t pageSize, uint32_t salt1, uint32_t salt2,
+BQL_API void bql_wal_check_frame(const uint8_t *frame, uint32_t pageSize, uint32_t salt1, uint32_t salt2,
                            uint32_t s0, uint32_t s1, int native, uint32_t *out) {
   /* Every field of a frame header is big-endian, whatever the checksum word order is. */
   uint32_t pgno = ((uint32_t)frame[0] << 24) | ((uint32_t)frame[1] << 16) |
@@ -126,8 +126,8 @@ BUNQL_API void bunql_wal_check_frame(const uint8_t *frame, uint32_t pageSize, ui
     out[4] = s1;
     return;
   }
-  bunql_sum(frame, 8, native, &s0, &s1);
-  bunql_sum(frame + 24, pageSize, native, &s0, &s1);
+  bql_sum(frame, 8, native, &s0, &s1);
+  bql_sum(frame + 24, pageSize, native, &s0, &s1);
   out[0] = (c0 == s0 && c1 == s1) ? 1u : 0u;
   out[3] = s0;
   out[4] = s1;

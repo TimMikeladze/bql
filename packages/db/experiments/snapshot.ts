@@ -26,7 +26,7 @@ if (!lib.snapshot) {
 const snap = lib.snapshot
 const MAIN = Buffer.from("main\0", "utf8")
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-snapshot-"))
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-snapshot-"))
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }))
 const file = path.join(dir, "s.db")
 const walKiB = (): number => {
@@ -37,7 +37,7 @@ const walKiB = (): number => {
   }
 }
 
-/** A fresh database with one row, and SQLite's autocheckpoint off as a BunQL tenant has it. */
+/** A fresh database with one row, and SQLite's autocheckpoint off as a bql.sh tenant has it. */
 function fresh(): Database {
   fs.rmSync(dir, { recursive: true, force: true })
   fs.mkdirSync(dir, { recursive: true })

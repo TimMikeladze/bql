@@ -1,4 +1,4 @@
-# Resume here — state of BunQL and what to do next
+# Resume here — state of bql.sh and what to do next
 
 **Updated 2026-09-16: phase 3 is run, and it is the last named phase.** Design §11 listed four
 "frontier extras" and **three of them were not what that row thought they were**: the query-plan
@@ -24,7 +24,7 @@ Rewritten 2026-09-13, at the end of the session that went after the list the pre
 **Three of the things on that list turned out to be bugs rather than chores**, and each was
 diagnosed wrongly before it was diagnosed rightly:
 
-- Windows was not failing on a file copy. It was failing because BunQL writes shared memory
+- Windows was not failing on a file copy. It was failing because bql.sh writes shared memory
   through a file descriptor (E2).
 - P5's "flaky test" was not flaky. A checkpoint was folding away frames the log had never seen,
   and a `kill -9` in that window was unrecoverable.
@@ -49,15 +49,15 @@ P8 overturns), `docs/p6-router-resolution.md`, `docs/e1-windows.md`, `docs/c5-ap
 Windows is a supported platform. C1-C6, C3a/C3b, C4-C4e, H1-H8, P1-P6, R1-R10, E1-E2, L1-L8,
 **P7-P10**. **CI green on macOS, Linux and Windows**, all three gating, plus a fourth job as of L7
 that packs the real tarball and builds SQLite from it. On `main`, pushed to
-**https://github.com/TimMikeladze/bunql** (private). `bun test` → **1563 pass, 2 skip, 0 fail**
-across 138 files, and green again with `BUNQL_WAL_NATIVE=0` (run it both ways; the second is what
+**https://github.com/TimMikeladze/bql** (private). `bun test` → **1563 pass, 2 skip, 0 fail**
+across 138 files, and green again with `BQL_WAL_NATIVE=0` (run it both ways; the second is what
 proves the JavaScript fallback). `bun run typecheck`, `bun run bytes`, `bun run routes:check` and
 `bun run pack:check` clean. Zero runtime dependencies.
 
 ### The P track (phase 3), newest first
 
 **P10 — encryption at rest is designed, costed, and refused for this phase.** Nothing existed; the
-primitive was never the problem (Bun ships WebCrypto) — **BunQL does not own the writes.** A design
+primitive was never the problem (Bun ships WebCrypto) — **bql.sh does not own the writes.** A design
 that covers the whole path *does* exist and keeps zero runtime dependencies: a page-encrypting VFS
 shim in C compiled into the vendored artefact beside `walsum.c`, with the three components that
 bypass the VFS — the WAL tailer, the page applier, and the log and bucket that carry page images —
@@ -91,7 +91,7 @@ libsqlite3 and **wrong on a replica**, where the page applier leaves no old page
 is **impossible in SQLite** rather than unbuilt. What binds is the ceiling: **six tables** take the
 generated data API from a 100% hit rate to **0%**, at 81x a hit per `prepare` (186x under load),
 because a round-robin working set evicts each text just before it is wanted again. `[sqlite]
-statementCache` and three `bunql_statement_cache_*` counters are the answer — **alert on the
+statementCache` and three `bql_statement_cache_*` counters are the answer — **alert on the
 eviction rate.** `docs/p7-plan-cache.md`.
 
 ### What phase 3 found that nobody asked it to
@@ -106,7 +106,7 @@ Three findings outlived their milestones. Each is in the gap list below with its
 2. **A token-authenticated write expires its own statement cache twice per request.**
    `applyPolicy` installs a policy and `handle.release()` takes it off in a `finally`
    (`src/server/exec.ts:310`), and re-arming `sqlite3_set_authorizer` is exactly what expires
-   compiled statements. BunQL's cache still records a **hit** and SQLite recompiles behind it —
+   compiled statements. bql.sh's cache still records a **hit** and SQLite recompiles behind it —
    measured 0.81 µs against 2.76 µs on a point read. The read path does not do it (`withReader`
    scopes once and never releases), and no benchmark ever showed it because benchmarks use the
    admin key, which installs no policy at all.
@@ -128,7 +128,7 @@ which is what lets it serve a client that had `(5, 0)` while `(5, 1)` is still r
 
 **L7 — the tarball can build its own engine.** `package.json` `files` excluded `scripts/`, so
 `sqlite:build` — advertised in `package.json` and in the README — was not in the published package,
-and a clone with a built `vendor/` hid it completely. The gate is `bun run db pack:check`: pack,
+and a clone with a built `vendor/` hid it completely. The gate is `bun run pack:check`: pack,
 install the tarball into an empty directory as a dependency, build SQLite there, smoke it. It found
 a second bug on its first run, which would have shipped in the first release: `bun run
 sqlite:build` in a consumer's project resolves against *their* package.json. The command is the
@@ -138,8 +138,8 @@ path. `docs/l7-tarball.md`.
 concurrency since R3, so a thousand shipping databases were never a thousand concurrent requests.
 What that gate does not do is what L6 built: order the queue by how far behind each database is
 (so a database behind for an hour is not starved by one that committed a moment ago), bound the
-wait so a shipper re-arms instead of growing a second queue, and report `bunql_upload_inflight` and
-`bunql_upload_waiting`. `docs/l6-upload-budget.md`.
+wait so a shipper re-arms instead of growing a second queue, and report `bql_upload_inflight` and
+`bql_upload_waiting`. `docs/l6-upload-budget.md`.
 
 **L5 — the fsync sweep is built, measured, and left off.** The benchmark came first, as the plan
 demanded, and it decided against the plan's own default. Three findings: the write path already
@@ -225,7 +225,7 @@ copying an open file. Grouping the job's `EBUSY` stacks by *frame* rather than b
 of them at one site and none in `snapshot()`: mechanism A writes the `-shm` file through a
 descriptor while its own connection has that file mapped, which POSIX keeps coherent and Windows
 refuses outright (`ERROR_USER_MAPPED_FILE`, reported as `EBUSY`). `walIndexWriteHdr` stores into
-the mapping and fences with `xShmBarrier`; so does BunQL now, on every platform rather than behind
+the mapping and fences with `xShmBarrier`; so does bql.sh now, on every platform rather than behind
 a `win32` branch — a branch would leave the new path exercised only by the one job that cannot be
 run locally.
 
@@ -310,7 +310,7 @@ down in `docs/api.md` as well as here.
 3. **`[limits] groupCommit` is on.** 4.7x at 64 concurrent clients, 2.2x at four, and **15% slower
    for a single client** with nobody to fold with. It changes what a client sees and the change is
    documented rather than defaulted away: folded writes share one txid, so the change feed emits one
-   event per fold and `BunQL-Min-Txid` is coarser — never weaker, since a txid covering more than
+   event per fold and `BQL-Min-Txid` is coarser — never weaker, since a txid covering more than
    your write still satisfies read-your-writes.
 
 **The two e2e tests that asserted one txid per write were rewritten, not deleted**, because they are
@@ -338,7 +338,7 @@ legs and the wrong one for the busiest. `docs/c4c-replication-follow.md` §9.
 
 | landed in the performance session | commit | what it is |
 |---|---|---|
-| README rewritten from `src/`, surface subpaths exported | `ebf5555` | `@bunql/db/core`, `/http`, `/openapi`, `/dataapi`, `/graphql` now resolve; `test/package/exports.test.ts` fails if a doc imports a subpath the package does not publish |
+| README rewritten from `src/`, surface subpaths exported | `ebf5555` | `bql.sh/core`, `/http`, `/openapi`, `/dataapi`, `/graphql` now resolve; `test/package/exports.test.ts` fails if a doc imports a subpath the package does not publish |
 | Apple libsqlite3 correction | `724eb97` | it *has* preupdate/session/snapshot on macOS 26; what differs is its page-cache default, and six tests fail on it. `docs/c6-packaging.md` §1.1 |
 | performance audit | `12f94a1` `cbe1cd8` | `bench/profile.ts`, `docs/performance.md`, and the SQLite settings audit read off live connections |
 | `[sqlite]` + token cache | `c020766` | pragmas stated rather than inherited; EdDSA verification cached, so an HTTP read with a real token went 76.4 µs → 45.3 |
@@ -357,7 +357,7 @@ legs and the wrong one for the busiest. `docs/c4c-replication-follow.md` §9.
 
 | landed two sessions ago | what it is |
 |---|---|
-| P3: the WAL checksum in C | `scripts/native/walsum.c` compiled into the vendored artefact, `bunql_wal_*` as optional symbols in `src/sqlite/lib.ts`, `src/wal/native.ts` (`checkFrameFast`, `BUNQL_WAL_NATIVE=0` to force the fallback), three call sites in `src/wal/tailer.ts`, `test/wal/native.test.ts`. **Write 28.9 → 24.0 µs, 29 136 → 33 854 writes/s.** `docs/p3-wal-checksum.md` |
+| P3: the WAL checksum in C | `scripts/native/walsum.c` compiled into the vendored artefact, `bql_wal_*` as optional symbols in `src/sqlite/lib.ts`, `src/wal/native.ts` (`checkFrameFast`, `BQL_WAL_NATIVE=0` to force the fallback), three call sites in `src/wal/tailer.ts`, `test/wal/native.test.ts`. **Write 28.9 → 24.0 µs, 29 136 → 33 854 writes/s.** `docs/p3-wal-checksum.md` |
 | C5: replica apply mechanism A | `src/wal/shm.ts` (the wal-index header format), `src/wal/shmlock.ts` (the WAL lock set through `xShmLock`, the only FFI in `src/wal/`), the strategy split in `src/wal/applier.ts`, `ApplyBusy`, `[replication] apply` and `applyBusyMs`, `"apply"` on `GET /v1/db/{db}`, `bench/wal.ts` over both mechanisms, `test/wal/shm.test.ts` and `test/wal/apply-pages.test.ts`. **Replica read 47.2 µs → 6.4, apply 196 → 162, end to end 291 → 211.** `docs/c5-apply-pages.md` |
 
 | landed three sessions ago | what it is |
@@ -365,7 +365,7 @@ legs and the wrong one for the busiest. `docs/c4c-replication-follow.md` §9.
 | C4: `workers: N` | `src/server/workers/` (shard, protocol, pool, entry, router), `[server] workers`, `--workers`, `WORKERS_UNSUPPORTED` (since removed by C4d, which lifted the last combination it refused), `Metrics.state/absorb`, `bench/workers.ts`. The main thread is a router owning the listener, every socket, the catalog and the authenticator and no database; N workers each hold a whole `ServerRuntime` over a hash shard. `ws.ts`, `routes.ts`, `runtime.ts` and `tenant/` are untouched. `docs/c4-workers.md` |
 | H8: the `/v1` request schemas enforced | `src/http/handler.ts` split at the error boundary (`executeOperation` throws, `compileOperation` maps), `deferBody` + `bodyReader`, `ctx.body` read through `readJson`, `problems` moved into `mapError`. `docs/h8-validated-requests.md` |
 | H8: `NOT_FOUND: 404` | the data API's `/{pk}` routes answer 404 rather than 200-with-null; GraphQL still answers `null`, through `nullOnNotFound` |
-| H8: `problems` published end to end | `errorBodySchema` declares it, `ErrorInfo` names it, `BunQLClientError.problems` carries it |
+| H8: `problems` published end to end | `errorBodySchema` declares it, `ErrorInfo` names it, `BqlClientError.problems` carries it |
 | H6: the surfaces mounted | `src/server/registry.ts` (every `/v1` route as an `Operation`), `src/server/surfaces.ts` (the data API cache, the per-tenant dispatcher, the GraphQL handler), `[api]` and `[graphql]` config, `docs/h6-mount.md` |
 | `routes:check` reads the registry | it already read the live table; it now also fails when a served route is **not** in the registry, so a hand-added route in `createApp` cannot go undescribed |
 | `CLUSTER_DISABLED` joined `ERROR_STATUS` | `routes.ts` has thrown it since C1 with an explicit 503, but it was absent from the documented vocabulary, so the document build rejected it |
@@ -399,10 +399,10 @@ Two now matter:
 
 C1, C2 and C6 are done (see the table above). What remains, in the order it makes sense to build:
 
-1. ~~**Control plane (§5.3).**~~ **Done (C1).** `src/cluster/`, `GET /v1/cluster`, `bunql cluster`.
+1. ~~**Control plane (§5.3).**~~ **Done (C1).** `src/cluster/`, `GET /v1/cluster`, `bql cluster`.
 2. ~~**Promotion and failover.**~~ **Done (C2).** `docs/c2-promotion.md`. Verified by hand on real
    nodes, including the case that matters most: an old primary restarted with **no `--replica-of`
-   at all** still reads `BunQL-Role: replica` and refuses a write with `NOT_PRIMARY`, because the
+   at all** still reads `BQL-Role: replica` and refuses a write with `NOT_PRIMARY`, because the
    demotion is persisted rather than held in memory. No split brain in the one scenario where a
    node has every reason to believe it is still in charge.
 3. ~~**Placement and the `[cluster]` config section**~~ **Done (C3, C3a, C3b).** A database has a
@@ -520,7 +520,7 @@ Added by phase 3 (2026-09-16), and the first is the one to act on:
   varies per *shape* — a `?select=` list, a filter set, an order, a bulk-insert row count are each
   one — and `POST` of N rows is N distinct texts for one table. Past the ceiling every `prepare`
   costs 81x a hit. Nothing about this is wrong; it is a default that wants raising on any node
-  serving the data API, and `bunql_statement_cache_evictions_total` is how you know.
+  serving the data API, and `bql_statement_cache_evictions_total` is how you know.
   `docs/p7-plan-cache.md`.
 - ~~**`bench/http.ts` authenticates with the admin key**, which is a constant-time compare, so its
   numbers are still the best case rather than what a token-bearing client sees.~~ **Closed.**
@@ -558,7 +558,7 @@ Carried forward from phase 0, still true:
   build, typecheck, the suite and the routes check on `macos-latest` (arm64) and `ubuntu-latest`
   (x64), green on real runners. Actions are SHA-pinned, `permissions: contents: read`, no secrets,
   and the storage tests run against the in-process `FakeS3` because the workflow never sets
-  `BUNQL_TEST_S3_ENDPOINT`.
+  `BQL_TEST_S3_ENDPOINT`.
 - Nothing is published to npm; `package.json` has `exports`, `bin`, `engines` but no release flow.
 
 What the surfaces work (H1-H5) added to the list:
@@ -615,7 +615,7 @@ What phase 1 added to the list:
 - ~~**A replica cannot be promoted.**~~ **Closed (C2, `docs/c2-promotion.md`)** — it was
   phase-2 milestone 2 and that milestone is done, as the "Phase 2 — what is left" table above
   says. Verified by hand on real nodes, including an old primary restarted with no `--replica-of`
-  at all, which still reads `BunQL-Role: replica` and refuses a write with `NOT_PRIMARY` because
+  at all, which still reads `BQL-Role: replica` and refuses a write with `NOT_PRIMARY` because
   the demotion is persisted rather than held in memory.
 - ~~**The Hrana surface does not forward writes.**~~ **Closed (R4b)**, and the read half with it:
   `BEGIN TRANSACTION READONLY` on a replica is served on a pooled reader rather than refused
@@ -746,7 +746,7 @@ and §6. **CI is green on macOS, Linux and Windows.**
   or leave it. `docs/p3-wal-checksum.md` §2.
 - ~~**A read mode for the native `/v1/db/{db}/tx`.**~~ **Closed (P8)** — as a *separate* surface,
   not a fourth writer mode. `docs/r10-read-transactions.md` §4 argued it away on the grounds that
-  `BunQL-Min-Txid` is the native consistent-read answer; it is not. That header is a **floor**, so
+  `BQL-Min-Txid` is the native consistent-read answer; it is not. That header is a **floor**, so
   two reads that both satisfy it can see different databases, and a consistent read is a **point**.
   `POST /v1/db/{db}/read` is the point, on R10's leased reader with no new primitive under it.
   `docs/p8-read-sessions.md` §1.
@@ -755,19 +755,19 @@ and §6. **CI is green on macOS, Linux and Windows.**
   now reach the SSE feed as well as the socket.
 - **The npm release flow is ready and has never been run.** `.github/workflows/release.yml` runs
   the full gate on a `v*` tag — refusing to go on if the tag and `package.json` disagree about the
-  version — and publishes with provenance. The package is **`@bunql/db`**: unscoped `bunql` is
-  somebody else's, and the scope is wanted anyway for the `@bunql/sqlite-*` binaries below. **The
-  product is still BunQL** — `BUNQL_*`, `bunql.toml`, the `bunql:` log prefix and the `bunql`
+  version — and publishes with provenance. The package is **`bql.sh`**: unscoped `bql` is
+  somebody else's, and the scope is wanted anyway for the `@bql/sqlite-*` binaries below. **The
+  product is still bql.sh** — `BQL_*`, `bql.toml`, the `bql:` log prefix and the `bql`
   binary are untouched; only the published name is scoped. **What is left is one secret**,
   `NPM_TOKEN` in the repository's settings, and then setting `version` and pushing a `v` tag. MIT
   and the copyright line are a default, not a decision.
-- **`@bunql/sqlite-*` prebuilt libraries** are still unbuilt and still the right idea;
+- **`@bql/sqlite-*` prebuilt libraries** are still unbuilt and still the right idea;
   `docs/c6-packaging.md` §6 says what it would take. The scope is held, so the names are there.
 
 ### Closed since the last edition, so stop looking for them
 
 - ~~**`defensive` for the vendored build.**~~ It is `[sqlite] defensive`, it is implemented through
-  `bunql_db_config_int`, and a node told to be defensive on a build that cannot be refuses to
+  `bql_db_config_int`, and a node told to be defensive on a build that cannot be refuses to
   start. `docs/p1-pragmas.md`.
 - ~~**`schema` events reach WebSocket subscribers only.**~~ The SSE feed carries them too.
 - ~~**`bench/http.ts` authenticates with the admin key**, so its numbers are the best case.~~
@@ -790,13 +790,13 @@ module header states its invariant. Tests go in `test/<area>/`, temp dirs under 
 **The SQLite library.** Run `bun run sqlite:build` once: it compiles 3.53.4 from a hash-pinned
 amalgamation **plus `scripts/native/walsum.c`** into `vendor/sqlite/`, which `src/sqlite/lib.ts`
 prefers over anything on the system. Without it a node still works, but WAL frames are checksummed
-in JavaScript and every write is about 17% slower — `bunql serve` says so at startup
+in JavaScript and every write is about 17% slower — `bql serve` says so at startup
 (`docs/p3-wal-checksum.md`). That is what CI uses on both platforms. Without it the driver still finds Homebrew's build
 on macOS and a distro one on Linux — contrary to what this file used to say, Debian and Ubuntu
 *do* ship `ENABLE_PREUPDATE_HOOK` and `ENABLE_SESSION` — but no distro ships
 `SQLITE_ENABLE_SNAPSHOT`, and the floor is SQLite 3.37.0 because `sqlite3_changes64` is in the
 core symbol table, so an older library fails `dlopen` entirely and reads as *no* library. Apple's
-system build lacks `load_extension`. `BUNQL_SQLITE_LIB` overrides the search, and a capability
+system build lacks `load_extension`. `BQL_SQLITE_LIB` overrides the search, and a capability
 that is missing now names the remedy in its error. See `docs/c6-packaging.md`.
 
 **No raw control bytes in source.** A separator or a magic value must be written as an escape —

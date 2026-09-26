@@ -1,4 +1,4 @@
-# Phase 0 implementation plan — standalone BunQL
+# Phase 0 implementation plan — standalone bql.sh
 
 Companion to `design.md`. This is the build order, module boundaries, and acceptance tests for
 the standalone product. Every milestone ends with `bun test` green, `bun run typecheck` green,
@@ -8,7 +8,7 @@ and a runnable demo.
 
 | # | decision | choice |
 |---|---|---|
-| 1 | driver | own `bun:ffi` driver (`src/sqlite/`) over a shared libsqlite3; feature-detect `PRAGMA compile_options`; library path from `BUNQL_SQLITE_LIB`, else autodetect (`/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib`, `/usr/local/opt/sqlite/lib/libsqlite3.dylib`, `libsqlite3.so.0`, `/usr/lib/*/libsqlite3.so.0`). Vendored prebuilt libs are a phase-1 packaging task. |
+| 1 | driver | own `bun:ffi` driver (`src/sqlite/`) over a shared libsqlite3; feature-detect `PRAGMA compile_options`; library path from `BQL_SQLITE_LIB`, else autodetect (`/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib`, `/usr/local/opt/sqlite/lib/libsqlite3.dylib`, `libsqlite3.so.0`, `/usr/lib/*/libsqlite3.so.0`). Vendored prebuilt libs are a phase-1 packaging task. |
 | 2 | tenant addressing | `/v1/db/{db}/…`; `server.tenantFromHost` optional |
 | 3 | value encoding | plain JSON; only exotic values tagged: `{"$i":"…"}` for unsafe ints, `{"$b":"base64"}` for blobs, `{"$f":"inf"|"-inf"}` |
 | 4 | rows default | arrays + `columns`; `rows: "object"` per request |
@@ -23,7 +23,7 @@ and a runnable demo.
 ## Repository layout
 
 ```
-package.json            name "bunql", type module, bin: bunql, exports: ".", "./client", "./sqlite", "./kysely"
+package.json            name "bql", type module, bin: bql, exports: ".", "./client", "./sqlite", "./kysely"
 tsconfig.json           strict, moduleResolution bundler, types bun-types
 src/
   sqlite/               FFI driver (no bun:sqlite import anywhere in src/)
@@ -56,8 +56,8 @@ src/
   client/
     index.ts            createClient, Db (sql tagged template, execute, batch, transaction, changes, live)
     protocol.ts         shared request/response types with server
-  embedded.ts           BunQL.open(), bq.db(name) implementing Db (async + .sync), bq.serve()
-  cli.ts                bunql serve|db|snapshot|restore|token|shell
+  embedded.ts           Bql.open(), bq.db(name) implementing Db (async + .sync), bq.serve()
+  cli.ts                bql serve|db|snapshot|restore|token|shell
 test/                   bun test; fixtures create temp dirs under os.tmpdir()
 experiments/            kept as benchmarks (already present)
 docs/                   design.md, plan-phase0.md, api.md (generated from server routes when stable)

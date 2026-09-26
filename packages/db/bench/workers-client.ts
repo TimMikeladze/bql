@@ -42,7 +42,7 @@ let stop = false
 
 async function connection(index: number): Promise<void> {
   const db = dbs[index % dbs.length] as string
-  const socket = new WebSocket(wsUrl, "bunql.v1")
+  const socket = new WebSocket(wsUrl, "bql.v1")
   await new Promise<void>((resolve, reject) => {
     socket.onopen = () => resolve()
     socket.onerror = () => reject(new Error("socket failed"))

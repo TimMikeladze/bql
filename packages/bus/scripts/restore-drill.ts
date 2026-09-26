@@ -17,7 +17,7 @@ import { generateKey } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
 
 const root = resolve(import.meta.dir, "..");
-const scratch = await mkdtemp(`${tmpdir()}/agenticbus-restore-`);
+const scratch = await mkdtemp(`${tmpdir()}/bql-bus-restore-`);
 const data = `${scratch}/data`;
 const backup = `${scratch}/backup`;
 const signingKey = generateKey();
@@ -44,7 +44,7 @@ async function freePort(start: number): Promise<number> {
   throw new Error(`no free port from ${start}`);
 }
 
-const binary = process.env.AGENTICBUS_BIN;
+const binary = process.env.BQL_BUS_BIN;
 const cli = (args: string[]) =>
   Bun.spawn(binary ? [binary, ...args] : [process.execPath, "src/cli/index.ts", ...args], {
     cwd: root,

@@ -1,5 +1,5 @@
 // Invariant: every knob has exactly three sources, in this order — a default in this file, a key
-// in `bunql.toml`, an environment override named `BUNQL_*` — and the resolved config is frozen
+// in `bql.toml`, an environment override named `BQL_*` — and the resolved config is frozen
 // before anything reads it. Nothing downstream consults `process.env` or re-parses the file.
 //
 // Secrets are the one place with state: a node with no configured admin key or signing key
@@ -11,7 +11,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { type ApplyMechanism, DEFAULT_APPLY_BUSY_MS } from "../wal/index.ts"
 import { AuthKeys, type Ed25519Jwk, KeyRing } from "./auth.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 
 /**
  * Durability a write is answered at when the request does not say (design §5.4). `"replica"` and
@@ -23,7 +23,7 @@ export type DefaultAck = "local" | "fsync" | "replica" | "quorum"
 export interface ServerSection {
   port: number
   host: string
-  /** Name this node reports in `BunQL-Node`. Defaults to the hostname. */
+  /** Name this node reports in `BQL-Node`. Defaults to the hostname. */
   node: string
   /** Also accept `{db}.host` addressing, libsql-style (design §6). */
   tenantFromHost: boolean
@@ -47,8 +47,8 @@ export interface DataSection {
 }
 
 /**
- * SQLite settings BunQL states rather than inherits (`docs/p1-pragmas.md`). Everything here is
- * applied per connection — all of it pragmas but `statementCache`, which bounds BunQL's own
+ * SQLite settings bql.sh states rather than inherits (`docs/p1-pragmas.md`). Everything here is
+ * applied per connection — all of it pragmas but `statementCache`, which bounds bql.sh's own
  * prepared-statement cache — so the values a connection carries do not depend on which
  * libsqlite3 was found — Apple's defaults `cache_size` to pages where upstream defaults it to KiB,
  * which is four times the cache and a different moment for dirty pages to reach the `-wal`.
@@ -69,7 +69,7 @@ export interface SqliteSection {
    *
    * It is a **cliff, not a slope**: a working set of 65 texts on one connection costs 82x what 64
    * costs on an idle machine and 186x on a loaded one, because every `prepare()` past the ceiling
-   * compiles *and* finalizes a victim. `bunql_statement_cache_evictions_total` rising on a live
+   * compiles *and* finalizes a victim. `bql_statement_cache_evictions_total` rising on a live
    * node is the symptom; raising this is the answer. Each entry costs a compiled statement's
    * memory, which for the data API's generated SQL is single-digit KiB.
    */
@@ -105,7 +105,7 @@ export interface SqliteSection {
    * file you did not write, which is exactly what `POST /v1/db/{db}/import` accepts.
    *
    * Off by default, like every other switch here that changes what a statement means. It has **no
-   * pragma** and is reachable only through the vendored build's `bunql_db_config_int` shim
+   * pragma** and is reachable only through the vendored build's `bql_db_config_int` shim
    * (`docs/p1-pragmas.md`), so a node on a system libsqlite3 that asks for it is refused at
    * startup rather than left believing it is hardened.
    */
@@ -439,7 +439,7 @@ export interface S3Section {
    * ceiling on the wait, so a database that had been behind for an hour queued behind one that
    * committed a moment ago. This queue is ordered by how far behind the caller is, gives up after
    * `uploadWaitMs` so the shipper re-arms rather than growing a second queue, and is reported as
-   * `bunql_upload_inflight` and `bunql_upload_waiting`.
+   * `bql_upload_inflight` and `bql_upload_waiting`.
    *
    * Defaults to `concurrency`, because the store's own gate is the node's real ceiling and a
    * larger number here would only move the queueing into it, where the ordering is lost.
@@ -540,7 +540,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
   server: {
     port: 4321,
     host: "0.0.0.0",
-    node: "bunql",
+    node: "bql",
     tenantFromHost: false,
     cors: true,
     workers: 1,
@@ -639,7 +639,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     bucket: "",
     region: "",
     endpoint: "",
-    prefix: "bunql/",
+    prefix: "bql/",
     accessKeyId: "",
     secretAccessKey: "",
     sessionToken: "",
@@ -670,57 +670,57 @@ export const DEFAULT_CONFIG: ServerConfig = {
 }
 
 /**
- * The short `BUNQL_*` names, kept because they are what earlier milestones documented. The
- * canonical name of a key is `BUNQL_<SECTION>_<KEY>`, generated below from the defaults, and it
+ * The short `BQL_*` names, kept because they are what earlier milestones documented. The
+ * canonical name of a key is `BQL_<SECTION>_<KEY>`, generated below from the defaults, and it
  * wins when both are set.
  */
 const ENV_ALIASES: Readonly<Record<string, string>> = {
-  BUNQL_PORT: "server.port",
-  BUNQL_HOST: "server.host",
-  BUNQL_NODE: "server.node",
-  BUNQL_TENANT_FROM_HOST: "server.tenantFromHost",
-  BUNQL_CORS: "server.cors",
-  BUNQL_DIR: "data.dir",
-  BUNQL_MAX_OPEN: "data.maxOpen",
-  BUNQL_READERS: "data.readers",
-  BUNQL_PAGE_SIZE: "data.pageSize",
-  BUNQL_QUOTA_BYTES: "data.quotaBytes",
-  BUNQL_DEFAULT_ACK: "durability.defaultAck",
-  BUNQL_CHECKPOINT_WAL_BYTES: "durability.checkpointWalBytes",
-  BUNQL_RETENTION: "durability.retention",
-  BUNQL_RING_BYTES: "realtime.ringBytes",
-  BUNQL_RING_MAX_AGE_MS: "realtime.ringMaxAgeMs",
-  BUNQL_MAX_LIVE_QUERIES: "realtime.maxLiveQueries",
-  BUNQL_MAX_ROWS_PER_LIVE: "realtime.maxRowsPerLive",
-  BUNQL_IDLE_RETAIN_MS: "realtime.idleRetainMs",
-  BUNQL_QUERY_TIMEOUT_MS: "limits.queryTimeoutMs",
-  BUNQL_WRITE_TIMEOUT_MS: "limits.writeTimeoutMs",
-  BUNQL_TX_IDLE_TIMEOUT_MS: "limits.txIdleTimeoutMs",
-  BUNQL_MAX_ROWS: "limits.maxRows",
-  BUNQL_MAX_RESULT_BYTES: "limits.maxResultBytes",
-  BUNQL_MAX_OPEN_TX: "limits.maxOpenTx",
-  BUNQL_TX_WAIT_MS: "limits.txWaitMs",
-  BUNQL_MAX_BODY_BYTES: "limits.maxBodyBytes",
-  BUNQL_MAX_IMPORT_BYTES: "limits.maxImportBytes",
-  BUNQL_ADMIN_KEY: "auth.adminKey",
-  BUNQL_JWT_ED25519: "auth.jwtKey",
-  BUNQL_KEYS_FILE: "auth.keysFile",
-  BUNQL_CLOCK_TOLERANCE_SEC: "auth.clockToleranceSec",
-  BUNQL_TOKEN_TTL_MS: "auth.defaultTokenTtlMs",
+  BQL_PORT: "server.port",
+  BQL_HOST: "server.host",
+  BQL_NODE: "server.node",
+  BQL_TENANT_FROM_HOST: "server.tenantFromHost",
+  BQL_CORS: "server.cors",
+  BQL_DIR: "data.dir",
+  BQL_MAX_OPEN: "data.maxOpen",
+  BQL_READERS: "data.readers",
+  BQL_PAGE_SIZE: "data.pageSize",
+  BQL_QUOTA_BYTES: "data.quotaBytes",
+  BQL_DEFAULT_ACK: "durability.defaultAck",
+  BQL_CHECKPOINT_WAL_BYTES: "durability.checkpointWalBytes",
+  BQL_RETENTION: "durability.retention",
+  BQL_RING_BYTES: "realtime.ringBytes",
+  BQL_RING_MAX_AGE_MS: "realtime.ringMaxAgeMs",
+  BQL_MAX_LIVE_QUERIES: "realtime.maxLiveQueries",
+  BQL_MAX_ROWS_PER_LIVE: "realtime.maxRowsPerLive",
+  BQL_IDLE_RETAIN_MS: "realtime.idleRetainMs",
+  BQL_QUERY_TIMEOUT_MS: "limits.queryTimeoutMs",
+  BQL_WRITE_TIMEOUT_MS: "limits.writeTimeoutMs",
+  BQL_TX_IDLE_TIMEOUT_MS: "limits.txIdleTimeoutMs",
+  BQL_MAX_ROWS: "limits.maxRows",
+  BQL_MAX_RESULT_BYTES: "limits.maxResultBytes",
+  BQL_MAX_OPEN_TX: "limits.maxOpenTx",
+  BQL_TX_WAIT_MS: "limits.txWaitMs",
+  BQL_MAX_BODY_BYTES: "limits.maxBodyBytes",
+  BQL_MAX_IMPORT_BYTES: "limits.maxImportBytes",
+  BQL_ADMIN_KEY: "auth.adminKey",
+  BQL_JWT_ED25519: "auth.jwtKey",
+  BQL_KEYS_FILE: "auth.keysFile",
+  BQL_CLOCK_TOLERANCE_SEC: "auth.clockToleranceSec",
+  BQL_TOKEN_TTL_MS: "auth.defaultTokenTtlMs",
   // The three an operator types by hand often enough to want a short name.
-  BUNQL_REPLICA_OF: "replication.primary",
-  BUNQL_CLUSTER_PEERS: "cluster.peers",
-  BUNQL_CLUSTER_SECRET: "replication.secret",
-  BUNQL_FOLLOW: "replication.follow",
+  BQL_REPLICA_OF: "replication.primary",
+  BQL_CLUSTER_PEERS: "cluster.peers",
+  BQL_CLUSTER_SECRET: "replication.secret",
+  BQL_FOLLOW: "replication.follow",
   // The bucket is typed by hand often enough, and `AWS_*` / `S3_*` are Bun's own fallbacks rather
   // than ours, so only the bucket itself gets a short name.
-  BUNQL_S3_URL: "s3.bucket",
+  BQL_S3_URL: "s3.bucket",
 }
 
-/** `data` + `dir` → `BUNQL_DATA_DIR`; `limits` + `queryTimeoutMs` → `BUNQL_LIMITS_QUERY_TIMEOUT_MS`. */
+/** `data` + `dir` → `BQL_DATA_DIR`; `limits` + `queryTimeoutMs` → `BQL_LIMITS_QUERY_TIMEOUT_MS`. */
 export function envNameFor(section: string, key: string): string {
   const snake = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase()
-  return `BUNQL_${section.toUpperCase()}_${snake}`
+  return `BQL_${section.toUpperCase()}_${snake}`
 }
 
 /** One override per key of the resolved config, named by its section and its key. */
@@ -757,7 +757,7 @@ function coerce(target: unknown, raw: string): unknown {
   }
   if (typeof target === "number") {
     const n = Number(raw.replaceAll("_", ""))
-    if (!Number.isFinite(n)) throw BunQLError.badRequest(`${JSON.stringify(raw)} is not a number`)
+    if (!Number.isFinite(n)) throw BqlError.badRequest(`${JSON.stringify(raw)} is not a number`)
     return n
   }
   if (typeof target === "boolean") return raw === "1" || raw.toLowerCase() === "true"
@@ -785,7 +785,7 @@ function mergeSection<T extends object>(base: T, patch: Partial<T> | undefined, 
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined || value === null) continue
     // Every string from a file goes through `${…}` expansion, whatever the default's type is:
-    // `adminKey` defaults to null and is exactly the key design §9.4 writes as `${BUNQL_ADMIN_KEY}`.
+    // `adminKey` defaults to null and is exactly the key design §9.4 writes as `${BQL_ADMIN_KEY}`.
     ;(out as Record<string, unknown>)[key] = typeof value === "string" ? expand(value, env) : value
   }
   return out
@@ -801,9 +801,9 @@ export interface LoadConfigOptions {
 }
 
 /**
- * Resolves the configuration: defaults, then the TOML file, then `overrides`, then `BUNQL_*`.
+ * Resolves the configuration: defaults, then the TOML file, then `overrides`, then `BQL_*`.
  * An empty string in the environment or after `${…}` expansion counts as "not set", so an unset
- * `${BUNQL_ADMIN_KEY}` in the file leaves the key to be generated rather than making it "".
+ * `${BQL_ADMIN_KEY}` in the file leaves the key to be generated rather than making it "".
  */
 export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   const env = options.env ?? (process.env as Env)
@@ -813,7 +813,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     if (fs.existsSync(file)) {
       fromFile = Bun.TOML.parse(fs.readFileSync(file, "utf8")) as ServerConfigInput
     } else if (options.required) {
-      throw BunQLError.badRequest(`no config file at ${file}`)
+      throw BqlError.badRequest(`no config file at ${file}`)
     }
   }
 
@@ -869,58 +869,58 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   if (config.auth.adminKey === "") config.auth.adminKey = null
   if (config.auth.jwtKey === "") config.auth.jwtKey = null
   if (config.server.node === DEFAULT_CONFIG.server.node) {
-    config.server.node = env.BUNQL_NODE || defaultNodeId()
+    config.server.node = env.BQL_NODE || defaultNodeId()
   }
   config.data.dir = path.resolve(config.data.dir)
   if (config.auth.keysFile === null) config.auth.keysFile = path.join(config.data.dir, "keys.json")
 
   const ack = config.durability.defaultAck
   if (ack !== "local" && ack !== "fsync" && ack !== "replica" && ack !== "quorum") {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[durability] defaultAck must be "local", "fsync", "replica" or "quorum", got ${JSON.stringify(ack)}`,
     )
   }
   const apply = config.replication.apply
   if (apply !== "pages" && apply !== "wal") {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[replication] apply must be "pages" or "wal", got ${JSON.stringify(apply)}`,
     )
   }
   if (!(config.replication.applyBusyMs >= 0)) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[replication] applyBusyMs must be a non-negative number, got ${JSON.stringify(config.replication.applyBusyMs)}`,
     )
   }
   const without = config.replication.ackWithoutReplicas
   if (without !== "error" && without !== "allow") {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[replication] ackWithoutReplicas must be "error" or "allow", got ${JSON.stringify(without)}`,
     )
   }
   // Validate before deriving, or a typo in `role` would be silently corrected by `primary`.
   if (config.replication.role !== "primary" && config.replication.role !== "replica") {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[replication] role must be "primary" or "replica", got ${JSON.stringify(config.replication.role)}`,
     )
   }
   // `--replica-of` is the whole decision: a node that is told where its primary is, is a replica.
   if (config.replication.primary) config.replication.role = "replica"
   if (config.replication.role === "replica" && !config.replication.primary) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       'a node with [replication] role = "replica" needs [replication] primary set to the ' +
         "primary's wss:// URL",
     )
   }
   if (config.replication.follow.length === 0) config.replication.follow = ["*"]
   // P9. `true` is "the sensible level", which is `row`; the string spellings are what the
-  // environment can carry, since `BUNQL_*` values are always strings.
+  // environment can carry, since `BQL_*` values are always strings.
   const logical = config.replication.logicalChanges as LogicalChangeLevel | true | string
   if (logical === true || logical === "true" || logical === "1") {
     config.replication.logicalChanges = "row"
   } else if (logical === "false" || logical === "0" || logical === "off") {
     config.replication.logicalChanges = false
   } else if (logical !== false && logical !== "pk" && logical !== "row" && logical !== "row+old") {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       '[replication] logicalChanges must be false, true, "pk", "row" or "row+old", got ' +
         JSON.stringify(logical),
     )
@@ -934,19 +934,19 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   }
   if (!config.cluster.id) config.cluster.id = config.server.node
   if (config.cluster.enabled && !config.replication.secret) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       "[cluster] enabled needs [replication] secret: the raft socket proves the same cluster " +
         "secret the replication socket does",
     )
   }
   if (config.cluster.enabled && config.cluster.leaseGuardMs >= config.cluster.leaseTtlMs) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[cluster] leaseGuardMs (${config.cluster.leaseGuardMs}) must be below leaseTtlMs ` +
         `(${config.cluster.leaseTtlMs}): the guard is the part of the lease a holder does not use`,
     )
   }
   if (config.cluster.enabled && config.cluster.leaseRenewMs >= config.cluster.leaseTtlMs - config.cluster.leaseGuardMs) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[cluster] leaseRenewMs (${config.cluster.leaseRenewMs}) must leave room inside ` +
         `leaseTtlMs - leaseGuardMs (${config.cluster.leaseTtlMs - config.cluster.leaseGuardMs}), ` +
         "or a lease expires before its holder has asked to keep it",
@@ -1008,7 +1008,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
 function assertWorkers(config: ServerConfig): void {
   const n = config.server.workers
   if (Number.isFinite(n) && n >= 0) return
-  throw BunQLError.badRequest(
+  throw BqlError.badRequest(
     `[server] workers must be 0 (one per core) or a positive count, got ${JSON.stringify(n)}`,
   )
 }
@@ -1016,7 +1016,7 @@ function assertWorkers(config: ServerConfig): void {
 /** One path segment: no slash, no `:` (which is Bun's parameter marker), and not empty. */
 function assertSegment(value: string, what: string): void {
   if (value.length > 0 && !/[/:*?#]/.test(value)) return
-  throw BunQLError.badRequest(
+  throw BqlError.badRequest(
     `${what} must be a single path segment with no "/", ":", "*", "?" or "#", got ${JSON.stringify(value)}`,
   )
 }
@@ -1027,7 +1027,7 @@ function clusterEnabledIn(
   overrides: ServerConfigInput | undefined,
   env: Env,
 ): boolean | null {
-  const raw = env.BUNQL_CLUSTER_ENABLED
+  const raw = env.BQL_CLUSTER_ENABLED
   if (raw !== undefined && raw !== "") return raw === "1" || raw.toLowerCase() === "true"
   if (overrides?.cluster?.enabled !== undefined) return overrides.cluster.enabled
   if (fromFile.cluster?.enabled !== undefined) return fromFile.cluster.enabled
@@ -1040,7 +1040,7 @@ function patchSetsEnabled(
   overrides: ServerConfigInput | undefined,
   env: Env,
 ): boolean | null {
-  const raw = env.BUNQL_S3_ENABLED
+  const raw = env.BQL_S3_ENABLED
   if (raw !== undefined && raw !== "") return raw === "1" || raw.toLowerCase() === "true"
   if (overrides?.s3?.enabled !== undefined) return overrides.s3.enabled
   if (fromFile.s3?.enabled !== undefined) return fromFile.s3.enabled
@@ -1052,24 +1052,24 @@ function parseRetentionOrThrow(text: string, section: "s3" | "durability"): void
   const trimmed = text.trim()
   if (trimmed.length === 0) return
   if (!/^\d+(?:\.\d+)?\s*(ms|s|m|h|d|w)?$/i.test(trimmed)) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `[${section}] retention must look like 30d, 12h or 3600, got ${JSON.stringify(text)}`,
     )
   }
 }
 
 /**
- * A node id that is stable for a machine without naming it. `BunQL-Node` travels on every
+ * A node id that is stable for a machine without naming it. `BQL-Node` travels on every
  * response and into whatever a client logs, so the default is a hash of the hostname rather than
- * the hostname itself; an operator who wants a readable name sets `[server] node` or `BUNQL_NODE`.
+ * the hostname itself; an operator who wants a readable name sets `[server] node` or `BQL_NODE`.
  */
 function defaultNodeId(): string {
   try {
     const host = Bun.spawnSync(["hostname"]).stdout.toString().trim()
-    if (!host) return "bunql"
-    return `bunql-${Bun.hash.xxHash3(host).toString(16).padStart(16, "0").slice(0, 8)}`
+    if (!host) return "bql"
+    return `bql-${Bun.hash.xxHash3(host).toString(16).padStart(16, "0").slice(0, 8)}`
   } catch {
-    return "bunql"
+    return "bql"
   }
 }
 

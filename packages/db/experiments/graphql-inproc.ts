@@ -21,7 +21,7 @@ const seen: string[] = []
 const document = {
   openapi: "3.1.0",
   info: { title: "acme", version: "1" },
-  servers: [{ url: "http://bunql.local/v1/db/acme/api" }],
+  servers: [{ url: "http://bql.local/v1/db/acme/api" }],
   paths: {
     "/users": {
       get: {
@@ -56,7 +56,7 @@ const inProcessFetch: typeof globalThis.fetch = async (input, init) => {
 }
 
 const { schema } = await createGraphQLSchema(document, {
-  baseUrl: "http://bunql.local/v1/db/acme/api",
+  baseUrl: "http://bql.local/v1/db/acme/api",
   fetch: inProcessFetch,
 })
 console.log(printSchema(schema).split("\n").filter((l) => l.includes("createUser")).join("\n"))

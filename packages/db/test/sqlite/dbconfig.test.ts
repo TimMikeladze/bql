@@ -25,7 +25,7 @@ afterEach(() => {
 })
 
 function open(): Database {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-dbconfig-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-dbconfig-"))
   dirs.push(dir)
   const db = Database.open(path.join(dir, "t.db"))
   db.exec("create table t (a integer)")

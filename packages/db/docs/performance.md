@@ -6,7 +6,7 @@ made of**, which is what an optimisation has to be argued against. Every number 
 (M5 Pro, macOS 26.6.2, vendored SQLite 3.53.4).
 
 The short version: **SQLite is not the bottleneck anywhere.** A write spends 29% of its time in
-SQLite and 71% in BunQL's own record pipeline. A read spends 0.79 µs in SQLite and arrives 28 µs
+SQLite and 71% in bql.sh's own record pipeline. A read spends 0.79 µs in SQLite and arrives 28 µs
 later on a socket. Both ceilings are ours to move.
 
 
@@ -147,7 +147,7 @@ A socket pays even that once, at `hello`, which is a second reason sockets beat 
    over 8 databases inside one thread changed nothing (28.8k vs 28.1k msg/s) — the bound was the
    thread, not the database. Sharding those 8 databases over 6 worker threads takes the same load
    to 72 817 writes/s. §5.
-5. **HTTP framing** — 35 µs before any query runs. Nothing to fix in BunQL; it is a reason to
+5. **HTTP framing** — 35 µs before any query runs. Nothing to fix in bql.sh; it is a reason to
    prefer the socket, and a reason the Data API (§H4) should be reachable over the socket too.
 6. ~~**`recorder.poll` at 8 µs**~~ **Addressed by `scripts/native/walsum.c` (P3), and the diagnosis
    this entry used to carry was wrong.** It said the 5.16 µs `checkFrame` was "cache misses on a
@@ -164,7 +164,7 @@ A socket pays even that once, at `hello`, which is a second reason sockets beat 
    this one is to mismeasure.
    The write path still touches each page about four times — read from the WAL, WAL checksum,
    xxHash3 for the database checksum, zstd — but three of those are now native and only the read is
-   BunQL's. Apply mechanism A (C5, `docs/c5-apply-pages.md`) removed the WAL frame checksum from
+   bql.sh's. Apply mechanism A (C5, `docs/c5-apply-pages.md`) removed the WAL frame checksum from
    the *replica* by writing no frames at all; P3 made the *primary's* cost native. **Capturing
    pages from SQLite directly is no longer on this list**: it would save the remaining `readSync`,
    0.38 µs, for a VFS shim built out of `JSCallback`s on every write.
@@ -279,7 +279,7 @@ than B — detected by the same checksum chain, and usually resumed rather than 
 **G. Checksum WAL frames in C.** ✅ **Built** — `scripts/native/walsum.c`, compiled into the
 vendored libsqlite3 and resolved as an optional symbol exactly as `sqlite3_snapshot_*` is, so a
 node on a system library keeps the JavaScript and says so at startup (`docs/p3-wal-checksum.md`).
-Measured with the helper and again with `BUNQL_WAL_NATIVE=0`:
+Measured with the helper and again with `BQL_WAL_NATIVE=0`:
 
 | | JavaScript | C |
 |---|---|---|
@@ -292,7 +292,7 @@ Measured with the helper and again with `BUNQL_WAL_NATIVE=0`:
 **17% off a write and 16% more write throughput**, and the checksum is still computed — the
 alternative of trusting the wal-index's `mxFrame` and skipping it was rejected, because it is the
 only thing on the live path that would catch a bit that changed between SQLite writing a page and
-BunQL reading it back. §3.1 of that document says why the replica cannot stand in for it.
+bql.sh reading it back. §3.1 of that document says why the replica cannot stand in for it.
 
 ## 5. How this scales
 
@@ -408,10 +408,10 @@ system.
 - **zstd level 1 instead of 3.** Same 4.3x ratio, 1 µs cheaper. Not worth a format decision — if
   compression is to be changed, change *when* it runs, not how hard it tries (C).
 
-## 7. SQLite's own settings — what BunQL sets, and what it inherits
+## 7. SQLite's own settings — what bql.sh sets, and what it inherits
 
 Read off a live tenant through the registry's `onConnection` hook, so these are the connections
-BunQL actually serves from rather than a fresh one opened beside them.
+bql.sh actually serves from rather than a fresh one opened beside them.
 
 **Set deliberately**
 
@@ -419,7 +419,7 @@ BunQL actually serves from rather than a fresh one opened beside them.
 |---|---|---|---|
 | `journal_mode` | `wal` | `tenant.ts` (writer), and every other open path | the whole design: readers never block the writer, and the `-wal` is what the tailer ships |
 | `synchronous` | `1` (NORMAL) | writer | a commit does not fsync; `ack: "fsync"` and above do it explicitly (`#syncDurable`) |
-| `wal_autocheckpoint` | `0` | writer, and the replica applier | **BunQL owns checkpoints.** SQLite checkpointing on its own could move frames out of the WAL before the tailer recorded them |
+| `wal_autocheckpoint` | `0` | writer, and the replica applier | **bql.sh owns checkpoints.** SQLite checkpointing on its own could move frames out of the WAL before the tailer recorded them |
 | `SQLITE_FCNTL_PERSIST_WAL` | on | writer | keeps the `-wal` across the last close, so a crash reconcile still has its frames |
 | `page_size` | 4096, `[data] pageSize` | at creation only | a page is the unit of replication |
 | `max_page_count` | from `quotaBytes` | writer | the per-tenant storage quota |
@@ -476,7 +476,7 @@ bun run bench --only wal            # the shipping legs
 ```
 
 `bench/profile.ts` is deliberately not part of `bun run bench`: three of its four sections measure
-things BunQL does not do (uncompressed records, group commit, cached verification), so they are
+things bql.sh does not do (uncompressed records, group commit, cached verification), so they are
 attribution for this document rather than budgets to hold.
 
 ### Two ways this file has been wrong, and how to not repeat them
@@ -596,7 +596,7 @@ Two further reasons, both measured rather than argued:
 
 `[durability] fsyncSweep = "shared"` is therefore shipped and off. Turn it on for a node running
 `ack: "local"` with hundreds of write-active databases on one thread;
-`bunql_fsync_sweep_duration_us` is what tells you the interval has stretched.
+`bql_fsync_sweep_duration_us` is what tells you the interval has stretched.
 
 **Conditions these numbers were taken under.** §8's bar was met for §9.2 and the `--depth` ladder
 (load average 1.8–1.9) and *not* for the ladder in §9.3, which ran at load 6–9. Every row there is
@@ -637,7 +637,7 @@ connection:
 | 30 | 360 | 64 | 0.0% |
 | 30 | 360 | 512 | **100.0%** |
 
-`bunql_statement_cache_evictions_total` rising while the node is serving is the symptom; raising
+`bql_statement_cache_evictions_total` rising while the node is serving is the symptom; raising
 `[sqlite] statementCache` is the answer. It is per connection, so a tenant pays it once for the
 writer and once per pooled reader.
 
@@ -717,7 +717,7 @@ of **84.9 ns/row at `pk` and 75.9 ns/row at `row`**, with a paired *minimum* tha
 which is what an effect too small for this instrument looks like. That is the ~50 ns figure.
 Design §2.3's own table is where it came from: 0.18 µs for an insert against 0.23 µs "with JS
 `update_hook` firing". The number is real and it is the update hook's; §4.6 attached it to the
-preupdate bullet, and the preupdate hook is the engine BunQL actually runs.
+preupdate bullet, and the preupdate hook is the engine bql.sh actually runs.
 
 | engine | `pk` | `row` | reads values? | `WITHOUT ROWID`? |
 |---|---|---|---|---|

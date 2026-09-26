@@ -231,7 +231,7 @@ for (const spec of BENCHES) {
   const started = Bun.nanoseconds()
   const child = Bun.spawn(
     [process.execPath, "run", path.join(import.meta.dir, spec.file), ...spec.args],
-    { stdout: "pipe", stderr: "inherit", env: { ...process.env, BUNQL_BENCH_JSON: "1" } },
+    { stdout: "pipe", stderr: "inherit", env: { ...process.env, BQL_BENCH_JSON: "1" } },
   )
   const output = await new Response(child.stdout).text()
   const code = await child.exited

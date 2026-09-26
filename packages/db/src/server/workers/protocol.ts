@@ -520,7 +520,7 @@ export interface PublishEvent {
 
 /**
  * C4d: a database's role flipped on this worker — a promotion or a fencing rewrote its catalog
- * row. The router derives `BunQL-Role` and the `requirePrimary` gate on `POST /v1/db` from its own
+ * row. The router derives `BQL-Role` and the `requirePrimary` gate on `POST /v1/db` from its own
  * read of that catalog, and a row rewritten on another thread reaches no `onChange` here, so a
  * promoted sharded node would otherwise keep calling itself a replica for ever.
  */

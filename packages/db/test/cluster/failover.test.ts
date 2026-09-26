@@ -3,7 +3,7 @@
 // The things this exists to catch are the ones a unit test cannot: that a lease actually lapses
 // when its holder dies (it is the *holder* that renews it, not the leader — a leader renewing on a
 // dead node's behalf would keep a dead primary's database for ever and nothing would ever fail
-// over), that the replica with the best copy takes it, and that a client following `BunQL-Primary`
+// over), that the replica with the best copy takes it, and that a client following `BQL-Primary`
 // reaches the node that took it.
 //
 // A database gets its second copy the phase-1 way, with the other nodes following the owner over
@@ -101,7 +101,7 @@ describe("a cluster", () => {
   )
 
   test(
-    "loses its primary, a replica takes over, and a client follows BunQL-Primary to it",
+    "loses its primary, a replica takes over, and a client follows BQL-Primary to it",
     async () => {
       const servers = await startCluster(3, { followFirst: true })
       await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
@@ -172,7 +172,7 @@ describe("a cluster", () => {
         body: JSON.stringify({ sql: "insert into t (v) values ('nope')" }),
       })
       expect(refused.status).toBe(503)
-      expect(refused.headers.get("BunQL-Primary")).toBe(winner.url)
+      expect(refused.headers.get("BQL-Primary")).toBe(winner.url)
       expect((await refused.json()) as { error: { code: string } }).toMatchObject({
         error: { code: "NOT_PRIMARY" },
       })

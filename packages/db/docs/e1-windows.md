@@ -25,7 +25,7 @@ vendored path goes through `fileURLToPath`, which is a no-op everywhere else.
 **A DLL exports nothing unless it is told to.** A shared object on macOS and Linux exports every
 non-static symbol; a DLL exports only what is marked. SQLite routes every public function through
 `SQLITE_API`, so `-DSQLITE_API=__declspec(dllexport)` is the whole of it for the amalgamation, and
-`scripts/native/walsum.c` now marks its three functions `BUNQL_API`, defined the same way on
+`scripts/native/walsum.c` now marks its three functions `BQL_API`, defined the same way on
 Windows and to nothing everywhere else. Without this the library loads and every symbol is missing,
 which reads as "too old" rather than as "not exported" — the confusing failure, so it is worth
 naming.
@@ -50,7 +50,7 @@ It becomes a gate by deleting those lines, on the day it passes.
 Three runs, each one answering a question the last one could not reach.
 
 **Run 1 — the build never happened, and the driver segfaulted.** `scripts/sqlite.ts` located
-`walsum.c` through `URL.pathname`, which is `/D:/a/bunql/…` on Windows and which no file API
+`walsum.c` through `URL.pathname`, which is `/D:/a/bql/…` on Windows and which no file API
 accepts, so there was no DLL. The driver then fell through to the candidate `"sqlite3.dll"` — and
 that is not a filename on Windows, it is a request to the loader to search System32 and every
 directory on `PATH`. It found something, resolved symbols from it, and Bun died at address 0 on the
@@ -66,7 +66,7 @@ will appear at.
 **Run 3 — it builds, it loads, and the suite runs.**
 
 ```
-D:\a\bunql\bunql\vendor\sqlite\sqlite3.dll 3.53.4
+D:\a\bql\bql\vendor\sqlite\sqlite3.dll 3.53.4
 {"preupdate":true,"session":true,"snapshot":true,"walsum":true,"fts5":true,
  "rtree":true,"dbstat":true,"json":true,"math":true,"threadsafe":1}
 ```
@@ -93,14 +93,14 @@ Grouped by message rather than by test, the failures collapse almost entirely in
 | `BUSY: <db> is taking a snapshot` | the same thing, seen by a client |
 | `timed out waiting for <replica> to reach <db>@N` | ~15 sites, all downstream of the above |
 
-**Windows refuses to write a file another handle has open.** POSIX allows it, and BunQL leans on
+**Windows refuses to write a file another handle has open.** POSIX allows it, and bql.sh leans on
 that: `tenant.snapshot()` copies the database file while the tenant still holds it, which is what
 makes a snapshot nearly free (`src/wal/snapshot.ts`). On Windows that copy raises `EBUSY`, the
 snapshot fails, the tenant stays marked exclusive, clients get `503 BUSY`, and every replica that
 was waiting for a bootstrap snapshot times out. One cause, three layers of symptom, and it accounts
 for the replication, restore, bootstrap, segment-index and crash-reconcile clusters together.
 
-The one unrelated failure is `loadConfig` expecting `"/tmp/bunql-canonical"` — a POSIX path
+The one unrelated failure is `loadConfig` expecting `"/tmp/bql-canonical"` — a POSIX path
 literal in a test, not a portability problem in the code.
 
 ### So where Windows stands

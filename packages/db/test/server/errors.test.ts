@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { SqliteError } from "../../src/sqlite/index.ts"
-import { BunQLError, errorResponse, mapError } from "../../src/server/errors.ts"
+import { BqlError, errorResponse, mapError } from "../../src/server/errors.ts"
 
 /** Extended result codes as sqlite3.h numbers them. */
 const RC = {
@@ -51,18 +51,18 @@ describe("mapError on SQLite failures", () => {
   }
 })
 
-describe("mapError on BunQL failures", () => {
-  const cases: [BunQLError, number, string][] = [
-    [BunQLError.badRequest("bad sql"), 400, "BAD_REQUEST"],
-    [BunQLError.unauthenticated(), 401, "UNAUTHENTICATED"],
-    [BunQLError.notAuthorized(), 403, "NOT_AUTHORIZED"],
-    [BunQLError.dbNotFound("acme"), 404, "DB_NOT_FOUND"],
-    [BunQLError.queryTimeout(10), 408, "QUERY_TIMEOUT"],
-    [BunQLError.resetRequired(), 409, "RESET_REQUIRED"],
-    [BunQLError.txidNotAvailable(99, 12), 425, "TXID_NOT_AVAILABLE"],
-    [BunQLError.notPrimary("wss://node-b/v1/ws"), 503, "NOT_PRIMARY"],
-    [BunQLError.busy(), 503, "BUSY"],
-    [BunQLError.quotaExceeded(), 507, "QUOTA_EXCEEDED"],
+describe("mapError on bql.sh failures", () => {
+  const cases: [BqlError, number, string][] = [
+    [BqlError.badRequest("bad sql"), 400, "BAD_REQUEST"],
+    [BqlError.unauthenticated(), 401, "UNAUTHENTICATED"],
+    [BqlError.notAuthorized(), 403, "NOT_AUTHORIZED"],
+    [BqlError.dbNotFound("acme"), 404, "DB_NOT_FOUND"],
+    [BqlError.queryTimeout(10), 408, "QUERY_TIMEOUT"],
+    [BqlError.resetRequired(), 409, "RESET_REQUIRED"],
+    [BqlError.txidNotAvailable(99, 12), 425, "TXID_NOT_AVAILABLE"],
+    [BqlError.notPrimary("wss://node-b/v1/ws"), 503, "NOT_PRIMARY"],
+    [BqlError.busy(), 503, "BUSY"],
+    [BqlError.quotaExceeded(), 507, "QUOTA_EXCEEDED"],
   ]
 
   for (const [err, status, code] of cases) {
@@ -74,12 +74,12 @@ describe("mapError on BunQL failures", () => {
   }
 
   test("the status follows from the code when the caller does not give one", () => {
-    expect(new BunQLError("DB_NOT_FOUND", "gone").status).toBe(404)
-    expect(new BunQLError("SOMETHING_NEW", "gone").status).toBe(500)
+    expect(new BqlError("DB_NOT_FOUND", "gone").status).toBe(404)
+    expect(new BqlError("SOMETHING_NEW", "gone").status).toBe(500)
   })
 
   test("a replica that cannot reach minTxid reports where it is", () => {
-    const body = mapError(BunQLError.txidNotAvailable(99, 12)).body
+    const body = mapError(BqlError.txidNotAvailable(99, 12)).body
     expect(body.error.txid).toBe(12)
   })
 })
@@ -100,7 +100,7 @@ describe("mapError context", () => {
   })
 
   test("leaves out fields nobody supplied", () => {
-    const body = mapError(BunQLError.badRequest("nope")).body
+    const body = mapError(BqlError.badRequest("nope")).body
     expect(Object.keys(body.error).sort()).toEqual(["code", "message", "status"])
   })
 })
@@ -116,7 +116,7 @@ describe("mapError on anything else", () => {
   test("no stack trace ever reaches the body", () => {
     const err = new Error("boom")
     expect(JSON.stringify(mapError(err).body)).not.toContain("at ")
-    expect(JSON.stringify(mapError(BunQLError.badRequest("boom")).body)).not.toContain(
+    expect(JSON.stringify(mapError(BqlError.badRequest("boom")).body)).not.toContain(
       "errors.test",
     )
   })
@@ -131,7 +131,7 @@ describe("mapError on anything else", () => {
 
 describe("errorResponse", () => {
   test("is JSON with the mapped status", async () => {
-    const response = errorResponse(BunQLError.dbNotFound("acme"))
+    const response = errorResponse(BqlError.dbNotFound("acme"))
     expect(response.status).toBe(404)
     expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8")
     expect(await response.json()).toEqual({
@@ -140,16 +140,16 @@ describe("errorResponse", () => {
   })
 
   test("points a redirected client at the primary", () => {
-    const response = errorResponse(BunQLError.notPrimary("wss://node-b/v1/ws"))
+    const response = errorResponse(BqlError.notPrimary("wss://node-b/v1/ws"))
     expect(response.status).toBe(503)
-    expect(response.headers.get("BunQL-Primary")).toBe("wss://node-b/v1/ws")
+    expect(response.headers.get("BQL-Primary")).toBe("wss://node-b/v1/ws")
   })
 
   test("reports the txid it was serving and keeps extra headers", () => {
-    const response = errorResponse(BunQLError.badRequest("nope"), { txid: 41 }, {
-      "BunQL-Node": "node-a",
+    const response = errorResponse(BqlError.badRequest("nope"), { txid: 41 }, {
+      "BQL-Node": "node-a",
     })
-    expect(response.headers.get("BunQL-Txid")).toBe("41")
-    expect(response.headers.get("BunQL-Node")).toBe("node-a")
+    expect(response.headers.get("BQL-Txid")).toBe("41")
+    expect(response.headers.get("BQL-Node")).toBe("node-a")
   })
 })

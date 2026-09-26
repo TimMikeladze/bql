@@ -58,6 +58,6 @@ test("the refusals are counted and the queue is reported empty again", async () 
         ?.split(" ")
         .pop(),
     )
-  expect(value("bunql_write_queue_rejected_total")).toBeGreaterThan(0)
-  expect(value("bunql_write_queue_depth")).toBe(0)
+  expect(value("bql_write_queue_rejected_total")).toBeGreaterThan(0)
+  expect(value("bql_write_queue_depth")).toBe(0)
 })

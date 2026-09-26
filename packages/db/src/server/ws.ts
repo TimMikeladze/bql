@@ -34,7 +34,7 @@ import {
 import type { PinHolder, Principal } from "./auth.ts"
 import { pinOwner, requireScope } from "./auth.ts"
 import type { RemoteTx } from "./forward.ts"
-import { BunQLError, mapError } from "./errors.ts"
+import { BqlError, mapError } from "./errors.ts"
 import {
   assertStatement,
   awaitTxid,
@@ -135,7 +135,7 @@ function replyError(ws: Socket, id: number | undefined, err: unknown): void {
 function principalOf(ws: Socket): Principal {
   const principal = ws.data.principal
   if (!principal) {
-    throw BunQLError.unauthenticated("send a hello message with a token before anything else")
+    throw BqlError.unauthenticated("send a hello message with a token before anything else")
   }
   return principal
 }
@@ -201,11 +201,11 @@ export async function handleMessage(ws: Socket, raw: string | Buffer): Promise<v
   try {
     message = JSON.parse(text) as WsRequest
   } catch {
-    replyError(ws, undefined, BunQLError.badRequest("frame is not valid JSON"))
+    replyError(ws, undefined, BqlError.badRequest("frame is not valid JSON"))
     return
   }
   if (!message || typeof message !== "object" || typeof message.op !== "string") {
-    replyError(ws, undefined, BunQLError.badRequest("every frame needs an op"))
+    replyError(ws, undefined, BqlError.badRequest("every frame needs an op"))
     return
   }
   ws.data.runtime.metrics.wsMessage()
@@ -227,7 +227,7 @@ export async function handleMessage(ws: Socket, raw: string | Buffer): Promise<v
       }
       case "tx.begin": {
         const db = (message as { db?: string }).db
-        if (!db) throw BunQLError.badRequest("tx.begin needs a db")
+        if (!db) throw BqlError.badRequest("tx.begin needs a db")
         enqueue(ws, db, id, () => txBegin(ws, message as WsAny, db))
         return
       }
@@ -245,7 +245,7 @@ export async function handleMessage(ws: Socket, raw: string | Buffer): Promise<v
       }
       case "subscribe": {
         const db = (message as { db?: string }).db
-        if (!db) throw BunQLError.badRequest("subscribe needs a db")
+        if (!db) throw BqlError.badRequest("subscribe needs a db")
         enqueue(ws, db, id, () => subscribe(ws, message as WsAny, db))
         return
       }
@@ -253,7 +253,7 @@ export async function handleMessage(ws: Socket, raw: string | Buffer): Promise<v
         unsubscribe(ws, message as WsAny)
         return
       default:
-        throw BunQLError.badRequest(`unknown op ${JSON.stringify((message as WsAny).op)}`)
+        throw BqlError.badRequest(`unknown op ${JSON.stringify((message as WsAny).op)}`)
     }
   } catch (err) {
     replyError(ws, id, err)
@@ -291,7 +291,7 @@ async function hello(ws: Socket, message: WsAny): Promise<void> {
   if (message.token) {
     ws.data.principal = await runtime.auth.authenticateToken(message.token)
   } else if (!ws.data.principal) {
-    throw BunQLError.unauthenticated("hello needs a token on a socket that had none")
+    throw BqlError.unauthenticated("hello needs a token on a socket that had none")
   }
   if (message.id !== undefined) send(ws, { id: message.id, ok: true })
   greet(ws, runtime.node)
@@ -304,7 +304,7 @@ function databaseOf(ws: Socket, message: WsRequest): string {
     return watch(ws, remote ? remote.db : sessionOf(ws, any).db)
   }
   if (any.db) return watch(ws, any.db)
-  throw BunQLError.badRequest(`${any.op} needs a db or a tx`)
+  throw BqlError.badRequest(`${any.op} needs a db or a tx`)
 }
 
 /** Joins the `moved` topic for a database, once per socket per name. */
@@ -321,10 +321,10 @@ function watch(ws: Socket, db: string): string {
 }
 
 function sessionOf(ws: Socket, message: WsAny): TxSession {
-  if (!message.tx) throw BunQLError.badRequest(`${message.op} needs a tx`)
+  if (!message.tx) throw BqlError.badRequest(`${message.op} needs a tx`)
   const session = ws.data.runtime.txSession(message.tx)
   if (session.owner !== null && session.owner !== ws.data.owner) {
-    throw BunQLError.notAuthorized("that transaction belongs to another connection")
+    throw BqlError.notAuthorized("that transaction belongs to another connection")
   }
   return session
 }
@@ -335,7 +335,7 @@ function remoteOf(ws: Socket, message: WsAny): RemoteTx | undefined {
   const remote = ws.data.runtime.forwarder.remoteTx(message.tx)
   if (!remote) return undefined
   if (remote.owner !== null && remote.owner !== ws.data.owner) {
-    throw BunQLError.notAuthorized("that transaction belongs to another connection")
+    throw BqlError.notAuthorized("that transaction belongs to another connection")
   }
   return remote
 }
@@ -352,7 +352,7 @@ async function statement(ws: Socket, message: WsAny, db: string): Promise<void> 
       if (message.op === "batch") {
         const statements = message.statements
         if (!Array.isArray(statements) || statements.length === 0) {
-          throw BunQLError.badRequest("batch needs a non-empty statements array")
+          throw BqlError.badRequest("batch needs a non-empty statements array")
         }
         const results = []
         for (let i = 0; i < statements.length; i++) {
@@ -450,10 +450,10 @@ function runBatch(
   options: ReturnType<typeof resolveOptions>,
   inTx: boolean,
 ): { results: unknown[]; txid: number } {
-  if (!inTx) throw BunQLError.badRequest("batch outside a transaction takes the normal path")
+  if (!inTx) throw BqlError.badRequest("batch outside a transaction takes the normal path")
   const statements = message.statements
   if (!Array.isArray(statements) || statements.length === 0) {
-    throw BunQLError.badRequest("batch needs a non-empty statements array")
+    throw BqlError.badRequest("batch needs a non-empty statements array")
   }
   const results = statements.map((statement, index) => {
     try {
@@ -536,7 +536,7 @@ function subscribe(ws: Socket, message: WsAny, db: string): void {
     return
   }
   if (message.kind !== undefined && message.kind !== "changes") {
-    throw BunQLError.badRequest(`subscribe kind must be "changes" or "live"`)
+    throw BqlError.badRequest(`subscribe kind must be "changes" or "live"`)
   }
   subscribeChanges(ws, message, tenant)
 }
@@ -600,7 +600,7 @@ function subscribeLive(ws: Socket, message: WsAny, tenant: TxSession["tenant"]):
   const runtime = ws.data.runtime
   const principal = principalOf(ws)
   const db = tenant.name
-  if (!message.sql) throw BunQLError.badRequest("a live subscription needs sql")
+  if (!message.sql) throw BqlError.badRequest("a live subscription needs sql")
   const rows = message.rows === "object" ? "object" : "array"
   const holder = pinOwner(principal)
   runtime.retain(db, holder)
@@ -670,9 +670,9 @@ export function drain(ws: Socket): void {
 
 function unsubscribe(ws: Socket, message: WsAny): void {
   const id = message.sub
-  if (!id) throw BunQLError.badRequest("unsubscribe needs a sub")
+  if (!id) throw BqlError.badRequest("unsubscribe needs a sub")
   const removed = dropSubscription(ws, id)
-  if (!removed) throw BunQLError.badRequest(`no such subscription ${JSON.stringify(id)}`)
+  if (!removed) throw BqlError.badRequest(`no such subscription ${JSON.stringify(id)}`)
   if (message.id !== undefined) send(ws, { id: message.id, ok: true })
 }
 

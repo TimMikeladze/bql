@@ -85,7 +85,7 @@ is already the validated one.
 `ERROR_STATUS` has `DB_NOT_FOUND` and `TX_NOT_FOUND` and nothing meaning a row, so the data API's
 three `/{pk}` operations answer `200` with `null` and publish `anyOf: [Row, null]`.
 
-- `NOT_FOUND: 404` joins `ERROR_STATUS` and `BunQLErrorCode`, with `BunQLError.notFound`.
+- `NOT_FOUND: 404` joins `ERROR_STATUS` and `BqlErrorCode`, with `BqlError.notFound`.
 - The `get`, `update` and `delete` operations in `src/dataapi/operations.ts` declare it, their
   response schema becomes the row rather than the union, and the handlers throw instead of returning
   `null`.
@@ -102,7 +102,7 @@ Two bodies are described and not checked, and both are right to be:
   reaches `readJson`, so nothing tries to `JSON.parse` a database. It now declares
   `bodyType: "application/vnd.sqlite3"` so the document says what it really takes.
 - **`databaseGraphql`** has to answer a malformed query in GraphQL's own `{errors: [...]}` envelope
-  rather than BunQL's `{error: {...}}` — `src/graphql/handler.ts`'s header argues that out — so its
+  rather than bql.sh's `{error: {...}}` — `src/graphql/handler.ts`'s header argues that out — so its
   handler reads and refuses the body itself.
 
 And an ordering consequence worth stating, because a test pins it: `POST /v1/db/{db}/query` with an
@@ -129,7 +129,7 @@ surface with both peers resolved.
 
 One thing found along the way and fixed: `ResponseInvalid` also carries a `problems` list, and
 moving `problems` into `mapError` briefly leaked it into the `500` a client is supposed to learn
-nothing from. `problemsOf` is gated to `BunQLError`, which a response bug is not.
+nothing from. `problemsOf` is gated to `BqlError`, which a response bug is not.
 
 Two code comments claimed an unsupported verb answers `405` from Bun's router. It answers `404`,
 through `createApp`'s `fetch` fallback — verified by hand. The comments say so now; the behaviour

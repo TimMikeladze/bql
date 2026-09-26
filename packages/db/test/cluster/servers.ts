@@ -1,4 +1,4 @@
-// A real BunQL cluster in this process: N whole servers, each with `[cluster] enabled`, each on a
+// A real bql.sh cluster in this process: N whole servers, each with `[cluster] enabled`, each on a
 // free port, all sharing one secret.
 //
 // A cluster node has to know its own `advertise` address before it starts — the Raft socket is
@@ -49,7 +49,7 @@ export async function freePort(): Promise<number> {
   return port
 }
 
-export function tempDir(prefix = "bunql-c2-"): string {
+export function tempDir(prefix = "bql-c2-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   dirs.push(dir)
   return dir
@@ -85,7 +85,7 @@ export async function startCluster(
   const first = ids[0] as string
   const servers: ClusterServer[] = []
   for (const id of ids) {
-    const dir = tempDir(`bunql-${id}-`)
+    const dir = tempDir(`bql-${id}-`)
     const peers = ids.filter((peer) => peer !== id).map((peer) => `${peer}=${advertise[peer]}`)
     const replicaOf =
       options.followFirst && id !== first
@@ -131,7 +131,7 @@ export async function startCluster(
     })
     const handle = await startServer(config, {
       log: () => {},
-      onError: process.env.BUNQL_TEST_CLUSTER_LOG
+      onError: process.env.BQL_TEST_CLUSTER_LOG
         ? (err) => console.error(`[${id}]`, err)
         : () => {},
     })

@@ -1,6 +1,6 @@
 # Exactly-once, in three tiers
 
-End-to-end exactly-once against an arbitrary external system is not achievable, and AgenticBus
+End-to-end exactly-once against an arbitrary external system is not achievable, and bql.sh/bus
 does not claim it. What it does offer is three tiers, each precisely bounded, and a named window
 where the last one stops.
 
@@ -21,7 +21,7 @@ The handler runs in the bus's own process and writes to the same SQLite file, so
 transaction and nothing to reconcile. No two-phase commit, no idempotency key, no compensation.
 
 ```ts
-import { createBus } from "@bunql/bus";
+import { createBus } from "bql.sh/bus";
 
 const bus = createBus({ path: "./data/bus.db", blobDirectory: "./data/blobs" });
 bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");

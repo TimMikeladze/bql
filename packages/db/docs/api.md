@@ -1,4 +1,4 @@
-# BunQL API reference
+# bql.sh API reference
 
 The API as implemented at the end of phase 1: one primary, any number of replicas, continuous
 backup to S3, and a libsql-compatible surface beside the native one. `docs/design.md` is the
@@ -63,17 +63,17 @@ Every response carries these four:
 
 | header | meaning |
 |---|---|
-| `BunQL-Txid` | the database's last txid as this request saw it |
-| `BunQL-Node` | node identity; a hash of the hostname unless `[server] node` sets one |
-| `BunQL-Role` | `primary` or `replica` — **for the database this request names**, live |
-| `BunQL-Duration-Us` | microseconds spent in the handler |
+| `BQL-Txid` | the database's last txid as this request saw it |
+| `BQL-Node` | node identity; a hash of the hostname unless `[server] node` sets one |
+| `BQL-Role` | `primary` or `replica` — **for the database this request names**, live |
+| `BQL-Duration-Us` | microseconds spent in the handler |
 
-`BunQL-Role` is per database and it moves at runtime. A node promoted for `acme` answers
+`BQL-Role` is per database and it moves at runtime. A node promoted for `acme` answers
 `primary` for `acme` and `replica` for everything it still follows, in the same process and
 without a restart; a request that names no database (`POST /v1/db`, `/healthz`) gets the node's
 own role instead. See [Promotion and failover](#promotion-and-failover).
 
-`BunQL-Primary` is on **every** response from a replica, not only on a `NOT_PRIMARY` error: it
+`BQL-Primary` is on **every** response from a replica, not only on a `NOT_PRIMARY` error: it
 carries where that database's writes go — `[replication] primary` in a static topology, and the
 node the control plane names in a cluster — so a client that wants the write path never has to
 provoke an error to find it. While `[server] cors` is on (the default) all five are listed in
@@ -89,8 +89,8 @@ Accepted as body fields on every statement-bearing request, and two of them as h
 | `rows` | — | `"array"`, `"object"` | `"array"` |
 | `maxRows` | — | positive integer; the request fails at the row that would cross it | `[limits] maxRows`, 10000 |
 | `timeoutMs` | — | positive integer, clamped to the configured limit | `[limits] queryTimeoutMs` |
-| `ack` | `BunQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `fsync` |
-| `minTxid` | `BunQL-Min-Txid` | integer; the request waits up to 2 s, then `425` | none |
+| `ack` | `BQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `fsync` |
+| `minTxid` | `BQL-Min-Txid` | integer; the request waits up to 2 s, then `425` | none |
 | `consistency` | — | `"ryw"`, `"primary"`, `"any"` | `"ryw"` |
 
 `consistency` is validated but changes nothing on a single node; `minTxid` does the work.
@@ -104,7 +104,7 @@ Accepted as body fields on every statement-bearing request, and two of them as h
 | `replica` | `fsync` here, **and** one replica node reporting the record fsynced. |
 | `quorum` | `fsync` here, **and** a majority of (primary + replicas) holding it: `floor((replicas + 1) / 2)` replica acks. |
 
-The level is read from the body, then the `BunQL-Ack` header, then `[durability] defaultAck`, and
+The level is read from the body, then the `BQL-Ack` header, then `[durability] defaultAck`, and
 applies to `query`, `batch` and the WebSocket equivalents. An interactive transaction takes the
 node's default at commit.
 
@@ -206,7 +206,7 @@ that were once refused and is gone with the last of them.
 | `TXID_NOT_AVAILABLE` | 425 | `minTxid` did not land within the wait |
 | `PIN_LIMIT` | 429 | this principal already holds `[limits] maxPinnedPerPrincipal` databases open with subscriptions |
 | `BUSY` | 503 | `SQLITE_BUSY`/`SQLITE_LOCKED`, a snapshot in progress, or too many forwards in flight |
-| `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it, or an admin write reached one at all; carries `BunQL-Primary` |
+| `NOT_PRIMARY` | 503 | a write reached a replica that cannot forward it, or an admin write reached one at all; carries `BQL-Primary` |
 | `WRITE_QUEUE_FULL` | 503 | the database's write queue is at `[limits] maxQueuedWrites` or `maxQueuedWriteBytes`; carries `Retry-After` |
 | `WRITE_QUEUE_TIMEOUT` | 503 | queued past `[limits] queueWaitMs` without reaching the writer |
 | `TOO_MANY_OPEN` | 503 | the node is at `[data] maxOpen` and every open database is pinned by a subscription |
@@ -272,7 +272,7 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `GET /v1/cluster/raft` | node-to-node raft socket (WebSocket) | cluster secret, in-band |
 | `POST /v1/tokens` | mint a scoped token | admin |
 | `DELETE /v1/tokens/:jti` | revoke one | admin |
-| `GET /v1/ws` | WebSocket upgrade, sub-protocol `bunql.v1` | any |
+| `GET /v1/ws` | WebSocket upgrade, sub-protocol `bql.v1` | any |
 | `GET /v2`, `GET /v3` | Hrana version probe | none |
 | `POST /v2/pipeline`, `POST /v3/pipeline` | Hrana pipeline, database from `x-namespace`/`Host`/`default` | `ro`, `rw` when it writes |
 | `POST /v3/cursor` | Hrana cursor, newline-delimited | as above |
@@ -399,7 +399,7 @@ DELETE /v1/db/acme/read/9c2e…
 → 200 { "read": "9c2e…", "ended": true }
 ```
 
-**It is not `BunQL-Min-Txid`**, which is the thing to reach for first and the wrong tool for this.
+**It is not `BQL-Min-Txid`**, which is the thing to reach for first and the wrong tool for this.
 That header is a **floor** — "do not answer until the tenant has reached txid N" — so two reads that
 both satisfy it can see different databases, because the second sees every write that landed in
 between. A read session is a **point**.
@@ -506,7 +506,7 @@ The long poll returns a JSON array of the same `change` objects:
 ```http
 GET /v1/db/acme/changes?since=4800&wait=30000
 → 200 [ {"txid":4801,"seq":0,"changes":[…]}, … ]
-   BunQL-Txid: 4805
+   BQL-Txid: 4805
    Cache-Control: public, max-age=31536000, immutable     ← a `since` in the past is immutable
 ```
 
@@ -618,7 +618,7 @@ shipper and a replica bootstrap take snapshots on their own; a node with neither
 `POST /v1/db/{db}/snapshot` if it wants point-in-time restore.
 
 **On a replica, `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore` and
-`POST /v1/db/:db/import` answer `503 NOT_PRIMARY` with `BunQL-Primary`**, the same shape a
+`POST /v1/db/:db/import` answer `503 NOT_PRIMARY` with `BQL-Primary`**, the same shape a
 statement write gets when it cannot be forwarded. A replica's files are the primary's, and acting
 on them locally would create a database the cluster never hears about or delete the copy the
 applier needs. Reads, `POST /v1/tokens`, and the node-local `snapshot` and `checkpoint` routes work
@@ -634,7 +634,7 @@ POST /v1/db/acme/restore    { "at": 4800, "into": "acme-recovered" }
 
 POST /v1/db/acme/restore    { "from": "s3", "at": 4800, "into": "acme-recovered" }
 → 201 { "name": "acme-recovered", "from": "acme", "source": "s3", "bucket": "backups",
-        "prefix": "bunql/", "generation": "fd4312b8c8655fc7", "txid": 4800,
+        "prefix": "bql/", "generation": "fd4312b8c8655fc7", "txid": 4800,
         "fromTxid": 4750, "applied": 50, "objects": 2, "bytes": 98304 }
 
 POST /v1/db/acme/checkpoint { "mode": "TRUNCATE" }
@@ -682,7 +682,7 @@ as-built note; `docs/plan-surfaces.md` is the design.
 GET    /v1/db/acme/api/users?name=like.ann*&order=name.asc&limit=20&select=id,name
 GET    /v1/db/acme/api/users/1
 POST   /v1/db/acme/api/users          { "name": "ann", "email": "ann@example.com" }
-PATCH  /v1/db/acme/api/users/1        { "email": "ann@bunql.dev" }
+PATCH  /v1/db/acme/api/users/1        { "email": "ann@bql.dev" }
 DELETE /v1/db/acme/api/users/1
 ```
 
@@ -726,7 +726,7 @@ nothing else.
 
 ```http
 GET  /v1/db/acme/backup
-→ { "db": "acme", "enabled": true, "bucket": "backups", "prefix": "bunql/",
+→ { "db": "acme", "enabled": true, "bucket": "backups", "prefix": "bql/",
     "endpoint": "https://…", "retention": "30d",
     "shipper": { "shippedTxid": 4812, "pendingRecords": 0, "pendingBytes": 0,
                  "behind": false, "lastError": null, "lastShipMs": 7,
@@ -743,7 +743,7 @@ POST /v1/db/acme/backup/verify  { "at": 4800 }
 → 409 when an object the manifest names is absent or the wrong size; `missing` says which
 
 GET  /v1/db/acme/backup/generations
-→ { "db": "acme", "bucket": "backups", "prefix": "bunql/", "generations": [ … ] }
+→ { "db": "acme", "bucket": "backups", "prefix": "bql/", "generations": [ … ] }
 ```
 
 All three need the admin key. `verify` downloads nothing and writes nothing: it checks the
@@ -753,7 +753,7 @@ reach is `400 S3_INCOMPLETE` naming the shortfall; an object whose body does not
 recorded hash is `400 S3_CORRUPT`; a node with no bucket is `503 S3_DISABLED`.
 
 Shipping never blocks a commit. A bucket that is slow or unreachable makes `behind` true and
-`bunql_s3_errors_total` climb while writes are answered at their usual latency, and the shipper
+`bql_s3_errors_total` climb while writes are answered at their usual latency, and the shipper
 catches up from the local log when the bucket returns. Retention in the bucket (`[s3] retention`,
 default 30 d) removes snapshots past the window and the segments wholly below the oldest snapshot
 that survives — never one a surviving snapshot would need to replay from.
@@ -789,29 +789,29 @@ GET /metrics  → Prometheus text 0.0.4; needs the admin key when one is configu
 down: a replica that cannot reach its primary is serving data that only gets staler.
 
 Metrics are per-process counters only — nothing keyed by database, so cardinality is bounded. A
-node that replicates adds four series: `bunql_replication_lag_txid` and
-`bunql_replication_connected` (gauges) and `bunql_replication_bytes_total` and
-`bunql_replication_records_total` (counters). On a primary they count what was streamed out and
+node that replicates adds four series: `bql_replication_lag_txid` and
+`bql_replication_connected` (gauges) and `bql_replication_bytes_total` and
+`bql_replication_records_total` (counters). On a primary they count what was streamed out and
 how far the furthest-behind replica is; on a replica, what was received and applied.
 
-Three more counters cover R2's paths: `bunql_forwarded_writes_total` (writes this replica handed
-to its primary), `bunql_ack_timeouts_total` (writes that committed locally and then ran out of
-patience waiting for replica acks) and `bunql_tx_queued_total` (interactive transactions that
+Three more counters cover R2's paths: `bql_forwarded_writes_total` (writes this replica handed
+to its primary), `bql_ack_timeouts_total` (writes that committed locally and then ran out of
+patience waiting for replica acks) and `bql_tx_queued_total` (interactive transactions that
 waited for the writer instead of failing `TX_BUSY`).
 
-Three counters cover the prepared-statement cache (P7): `bunql_statement_cache_hits_total`,
-`bunql_statement_cache_misses_total` and `bunql_statement_cache_evictions_total`, summed over every
+Three counters cover the prepared-statement cache (P7): `bql_statement_cache_hits_total`,
+`bql_statement_cache_misses_total` and `bql_statement_cache_evictions_total`, summed over every
 connection the node has opened — including those of databases since evicted, so they never go
 backwards. **Alert on the eviction rate, not on the hit rate**: evictions rising while the node is
 serving means a connection's working set is past `[sqlite] statementCache` and every `prepare` is
-paying a compile, which is 81x a hit. A hit counted here is a hit in BunQL's cache and not proof
+paying a compile, which is 81x a hit. A hit counted here is a hit in bql.sh's cache and not proof
 SQLite did not recompile — an authorizer change expires every statement on the connection, and a
 token-authenticated write cycles the authorizer (`docs/p7-plan-cache.md` §4).
 
-A node with `[s3] bucket` set adds five: `bunql_s3_shipped_txid` (the highest txid any database
-has in the bucket), `bunql_s3_pending_records` and `bunql_s3_behind` (gauges), and
-`bunql_s3_errors_total` and `bunql_s3_bytes_total` (counters). Alert on `bunql_s3_behind` and on
-`bunql_s3_shipped_txid` not advancing; a node with no bucket omits all five rather than exporting
+A node with `[s3] bucket` set adds five: `bql_s3_shipped_txid` (the highest txid any database
+has in the bucket), `bql_s3_pending_records` and `bql_s3_behind` (gauges), and
+`bql_s3_errors_total` and `bql_s3_bytes_total` (counters). Alert on `bql_s3_behind` and on
+`bql_s3_shipped_txid` not advancing; a node with no bucket omits all five rather than exporting
 zeroes.
 
 ### Node-to-node replication
@@ -826,7 +826,7 @@ answers `403 REPLICATION_DISABLED`. The frame format, the bootstrap rules and th
 
 A write that arrives on a replica is handed to the primary over the socket the replica already
 holds (`FORWARD` out, `RESULT` back) and the replica answers with the primary's own result, plus
-the `BunQL-Txid` the transaction committed under. Before answering it waits for its own applier to
+the `BQL-Txid` the transaction committed under. Before answering it waits for its own applier to
 reach that txid, so the caller's next read *on that node* sees its own write with no `minTxid`.
 
 - Classification is `sqlite3_stmt_readonly`, the same call the local path makes: a read is served
@@ -836,7 +836,7 @@ reach that txid, so the caller's next read *on that node* sees its own write wit
 - The principal crosses the wire as its claims, not its token — two nodes share a cluster secret,
   not JWT key material — and the primary applies the same scope and table ACLs it would locally.
 - `[replication] forwardWrites = false` restores the phase-0 answer: `503 NOT_PRIMARY` with
-  `BunQL-Primary`. A replica that cannot reach its primary answers the same way.
+  `BQL-Primary`. A replica that cannot reach its primary answers the same way.
 - In flight forwards are capped by `[replication] maxForwards` (`503 BUSY` past it) and bounded by
   `[replication] forwardTimeoutMs` (`504 FORWARD_TIMEOUT`).
 - **Only statement writes forward.** The lifecycle routes act on a node's own files rather than on
@@ -889,18 +889,18 @@ Everything a replica cannot do in phase 1, in one place.
 
 | what | on a replica |
 |---|---|
-| reads | served locally, at the applied txid. `BunQL-Min-Txid` waits on the applier |
-| writes on the native routes | forwarded to the primary, transparently; `503 NOT_PRIMARY` with `BunQL-Primary` when `forwardWrites = false` or the socket is down |
+| reads | served locally, at the applied txid. `BQL-Min-Txid` waits on the applier |
+| writes on the native routes | forwarded to the primary, transparently; `503 NOT_PRIMARY` with `BQL-Primary` when `forwardWrites = false` or the socket is down |
 | writes on the Hrana surface | **not forwarded** — `NOT_PRIMARY`. Point a libsql client at the primary to write |
 | interactive transactions | forwarded whole; the baton is the primary's |
 | the change feed | txid-only events, `changes: []` |
 | live queries | full, re-run on every applied transaction |
-| `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore`, `POST /v1/db/:db/import` | `503 NOT_PRIMARY` with `BunQL-Primary`, or `307` when the new primary is on the same origin. They are refused rather than forwarded: a create would have to come back over the replication stream to exist here anyway, and a delete on a copy the primary still owns removes the applier's own file. The gate is per database, so a promoted node serves them for what it was promoted for. Address the primary, or promote |
+| `POST /v1/db`, `DELETE /v1/db/:db`, `POST /v1/db/:db/restore`, `POST /v1/db/:db/import` | `503 NOT_PRIMARY` with `BQL-Primary`, or `307` when the new primary is on the same origin. They are refused rather than forwarded: a create would have to come back over the replication stream to exist here anyway, and a delete on a copy the primary still owns removes the applier's own file. The gate is per database, so a promoted node serves them for what it was promoted for. Address the primary, or promote |
 | `POST /v1/db/:db/checkpoint` with `TRUNCATE` | `503 NOT_PRIMARY`. Every other mode runs locally, and under `apply = "pages"` there is nothing in the WAL to checkpoint, so it reports zero |
 | `POST /v1/db/:db/snapshot` | works: a replica has the file and a snapshot of it is a valid restore source |
 | S3 shipping | off. A replica authors nothing, so it ships nothing; `restore` from a bucket still works |
 | `ack: "replica"` / `"quorum"` on a forwarded write | honoured — the level travels with the forwarded body and the primary waits for it |
-| promotion to primary | `POST /v1/db/:db/promote` and `bunql promote` (C2). A promoted node stops following that database, keeps the copy, and serves its own lifecycle routes for it |
+| promotion to primary | `POST /v1/db/:db/promote` and `bql promote` (C2). A promoted node stops following that database, keeps the copy, and serves its own lifecycle routes for it |
 
 A replica's `GET /readyz` is `503` while its stream is down, so a load balancer takes it out of
 rotation rather than serving data that only gets staler.
@@ -945,7 +945,7 @@ Promotion is per database. Promoting a whole node is a loop over `GET /v1/db`.
 
 It stops following that database (keeping the copy — this is not the R7 unfollow, which deletes
 one), folds its WAL into the file, takes the new epoch, and reopens as a primary. From that
-instant it serves its own lifecycle routes for it, `BunQL-Role` says `primary` for it, and every
+instant it serves its own lifecycle routes for it, `BQL-Role` says `primary` for it, and every
 `TxnRecord` it authors carries the new epoch.
 
 Everything else it follows is untouched: a node is a primary for what it was promoted for and a
@@ -972,8 +972,8 @@ action.
 
 | transport | answer |
 |---|---|
-| HTTP, new primary on the same origin | `307` with `Location` and `BunQL-Primary` |
-| HTTP, new primary on another origin | `503 NOT_PRIMARY` with `BunQL-Primary` and `Location` |
+| HTTP, new primary on the same origin | `307` with `Location` and `BQL-Primary` |
+| HTTP, new primary on another origin | `503 NOT_PRIMARY` with `BQL-Primary` and `Location` |
 | WebSocket | `{"event":"moved","db":"acme","primary":"http://…"}` to every socket that has named that database |
 
 The split is not arbitrary. Following a cross-origin redirect strips `Authorization` (Fetch
@@ -1035,7 +1035,7 @@ elsewhere before `until`. The window in which two nodes could both write is ther
 `leaseGuardMs`, and that is the whole of it.
 
 A node whose lease has lapsed refuses writes with `503 NOT_PRIMARY` and keeps serving reads, which
-carry `BunQL-Role: replica`.
+carry `BQL-Role: replica`.
 
 ### Failover
 
@@ -1048,7 +1048,7 @@ epoch moves, the old primary is fenced by it, and the winner promotes itself loc
 
 ```toml
 [cluster]
-enabled = false        # BUNQL_CLUSTER_ENABLED; setting `peers` turns it on
+enabled = false        # BQL_CLUSTER_ENABLED; setting `peers` turns it on
 id = ""                # this node's id; defaults to [server] node
 advertise = ""         # ws://host:port other nodes reach this one at, and the HTTP base clients are sent to
 zone = ""              # rack/AZ label; C3's placement reads it
@@ -1062,7 +1062,7 @@ electionTimeoutMs = 1500
 heartbeatMs = 300
 ```
 
-Every key takes a `BUNQL_CLUSTER_*` override, and `BUNQL_CLUSTER_PEERS` is comma-separated. The
+Every key takes a `BQL_CLUSTER_*` override, and `BQL_CLUSTER_PEERS` is comma-separated. The
 cluster shares `[replication] secret` — the two sockets run between the same nodes and a second
 secret would be a second thing to rotate — so `[cluster] enabled` with no secret is a configuration
 error. So is a `leaseGuardMs` at or above `leaseTtlMs`, or a `leaseRenewMs` that leaves no room
@@ -1077,7 +1077,7 @@ heard of is not lease-gated at all. Consistent hashing, `rf` and zones are C3.
 ## Hrana — the libsql-compatible surface
 
 Everything under `/v2`, `/v3` and `/v1/db/:db/v2…` speaks libsql's Hrana protocol, so
-`@libsql/client`, `drizzle-orm/libsql`, `kysely-libsql` and the Turso CLI reach BunQL unmodified.
+`@libsql/client`, `drizzle-orm/libsql`, `kysely-libsql` and the Turso CLI reach bql.sh unmodified.
 It is a translation layer over the same `src/server/exec.ts` the native routes use: the same
 authorizer, deadline, row cap, single writer and txid. `docs/r4-hrana.md` is the as-built note.
 
@@ -1105,7 +1105,7 @@ import { createClient } from "@libsql/client"
 
 const client = createClient({
   url: "http://127.0.0.1:4321/v1/db/acme/", // the trailing slash matters
-  authToken: process.env.BUNQL_TOKEN,
+  authToken: process.env.BQL_TOKEN,
   intMode: "bigint",
 })
 await client.execute({ sql: "insert into users (name) values (?)", args: ["ada"] })
@@ -1115,7 +1115,7 @@ await tx.commit()
 ```
 
 Authentication is the ordinary one: `authToken` becomes `Authorization: Bearer`, and over a socket
-the token travels in the Hrana `hello`. A BunQL admin key or a minted token both work.
+the token travels in the Hrana `hello`. A bql.sh admin key or a minted token both work.
 
 ### What is implemented
 
@@ -1127,13 +1127,13 @@ the token travels in the Hrana `hello`. A BunQL admin key or a minted token both
 | `POST /v3/cursor` | yes | — |
 
 - **A stream is a real transaction holder.** `BEGIN`, `COMMIT` and `ROLLBACK` arriving as ordinary
-  statements are intercepted and turned into BunQL transactions, so `client.transaction()` (an
-  open stream) and `client.batch()` (conditioned steps in one request) are both one BunQL
+  statements are intercepted and turned into bql.sh transactions, so `client.transaction()` (an
+  open stream) and `client.batch()` (conditioned steps in one request) are both one bql.sh
   transaction with one txid.
 - **`BEGIN TRANSACTION READONLY`**, which `transactionMode: "read"` emits, opens a deferred
   transaction that refuses writes with `SQLITE_READONLY`.
 - **`replication_index` is our txid** as a decimal string, on every statement result.
-- **Error codes are BunQL's**: `LibsqlError.code` carries `SQLITE_CONSTRAINT_UNIQUE`,
+- **Error codes are bql.sh's**: `LibsqlError.code` carries `SQLITE_CONSTRAINT_UNIQUE`,
   `QUERY_TIMEOUT`, `NOT_AUTHORIZED`, `DB_NOT_FOUND` and the rest of the table above.
 - **Batons** are HMAC-SHA256 over `streamId:seq:expiry` with a per-process key, single-use, and
   die with the process. A stream expires after 60 s idle; a service holds at most 4096 streams, a
@@ -1161,7 +1161,7 @@ the token travels in the Hrana `hello`. A BunQL admin key or a minted token both
 
 ## WebSocket protocol
 
-`GET /v1/ws`, sub-protocol `bunql.v1`. One socket, many databases, pipelined, JSON text frames.
+`GET /v1/ws`, sub-protocol `bql.v1`. One socket, many databases, pipelined, JSON text frames.
 Requests naming one database are answered in the order they arrived; different databases
 interleave. Every client frame carries `id` and every reply echoes it; server-initiated frames
 carry `sub`, or an `event` with no `id`.
@@ -1172,7 +1172,7 @@ presents none is accepted and must send `hello` before anything else.
 ```jsonc
 → {"id":1,"op":"hello","token":"eyJ…"}
 ← {"id":1,"ok":true}
-← {"event":"hello","protocol":"bunql.v1","node":"…","role":"primary"}
+← {"event":"hello","protocol":"bql.v1","node":"…","role":"primary"}
 ```
 
 `hello` is answered with the greeting whether or not it carried an `id`; a socket that arrived
@@ -1256,7 +1256,7 @@ the same question for clients that cannot see control frames.
 
 Both SSE routes answer with `Content-Type: text/event-stream; charset=utf-8`,
 `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, `X-Accel-Buffering: no` and
-`BunQL-Txid`. The response is never compressed and never relies on Bun's idle timeout: it opts out
+`BQL-Txid`. The response is never compressed and never relies on Bun's idle timeout: it opts out
 with `server.timeout(req, 0)` and owns its own `: ping` every 15 s. The first bytes are
 `retry: 1000` and a comment, so a client that is up to date still gets its headers delivered.
 
@@ -1298,13 +1298,13 @@ from before a restart — answers `reset`, and the client must re-query.
 
 ## Client SDK
 
-`@bunql/db/client`. Runs in browsers, Bun, Node and Workers: it imports nothing from Bun or Node, and
+`bql.sh/client`. Runs in browsers, Bun, Node and Workers: it imports nothing from Bun or Node, and
 uses only `fetch`, `WebSocket`, `ReadableStream`, `TextDecoder`, `AbortController` and base64.
 One-shot statements go over HTTP; the socket is opened lazily, for subscriptions and interactive
 transactions.
 
 ```ts
-import { createClient } from "@bunql/db/client"
+import { createClient } from "bql.sh/client"
 
 const client = createClient({
   url: "https://sql.example.com",   // ws(s):// is accepted and rewritten
@@ -1319,7 +1319,7 @@ const client = createClient({
 })
 
 const db = client.db("acme")
-client.txid("acme")   // highest txid this client has seen; what "ryw" sends as BunQL-Min-Txid
+client.txid("acme")   // highest txid this client has seen; what "ryw" sends as BQL-Min-Txid
 client.close()
 ```
 
@@ -1396,7 +1396,7 @@ delivered twice; a position the ring cannot serve arrives as `reset`. A live que
 microtask after it is created, so `key` and the first `on` are registered before the subscription
 goes out; calling `key` after that is an error rather than a silent no-op.
 
-Every failure a caller sees is a `BunQLClientError` carrying the server's `code`, `status` and
+Every failure a caller sees is a `BqlClientError` carrying the server's `code`, `status` and
 `txid`.
 
 ### Admin
@@ -1450,28 +1450,28 @@ are optional peers. `docs/r5-orm.md` is the as-built note, with the mapping tabl
 limitation.
 
 ```ts
-import { BunQLDialect } from "@bunql/db/kysely"
+import { BqlDialect } from "bql.sh/kysely"
 import { Kysely } from "kysely"
 
 const db = new Kysely<Schema>({
-  dialect: new BunQLDialect({ url: "http://127.0.0.1:4321", token, db: "acme" }),
+  dialect: new BqlDialect({ url: "http://127.0.0.1:4321", token, db: "acme" }),
 })
 ```
 
 ```ts
-import { drizzle } from "@bunql/db/drizzle"
+import { drizzle } from "bql.sh/drizzle"
 
 const db = drizzle({ url: "http://127.0.0.1:4321", token, db: "acme" }, { schema: { todos } })
-db.$client.bunql // the BunQL `Db` underneath
+db.$client.bql // the bql.sh `Db` underneath
 ```
 
 Both take the same three sources: a client `Db` from `createClient(...).db(name)`, an embedded
-`Db` from `BunQL.open({dir}).db(name)` with no HTTP in the middle, or `{url, token, db}`, which
+`Db` from `Bql.open({dir}).db(name)` with no HTTP in the middle, or `{url, token, db}`, which
 the adapter builds a client from and closes with `destroy()` / `$client.close()`. A `Db` you pass
 in yourself is never closed for you. A client the adapter opens uses `intMode: "bigint"`, because
 an ORM that throws on an integer past 2^53 is worse than one that hands back a bigint.
 
-- **Transactions are real.** Kysely's `begin`/`commit` connection contract is bridged onto BunQL's
+- **Transactions are real.** Kysely's `begin`/`commit` connection contract is bridged onto bql.sh's
   callback transaction; Drizzle goes through the libsql driver's `client.transaction()`, which maps
   onto the baton. Nested transactions are savepoints.
 - **`db.batch()` in Drizzle is `POST /v1/db/{db}/batch`** — one transaction, one txid,
@@ -1480,23 +1480,23 @@ an ORM that throws on an integer past 2^53 is worse than one that hands back a b
 - **One open transaction per database.** Kysely serialises everything from one instance; the
   Drizzle adapter queues a second transaction for up to 10 s. Two instances over one database can
   still collide with `409 TX_BUSY`.
-- **Errors keep BunQL's `code`.** Kysely propagates the `BunQLClientError`; Drizzle wraps it, so
-  the BunQL error is the `cause`.
+- **Errors keep bql.sh's `code`.** Kysely propagates the `BqlClientError`; Drizzle wraps it, so
+  the bql.sh error is the `cause`.
 
 ---
 
 ## Embedded API
 
-`bunql`. The engine in this process, over the same `Db` interface, plus a synchronous escape hatch.
+`bql`. The engine in this process, over the same `Db` interface, plus a synchronous escape hatch.
 
 ```ts
-import { BunQL } from "@bunql/db"
+import { Bql } from "bql.sh"
 
-const bq = await BunQL.open({
+const bq = await Bql.open({
   dir: "./data",        // shorthand for data: { dir }
   intMode: "number",
-  config: null,         // a bunql.toml to read first; embedded callers configure in code
-  env: {},              // BUNQL_* is not consulted unless you pass it
+  config: null,         // a bql.toml to read first; embedded callers configure in code
+  env: {},              // BQL_* is not consulted unless you pass it
   onError: (err) => {},
   // …plus any ServerConfig section: server, data, durability, realtime, limits, auth
 })
@@ -1546,27 +1546,27 @@ in-process code with the data directory already open. Tokens start applying agai
 ## CLI
 
 ```
-bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
+bql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bql.toml] [--admin-key K]
             [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
             [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
             [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
-bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
-bunql db list
-bunql db stat <name>
-bunql db delete <name>
-bunql db fork <name> --from <db>[@<txid|time>]
-bunql snapshot <db>
-bunql restore <db> --at <txid|time> [--into <name>]
-bunql restore <db> --from s3://bucket/prefix [--at <txid|time>] [--into <name>] [--generation G]
-bunql backup status <db>
-bunql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
-bunql backup generations <db>
-bunql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
-bunql promote <db> [--force]
-bunql cluster
-bunql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
-bunql exec <db> --sql "select 1"
-bunql shell <db>
+bql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
+bql db list
+bql db stat <name>
+bql db delete <name>
+bql db fork <name> --from <db>[@<txid|time>]
+bql snapshot <db>
+bql restore <db> --at <txid|time> [--into <name>]
+bql restore <db> --from s3://bucket/prefix [--at <txid|time>] [--into <name>] [--generation G]
+bql backup status <db>
+bql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
+bql backup generations <db>
+bql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
+bql promote <db> [--force]
+bql cluster
+bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
+bql exec <db> --sql "select 1"
+bql shell <db>
 ```
 
 `serve` opens the data directory in this process. Every other command is an HTTP client of a
@@ -1575,12 +1575,12 @@ writer for it.
 
 | flag | default |
 |---|---|
-| `--url` | `$BUNQL_URL`, else `http://127.0.0.1:4321` |
-| `--token` | `$BUNQL_TOKEN`, else `$BUNQL_ADMIN_KEY` |
+| `--url` | `$BQL_URL`, else `http://127.0.0.1:4321` |
+| `--token` | `$BQL_TOKEN`, else `$BQL_ADMIN_KEY` |
 | `--json` | print the server's own body instead of a summary line |
 
 `--ttl` takes `ms`, `s`, `m`, `h`, `d`, `w` suffixes. `--tables` is `name:r,name:rw`. `--from` and
-`--at` take a txid or an ISO-8601 timestamp, so `bunql db fork x --from y@2026-09-11T10:00:00Z`
+`--at` take a txid or an ISO-8601 timestamp, so `bql db fork x --from y@2026-09-11T10:00:00Z`
 works. `shell` is a REPL over the WebSocket protocol; `exec` is the one-shot a script wants.
 
 `serve --replica-of <url>` makes the node a replica of that primary: it needs the same
@@ -1588,46 +1588,46 @@ works. `shell` is a REPL over the WebSocket protocol; `exec` is the one-shot a s
 the primary announces. A pair is two commands:
 
 ```sh
-bunql serve --dir ./p --port 4501 --cluster-secret $SECRET
-bunql serve --dir ./r --port 4502 --cluster-secret $SECRET \
+bql serve --dir ./p --port 4501 --cluster-secret $SECRET
+bql serve --dir ./r --port 4502 --cluster-secret $SECRET \
             --replica-of ws://127.0.0.1:4501/v1/replication
 ```
 
-When the primary is gone, `bunql promote` is addressed at the replica that should take over —
+When the primary is gone, `bql promote` is addressed at the replica that should take over —
 promotion is that node's own copy being accepted, so `--url` names the candidate:
 
 ```sh
-bunql --url http://127.0.0.1:4502 promote acme          # refused while the primary is up
-bunql --url http://127.0.0.1:4502 promote acme --force  # "it is gone, I have checked"
+bql --url http://127.0.0.1:4502 promote acme          # refused while the primary is up
+bql --url http://127.0.0.1:4502 promote acme --force  # "it is gone, I have checked"
 ```
 
 `serve --cluster-peers` puts the node in a Raft control plane, which is what makes failover
 automatic. Every node needs its own `--advertise`, and they all share `--cluster-secret`:
 
 ```sh
-bunql serve --dir ./a --port 4501 --cluster-secret $SECRET \
+bql serve --dir ./a --port 4501 --cluster-secret $SECRET \
             --advertise ws://127.0.0.1:4501 --cluster-peers b=ws://127.0.0.1:4502,c=ws://127.0.0.1:4503
-bunql cluster   # membership, term, and where each database lives
+bql cluster   # membership, term, and where each database lives
 ```
 
 `serve --s3 s3://bucket/prefix` turns on continuous backup. Credentials deliberately have **no
-flag** — they belong in `bunql.toml` or the environment (`BUNQL_S3_ACCESS_KEY_ID`,
-`BUNQL_S3_SECRET_ACCESS_KEY`, or Bun's own `AWS_*` / `S3_*`), not in a shell history or a process
-listing. `bunql restore <db> --from s3://…` recovers a database onto a node that has never seen
+flag** — they belong in `bql.toml` or the environment (`BQL_S3_ACCESS_KEY_ID`,
+`BQL_S3_SECRET_ACCESS_KEY`, or Bun's own `AWS_*` / `S3_*`), not in a shell history or a process
+listing. `bql restore <db> --from s3://…` recovers a database onto a node that has never seen
 it, which is the whole point of the bucket:
 
 ```sh
-bunql serve --dir ./node --port 4321 --s3 s3://backups/prod --s3-endpoint https://…
-bunql backup status acme
-bunql backup verify acme --at 2026-09-11T10:00:00Z
-bunql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+bql serve --dir ./node --port 4321 --s3 s3://backups/prod --s3-endpoint https://…
+bql backup status acme
+bql backup verify acme --at 2026-09-11T10:00:00Z
+bql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
 ```
 
 ---
 
 ## Workers
 
-`[server] workers = N` (or `bunql serve --workers N`) runs the node's databases on **N worker
+`[server] workers = N` (or `bql serve --workers N`) runs the node's databases on **N worker
 threads** and keeps the listener, every socket, the catalog and the authenticator on the main
 thread, which owns no database of its own. A database belongs to the worker its name hashes to;
 every `/v1/db/{db}/…` request, every WebSocket frame and every libsql socket is routed there. The
@@ -1690,7 +1690,7 @@ subscription {
 }
 ```
 
-It carries the **change feed**, the same events SSE `GET /v1/db/{db}/changes` and the `bunql.v1`
+It carries the **change feed**, the same events SSE `GET /v1/db/{db}/changes` and the `bql.v1`
 socket carry, with the same `tables` filter and the same `since` replay. `reset` is true on the
 first event when `since` was older than the ring could serve: there is a gap, so re-query rather
 than trust the feed. A client that wants a live *result* re-runs its query when an event arrives.
@@ -1736,7 +1736,7 @@ one-to-one is the *transaction*. Two consequences:
   with distinct sequences, and a CDC consumer has a stable key it can dedupe on across a replay.
   This is the one consequence of group commit that was worth removing rather than documenting.
   `docs/l8-change-seq.md`.
-- **`BunQL-Min-Txid` is coarser.** A txid you were handed covers your write and possibly others, so
+- **`BQL-Min-Txid` is coarser.** A txid you were handed covers your write and possibly others, so
   reading at it is still read-your-writes — it cannot be *weaker*, only less precise about whose
   other writes came with yours.
 
@@ -1772,16 +1772,16 @@ rather than being served outside a transaction the client still believes it is i
 On a replica an open read transaction makes the page applier defer and retry, so replication is
 **delayed** for as long as it is held and resumes when it ends. Nothing is lost and nothing
 diverges. A client that only wants a consistent read does not need a transaction at all: every
-statement on a replica is a snapshot read, and `BunQL-Min-Txid` pins which snapshot.
+statement on a replica is a snapshot read, and `BQL-Min-Txid` pins which snapshot.
 
 The native `/v1/db/{db}/tx` keeps its three writer modes (`deferred`, `immediate`, `exclusive`) and
 has no read mode. It does not need one: `POST /v1/db/{db}/read` is the native surface's consistent
-read, on this same mechanism and served locally on a replica. R10 recorded `BunQL-Min-Txid` as the
+read, on this same mechanism and served locally on a replica. R10 recorded `BQL-Min-Txid` as the
 answer here; it is not, because a floor is not a point — see **Read sessions** above and
 `docs/p8-read-sessions.md`.
 
 With `[replication] forwardWrites = false` a replica is read-only and a write is refused with
-`503 NOT_PRIMARY` and `BunQL-Primary`.
+`503 NOT_PRIMARY` and `BQL-Primary`.
 
 ### Per-database settings
 
@@ -1817,7 +1817,7 @@ With `[cluster] enabled`, a database has a **home node**, picked by rendezvous h
 cluster's membership with `[cluster] zone` spreading its `[cluster] rf` copies across racks. Every
 node computes the same home from the same replicated membership, so:
 
-- `POST /v1/db` on a node that is **not** the home answers `503 NOT_PRIMARY` with `BunQL-Primary`
+- `POST /v1/db` on a node that is **not** the home answers `503 NOT_PRIMARY` with `BQL-Primary`
   naming the node that is. That is what stops two nodes creating the same database; the SDK retries
   against the named node, and a same-origin deployment gets a `307` instead.
 - A request naming a database this node holds **no copy** of, which the cluster knows and places
@@ -1837,126 +1837,126 @@ says: an operator who wrote it outranks the function.
 
 ## Configuration
 
-`bunql.toml` in the working directory, then `BUNQL_*` in the environment, which wins.
-`${VAR}` inside a TOML value is expanded from the environment. `BUNQL_CONFIG` names the file and
+`bql.toml` in the working directory, then `BQL_*` in the environment, which wins.
+`${VAR}` inside a TOML value is expanded from the environment. `BQL_CONFIG` names the file and
 makes it required. An empty environment value counts as unset.
 
 Every key has a canonical override named after its section and its key, upper-cased and
-underscore-separated under `BUNQL_`. The shorter names below are aliases kept for compatibility;
+underscore-separated under `BQL_`. The shorter names below are aliases kept for compatibility;
 the canonical one wins when both are set.
 
 | key | default | canonical override | alias |
 |---|---|---|---|
-| `[server] port` | `4321` | `BUNQL_SERVER_PORT` | `BUNQL_PORT` |
-| `[server] host` | `"0.0.0.0"` | `BUNQL_SERVER_HOST` | `BUNQL_HOST` |
-| `[server] node` | hash of the hostname | `BUNQL_SERVER_NODE` | `BUNQL_NODE` |
-| `[server] tenantFromHost` | `false` | `BUNQL_SERVER_TENANT_FROM_HOST` | `BUNQL_TENANT_FROM_HOST` |
-| `[server] cors` | `true` | `BUNQL_SERVER_CORS` | `BUNQL_CORS` |
-| `[server] workers` | `1` | `BUNQL_SERVER_WORKERS` | — |
-| `[data] dir` | `"./data"` | `BUNQL_DATA_DIR` | `BUNQL_DIR` |
-| `[data] maxOpen` | `1024` | `BUNQL_DATA_MAX_OPEN` | `BUNQL_MAX_OPEN` |
-| `[data] readers` | `2` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |
-| `[data] pageSize` | `4096` | `BUNQL_DATA_PAGE_SIZE` | `BUNQL_PAGE_SIZE` |
-| `[data] quotaBytes` | `0` (unlimited) | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
-| `[sqlite] statementCache` | `64` (per connection) | `BUNQL_SQLITE_STATEMENT_CACHE` | — |
-| `[sqlite] writerCacheBytes` | `8388608` | `BUNQL_SQLITE_WRITER_CACHE_BYTES` | — |
-| `[sqlite] readerCacheBytes` | `2097152` | `BUNQL_SQLITE_READER_CACHE_BYTES` | — |
-| `[sqlite] readerMmapBytes` | `0` (off) | `BUNQL_SQLITE_READER_MMAP_BYTES` | — |
-| `[sqlite] foreignKeys` | `false` | `BUNQL_SQLITE_FOREIGN_KEYS` | — |
-| `[sqlite] trustedSchema` | `true` | `BUNQL_SQLITE_TRUSTED_SCHEMA` | — |
-| `[sqlite] cellSizeCheck` | `false` | `BUNQL_SQLITE_CELL_SIZE_CHECK` | — |
-| `[durability] defaultAck` | `"fsync"` (also `local`, `replica`, `quorum`) | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
-| `[durability] checkpointWalBytes` | `4000000` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
-| `[durability] retention` | `"7d"` (`"0"` keeps everything) | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
-| `[durability] sweepIntervalMs` | `300000` (`0` sweeps only at start) | `BUNQL_DURABILITY_SWEEP_INTERVAL_MS` | — |
-| `[durability] maxLogBytes` | `0` (unlimited) | `BUNQL_DURABILITY_MAX_LOG_BYTES` | — |
-| `[durability] segmentBytes` | `16777216` | `BUNQL_DURABILITY_SEGMENT_BYTES` | — |
-| `[durability] compress` | `true` (zstd) | `BUNQL_DURABILITY_COMPRESS` | — |
-| `[durability] snapshotIntervalMs` | `3600000` (`0` off) | `BUNQL_DURABILITY_SNAPSHOT_INTERVAL_MS` | — |
-| `[realtime] ringBytes` | `10000000` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
-| `[realtime] ringMaxAgeMs` | `60000` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
-| `[realtime] maxLiveQueries` | `1000` | `BUNQL_REALTIME_MAX_LIVE_QUERIES` | `BUNQL_MAX_LIVE_QUERIES` |
-| `[realtime] maxRowsPerLive` | `1000` | `BUNQL_REALTIME_MAX_ROWS_PER_LIVE` | `BUNQL_MAX_ROWS_PER_LIVE` |
-| `[realtime] idleRetainMs` | `15000` | `BUNQL_REALTIME_IDLE_RETAIN_MS` | `BUNQL_IDLE_RETAIN_MS` |
-| `[limits] queryTimeoutMs` | `10000` | `BUNQL_LIMITS_QUERY_TIMEOUT_MS` | `BUNQL_QUERY_TIMEOUT_MS` |
-| `[limits] writeTimeoutMs` | `30000` | `BUNQL_LIMITS_WRITE_TIMEOUT_MS` | `BUNQL_WRITE_TIMEOUT_MS` |
-| `[limits] txIdleTimeoutMs` | `5000` | `BUNQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BUNQL_TX_IDLE_TIMEOUT_MS` |
-| `[limits] maxRows` | `10000` | `BUNQL_LIMITS_MAX_ROWS` | `BUNQL_MAX_ROWS` |
-| `[limits] maxResultBytes` | `67108864` | `BUNQL_LIMITS_MAX_RESULT_BYTES` | `BUNQL_MAX_RESULT_BYTES` |
-| `[limits] maxOpenTx` | `1` | `BUNQL_LIMITS_MAX_OPEN_TX` | `BUNQL_MAX_OPEN_TX` |
-| `[limits] txWaitMs` | `5000` | `BUNQL_LIMITS_TX_WAIT_MS` | `BUNQL_TX_WAIT_MS` |
-| `[limits] maxBodyBytes` | `8388608` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
-| `[limits] maxImportBytes` | `1073741824` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
-| `[limits] groupCommit` | `true` | `BUNQL_LIMITS_GROUP_COMMIT` | — |
-| `[limits] maxQueuedWrites` | `256` | `BUNQL_LIMITS_MAX_QUEUED_WRITES` | — |
-| `[limits] maxQueuedWriteBytes` | `8388608` | `BUNQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
-| `[limits] queueWaitMs` | `5000` | `BUNQL_LIMITS_QUEUE_WAIT_MS` | — |
-| `[limits] maxPinnedPerPrincipal` | `64` | `BUNQL_LIMITS_MAX_PINNED_PER_PRINCIPAL` | — |
-| `[durability] fsyncSweep` | `"per-db"` | `BUNQL_DURABILITY_FSYNC_SWEEP` | — |
-| `[limits] maxReadTx` | `16` | `BUNQL_LIMITS_MAX_READ_TX` | — |
-| `[limits] readTxTimeoutMs` | `30000` | `BUNQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
-| `[limits] groupCommitMax` | `64` | `BUNQL_LIMITS_GROUP_COMMIT_MAX` | — |
-| `[auth] verifyCacheSize` | `1024` (`0` disables) | `BUNQL_AUTH_VERIFY_CACHE_SIZE` | — |
-| `[auth] adminKey` | generated on first start | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
-| `[auth] jwtKey` | generated on first start | `BUNQL_AUTH_JWT_KEY` | `BUNQL_JWT_ED25519` |
-| `[auth] jwtPublicKeys` | `[]` | `BUNQL_AUTH_JWT_PUBLIC_KEYS` (comma-separated) | — |
-| `[auth] keysFile` | `<dataDir>/keys.json` | `BUNQL_AUTH_KEYS_FILE` | `BUNQL_KEYS_FILE` |
-| `[auth] clockToleranceSec` | `30` | `BUNQL_AUTH_CLOCK_TOLERANCE_SEC` | `BUNQL_CLOCK_TOLERANCE_SEC` |
-| `[auth] defaultTokenTtlMs` | `2592000000` (30 d) | `BUNQL_AUTH_DEFAULT_TOKEN_TTL_MS` | `BUNQL_TOKEN_TTL_MS` |
-| `[replication] role` | `"primary"` | `BUNQL_REPLICATION_ROLE` | — |
-| `[replication] primary` | `""` | `BUNQL_REPLICATION_PRIMARY` | `BUNQL_REPLICA_OF` |
-| `[replication] secret` | `""` (replication off) | `BUNQL_REPLICATION_SECRET` | `BUNQL_CLUSTER_SECRET` |
-| `[replication] follow` | `["*"]` | `BUNQL_REPLICATION_FOLLOW` (comma-separated) | `BUNQL_FOLLOW` |
-| `[replication] apply` | `"pages"` (or `"wal"`) | `BUNQL_REPLICATION_APPLY` | — |
-| `[replication] applyBusyMs` | `25` | `BUNQL_REPLICATION_APPLY_BUSY_MS` | — |
-| `[replication] ackTimeoutMs` | `2000` | `BUNQL_REPLICATION_ACK_TIMEOUT_MS` | — |
-| `[replication] ackWithoutReplicas` | `"error"` (or `"allow"`) | `BUNQL_REPLICATION_ACK_WITHOUT_REPLICAS` | — |
-| `[replication] heartbeatMs` | `5000` | `BUNQL_REPLICATION_HEARTBEAT_MS` | — |
-| `[replication] slowReplicaMs` | `30000` | `BUNQL_REPLICATION_SLOW_REPLICA_MS` | — |
-| `[replication] reconnectMs` | `250` | `BUNQL_REPLICATION_RECONNECT_MS` | — |
-| `[replication] forwardWrites` | `true` | `BUNQL_REPLICATION_FORWARD_WRITES` | — |
-| `[replication] forwardTimeoutMs` | `10000` | `BUNQL_REPLICATION_FORWARD_TIMEOUT_MS` | — |
-| `[replication] maxForwards` | `256` | `BUNQL_REPLICATION_MAX_FORWARDS` | — |
-| `[replication] logicalChanges` | `false`; `true`, `"pk"`, `"row"` or `"row+old"` | `BUNQL_REPLICATION_LOGICAL_CHANGES` | — |
-| `[cluster] enabled` | `false`; `true` once `peers` is set | `BUNQL_CLUSTER_ENABLED` | — |
-| `[cluster] id` | `""` → `[server] node` | `BUNQL_CLUSTER_ID` | — |
-| `[cluster] advertise` | `""` | `BUNQL_CLUSTER_ADVERTISE` | — |
-| `[cluster] zone` | `""` | `BUNQL_CLUSTER_ZONE` | — |
-| `[cluster] peers` | `[]`; `id=ws://host:port` or a bare URL | `BUNQL_CLUSTER_PEERS` (comma-separated) | — |
-| `[cluster] bootstrap` | `false` | `BUNQL_CLUSTER_BOOTSTRAP` | — |
-| `[cluster] rf` | `2` (recorded; placement is C3) | `BUNQL_CLUSTER_RF` | — |
-| `[cluster] leaseTtlMs` | `3000` | `BUNQL_CLUSTER_LEASE_TTL_MS` | — |
-| `[cluster] leaseRenewMs` | `1000` | `BUNQL_CLUSTER_LEASE_RENEW_MS` | — |
-| `[cluster] leaseGuardMs` | `500` | `BUNQL_CLUSTER_LEASE_GUARD_MS` | — |
-| `[cluster] electionTimeoutMs` | `1500` | `BUNQL_CLUSTER_ELECTION_TIMEOUT_MS` | — |
-| `[cluster] heartbeatMs` | `300` | `BUNQL_CLUSTER_HEARTBEAT_MS` | — |
-| `[s3] enabled` | `false`; `true` once `bucket` is set | `BUNQL_S3_ENABLED` | — |
-| `[s3] bucket` | `""` (no shipping); also accepts `s3://bucket/prefix` | `BUNQL_S3_BUCKET` | `BUNQL_S3_URL` |
-| `[s3] region` | `""` (Bun's own resolution) | `BUNQL_S3_REGION` | — |
-| `[s3] endpoint` | `""` (AWS); required for R2, Tigris, MinIO | `BUNQL_S3_ENDPOINT` | — |
-| `[s3] prefix` | `"bunql/"` | `BUNQL_S3_PREFIX` | — |
-| `[s3] accessKeyId` | `""` (Bun's `S3_*` / `AWS_*`) | `BUNQL_S3_ACCESS_KEY_ID` | — |
-| `[s3] secretAccessKey` | `""` (Bun's `S3_*` / `AWS_*`) | `BUNQL_S3_SECRET_ACCESS_KEY` | — |
-| `[s3] sessionToken` | `""` | `BUNQL_S3_SESSION_TOKEN` | — |
-| `[s3] virtualHostedStyle` | `false` | `BUNQL_S3_VIRTUAL_HOSTED_STYLE` | — |
-| `[s3] shipIntervalMs` | `1000` | `BUNQL_S3_SHIP_INTERVAL_MS` | — |
-| `[s3] snapshotIntervalMs` | `3600000` (0 disables) | `BUNQL_S3_SNAPSHOT_INTERVAL_MS` | — |
-| `[s3] snapshotEveryBytes` | `67108864` (0 disables) | `BUNQL_S3_SNAPSHOT_EVERY_BYTES` | — |
-| `[s3] retention` | `"30d"` (`"0"` keeps everything) | `BUNQL_S3_RETENTION` | — |
-| `[s3] concurrency` | `4` | `BUNQL_S3_CONCURRENCY` | — |
-| `[s3] maxConcurrentUploads` | `0` (follow `concurrency`) | `BUNQL_S3_MAX_CONCURRENT_UPLOADS` | — |
-| `[s3] uploadWaitMs` | `5000` | `BUNQL_S3_UPLOAD_WAIT_MS` | — |
-| `[s3] maxPendingBytes` | `67108864` | `BUNQL_S3_MAX_PENDING_BYTES` | — |
-| `[s3] retries` | `4` | `BUNQL_S3_RETRIES` | — |
-| `[api] enabled` | `true` | `BUNQL_API_ENABLED` | — |
-| `[api] prefix` | `"api"` (one path segment) | `BUNQL_API_PREFIX` | — |
-| `[api] defaultLimit` | `100` | `BUNQL_API_DEFAULT_LIMIT` | — |
-| `[api] maxLimit` | `1000` | `BUNQL_API_MAX_LIMIT` | — |
-| `[graphql] enabled` | `true`, ignored without the optional peers | `BUNQL_GRAPHQL_ENABLED` | — |
-| `[graphql] graphiql` | `true` | `BUNQL_GRAPHQL_GRAPHIQL` | — |
-| `[graphql] path` | `"graphql"` (one path segment) | `BUNQL_GRAPHQL_PATH` | — |
-| `[graphql] maxDepth` | `12` | `BUNQL_GRAPHQL_MAX_DEPTH` | — |
-| `[graphql] maxComplexity` | `10000` | `BUNQL_GRAPHQL_MAX_COMPLEXITY` | — |
+| `[server] port` | `4321` | `BQL_SERVER_PORT` | `BQL_PORT` |
+| `[server] host` | `"0.0.0.0"` | `BQL_SERVER_HOST` | `BQL_HOST` |
+| `[server] node` | hash of the hostname | `BQL_SERVER_NODE` | `BQL_NODE` |
+| `[server] tenantFromHost` | `false` | `BQL_SERVER_TENANT_FROM_HOST` | `BQL_TENANT_FROM_HOST` |
+| `[server] cors` | `true` | `BQL_SERVER_CORS` | `BQL_CORS` |
+| `[server] workers` | `1` | `BQL_SERVER_WORKERS` | — |
+| `[data] dir` | `"./data"` | `BQL_DATA_DIR` | `BQL_DIR` |
+| `[data] maxOpen` | `1024` | `BQL_DATA_MAX_OPEN` | `BQL_MAX_OPEN` |
+| `[data] readers` | `2` | `BQL_DATA_READERS` | `BQL_READERS` |
+| `[data] pageSize` | `4096` | `BQL_DATA_PAGE_SIZE` | `BQL_PAGE_SIZE` |
+| `[data] quotaBytes` | `0` (unlimited) | `BQL_DATA_QUOTA_BYTES` | `BQL_QUOTA_BYTES` |
+| `[sqlite] statementCache` | `64` (per connection) | `BQL_SQLITE_STATEMENT_CACHE` | — |
+| `[sqlite] writerCacheBytes` | `8388608` | `BQL_SQLITE_WRITER_CACHE_BYTES` | — |
+| `[sqlite] readerCacheBytes` | `2097152` | `BQL_SQLITE_READER_CACHE_BYTES` | — |
+| `[sqlite] readerMmapBytes` | `0` (off) | `BQL_SQLITE_READER_MMAP_BYTES` | — |
+| `[sqlite] foreignKeys` | `false` | `BQL_SQLITE_FOREIGN_KEYS` | — |
+| `[sqlite] trustedSchema` | `true` | `BQL_SQLITE_TRUSTED_SCHEMA` | — |
+| `[sqlite] cellSizeCheck` | `false` | `BQL_SQLITE_CELL_SIZE_CHECK` | — |
+| `[durability] defaultAck` | `"fsync"` (also `local`, `replica`, `quorum`) | `BQL_DURABILITY_DEFAULT_ACK` | `BQL_DEFAULT_ACK` |
+| `[durability] checkpointWalBytes` | `4000000` | `BQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BQL_CHECKPOINT_WAL_BYTES` |
+| `[durability] retention` | `"7d"` (`"0"` keeps everything) | `BQL_DURABILITY_RETENTION` | `BQL_RETENTION` |
+| `[durability] sweepIntervalMs` | `300000` (`0` sweeps only at start) | `BQL_DURABILITY_SWEEP_INTERVAL_MS` | — |
+| `[durability] maxLogBytes` | `0` (unlimited) | `BQL_DURABILITY_MAX_LOG_BYTES` | — |
+| `[durability] segmentBytes` | `16777216` | `BQL_DURABILITY_SEGMENT_BYTES` | — |
+| `[durability] compress` | `true` (zstd) | `BQL_DURABILITY_COMPRESS` | — |
+| `[durability] snapshotIntervalMs` | `3600000` (`0` off) | `BQL_DURABILITY_SNAPSHOT_INTERVAL_MS` | — |
+| `[realtime] ringBytes` | `10000000` | `BQL_REALTIME_RING_BYTES` | `BQL_RING_BYTES` |
+| `[realtime] ringMaxAgeMs` | `60000` | `BQL_REALTIME_RING_MAX_AGE_MS` | `BQL_RING_MAX_AGE_MS` |
+| `[realtime] maxLiveQueries` | `1000` | `BQL_REALTIME_MAX_LIVE_QUERIES` | `BQL_MAX_LIVE_QUERIES` |
+| `[realtime] maxRowsPerLive` | `1000` | `BQL_REALTIME_MAX_ROWS_PER_LIVE` | `BQL_MAX_ROWS_PER_LIVE` |
+| `[realtime] idleRetainMs` | `15000` | `BQL_REALTIME_IDLE_RETAIN_MS` | `BQL_IDLE_RETAIN_MS` |
+| `[limits] queryTimeoutMs` | `10000` | `BQL_LIMITS_QUERY_TIMEOUT_MS` | `BQL_QUERY_TIMEOUT_MS` |
+| `[limits] writeTimeoutMs` | `30000` | `BQL_LIMITS_WRITE_TIMEOUT_MS` | `BQL_WRITE_TIMEOUT_MS` |
+| `[limits] txIdleTimeoutMs` | `5000` | `BQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BQL_TX_IDLE_TIMEOUT_MS` |
+| `[limits] maxRows` | `10000` | `BQL_LIMITS_MAX_ROWS` | `BQL_MAX_ROWS` |
+| `[limits] maxResultBytes` | `67108864` | `BQL_LIMITS_MAX_RESULT_BYTES` | `BQL_MAX_RESULT_BYTES` |
+| `[limits] maxOpenTx` | `1` | `BQL_LIMITS_MAX_OPEN_TX` | `BQL_MAX_OPEN_TX` |
+| `[limits] txWaitMs` | `5000` | `BQL_LIMITS_TX_WAIT_MS` | `BQL_TX_WAIT_MS` |
+| `[limits] maxBodyBytes` | `8388608` | `BQL_LIMITS_MAX_BODY_BYTES` | `BQL_MAX_BODY_BYTES` |
+| `[limits] maxImportBytes` | `1073741824` | `BQL_LIMITS_MAX_IMPORT_BYTES` | `BQL_MAX_IMPORT_BYTES` |
+| `[limits] groupCommit` | `true` | `BQL_LIMITS_GROUP_COMMIT` | — |
+| `[limits] maxQueuedWrites` | `256` | `BQL_LIMITS_MAX_QUEUED_WRITES` | — |
+| `[limits] maxQueuedWriteBytes` | `8388608` | `BQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
+| `[limits] queueWaitMs` | `5000` | `BQL_LIMITS_QUEUE_WAIT_MS` | — |
+| `[limits] maxPinnedPerPrincipal` | `64` | `BQL_LIMITS_MAX_PINNED_PER_PRINCIPAL` | — |
+| `[durability] fsyncSweep` | `"per-db"` | `BQL_DURABILITY_FSYNC_SWEEP` | — |
+| `[limits] maxReadTx` | `16` | `BQL_LIMITS_MAX_READ_TX` | — |
+| `[limits] readTxTimeoutMs` | `30000` | `BQL_LIMITS_READ_TX_TIMEOUT_MS` | — |
+| `[limits] groupCommitMax` | `64` | `BQL_LIMITS_GROUP_COMMIT_MAX` | — |
+| `[auth] verifyCacheSize` | `1024` (`0` disables) | `BQL_AUTH_VERIFY_CACHE_SIZE` | — |
+| `[auth] adminKey` | generated on first start | `BQL_AUTH_ADMIN_KEY` | `BQL_ADMIN_KEY` |
+| `[auth] jwtKey` | generated on first start | `BQL_AUTH_JWT_KEY` | `BQL_JWT_ED25519` |
+| `[auth] jwtPublicKeys` | `[]` | `BQL_AUTH_JWT_PUBLIC_KEYS` (comma-separated) | — |
+| `[auth] keysFile` | `<dataDir>/keys.json` | `BQL_AUTH_KEYS_FILE` | `BQL_KEYS_FILE` |
+| `[auth] clockToleranceSec` | `30` | `BQL_AUTH_CLOCK_TOLERANCE_SEC` | `BQL_CLOCK_TOLERANCE_SEC` |
+| `[auth] defaultTokenTtlMs` | `2592000000` (30 d) | `BQL_AUTH_DEFAULT_TOKEN_TTL_MS` | `BQL_TOKEN_TTL_MS` |
+| `[replication] role` | `"primary"` | `BQL_REPLICATION_ROLE` | — |
+| `[replication] primary` | `""` | `BQL_REPLICATION_PRIMARY` | `BQL_REPLICA_OF` |
+| `[replication] secret` | `""` (replication off) | `BQL_REPLICATION_SECRET` | `BQL_CLUSTER_SECRET` |
+| `[replication] follow` | `["*"]` | `BQL_REPLICATION_FOLLOW` (comma-separated) | `BQL_FOLLOW` |
+| `[replication] apply` | `"pages"` (or `"wal"`) | `BQL_REPLICATION_APPLY` | — |
+| `[replication] applyBusyMs` | `25` | `BQL_REPLICATION_APPLY_BUSY_MS` | — |
+| `[replication] ackTimeoutMs` | `2000` | `BQL_REPLICATION_ACK_TIMEOUT_MS` | — |
+| `[replication] ackWithoutReplicas` | `"error"` (or `"allow"`) | `BQL_REPLICATION_ACK_WITHOUT_REPLICAS` | — |
+| `[replication] heartbeatMs` | `5000` | `BQL_REPLICATION_HEARTBEAT_MS` | — |
+| `[replication] slowReplicaMs` | `30000` | `BQL_REPLICATION_SLOW_REPLICA_MS` | — |
+| `[replication] reconnectMs` | `250` | `BQL_REPLICATION_RECONNECT_MS` | — |
+| `[replication] forwardWrites` | `true` | `BQL_REPLICATION_FORWARD_WRITES` | — |
+| `[replication] forwardTimeoutMs` | `10000` | `BQL_REPLICATION_FORWARD_TIMEOUT_MS` | — |
+| `[replication] maxForwards` | `256` | `BQL_REPLICATION_MAX_FORWARDS` | — |
+| `[replication] logicalChanges` | `false`; `true`, `"pk"`, `"row"` or `"row+old"` | `BQL_REPLICATION_LOGICAL_CHANGES` | — |
+| `[cluster] enabled` | `false`; `true` once `peers` is set | `BQL_CLUSTER_ENABLED` | — |
+| `[cluster] id` | `""` → `[server] node` | `BQL_CLUSTER_ID` | — |
+| `[cluster] advertise` | `""` | `BQL_CLUSTER_ADVERTISE` | — |
+| `[cluster] zone` | `""` | `BQL_CLUSTER_ZONE` | — |
+| `[cluster] peers` | `[]`; `id=ws://host:port` or a bare URL | `BQL_CLUSTER_PEERS` (comma-separated) | — |
+| `[cluster] bootstrap` | `false` | `BQL_CLUSTER_BOOTSTRAP` | — |
+| `[cluster] rf` | `2` (recorded; placement is C3) | `BQL_CLUSTER_RF` | — |
+| `[cluster] leaseTtlMs` | `3000` | `BQL_CLUSTER_LEASE_TTL_MS` | — |
+| `[cluster] leaseRenewMs` | `1000` | `BQL_CLUSTER_LEASE_RENEW_MS` | — |
+| `[cluster] leaseGuardMs` | `500` | `BQL_CLUSTER_LEASE_GUARD_MS` | — |
+| `[cluster] electionTimeoutMs` | `1500` | `BQL_CLUSTER_ELECTION_TIMEOUT_MS` | — |
+| `[cluster] heartbeatMs` | `300` | `BQL_CLUSTER_HEARTBEAT_MS` | — |
+| `[s3] enabled` | `false`; `true` once `bucket` is set | `BQL_S3_ENABLED` | — |
+| `[s3] bucket` | `""` (no shipping); also accepts `s3://bucket/prefix` | `BQL_S3_BUCKET` | `BQL_S3_URL` |
+| `[s3] region` | `""` (Bun's own resolution) | `BQL_S3_REGION` | — |
+| `[s3] endpoint` | `""` (AWS); required for R2, Tigris, MinIO | `BQL_S3_ENDPOINT` | — |
+| `[s3] prefix` | `"bql/"` | `BQL_S3_PREFIX` | — |
+| `[s3] accessKeyId` | `""` (Bun's `S3_*` / `AWS_*`) | `BQL_S3_ACCESS_KEY_ID` | — |
+| `[s3] secretAccessKey` | `""` (Bun's `S3_*` / `AWS_*`) | `BQL_S3_SECRET_ACCESS_KEY` | — |
+| `[s3] sessionToken` | `""` | `BQL_S3_SESSION_TOKEN` | — |
+| `[s3] virtualHostedStyle` | `false` | `BQL_S3_VIRTUAL_HOSTED_STYLE` | — |
+| `[s3] shipIntervalMs` | `1000` | `BQL_S3_SHIP_INTERVAL_MS` | — |
+| `[s3] snapshotIntervalMs` | `3600000` (0 disables) | `BQL_S3_SNAPSHOT_INTERVAL_MS` | — |
+| `[s3] snapshotEveryBytes` | `67108864` (0 disables) | `BQL_S3_SNAPSHOT_EVERY_BYTES` | — |
+| `[s3] retention` | `"30d"` (`"0"` keeps everything) | `BQL_S3_RETENTION` | — |
+| `[s3] concurrency` | `4` | `BQL_S3_CONCURRENCY` | — |
+| `[s3] maxConcurrentUploads` | `0` (follow `concurrency`) | `BQL_S3_MAX_CONCURRENT_UPLOADS` | — |
+| `[s3] uploadWaitMs` | `5000` | `BQL_S3_UPLOAD_WAIT_MS` | — |
+| `[s3] maxPendingBytes` | `67108864` | `BQL_S3_MAX_PENDING_BYTES` | — |
+| `[s3] retries` | `4` | `BQL_S3_RETRIES` | — |
+| `[api] enabled` | `true` | `BQL_API_ENABLED` | — |
+| `[api] prefix` | `"api"` (one path segment) | `BQL_API_PREFIX` | — |
+| `[api] defaultLimit` | `100` | `BQL_API_DEFAULT_LIMIT` | — |
+| `[api] maxLimit` | `1000` | `BQL_API_MAX_LIMIT` | — |
+| `[graphql] enabled` | `true`, ignored without the optional peers | `BQL_GRAPHQL_ENABLED` | — |
+| `[graphql] graphiql` | `true` | `BQL_GRAPHQL_GRAPHIQL` | — |
+| `[graphql] path` | `"graphql"` (one path segment) | `BQL_GRAPHQL_PATH` | — |
+| `[graphql] maxDepth` | `12` | `BQL_GRAPHQL_MAX_DEPTH` | — |
+| `[graphql] maxComplexity` | `10000` | `BQL_GRAPHQL_MAX_COMPLEXITY` | — |
 
 Setting `[replication] primary` makes the node a replica; `role` need not be set as well. A
 replica with no `primary` is refused at start.
@@ -1968,7 +1968,7 @@ than silently ignored. `[durability] retention` is how long a deleted database s
 `<dataDir>/trash/`, and how far back this node keeps its own log segments and snapshots; `[s3]
 retention` is the separate bound on what the bucket holds.
 
-One more, outside the config file: `BUNQL_SQLITE_LIB` names the `libsqlite3` the driver loads.
+One more, outside the config file: `BQL_SQLITE_LIB` names the `libsqlite3` the driver loads.
 Without it the usual Homebrew and Linux paths are tried.
 
 ---
@@ -1983,21 +1983,21 @@ document is not edited; this is the list.
 | design | status |
 |---|---|
 | §8 replication protocol (`/v1/replication` binary frames) | R1. `GET /v1/db/{db}/replication` is the JSON status route of §6.5; the socket is the protocol |
-| §9.3 `bunql serve --replica-of` | R1, with `--cluster-secret` and `--follow` |
+| §9.3 `bql serve --replica-of` | R1, with `--cluster-secret` and `--follow` |
 | §9.4 `[replication]` | R1 |
 | §5.2 replicas serve reads and forward writes | R2. `forwardWrites = false` keeps R1's `503 NOT_PRIMARY` |
 | §5.4 `ack: "replica" \| "quorum"` | R2, with `NO_REPLICAS` and `ACK_TIMEOUT` as the two refusals |
-| §5.4 read-your-writes across nodes | R2. `BunQL-Min-Txid` waits on the applier; every response carries `BunQL-Txid` and `BunQL-Role` |
+| §5.4 read-your-writes across nodes | R2. `BQL-Min-Txid` waits on the applier; every response carries `BQL-Txid` and `BQL-Role` |
 | §5.2 a new database reaches a wildcard replica at once | R2. The primary announces its database list on create, import and delete |
 | §5.2 replica realtime | R2, in part: live queries converge, the change feed is txid-only. See "Realtime on a replica" above |
 | §4.4 S3 shipper (`Bun.S3Client`, snapshots + segments, retention) | R3. `[s3] bucket` turns it on; see "S3 backup" above |
 | §4.4 local log and snapshot retention | R6. `TxnLog.retain` and `removeSnapshot` had no caller at all; `[durability] sweepIntervalMs` and `maxLogBytes` are new. See `docs/r6-retention.md` |
-| §4.4 restore from a bucket by txid or timestamp | R3. `POST /v1/db/{db}/restore {"from":"s3"}` and `bunql restore --from s3://…` |
+| §4.4 restore from a bucket by txid or timestamp | R3. `POST /v1/db/{db}/restore {"from":"s3"}` and `bql restore --from s3://…` |
 | §6.5 "S3 position" on `GET /v1/db/{db}/replication` | R3, as the `s3` block |
-| §9.4 `[s3]` | R3, with every key taking a `BUNQL_S3_*` override |
+| §9.4 `[s3]` | R3, with every key taking a `BQL_S3_*` override |
 | `next.md`: `src/wal/log.ts` cold open walks every record header | R3. A sidecar segment index; 2.69 ms → 0.36 ms at 6k records |
 | §6.7 Hrana compatibility (`/v2/pipeline`, `/v3/pipeline`, `/v3/cursor`, `hrana3`/`hrana2` sockets) | R4. No protobuf and no Hrana 1; see [Hrana](#hrana--the-libsql-compatible-surface) |
-| §9.2 `@bunql/db/kysely`, `@bunql/db/drizzle` | R5, both optional peers; see [ORM adapters](#orm-adapters) |
+| §9.2 `bql.sh/kysely`, `bql.sh/drizzle` | R5, both optional peers; see [ORM adapters](#orm-adapters) |
 | `docs/r4-hrana.md` §4: `lastInsertRowid` was null when a rowid repeated | fixed. The statement answers for itself, from SQLite's authorizer at prepare time |
 
 The as-built notes are `docs/r1-replication.md` (transport), `docs/r2-durability.md`
@@ -2012,8 +2012,8 @@ really send) and `docs/r5-orm.md` (the two adapters).
 | §5.3 built-in Raft control plane (membership, placement, per-database leases) | C1/C2. Control plane only; the write path consults a cached lease against a monotonic clock and never awaits |
 | §6.5 `POST /v1/db/{db}/promote` | C2, with the epoch fencing the old primary and `force` overriding exactly three refusals |
 | §5.3 failover on a lapsed lease | C2. The holder renews its own lease; the leader grants a lapsed one to the reachable replica with the highest acked txid |
-| §5.3 `307` + `BunQL-Primary`, WS `moved` | C2. `307` same-origin only, because a cross-origin redirect strips `Authorization`; the SDK replays once instead |
-| §9.3 `bunql promote`, `bunql cluster` | C2 |
+| §5.3 `307` + `BQL-Primary`, WS `moved` | C2. `307` same-origin only, because a cross-origin redirect strips `Authorization`; the SDK replays once instead |
+| §9.3 `bql promote`, `bql cluster` | C2 |
 | §9.4 `[cluster]` | C2, without `rf` — placement is C3 |
 
 `docs/c2-promotion.md` is the as-built note.
@@ -2024,7 +2024,7 @@ really send) and `docs/r5-orm.md` (the two adapters).
 |---|---|
 | §4.5 replica apply mechanism A (pages into the file, shm header rewritten under the WAL locks) | mechanism B works and is what the numbers above are; A is the way to stop rescanning the WAL per apply |
 | §4.6 row-level CDC on a replica | phase 3. A replica receives pages, so logical decoding of the WAL is what it would take |
-| §9.2 `BunQL.open({ s3 })` | phase 2; the embedded engine has no shipper of its own |
+| §9.2 `Bql.open({ s3 })` | phase 2; the embedded engine has no shipper of its own |
 | `workers: N` (design §2.3) | phase 2. One process owns the writers today |
 
 ### Behaviour that differs
@@ -2049,8 +2049,8 @@ really send) and `docs/r5-orm.md` (the two adapters).
   divides the budget into shares of 128 and passes each worker its own. Bun workers are threads
   sharing one file-descriptor table, so the old per-thread reading meant 8192 databases and about
   57 000 descriptors while each thread warned about 7 168. `GET /v1/db` reports `open` and
-  `maxOpen` for the node and `/metrics` reports the same two as `bunql_open_tenants` and
-  `bunql_max_open_tenants`. A `maxOpen` too small to divide is still divided — a per-worker floor
+  `maxOpen` for the node and `/metrics` reports the same two as `bql_open_tenants` and
+  `bql_max_open_tenants`. A `maxOpen` too small to divide is still divided — a per-worker floor
   would be that floor times the worker count wearing a disguise — and the node warns at start that
   it will thrash. `docs/l3-fd-budget.md`.
 - **The file-descriptor warning is about the node and is printed once.** It needs roughly seven
@@ -2071,7 +2071,7 @@ really send) and `docs/r5-orm.md` (the two adapters).
   across every database on a thread; a shipper that waits longer than `[s3] uploadWaitMs` gives up
   and re-arms rather than queueing a second drain. The queue is ordered by the caller's shipped
   txid, so a database that has been behind for an hour is served before one that committed a moment
-  ago. `bunql_upload_inflight` and `bunql_upload_waiting` report it. `docs/l6-upload-budget.md`.
+  ago. `bql_upload_inflight` and `bql_upload_waiting` report it. `docs/l6-upload-budget.md`.
 - **`[sqlite] statementCache` is per connection, and 64 is smaller than it sounds.** It bounds the
   distinct SQL texts one connection keeps compiled; a tenant holds one writer plus `[data] readers`
   pooled readers, each with its own cache of this size, because a `sqlite3_stmt*` belongs to the
@@ -2079,7 +2079,7 @@ really send) and `docs/r5-orm.md` (the two adapters).
   rather than a slope: **six tables** of six columns take the generated data API from a 100% hit
   rate to **0%**, at 81x a hit per `prepare`, because a working set cycled round-robin evicts each
   text just before it is wanted again. `POST` of N rows is N distinct texts for one table, since
-  the placeholder group repeats per row. Watch `bunql_statement_cache_evictions_total`;
+  the placeholder group repeats per row. Watch `bql_statement_cache_evictions_total`;
   `docs/p7-plan-cache.md`.
 - **`[durability] fsyncSweep` is off, and the number is why.** `"shared"` puts every log's
   `"interval"` barrier on one per-thread sweep, off the event loop. It wins at five hundred
@@ -2121,7 +2121,7 @@ really send) and `docs/r5-orm.md` (the two adapters).
   cell — not the length of the JSON it would serialise to. `docs/l1-result-budget.md`.
 - **The first live event is always `rows`, later ones `diff`.** A diff needs a previous result and
   the subscribe-time event has none.
-- **The default `BunQL-Node` is a hash of the hostname**, not the hostname. It travels on every
+- **The default `BQL-Node` is a hash of the hostname**, not the hostname. It travels on every
   response and into whatever a client logs. `[server] node` sets a readable one.
 - **The change ring is in memory.** A `Last-Event-ID` from before a restart is answered with
   `reset`, not an empty backlog — an empty backlog reads as "you are up to date".
@@ -2131,11 +2131,11 @@ really send) and `docs/r5-orm.md` (the two adapters).
   uses `transaction`.
 - **The client authenticates a socket with `hello`, not `?token=`.** The query-string token is
   still accepted by the server; the SDK does not use it.
-- **`bunql restore --at` and `from.at` accept a timestamp**, which design §9.3 asks for and the
+- **`bql restore --at` and `from.at` accept a timestamp**, which design §9.3 asks for and the
   original route did not do.
-- **`bunql exec <db> --sql …` is an addition** to the design §9.3 command list. `shell` needs a
+- **`bql exec <db> --sql …` is an addition** to the design §9.3 command list. `shell` needs a
   terminal; a one-shot statement is what a script wants.
-- **Every `[section] key` has a `BUNQL_<SECTION>_<KEY>` override.** The short aliases predate it
+- **Every `[section] key` has a `BQL_<SECTION>_<KEY>` override.** The short aliases predate it
   and still work.
 
 ### Record and layout details
@@ -2145,7 +2145,7 @@ really send) and `docs/r5-orm.md` (the two adapters).
   at the end of the header rather than after the body, so `decodeHeader` is one fixed-size read.
 - **The 128-bit body hash is two 64-bit XXH3 digests** with seeds `0` and `0x9E3779B1`, because
   `Bun.hash.xxHash3` exposes only the 64-bit digest. It is not canonical XXH3-128 and nothing but
-  BunQL reads it.
+  bql.sh reads it.
 - **A replica verifies `postChecksum` before writing, not after.** The prospective checksum is
   computed from the pre-images, and a mismatch throws with the replica's WAL untouched.
 - **The tailer's position advances only at commit frames** and every poll re-verifies the chain

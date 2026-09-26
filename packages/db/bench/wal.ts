@@ -32,7 +32,7 @@ const META_FSYNC = (Bun.argv[2] as "each" | "rename" | undefined) ?? "each"
 // of. `docs/c5-apply-pages.md`.
 const MECHANISM = (Bun.argv[3] as ApplyMechanism | undefined) ?? "pages"
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-wal-bench-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-wal-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 const primaryDir = path.join(root, "primary")
 const replicaDir = path.join(root, "replica")

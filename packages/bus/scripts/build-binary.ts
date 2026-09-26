@@ -89,7 +89,7 @@ try {
     : [flag("target") ?? `bun-${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`];
 
   for (const target of targets) {
-    const outfile = `${outDir}/agenticbus-${target.replace(/^bun-/, "")}`;
+    const outfile = `${outDir}/bql-bus-${target.replace(/^bun-/, "")}`;
     await run(
       [
         "bun",

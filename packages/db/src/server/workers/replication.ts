@@ -89,7 +89,7 @@ export class ReplicationRouter {
   readonly heartbeatMs: number
   readonly slowReplicaMs: number
 
-  /** Bytes handed to `ws.send`, for `bunql_replication_bytes_total`. The router writes every one. */
+  /** Bytes handed to `ws.send`, for `bql_replication_bytes_total`. The router writes every one. */
   bytesSent = 0
 
   #runtime: ServerRuntime
@@ -111,10 +111,10 @@ export class ReplicationRouter {
     this.heartbeatMs = options.heartbeatMs ?? 5000
     this.slowReplicaMs = options.slowReplicaMs ?? 30_000
     this.#onError =
-      options.onError ?? ((err: unknown) => console.error("bunql: replication", err))
+      options.onError ?? ((err: unknown) => console.error("bql: replication", err))
   }
 
-  /** Replica connections attached, for `bunql_replication_connected`. The router owns them all. */
+  /** Replica connections attached, for `bql_replication_connected`. The router owns them all. */
   get connections(): number {
     return this.#conns.size
   }

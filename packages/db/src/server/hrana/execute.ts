@@ -14,7 +14,7 @@
 
 import type { QueryResult, Value } from "../../client/protocol.ts"
 import { applyPolicy, requireScope } from "../auth.ts"
-import { BunQLError } from "../errors.ts"
+import { BqlError } from "../errors.ts"
 import { executeInReadTx, executeInTx, executeStatement } from "../exec.ts"
 import type { Database } from "../../sqlite/index.ts"
 import { cstr } from "../../sqlite/lib.ts"
@@ -52,7 +52,7 @@ function emptyResult(txid: bigint, startedNs: number): HranaStmtResult {
 }
 
 /**
- * A BunQL result as a Hrana one. `decltype` is `../json.ts`'s column type, which is the declared
+ * A bql.sh result as a Hrana one. `decltype` is `../json.ts`'s column type, which is the declared
  * type when there is one and the storage class of the first non-null cell otherwise — so an
  * expression column reports a type where libsql-server reports null. `"NULL"`, which is what that
  * encoder emits for a column it could not type at all, becomes null here.
@@ -81,8 +81,8 @@ function toStmtResult(result: QueryResult, wantRows: boolean): HranaStmtResult {
 }
 
 /** SQLite's own wording, so a client that matches on the message sees what it expects. */
-function noTransaction(what: string): BunQLError {
-  return new BunQLError("BAD_REQUEST", `cannot ${what} - no transaction is active`, 400)
+function noTransaction(what: string): BqlError {
+  return new BqlError("BAD_REQUEST", `cannot ${what} - no transaction is active`, 400)
 }
 
 /**
@@ -115,7 +115,7 @@ function assertReadOnly(service: HranaService, stream: HranaStream, sql: string)
     ? tenant.readTxExec(readTx.tx, inspect)
     : tenant.txExec(inspect)
   if (!readonly) {
-    throw new BunQLError(
+    throw new BqlError(
       "SQLITE_READONLY",
       "attempt to write in a read-only transaction",
       403,
@@ -132,7 +132,7 @@ export async function executeStmt(
   stream: HranaStream,
   stmt: HranaStmt,
 ): Promise<HranaStmtResult> {
-  if (!stmt || typeof stmt !== "object") throw BunQLError.badRequest("a stmt object is required")
+  if (!stmt || typeof stmt !== "object") throw BqlError.badRequest("a stmt object is required")
   const sql = stream.sqlOf(stmt)
   const wantRows = stmt.want_rows !== false
   const runtime = service.runtime
@@ -143,7 +143,7 @@ export async function executeStmt(
   try {
     if (verb?.kind === "begin") {
       if (stream.tx || stream.remoteTx || stream.readTx) {
-        throw new BunQLError("BAD_REQUEST", "cannot start a transaction within a transaction", 400)
+        throw new BqlError("BAD_REQUEST", "cannot start a transaction within a transaction", 400)
       }
       requireScope(stream.principal, stream.db, verb.readonly ? "ro" : "rw")
       // R4b: a writable transaction on a replica lives on the *primary*, and the stream holds a
@@ -212,7 +212,7 @@ export async function executeStmt(
     if (stream.readTx && !stream.readTx.tx.open) {
       stream.readTx = null
       stream.txReadonly = false
-      throw new BunQLError("TX_NOT_FOUND", `${stream.db}: the read transaction has ended`, 404)
+      throw new BqlError("TX_NOT_FOUND", `${stream.db}: the read transaction has ended`, 404)
     }
     if (stream.txReadonly && (stream.tx || stream.readTx)) assertReadOnly(service, stream, sql)
     const args = argsOf(stmt)
@@ -258,7 +258,7 @@ function evalCond(
     case "error": {
       const step = cond.step
       if (!Number.isInteger(step) || step < 0 || step >= at) {
-        throw BunQLError.badRequest(`a batch condition may only name an earlier step, got ${step}`)
+        throw BqlError.badRequest(`a batch condition may only name an earlier step, got ${step}`)
       }
       return cond.type === "ok" ? results[step] !== null : errors[step] !== null
     }
@@ -271,13 +271,13 @@ function evalCond(
     case "is_autocommit":
       return stream.tx === null
     default:
-      throw BunQLError.badRequest(`unknown batch condition ${JSON.stringify(cond)}`)
+      throw BqlError.badRequest(`unknown batch condition ${JSON.stringify(cond)}`)
   }
 }
 
 function steps(batch: HranaBatch): HranaBatch["steps"] {
   if (!batch || !Array.isArray(batch.steps)) {
-    throw BunQLError.badRequest("a batch needs a steps array")
+    throw BqlError.badRequest("a batch needs a steps array")
   }
   return batch.steps
 }
@@ -297,7 +297,7 @@ export async function runBatch(
   const errors: (HranaBatchResult["step_errors"][number] | null)[] = new Array(list.length).fill(null)
   for (let i = 0; i < list.length; i++) {
     const step = list[i]
-    if (!step || typeof step !== "object") throw BunQLError.badRequest(`steps[${i}] must be an object`)
+    if (!step || typeof step !== "object") throw BqlError.badRequest(`steps[${i}] must be an object`)
     if (step.condition != null && !evalCond(step.condition, results, errors, i, stream)) continue
     try {
       results[i] = await executeStmt(service, stream, step.stmt)
@@ -323,7 +323,7 @@ export async function cursorEntries(
   const errors: (unknown | null)[] = new Array(list.length).fill(null)
   for (let i = 0; i < list.length; i++) {
     const step = list[i]
-    if (!step || typeof step !== "object") throw BunQLError.badRequest(`steps[${i}] must be an object`)
+    if (!step || typeof step !== "object") throw BqlError.badRequest(`steps[${i}] must be an object`)
     if (step.condition != null && !evalCond(step.condition, results, errors, i, stream)) continue
     let result: HranaStmtResult
     try {
@@ -419,7 +419,7 @@ export async function runStreamRequest(
     case "close":
       return { type: "close" }
     default:
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         `unknown Hrana request type ${JSON.stringify((request as { type?: unknown })?.type)}`,
       )
   }

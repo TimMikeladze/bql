@@ -56,7 +56,7 @@ test("a follower refuses writes, including claims", async () => {
 });
 
 test("being a follower survives a restart", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/agenticbus-follow-`);
+  const directory = await mkdtemp(`${tmpdir()}/bql-bus-follow-`);
   try {
     const path = `${directory}/bus.db`;
     const first = new BusStore(path);
@@ -77,7 +77,7 @@ test("being a follower survives a restart", async () => {
 });
 
 test("promotion advances the epoch, and the old leader is fenced out", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/agenticbus-fence-`);
+  const directory = await mkdtemp(`${tmpdir()}/bql-bus-fence-`);
   try {
     const lease = fileLease(`${directory}/lease.json`);
     const old = new BusStore(`${directory}/old.db`);

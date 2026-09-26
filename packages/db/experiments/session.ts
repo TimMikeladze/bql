@@ -1,7 +1,7 @@
 // Session extension via FFI on the bun:sqlite writer connection: row-level changesets (logical tier)
 import { dlopen, FFIType, JSCallback, ptr, toArrayBuffer, read } from "bun:ffi";
 import { Database } from "bun:sqlite";
-const LIB = process.env.BUNQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib";
+const LIB = process.env.BQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib";
 Database.setCustomSQLite(LIB);
 const lib = dlopen(LIB, {
   sqlite3_auto_extension: { args: [FFIType.ptr], returns: FFIType.i32 },

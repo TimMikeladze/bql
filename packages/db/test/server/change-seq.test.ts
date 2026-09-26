@@ -170,7 +170,7 @@ test("a bare txid still means the whole transaction, as it did before L8", async
 
 test("the WebSocket agrees with SSE on the key", async () => {
   const socket = new WebSocket(server.wsUrl(`?token=${encodeURIComponent(server.adminKey)}`), [
-    "bunql.v1",
+    "bql.v1",
   ])
   const events: ChangeEvent[] = []
   await new Promise<void>((resolve, reject) => {

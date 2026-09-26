@@ -1,4 +1,4 @@
-// The real `@libsql/client` against a real BunQL server, over both transports. `client.test.ts`
+// The real `@libsql/client` against a real bql.sh server, over both transports. `client.test.ts`
 // beside this file drives the request sequences by hand and is the finer-grained of the two; this
 // one is the proof that the hand-rolled reading was right, and it is the file to look at when a
 // client release changes something.

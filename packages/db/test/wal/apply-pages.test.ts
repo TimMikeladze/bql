@@ -34,7 +34,7 @@ interface Rig {
 }
 
 function rig(mechanism: ApplyMechanism = "pages", busyMs?: number): Rig {
-  const root = tempDir("bunql-apply-a-")
+  const root = tempDir("bql-apply-a-")
   const primaryDir = path.join(root, "primary")
   const replicaDir = path.join(root, "replica")
   fs.mkdirSync(primaryDir)
@@ -274,7 +274,7 @@ describe("mechanism A — page apply", () => {
   })
 
   test("both mechanisms produce the same database from the same records", () => {
-    const root = tempDir("bunql-apply-both-")
+    const root = tempDir("bql-apply-both-")
     const primaryDir = path.join(root, "primary")
     fs.mkdirSync(primaryDir)
     const { db, dbPath } = openPrimary(primaryDir)

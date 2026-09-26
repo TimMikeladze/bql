@@ -1,6 +1,6 @@
 node_modules/
 dist/
-.agenticbus/
+.bql-bus/
 .env
 *.log
 .DS_Store

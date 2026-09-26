@@ -5,7 +5,7 @@
 //   bun run bench/profile.ts [rounds]
 //
 // Not part of `bun run bench`: these are attribution numbers for `docs/performance.md`, not
-// budgets, and three of the four sections deliberately measure things BunQL does not do yet
+// budgets, and three of the four sections deliberately measure things bql.sh does not do yet
 // (uncompressed records, group commit, cached token verification).
 
 import fs from "node:fs"
@@ -17,7 +17,7 @@ import { encode, TxnLog, TxnRecorder } from "../src/wal/index.ts"
 import { distribution, emit, percentile, type Sample } from "./report.ts"
 
 const ROUNDS = Number(Bun.argv[2] ?? 3000)
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-profile-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-profile-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
 const us = (ns: number) => ns / 1000
@@ -203,6 +203,6 @@ const say = (text = "") => {
 }
 
 say(
-  `bunql profile · ${ROUNDS} rounds · Bun ${Bun.version} · ${process.platform}/${process.arch}`,
+  `bql profile · ${ROUNDS} rounds · Bun ${Bun.version} · ${process.platform}/${process.arch}`,
 )
 emit({ bench: "profile", legs })

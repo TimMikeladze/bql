@@ -1,12 +1,12 @@
 // Invariant: no module under `src/graphql/` names `graphql` or `openapi-x-graphql` in a static
-// import. Both are optional peers, BunQL's runtime dependency count is zero, and a reviewer checks
+// import. Both are optional peers, bql.sh's runtime dependency count is zero, and a reviewer checks
 // that by deleting the two packages and starting the server — so a static import would turn the
 // check into a crash at startup instead of a message at the one route that needs them. They load
 // through `import()` here, at the first request that reaches a schema, and nowhere else.
 //
 // `src/kysely.ts` and `src/drizzle.ts` are the same arrangement one notch looser: they may import
 // their peer statically because nothing under `src/` imports *them* — the peer is only resolved by
-// a consumer who asked for `bunql/kysely`. `src/server/routes.ts` imports this, so that
+// a consumer who asked for `bql/kysely`. `src/server/routes.ts` imports this, so that
 // loosening is not available here and the dynamic import is what stands in for it.
 //
 // A `import type` of either package is fine and is used freely: types are erased, so they cost an
@@ -36,7 +36,7 @@ export interface PeerLoaders {
 
 /** Neither package resolved. Named, and carrying the command that fixes it. */
 export class MissingPeersError extends Error {
-  /** The packages `bunql/graphql` needs, both of them, whichever one failed. */
+  /** The packages `bql/graphql` needs, both of them, whichever one failed. */
   readonly packages: readonly string[] = PEER_PACKAGES
   /** The install command, verbatim. */
   readonly install = PEER_INSTALL
@@ -45,7 +45,7 @@ export class MissingPeersError extends Error {
 
   constructor(missing: readonly string[], cause?: unknown) {
     super(
-      `bunql/graphql needs its optional peers ${PEER_PACKAGES.join(" and ")}; ` +
+      `bql/graphql needs its optional peers ${PEER_PACKAGES.join(" and ")}; ` +
         `${missing.join(" and ")} did not resolve. Install them: ${PEER_INSTALL}`,
       cause === undefined ? undefined : { cause },
     )

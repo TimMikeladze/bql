@@ -41,13 +41,13 @@ describe("metrics", () => {
     expect(response.status).toBe(200)
     expect(response.headers.get("content-type")).toContain("text/plain")
     const body = await response.text()
-    expect(body).toContain("# TYPE bunql_requests_total counter")
-    expect(body).toContain("# TYPE bunql_request_duration_us histogram")
-    expect(body).toMatch(/bunql_requests_total\{node="test-node",status="2xx"\} [1-9]/)
-    expect(body).toMatch(/bunql_writes_total\{node="test-node"\} [1-9]/)
-    expect(body).toMatch(/bunql_queries_total\{node="test-node"\} [1-9]/)
-    expect(body).toMatch(/bunql_open_tenants\{node="test-node"\} [1-9]/)
-    expect(body).toContain('bunql_request_duration_us_bucket{node="test-node",le="+Inf"}')
+    expect(body).toContain("# TYPE bql_requests_total counter")
+    expect(body).toContain("# TYPE bql_request_duration_us histogram")
+    expect(body).toMatch(/bql_requests_total\{node="test-node",status="2xx"\} [1-9]/)
+    expect(body).toMatch(/bql_writes_total\{node="test-node"\} [1-9]/)
+    expect(body).toMatch(/bql_queries_total\{node="test-node"\} [1-9]/)
+    expect(body).toMatch(/bql_open_tenants\{node="test-node"\} [1-9]/)
+    expect(body).toContain('bql_request_duration_us_bucket{node="test-node",le="+Inf"}')
   })
 
   test("metrics need the admin key when one is configured", async () => {
@@ -57,12 +57,12 @@ describe("metrics", () => {
   })
 
   test("vm steps accumulate, which is what quotas are billed on", async () => {
-    const before = await readGauge("bunql_vm_steps_total")
+    const before = await readGauge("bql_vm_steps_total")
     await server.fetch("/v1/db/acme/query", {
       method: "POST",
       body: JSON.stringify({ sql: "select count(*) from t" }),
     })
-    expect(await readGauge("bunql_vm_steps_total")).toBeGreaterThan(before)
+    expect(await readGauge("bql_vm_steps_total")).toBeGreaterThan(before)
   })
 })
 
@@ -90,7 +90,7 @@ describe("CORS", () => {
     expect(response.headers.get("access-control-max-age")).toBe("86400")
   })
 
-  test("a real response echoes the origin and exposes the BunQL headers", async () => {
+  test("a real response echoes the origin and exposes the bql.sh headers", async () => {
     const response = await server.fetch("/v1/db/acme/query", {
       method: "POST",
       headers: { origin: "https://app.example.com" },
@@ -98,7 +98,7 @@ describe("CORS", () => {
     })
     expect(response.headers.get("access-control-allow-origin")).toBe("https://app.example.com")
     expect(response.headers.get("access-control-allow-credentials")).toBe("true")
-    expect(response.headers.get("access-control-expose-headers")).toContain("BunQL-Txid")
+    expect(response.headers.get("access-control-expose-headers")).toContain("BQL-Txid")
   })
 
   test("cors: false leaves the headers off", async () => {
@@ -119,7 +119,7 @@ describe("routing", () => {
     const body = (await response.json()) as { error: { status: number; message: string } }
     expect(body.error.status).toBe(404)
     expect(body.error.message).toContain("/v1/nowhere")
-    expect(response.headers.get("BunQL-Node")).toBe("test-node")
+    expect(response.headers.get("BQL-Node")).toBe("test-node")
   })
 
   test("a verb a route does not serve is not a 200", async () => {

@@ -5,30 +5,27 @@
 # last one, and every check is a hard failure — this workflow has no `continue-on-error` anywhere,
 # deliberately, because a half-verified package is worse than no package.
 #
-# Two packages version independently, so the tag says which one:
+# One package, `bql.sh`, so one tag:
 #
-#   db-v1.2.3   publishes packages/db  as @bunql/db
-#   bus-v0.1.0  publishes packages/bus as @bunql/bus
+#   v0.1.0   publishes the repository root as bql.sh — the database under `bql.sh`,
+#            `bql.sh/client`, `bql.sh/sqlite`, …, and the bus under `bql.sh/bus`
 #
 # How a release happens:
 #
-#   1. Set `version` in that package's package.json to the version being released.
-#   2. `git tag <prefix>-v<that version> && git push --tags`.
+#   1. Set `version` in the root `package.json` to the version being released.
+#   2. `git tag v<that version> && git push --tags`.
 #
-# The tag is the trigger and the tag must match the package's `package.json`; `verify the tag`
-# below refuses the release otherwise, so a tag pushed against the wrong commit cannot publish a
-# version that claims to be something else. `GET /v1/openapi.json` publishes `info.version` from
-# the same field for @bunql/db and `packages/db/test/package/exports.test.ts` holds the two
-# together, so the tag, the package and every generated client agree by construction.
+# The tag is the trigger and the tag must match the root `package.json`; `verify the tag` below
+# refuses the release otherwise, so a tag pushed against the wrong commit cannot publish a version
+# that claims to be something else. `GET /v1/openapi.json` publishes `info.version` from the same
+# field and `packages/db/test/package/exports.test.ts` holds the two together, so the tag, the
+# package and every generated client agree by construction.
 #
-# Both packages are scoped to an npm org this project owns. Unscoped `bunql` is somebody else's (a
+# The name is unscoped, which is why it is the domain: plain `bql` on npm is somebody else's (a
 # query builder, last published 2026-02-12 with a `github.com/yourusername/` placeholder for a
-# repository), and the scope is wanted for its own sake: `packages/db/docs/c6-packaging.md` §6
-# plans `@bunql/sqlite-darwin-arm64` and friends, which need it.
-#
-# The products are still called BunQL and AgenticBus. `BUNQL_*`, `bunql.toml`, the `bunql:` log
-# prefix, the `bunql` and `agenticbus` binaries are all unchanged — only the names they are
-# *published* under are scoped.
+# repository), and `bql.sh` is both free and the thing people will have already typed into a
+# browser. `packages/db/docs/c6-packaging.md` §6 plans prebuilt `sqlite-darwin-arm64` and friends;
+# those become `bql.sh-sqlite-darwin-arm64` rather than members of a scope.
 #
 # **One thing is still needed before the first tag**, and it is not a code change: `NPM_TOKEN`, an
 # automation token for the org, in this repository's secrets. The `id-token: write` permission
@@ -39,7 +36,7 @@ name: release
 
 on:
   push:
-    tags: ["db-v*", "bus-v*"]
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -66,35 +63,20 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # The tag names the package. Anything else never reaches the publish step, because `on.tags`
-      # above only matches these two prefixes — this is the second half of the same decision, and
-      # it is what turns the prefix into a directory.
-      - name: resolve the package from the tag
-        id: pkg
-        run: |
-          case "$GITHUB_REF_NAME" in
-            db-v*)  dir=packages/db ;;
-            bus-v*) dir=packages/bus ;;
-            *) echo "tag $GITHUB_REF_NAME names no package" >&2; exit 1 ;;
-          esac
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-          echo "publishing from $dir"
-
       - name: verify the tag matches package.json
         run: |
-          tag="${GITHUB_REF_NAME#*-v}"
-          pkg=$(bun -e 'console.log(JSON.parse(await Bun.file("${{ steps.pkg.outputs.dir }}/package.json").text()).version)')
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')
           if [ "$tag" != "$pkg" ]; then
-            echo "tag $GITHUB_REF_NAME says $tag, ${{ steps.pkg.outputs.dir }}/package.json says $pkg" >&2
+            echo "tag $GITHUB_REF_NAME says $tag, package.json says $pkg" >&2
             exit 1
           fi
           echo "releasing $pkg"
 
       - run: bun install --frozen-lockfile
 
-      # Both packages run the whole gate, not just the one being released. @bunql/bus does not
-      # depend on @bunql/db yet, but it is about to, and a release that only proved its own half
-      # would be the release that ships the skew.
+      # One package means one gate over both halves: a release that proved only the database would
+      # be the release that ships a broken `bql.sh/bus`.
       - name: build libsqlite3
         run: bun run db sqlite:build
 
@@ -106,23 +88,26 @@ jobs:
 
       - run: bun run typecheck
 
-      - name: "@bunql/db"
+      - name: the database
         run: bun run db test
 
-      - name: "@bunql/bus"
+      - name: the bus
         run: bun run bus test
 
       - name: docs/api.md covers every route
         run: bun run db routes:check
 
+      # The tarball has to carry the bus's built dashboard, which `prepack` builds — and the same
+      # gate proves the published tarball installs, builds its own SQLite and runs both halves.
+      - name: pack:check
+        run: bun run pack:check
+
       # `--dry-run` first, so a packing failure — a missing file, a name npm will not accept — is
       # reported before anything is uploaded rather than halfway through.
       - name: pack
-        working-directory: ${{ steps.pkg.outputs.dir }}
         run: npm publish --dry-run --provenance
 
       - name: publish
-        working-directory: ${{ steps.pkg.outputs.dir }}
         run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

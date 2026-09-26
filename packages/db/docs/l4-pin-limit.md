@@ -62,8 +62,8 @@ subscribers release theirs immediately.
 | criterion | result |
 |---|---|
 | a principal subscribing past the pin limit is refused while other principals are unaffected | **yes.** `test/server/pin-limit.test.ts`: three subscriptions accepted, the fourth `429 PIN_LIMIT`, a second subscription to an already-pinned database accepted, and a different token's fourth accepted |
-| a node whose LRU is fully pinned refuses a new open instead of exceeding `maxOpen` | **yes.** Four principals pin four databases on a node with `maxOpen: 4`; a fifth database answers `503 TOO_MANY_OPEN` and `bunql_open_tenants` stays at four |
-| a dropped socket releases its pins | **yes**, and the test kills the sockets rather than unsubscribing politely. `bunql_tenants_pinned` returns to zero once the retain window passes |
+| a node whose LRU is fully pinned refuses a new open instead of exceeding `maxOpen` | **yes.** Four principals pin four databases on a node with `maxOpen: 4`; a fifth database answers `503 TOO_MANY_OPEN` and `bql_open_tenants` stays at four |
+| a dropped socket releases its pins | **yes**, and the test kills the sockets rather than unsubscribing politely. `bql_tenants_pinned` returns to zero once the retain window passes |
 
 All three cases were run against a tree with the two refusals disabled: the first two answer 200
 and the third answers `BUSY` rather than `TOO_MANY_OPEN`, so the test discriminates.
@@ -100,7 +100,7 @@ which is why both are there.
 holder, the retain window carries one, baton and read-transaction pins keyed by principal),
 `src/server/routes.ts` and `src/server/ws.ts` (the SSE and WebSocket subscription paths),
 `src/server/config.ts` (`[limits] maxPinnedPerPrincipal`), `src/server/errors.ts` (`PIN_LIMIT`,
-`TOO_MANY_OPEN`), `src/server/metrics.ts` (`bunql_tenants_pinned`, `bunql_open_refused_total`),
+`TOO_MANY_OPEN`), `src/server/metrics.ts` (`bql_tenants_pinned`, `bql_open_refused_total`),
 `src/server/workers/{protocol,pool,entry,router}.ts` (both sum across the disjoint shards),
 `src/server/registry.ts`, `src/client/protocol.ts`, `src/replication/replica.ts` (the double pin in
 §4b), `docs/api.md`, `docs/design.md` §4.7 and §6.6.

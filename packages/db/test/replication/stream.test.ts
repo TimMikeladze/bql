@@ -312,7 +312,7 @@ describe("refusals", () => {
   // turned off — the one configuration in which a replica still refuses a write outright.
   const noForwarding = { overrides: { replication: { forwardWrites: false } } }
 
-  test("a write on a replica is 503 NOT_PRIMARY with a BunQL-Primary header", async () => {
+  test("a write on a replica is 503 NOT_PRIMARY with a BQL-Primary header", async () => {
     const primary = track(await startPrimary())
     await createDb(primary, "acme", SCHEMA)
     const replica = track(await startReplica(primary, noForwarding))
@@ -517,14 +517,14 @@ describe("observability", () => {
     await untilTxid(replica, "acme", written.txid)
 
     const primaryText = await (await cluster.primary.fetch("/metrics")).text()
-    expect(primaryText).toContain("bunql_replication_connected")
-    expect(primaryText).toContain("bunql_replication_lag_txid")
-    expect(primaryText).toMatch(/bunql_replication_records_total\{[^}]*\} [1-9]/)
-    expect(primaryText).toMatch(/bunql_replication_bytes_total\{[^}]*\} [1-9]/)
+    expect(primaryText).toContain("bql_replication_connected")
+    expect(primaryText).toContain("bql_replication_lag_txid")
+    expect(primaryText).toMatch(/bql_replication_records_total\{[^}]*\} [1-9]/)
+    expect(primaryText).toMatch(/bql_replication_bytes_total\{[^}]*\} [1-9]/)
 
     const replicaText = await (await replica.fetch("/metrics")).text()
-    expect(replicaText).toMatch(/bunql_replication_connected\{[^}]*\} 1/)
-    expect(replicaText).toMatch(/bunql_replication_records_total\{[^}]*\} [1-9]/)
+    expect(replicaText).toMatch(/bql_replication_connected\{[^}]*\} 1/)
+    expect(replicaText).toMatch(/bql_replication_records_total\{[^}]*\} [1-9]/)
   })
 
   test("readyz on a replica reports the stream, and healthz reports the role", async () => {

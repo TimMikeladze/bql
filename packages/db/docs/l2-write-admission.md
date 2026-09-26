@@ -126,7 +126,7 @@ the drain's one-pass batch build and bulk byte account, `QueuedWriteOptions`, `T
 (the three `[limits]` keys), `src/server/errors.ts` (`WRITE_QUEUE_FULL`, `WRITE_QUEUE_TIMEOUT`,
 `ErrorDetails.retryAfterSec` and the `Retry-After` header), `src/server/exec.ts` (`requestWeight`,
 the signal, the rejection counter), `src/server/routes.ts` (`ctx.request.signal`),
-`src/server/metrics.ts` (`bunql_write_queue_depth`, `bunql_write_queue_rejected_total`),
+`src/server/metrics.ts` (`bql_write_queue_depth`, `bql_write_queue_rejected_total`),
 `src/server/workers/{protocol,pool,entry}.ts` (the depth sums across shards — disjoint, so it sums
 like any other), `src/server/registry.ts`, `src/dataapi/operations.ts`, `src/client/protocol.ts`,
 `docs/api.md`, `docs/design.md` §4.7 and §6.6.

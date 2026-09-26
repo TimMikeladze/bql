@@ -465,16 +465,16 @@ describe("library and feature detection", () => {
     expect(sqlite()).toBe(sqlite())
   })
 
-  test("BUNQL_SQLITE_LIB is tried first", () => {
-    const before = process.env.BUNQL_SQLITE_LIB
-    process.env.BUNQL_SQLITE_LIB = "/custom/libsqlite3.dylib"
+  test("BQL_SQLITE_LIB is tried first", () => {
+    const before = process.env.BQL_SQLITE_LIB
+    process.env.BQL_SQLITE_LIB = "/custom/libsqlite3.dylib"
     try {
       expect(candidatePaths()[0]).toBe("/custom/libsqlite3.dylib")
     } finally {
-      if (before === undefined) delete process.env.BUNQL_SQLITE_LIB
-      else process.env.BUNQL_SQLITE_LIB = before
+      if (before === undefined) delete process.env.BQL_SQLITE_LIB
+      else process.env.BQL_SQLITE_LIB = before
     }
-    delete process.env.BUNQL_SQLITE_LIB
+    delete process.env.BQL_SQLITE_LIB
     expect(candidatePaths()[0]).not.toBe("/custom/libsqlite3.dylib")
   })
 
@@ -484,7 +484,7 @@ describe("library and feature detection", () => {
       throw new Error("expected the load to fail")
     } catch (err) {
       const message = (err as Error).message
-      expect(message).toContain("BUNQL_SQLITE_LIB")
+      expect(message).toContain("BQL_SQLITE_LIB")
       expect(message).toContain("/nope/libsqlite3.so")
       expect(message).toContain("/also-nope/libsqlite3.dylib")
     }

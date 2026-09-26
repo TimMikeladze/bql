@@ -43,12 +43,12 @@ export class UploadBudget {
     this.permits = Math.max(1, permits)
   }
 
-  /** Requests in flight right now. `bunql_upload_inflight`. */
+  /** Requests in flight right now. `bql_upload_inflight`. */
   get inflight(): number {
     return this.#inflight
   }
 
-  /** Callers queued for a permit. `bunql_upload_waiting`. */
+  /** Callers queued for a permit. `bql_upload_waiting`. */
   get waiting(): number {
     return this.#queue.length
   }

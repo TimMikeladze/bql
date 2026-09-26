@@ -1,6 +1,6 @@
-> **Superseded (2026-09-12).** This described a standalone coordinator with its own fixed workflow. That design is gone: the graph now belongs to [dagr](https://github.com/TimMikeladze/dagr) and AgenticBus is the distributed execution layer around it. See [2026-09-12-distributed-execution.md](2026-09-12-distributed-execution.md). Kept for the reasoning on contracts, delivery semantics and recovery, which carried forward.
+> **Superseded (2026-09-12).** This described a standalone coordinator with its own fixed workflow. That design is gone: the graph now belongs to [dagr](https://github.com/TimMikeladze/dagr) and bql.sh/bus is the distributed execution layer around it. See [2026-09-12-distributed-execution.md](2026-09-12-distributed-execution.md). Kept for the reasoning on contracts, delivery semantics and recovery, which carried forward.
 
-# AgenticBus: Bun architecture proposal
+# bql.sh/bus: Bun architecture proposal
 
 Status: long-term architecture proposal, with an end-to-end prototype now implemented. See the [prototype plan](../plans/2026-09-11-e2e-prototype.md) and [README](../../../README.md) for its narrower implemented contracts and runnable commands.
 
@@ -75,7 +75,7 @@ Remote runners initiate outbound connections, so they do not need publicly reach
 
 | Contract | Meaning | Example | Success means |
 | --- | --- | --- | --- |
-| **Event** | An immutable observation | `dev.agenticbus.artifact.created.v1` | Coordinator durably accepted the fact |
+| **Event** | An immutable observation | `dev.bql-bus.artifact.created.v1` | Coordinator durably accepted the fact |
 | **Task command** | A request with an owner and lifecycle | Review artifact A using capability `code.review` | Task accepted; completion arrives separately |
 | **Decision request** | A deadline-bound question before an action | May this tool execute with these inputs? | A matching, unexpired decision was returned |
 
@@ -93,15 +93,15 @@ Illustrative proposed event, not an existing API response:
 {
   "specversion": "1.0",
   "id": "01-event-review-completed",
-  "source": "urn:agenticbus:worker:reviewer-7",
-  "type": "dev.agenticbus.review.completed.v1",
+  "source": "urn:bql-bus:worker:reviewer-7",
+  "type": "dev.bql-bus.review.completed.v1",
   "subject": "tasks/review-42",
   "time": "2026-09-11T20:00:00Z",
   "datacontenttype": "application/json",
   "workspaceid": "repo-17",
   "taskid": "review-42",
   "correlationid": "workflow-8",
-  "causationid": "urn:agenticbus:message:coordinator:request-41",
+  "causationid": "urn:bql-bus:message:coordinator:request-41",
   "data": {
     "artifactId": "artifact-patch-9",
     "verdict": "changes_requested",
@@ -230,12 +230,12 @@ An SSE connection is not a work lease or a durable acknowledgement. MCP tools ca
 Illustrative future CLI workflow, **not runnable today**:
 
 ```sh
-agenticbus serve --profile local
-agenticbus worker start --adapter claude --capability code.implement
-agenticbus worker start --adapter codex --capability code.review
-agenticbus task request code.review --artifact artifact-patch-9
-agenticbus task watch review-42
-agenticbus events tail --correlation workflow-8
+bql-bus serve --profile local
+bql-bus worker start --adapter claude --capability code.implement
+bql-bus worker start --adapter codex --capability code.review
+bql-bus task request code.review --artifact artifact-patch-9
+bql-bus task watch review-42
+bql-bus events tail --correlation workflow-8
 ```
 
 For remote mode, run the coordinator with HTTPS and enroll each runner using a short-lived bootstrap credential, exchanged for revocable worker credentials. Supply credentials through the environment/credential store rather than command arguments. The same request/watch operations work from either machine.

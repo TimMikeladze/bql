@@ -1,4 +1,4 @@
-# AgenticBus — one process, one SQLite file, the dashboard baked in.
+# bql.sh/bus — one process, one SQLite file, the dashboard baked in.
 FROM oven/bun:1.4-slim AS base
 WORKDIR /app
 

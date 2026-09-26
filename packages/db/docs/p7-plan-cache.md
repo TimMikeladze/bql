@@ -34,7 +34,7 @@ served from it, and `close()` finalizes the lot.
 **`SQLITE_PREPARE_PERSISTENT` is already set** — `prepareStatement(this, sql,
 SQLITE_PREPARE_PERSISTENT)`. There was nothing to turn on.
 
-**The cache cannot be shared across connections, and that is a SQLite fact rather than a BunQL
+**The cache cannot be shared across connections, and that is a SQLite fact rather than a bql.sh
 omission.** A `sqlite3_stmt*` belongs to the `sqlite3*` it was compiled against; no API executes
 one prepared statement on two connections, and no API exposes a compiled plan apart from a
 statement. A tenant holds one writer plus up to `[data] readers` (default 2) pooled readers, so a
@@ -113,7 +113,7 @@ benchmark in the tree has ever shown it.
 installed the way the reader does is a change to when a connection is scoped, and a connection
 left scoped to the last request's token is a security-shaped decision, not a tuning one. It is
 recorded here with its number so the next reader does not have to find it twice, and so that §5's
-counters are read correctly: **a hit counted here is a hit in BunQL's cache, not proof SQLite did
+counters are read correctly: **a hit counted here is a hit in bql.sh's cache, not proof SQLite did
 not recompile.**
 
 ## 5. What landed
@@ -127,8 +127,8 @@ since this is the one key there that SQLite knows nothing about — then `openCo
 embedded API and every existing test behave as they did.
 
 **Three counters** (`hits`, `misses`, `evictions`), incremented in `prepare()` and exported as
-`bunql_statement_cache_hits_total`, `bunql_statement_cache_misses_total` and
-`bunql_statement_cache_evictions_total`. A *rising* eviction count on a live node is the thrash;
+`bql_statement_cache_hits_total`, `bql_statement_cache_misses_total` and
+`bql_statement_cache_evictions_total`. A *rising* eviction count on a live node is the thrash;
 zero is a cache that fits.
 
 The counters live in **one object shared by every connection a registry opens**, following how L5
@@ -155,7 +155,7 @@ between it and `/metrics`. Each was run against a tree with the thing it pins ta
 | the same, the ceiling itself | `> this.#cacheLimit` becomes `> 1` | fail — `statementCacheSize` expected 4, received 1 |
 | counters are per connection unless one is shared | `prepare()` stops serving cached statements | fail — `hits: 1` became `hits: 0, misses: 3` |
 | a server at `[sqlite] statementCache: 4` evicts and `/metrics` says so | `openConnection` stops passing `statementCache` to `Database.open` | fail — evictions expected `> 6`, received `0`: the connection silently ran at the default 64 |
-| the default 64 holds the same working set, and a warm pass is all hits | the registry stops sharing its counters with its tenants | fail — `bunql_statement_cache_hits_total` expected `> 0`, received `0`: every connection counted into an object nothing reads |
+| the default 64 holds the same working set, and a warm pass is all hits | the registry stops sharing its counters with its tenants | fail — `bql_statement_cache_hits_total` expected `> 0`, received `0`: every connection counted into an object nothing reads |
 
 The second one is the milestone's point: `src/sqlite/database.ts`'s header has claimed since P0
 that the re-arm is what expires cached statements, and nothing tested it. It does, and now it is
@@ -212,7 +212,7 @@ path that no plan document names, and it should be somebody's milestone rather t
 | `src/server/config.ts` | `[sqlite] statementCache`, its default and its documentation; the section comment, which no longer claims everything in it is a pragma |
 | `src/tenant/tenant.ts` | `SqlitePragmas.statementCache`, `TenantOptions.statementCacheCounters`, both threaded through `openConnection` |
 | `src/tenant/registry.ts` | the shared counters object, handed to every tenant, and `RegistryStats.statementCache` |
-| `src/server/metrics.ts` | the three `bunql_statement_cache_*` counters |
+| `src/server/metrics.ts` | the three `bql_statement_cache_*` counters |
 | `src/server/workers/{protocol,entry,pool}.ts` | the shard share and its sum |
 | `bench/cache.ts` | the data API census — two passes over the real `introspect` and `buildStatement`, warm hit rate against table count and ceiling |
 | `test/sqlite/cache.test.ts` | new; five driver tests, §6 |

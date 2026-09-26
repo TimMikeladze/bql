@@ -45,7 +45,7 @@ import {
 } from "../graphql/index.ts"
 import { createDispatcher, type Dispatcher } from "../http/index.ts"
 import { ADMIN, type Principal, requireScope } from "./auth.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 import {
   awaitTxid,
   executeStatementQueued,
@@ -56,7 +56,7 @@ import { dbName, type Handler, json, type RouteContext } from "./routes.ts"
 import { mapTenantError, type ServerRuntime } from "./runtime.ts"
 
 /** Published in the documents this module emits; `test/package/exports.test.ts` keeps it honest. */
-export const VERSION = "0.0.0"
+export const VERSION = "0.1.0"
 
 /** `api` + `/v1/db/:db` → `/v1/db/:db/api`, which is what `src/dataapi/` generates paths under. */
 export function apiPrefixOf(prefix: string): string {
@@ -171,7 +171,7 @@ export class Surfaces {
    * One statement, as `principal`, down the path `POST /v1/db/{db}/query` takes: forwarded to the
    * primary when this node will not take it, folded into group commit when it writes, and waited
    * on to the requested `ack`. `ctx` is where the resulting txid is recorded so `src/server/app.ts`
-   * can stamp `BunQL-Txid`; introspection passes null for it.
+   * can stamp `BQL-Txid`; introspection passes null for it.
    */
   #execFor(
     db: string,
@@ -232,11 +232,11 @@ export class Surfaces {
       (invocation) => {
         const context = contexts.get(invocation.request)
         // Only reachable if something dispatched a request this module did not prepare.
-        if (!context) throw new BunQLError("INTERNAL", "no data API context for this request", 500)
+        if (!context) throw new BqlError("INTERNAL", "no data API context for this request", 500)
         return context
       },
       {
-        origin: "http://bunql.internal",
+        origin: "http://bql.internal",
         maxBodyBytes: this.#runtime.config.limits.maxBodyBytes,
         onError: (err) => this.#runtime.report(err),
       },
@@ -285,7 +285,7 @@ export class Surfaces {
         // The document's one server URL is where the caller actually reached this node, so a
         // client can hand it to a generator and have the result address the same server.
         origin: `${ctx.url.protocol}//${ctx.url.host}`,
-        info: { title: `${db} — BunQL data API`, version: VERSION },
+        info: { title: `${db} — bql.sh data API`, version: VERSION },
       }),
     )
   }
@@ -301,7 +301,7 @@ export class Surfaces {
     await awaitTxid(tenant, resolveOptions(undefined, ctx.request.headers, runtime.config))
     // The handler is given only the `Request`, so the principal and the route context travel
     // beside it: the txid a field's write produced still has to reach the wrapper that stamps
-    // `BunQL-Txid`, and authenticating again inside the context callback would be a second token
+    // `BQL-Txid`, and authenticating again inside the context callback would be a second token
     // check for one request.
     this.#calls.set(ctx.request, { ctx, principal })
     try {
@@ -331,7 +331,7 @@ export class Surfaces {
         const token = tokenFrom(payload)
         if (token) principal = await runtime.auth.authenticateToken(token)
         if (!principal) {
-          throw new BunQLError("UNAUTHENTICATED", "this socket presented no credential", 401)
+          throw new BqlError("UNAUTHENTICATED", "this socket presented no credential", 401)
         }
         // The same gate the HTTP surface applies before it generates anything.
         requireScope(principal, db, "ro")
@@ -343,7 +343,7 @@ export class Surfaces {
         operationName: string | undefined,
       ): Promise<PreparedOperation> => {
         const who = principal
-        if (!who) throw new BunQLError("UNAUTHENTICATED", "connection_init has not run", 401)
+        if (!who) throw new BqlError("UNAUTHENTICATED", "connection_init has not run", 401)
         const peers = await loadPeers()
         const tenant = await this.#graphqlHandler().schemas.for(db)
         const prepared = prepareDocument(peers, tenant.schema, query, {
@@ -355,7 +355,7 @@ export class Surfaces {
         })
         if (prepared.problems) {
           const why = prepared.problems.map((problem) => problem.message).join("; ")
-          throw new BunQLError("BAD_REQUEST", why, 400)
+          throw new BqlError("BAD_REQUEST", why, 400)
         }
         const options = resolveOptions(undefined, null, config)
         return {
@@ -373,7 +373,7 @@ export class Surfaces {
   }
 
   /**
-   * Opening a change feed, as one principal, under **exactly** the rule the `bunql.v1` socket and
+   * Opening a change feed, as one principal, under **exactly** the rule the `bql.v1` socket and
    * the SSE feed apply: `ro` on the database.
    *
    * There is deliberately no per-table check here, because there is none on the other two surfaces
@@ -438,7 +438,7 @@ export class Surfaces {
       context: (request: Request, db: string): DataApiContext => {
         const call = calls.get(request)
         if (!call) {
-          throw new BunQLError("INTERNAL", "no route context for this GraphQL request", 500)
+          throw new BqlError("INTERNAL", "no route context for this GraphQL request", 500)
         }
         const options = resolveOptions(undefined, request.headers, config)
         return { db, exec: this.#execFor(db, call.principal, options, call.ctx) }

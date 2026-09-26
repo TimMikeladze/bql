@@ -8,7 +8,7 @@ import { BusStore } from "../src/bus/store";
 import { generateKey, mint } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
 
-const scratch = await mkdtemp(`${tmpdir()}/agenticbus-ops-`);
+const scratch = await mkdtemp(`${tmpdir()}/bql-bus-ops-`);
 afterAll(() => rm(scratch, { recursive: true, force: true }));
 
 // ------------------------------------------------------------------ logging
@@ -74,15 +74,15 @@ test("metrics counters and gauges reach the scrape, and it needs a read token", 
   expect(scrape.status).toBe(200);
   const body = await scrape.text();
 
-  expect(body).toContain('agenticbus_messages_published{workspace="default"} 2');
+  expect(body).toContain('bql_bus_messages_published{workspace="default"} 2');
   expect(body).toContain(
-    'agenticbus_deliveries_acked{subscription="work",workspace="default"} 1',
+    'bql_bus_deliveries_acked{subscription="work",workspace="default"} 1',
   );
-  expect(body).toContain("# TYPE agenticbus_claim_duration summary");
+  expect(body).toContain("# TYPE bql_bus_claim_duration summary");
   // Depth is read at scrape time, not written when something moves: one
   // message was acked, so the other is still pending.
   expect(body).toContain(
-    'agenticbus_subscription_deliveries{status="pending",subscription="work",workspace="default"} 1',
+    'bql_bus_subscription_deliveries{status="pending",subscription="work",workspace="default"} 1',
   );
 
   // An admin scrape is the install. A workspace-pinned **reader** gets its own
@@ -105,9 +105,9 @@ test("metrics counters and gauges reach the scrape, and it needs a read token", 
   expect(scoped.status).toBe(200);
   const scopedBody = await scoped.text();
   expect(scopedBody).toContain(
-    'agenticbus_subscription_lag{subscription="work",workspace="default"} 0',
+    'bql_bus_subscription_lag{subscription="work",workspace="default"} 0',
   );
-  expect(scopedBody).not.toContain("agenticbus_disk_free_bytes");
+  expect(scopedBody).not.toContain("bql_bus_disk_free_bytes");
 
   // Another tenant's subscription must not appear in this tenant's scrape.
   const other = new BusClient({ url, token: adminToken, workspace: "other" });
@@ -297,7 +297,7 @@ test("a gauge for a deleted subscription does not linger in the scrape", async (
   // Gauges are rebuilt per scrape, so the series disappears with the
   // subscription. Counters are cumulative and stay.
   expect(after).not.toContain('subscription="doomed"');
-  expect(after).toContain("agenticbus_messages_published");
+  expect(after).toContain("bql_bus_messages_published");
 
   server.stop(true);
   store.close();

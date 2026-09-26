@@ -2,7 +2,7 @@
 // interprets that same object, and the operation/registry model `src/http/`, `src/openapi/` and
 // `src/graphql/` consume. Design of record: `docs/plan-surfaces.md`.
 //
-// Invariant: this module imports nothing from the rest of BunQL, nothing from `bun:*` and nothing
+// Invariant: this module imports nothing from the rest of bql.sh, nothing from `bun:*` and nothing
 // from `node:*`. It is pure and usable standalone, which is what "a bun http" and "a bun openapi"
 // mean — the dependency direction in `docs/plan-surfaces.md` is strictly downward and this is the
 // bottom of it.

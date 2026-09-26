@@ -63,7 +63,7 @@ import {
   type Principal,
 } from "./auth.ts"
 import type { ServerConfig } from "./config.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 import { Forwarder, runForward } from "./forward.ts"
 import { FencedNotice, httpBase, type NodeRole, Promoter } from "./promote.ts"
 import { decodeArgs, encodeRows, type EncodedRows } from "./json.ts"
@@ -265,8 +265,8 @@ export class ServerRuntime {
         // is operational news, not a fault in this process; printing its stack would bury the
         // faults that do have one. `ReplicaNotice` is the base of every such notice.
         err instanceof ReplicaNotice || err instanceof FencedNotice
-          ? console.error(`bunql: ${err.message}`)
-          : console.error("bunql: server runtime", err))
+          ? console.error(`bql: ${err.message}`)
+          : console.error("bql: server runtime", err))
     this.registry =
       options.registry ??
       TenantRegistry.open({
@@ -362,7 +362,7 @@ export class ServerRuntime {
   // ── role (C2) ────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * What this node reports in `BunQL-Role` when the request names no database, and what the
+   * What this node reports in `BQL-Role` when the request names no database, and what the
    * `POST /v1/db` gate reads. Live: a promotion changes it without a restart.
    */
   get role(): NodeRole {
@@ -675,14 +675,14 @@ export class ServerRuntime {
 
   #ackError(err: unknown): unknown {
     if (err instanceof AckTimeout) {
-      return BunQLError.ackTimeout(err.message, {
+      return BqlError.ackTimeout(err.message, {
         txid: Number(err.txid),
         acks: err.outcome.acks,
         needed: err.outcome.needed,
       })
     }
     if (err instanceof NoReplicas) {
-      return BunQLError.noReplicas(
+      return BqlError.noReplicas(
         err.message,
         err.txid === null ? undefined : { txid: Number(err.txid) },
       )
@@ -827,7 +827,7 @@ export class ServerRuntime {
   }
 
   /**
-   * C4d: where a worker reports a role flip. The router reads the catalog for `BunQL-Role` and for
+   * C4d: where a worker reports a role flip. The router reads the catalog for `BQL-Role` and for
    * the `requirePrimary` gate, and a row another thread rewrote fires no `onChange` here.
    */
   setRoleHandler(handler: ((db: string, role: NodeRole) => void) | null): void {
@@ -889,17 +889,17 @@ export class ServerRuntime {
 
   /** The tenant, or 404. Also refreshes its place in the LRU. */
   tenant(name: string): Tenant {
-    if (this.#closed) throw new BunQLError("INTERNAL", "server is closing", 503)
+    if (this.#closed) throw new BqlError("INTERNAL", "server is closing", 503)
     try {
       return this.registry.open(name)
     } catch (err) {
       // C3: a database this node holds no copy of, that the cluster *does* know and places
-      // elsewhere, is a direction rather than a `404` — the `NOT_PRIMARY` + `BunQL-Primary` C2
+      // elsewhere, is a direction rather than a `404` — the `NOT_PRIMARY` + `BQL-Primary` C2
       // already built, which `wrap()` turns into a same-origin `307`.
       //
       // On the miss path only, so the happy path is untouched: this costs nothing at all until a
       // request has already failed to find its database.
-      if (err instanceof BunQLError && err.code === "DB_NOT_FOUND") this.promoter.assertPlacedHere(name)
+      if (err instanceof BqlError && err.code === "DB_NOT_FOUND") this.promoter.assertPlacedHere(name)
       throw err
     }
   }
@@ -1116,7 +1116,7 @@ export class ServerRuntime {
     options: BeginTxOptions = {},
   ): TxSession {
     if (this.#txByDb.has(tenant.name) || tenant.txOpen) {
-      throw new BunQLError("TX_BUSY", `${tenant.name} already has an open transaction`, 409)
+      throw new BqlError("TX_BUSY", `${tenant.name} already has an open transaction`, 409)
     }
     this.assertWritable(tenant.name)
     const baton = randomBaton()
@@ -1166,7 +1166,7 @@ export class ServerRuntime {
       try {
         return this.beginTx(tenant, principal, options)
       } catch (err) {
-        if (!(err instanceof BunQLError) || err.code !== "TX_BUSY") throw err
+        if (!(err instanceof BqlError) || err.code !== "TX_BUSY") throw err
         const remainingMs = deadline - Date.now()
         if (remainingMs <= 0) throw err
         this.metrics.txQueued()
@@ -1189,7 +1189,7 @@ export class ServerRuntime {
         timer: setTimeout(() => {
           this.#dropWaiter(db, waiter)
           reject(
-            new BunQLError(
+            new BqlError(
               "TX_BUSY",
               `${db} still had an open transaction after ${waitMs}ms`,
               409,
@@ -1241,7 +1241,7 @@ export class ServerRuntime {
     options: { owner?: object | null; rows?: "array" | "object" } = {},
   ): ReadTxSession {
     if (tenant.openReadTx >= this.config.limits.maxReadTx) {
-      throw new BunQLError(
+      throw new BqlError(
         "TX_BUSY",
         `${tenant.name} already has ${tenant.openReadTx} read transactions open`,
         409,
@@ -1275,7 +1275,7 @@ export class ServerRuntime {
   readTxSession(baton: string): ReadTxSession {
     const session = this.#readTx.get(baton)
     if (!session) {
-      throw new BunQLError("TX_NOT_FOUND", "no such transaction, or it has already ended", 404)
+      throw new BqlError("TX_NOT_FOUND", "no such transaction, or it has already ended", 404)
     }
     return session
   }
@@ -1307,7 +1307,7 @@ export class ServerRuntime {
   txSession(baton: string): TxSession {
     const session = this.#tx.get(baton)
     if (!session) {
-      throw new BunQLError("TX_NOT_FOUND", "no such transaction, or it has already ended", 404)
+      throw new BqlError("TX_NOT_FOUND", "no such transaction, or it has already ended", 404)
     }
     return session
   }
@@ -1453,7 +1453,7 @@ export class ServerRuntime {
     for (const [db, queue] of this.#txQueue) {
       for (const waiter of queue) {
         clearTimeout(waiter.timer)
-        waiter.reject(new BunQLError("BUSY", `${db} is closing`, 503))
+        waiter.reject(new BqlError("BUSY", `${db} is closing`, 503))
       }
     }
     this.#txQueue.clear()
@@ -1631,20 +1631,20 @@ export function mapTenantError(err: unknown, primary?: string | null): unknown {
   switch (err.code) {
     case "NOT_PRIMARY":
       // What is left once R2's forwarding has declined to act: `forwardWrites = false`, or a
-      // replica that cannot reach its primary. The code and the `BunQL-Primary` header are the
+      // replica that cannot reach its primary. The code and the `BQL-Primary` header are the
       // ones phase 0 documented, so a client that already follows them keeps working.
-      return BunQLError.notPrimary(primary ?? undefined)
+      return BqlError.notPrimary(primary ?? undefined)
     case "DB_EXISTS":
-      return new BunQLError("CONFLICT", err.message, 409)
+      return new BqlError("CONFLICT", err.message, 409)
     case "WRITE_IN_PROGRESS":
     case "BUSY":
-      return BunQLError.busy(err.message)
+      return BqlError.busy(err.message)
     case "CLOSED":
-      return new BunQLError("BUSY", err.message, 503)
+      return new BqlError("BUSY", err.message, 503)
     case "NO_SNAPSHOT":
-      return BunQLError.badRequest(err.message)
+      return BqlError.badRequest(err.message)
     default:
-      return new BunQLError(err.code, err.message, 500)
+      return new BqlError(err.code, err.message, 500)
   }
 }
 

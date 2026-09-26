@@ -167,9 +167,9 @@ describe("a sharded primary serves replicas", () => {
     const body = await (await primary.fetch("/metrics")).text()
     // `connected` is the router's: it owns every socket. `records` is summed from the workers,
     // which are the threads that emit a `TXN`. `docs/c4b-replication-workers.md` §7.
-    expect(body).toMatch(/bunql_replication_connected\{[^}]*\} 1/)
-    expect(body).toMatch(/bunql_replication_bytes_total\{[^}]*\} [1-9]/)
-    expect(body).toMatch(/bunql_replication_records_total\{[^}]*\} [1-9]/)
+    expect(body).toMatch(/bql_replication_connected\{[^}]*\} 1/)
+    expect(body).toMatch(/bql_replication_bytes_total\{[^}]*\} [1-9]/)
+    expect(body).toMatch(/bql_replication_records_total\{[^}]*\} [1-9]/)
   })
 })
 

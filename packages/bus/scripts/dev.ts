@@ -8,7 +8,7 @@ import { mkdir } from "node:fs/promises";
 import { generateKey, mint } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
 
-const state = ".agenticbus";
+const state = ".bql-bus";
 await mkdir(state, { recursive: true });
 
 const read = async (path: string) => {
@@ -142,7 +142,7 @@ if (!ready) {
   );
 
   console.log(`
-AgenticBus dev
+bql.sh/bus dev
   dashboard   http://127.0.0.1:${vitePort}
   bus         ${url}
   consumers   worker-a, worker-b (work) · responder (rpc)

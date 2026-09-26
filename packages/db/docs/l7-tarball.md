@@ -30,7 +30,7 @@ it and `src/sqlite/lib.ts` locate it relative to their own module URL.
    real dependency, not a clone and not a workspace link;
 3. assert `scripts/sqlite.ts`, `scripts/native/walsum.c` and `src/sqlite/lib.ts` are all there;
 4. run the build from the installed copy and check the artefact it names exists;
-5. a smoke test *in that directory*, importing `@bunql/db` by name: assert the loaded library is
+5. a smoke test *in that directory*, importing `bql.sh` by name: assert the loaded library is
    the vendored one and reports `preupdate`, `session` and `walsum`, then open a database, create a
    table, insert a row and read it back.
 
@@ -40,7 +40,7 @@ exactly the bug it exists for.
 
 ## 3. What the gate found: the documented command does not work
 
-The README said *"Once published, `bun add @bunql/db` and `bun run sqlite:build` in your own
+The README said *"Once published, `bun add bql.sh` and `bun run sqlite:build` in your own
 project."* That is wrong, and it would have been wrong in the first published release: `npm run`
 and `bun run` resolve a script name against **your** `package.json`, not a dependency's, so a
 consumer running `bun run sqlite:build` gets "script not found".
@@ -49,7 +49,7 @@ The command that works — the one `pack-check.ts` runs, from the directory a co
 in — is the path:
 
 ```sh
-bun run node_modules/@bunql/db/scripts/sqlite.ts
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
 ```
 
 The README and `docs/c6-packaging.md` now say that. This is the install path the gate proves, which

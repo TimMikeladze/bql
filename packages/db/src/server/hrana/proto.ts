@@ -1,6 +1,6 @@
-// Invariant: this module is the only description of the Hrana wire format inside BunQL, and it
+// Invariant: this module is the only description of the Hrana wire format inside bql.sh, and it
 // carries no behaviour at all. Field names are Hrana's — `snake_case`, `last_insert_rowid` as a
-// string, integers as decimal text — and nothing here is allowed to drift towards BunQL's own
+// string, integers as decimal text — and nothing here is allowed to drift towards bql.sh's own
 // spelling, because both shapes exist in this process and a rename that type-checks would be a
 // silent protocol break.
 //

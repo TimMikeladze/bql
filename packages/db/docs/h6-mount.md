@@ -39,7 +39,7 @@ existing `Handler` from `src/server/routes.ts`, called with the `RouteContext` i
 The handlers keep their bodies.
 
 The reason is not timidity, it is a real obstruction. `src/server/app.ts`'s `wrap()` is the only
-place the four `BunQL-*` headers, CORS, the metrics tick and C2's same-origin `307` are applied,
+place the four `BQL-*` headers, CORS, the metrics tick and C2's same-origin `307` are applied,
 and the `307` needs to know **which error code** a handler refused with. `compileOperation` in
 `src/http/handler.ts` catches the error and returns a `Response`, by design — so a registry mounted
 through `mountRegistry` would hide `refused === "NOT_PRIMARY"` from `wrap`, and a promoted-away
@@ -82,7 +82,7 @@ holding a principal would hand caller A's rights to caller B.
 The data API inherits the ACLs, deadlines, row caps, quotas, txids, ack levels and write forwarding
 only if its `exec` takes the same path a `POST /v1/db/{db}/query` takes. So it does, in order:
 
-* `resolveOptions(undefined, request.headers, config)` — `BunQL-Ack` and `BunQL-Min-Txid` apply to
+* `resolveOptions(undefined, request.headers, config)` — `BQL-Ack` and `BQL-Min-Txid` apply to
   a data-API call exactly as they apply to a query;
 * `awaitTxid(tenant, options)` once per request, not once per statement;
 * `forwarder.needsPrimary(...)` → `forwarder.query(...)` on a replica, so a `POST /…/api/users`
@@ -93,7 +93,7 @@ only if its `exec` takes the same path a `POST /v1/db/{db}/query` takes. So it d
 * `mapTenantError(err, primaryUrlFor(db))` on the way out, so `NOT_PRIMARY` still carries the
   primary and still gets C2's `307` from `wrap`.
 
-`ctx.txid` is set from the result, so `BunQL-Txid` is on a data-API response as it is on a query's.
+`ctx.txid` is set from the result, so `BQL-Txid` is on a data-API response as it is on a query's.
 
 `rows: "array"` is kept (exec's default), and `rowObjects` in `src/dataapi/context.ts` reads it —
 that is what that function is for.
@@ -109,7 +109,7 @@ calls it directly.
 ## Decision 5 — who may read a document
 
 * `GET /v1/openapi.json` — **open**, no authentication. It describes this server's static API and
-  is byte-identical on every BunQL node; it names no database and carries no tenant data. It sits
+  is byte-identical on every bql.sh node; it names no database and carries no tenant data. It sits
   with `/healthz` and `/readyz`.
 * `GET /v1/db/:db/openapi.json` — needs `ro` on that database. It is derived from that tenant's
   tables, so it is schema disclosure.
@@ -168,7 +168,7 @@ entries there.
 | `test/replication/dataapi.test.ts` | a replica reads locally and forwards a generated write |
 | `test/package/exports.test.ts` | the version the documents publish is `package.json`'s |
 
-`src/server/hrana/` stays outside the registry. Hrana is libsql's wire protocol, not BunQL's API —
+`src/server/hrana/` stays outside the registry. Hrana is libsql's wire protocol, not bql.sh's API —
 `/v2/pipeline` is one endpoint carrying an RPC envelope, and describing it as OpenAPI would publish
 a document nobody could generate a useful client from. `app.ts` keeps `Object.assign(routes,
 hranaRoutes(runtime))` after the registry is mounted.

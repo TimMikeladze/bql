@@ -27,7 +27,7 @@ import type { SqliteValue } from "../sqlite/values.ts"
 import type { AckLevel, ReadTx, Tenant } from "../tenant/index.ts"
 import { applyPolicy, type Principal, requireScope } from "./auth.ts"
 import type { ServerConfig } from "./config.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 import { decodeArgs, encodeInteger, encodeRows } from "./json.ts"
 import type { ServerRuntime } from "./runtime.ts"
 
@@ -50,7 +50,7 @@ function asNumber(value: unknown, what: string): number | undefined {
   if (value === undefined || value === null || value === "") return undefined
   const n = typeof value === "string" ? Number(value) : value
   if (typeof n !== "number" || !Number.isFinite(n)) {
-    throw BunQLError.badRequest(`${what} must be a number`)
+    throw BqlError.badRequest(`${what} must be a number`)
   }
   return n
 }
@@ -60,13 +60,13 @@ function asAck(value: unknown): AckLevel | undefined {
   if (value === "local" || value === "fsync" || value === "replica" || value === "quorum") {
     return value
   }
-  throw BunQLError.badRequest(
+  throw BqlError.badRequest(
     `ack must be "local", "fsync", "replica" or "quorum", got ${JSON.stringify(value)}`,
   )
 }
 
 /**
- * The common request options of design §6, from the body and from the `BunQL-*` headers. A body
+ * The common request options of design §6, from the body and from the `BQL-*` headers. A body
  * field wins over a header, since a client that set both meant the one it wrote out in full.
  * Every limit is a floor-and-ceiling: a request may ask for less than the node allows, never more.
  */
@@ -78,21 +78,21 @@ export function resolveOptions(
   const limits = config.limits
   const rows = body?.rows ?? "array"
   if (rows !== "array" && rows !== "object") {
-    throw BunQLError.badRequest(`rows must be "array" or "object", got ${JSON.stringify(rows)}`)
+    throw BqlError.badRequest(`rows must be "array" or "object", got ${JSON.stringify(rows)}`)
   }
   const maxRows = asNumber(body?.maxRows, "maxRows") ?? limits.maxRows
-  if (maxRows <= 0) throw BunQLError.badRequest("maxRows must be positive")
+  if (maxRows <= 0) throw BqlError.badRequest("maxRows must be positive")
 
   const timeoutMs = asNumber(body?.timeoutMs, "timeoutMs")
   if (timeoutMs !== undefined && timeoutMs <= 0) {
-    throw BunQLError.badRequest("timeoutMs must be positive")
+    throw BqlError.badRequest("timeoutMs must be positive")
   }
   const ack =
     asAck(body?.ack ?? headers?.get(HEADERS.ack) ?? undefined) ?? config.durability.defaultAck
   const minTxid = asNumber(body?.minTxid ?? headers?.get(HEADERS.minTxid), "minTxid")
   const consistency = (body?.consistency ?? "ryw") as Consistency
   if (consistency !== "primary" && consistency !== "any" && consistency !== "ryw") {
-    throw BunQLError.badRequest(`unknown consistency ${JSON.stringify(consistency)}`)
+    throw BqlError.badRequest(`unknown consistency ${JSON.stringify(consistency)}`)
   }
 
   return {
@@ -110,11 +110,11 @@ export function resolveOptions(
 
 export function assertStatement(value: unknown, where: string): StatementRequest {
   if (!value || typeof value !== "object") {
-    throw BunQLError.badRequest(`${where} must be an object with a sql field`)
+    throw BqlError.badRequest(`${where} must be an object with a sql field`)
   }
   const sql = (value as StatementRequest).sql
   if (typeof sql !== "string" || sql.length === 0) {
-    throw BunQLError.badRequest(`${where} needs a non-empty sql string`)
+    throw BqlError.badRequest(`${where} needs a non-empty sql string`)
   }
   return value as StatementRequest
 }
@@ -126,7 +126,7 @@ interface Stepped {
   vmSteps: number
   rowsAffected: number
   lastInsertRowid: number | bigint | null
-  /** What the bounded step loop accounted for, reported as `bunql_result_bytes_max`. */
+  /** What the bounded step loop accounted for, reported as `bql_result_bytes_max`. */
   resultBytes: number
 }
 
@@ -380,7 +380,7 @@ export async function executeStatementQueued(
     // is the one place both refusals surface, since `WRITE_QUEUE_TIMEOUT` is raised on a timer
     // inside the tenant and still lands on this await.
     if (
-      err instanceof BunQLError &&
+      err instanceof BqlError &&
       (err.code === "WRITE_QUEUE_FULL" || err.code === "WRITE_QUEUE_TIMEOUT")
     ) {
       runtime.metrics.writeQueueRejected()
@@ -406,7 +406,7 @@ export function executeBatch(
 ): BatchResult {
   const statements = request.statements
   if (!Array.isArray(statements) || statements.length === 0) {
-    throw BunQLError.badRequest("batch needs a non-empty statements array")
+    throw BqlError.badRequest("batch needs a non-empty statements array")
   }
   for (let i = 0; i < statements.length; i++) assertStatement(statements[i], `statements[${i}]`)
   runtime.metrics.batch()

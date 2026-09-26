@@ -7,12 +7,12 @@
 // (`entry.ts`'s `assertOwned`), never a second writer.
 //
 // Second invariant: a hopped response is forwarded byte for byte. The worker's app already ran
-// `wrap()`, so the `BunQL-*` headers, CORS, the metrics tick and C2's `307` are the worker's; the
+// `wrap()`, so the `BQL-*` headers, CORS, the metrics tick and C2's `307` are the worker's; the
 // router adds nothing and rewrites nothing.
 
 import { HEADERS, WS_PROTOCOL } from "../../client/protocol.ts"
 import type { ServerConfig } from "../config.ts"
-import { BunQLError, errorResponse } from "../errors.ts"
+import { BqlError, errorResponse } from "../errors.ts"
 import { hranaTarget } from "../hrana/index.ts"
 import type { ServerRuntime } from "../runtime.ts"
 import type { ReplicationMetrics } from "../metrics.ts"
@@ -173,10 +173,10 @@ async function relayHello(
       await data.runtime.auth.authenticateToken(frame.token)
       data.routing.token = frame.token
     } else if (!data.routing.token) {
-      throw BunQLError.unauthenticated("hello needs a token on a socket that had none")
+      throw BqlError.unauthenticated("hello needs a token on a socket that had none")
     }
   } catch (err) {
-    const status = err instanceof BunQLError ? err : BunQLError.unauthenticated()
+    const status = err instanceof BqlError ? err : BqlError.unauthenticated()
     socket.send(
       JSON.stringify({
         ...(frame.id === undefined ? {} : { id: frame.id }),
@@ -323,7 +323,7 @@ export async function routerMetrics(
           records: shards?.records ?? 0,
         }
       : null
-  // C4e: the `bunql_s3_*` gauges, which C4 omitted because a shipper lives on a worker. The merge
+  // C4e: the `bql_s3_*` gauges, which C4 omitted because a shipper lives on a worker. The merge
   // is the one `ShipperPool.totals` already performs across a node's databases, applied across the
   // shards — which is exact rather than a convention, because a database belongs to one worker and
   // the shards are therefore disjoint.

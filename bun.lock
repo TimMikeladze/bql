@@ -3,18 +3,26 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "bunql",
+      "name": "bql",
       "devDependencies": {
         "bun-types": "^1.4.2",
         "typescript": "^7.0.2",
       },
+      "peerDependencies": {
+        "drizzle-orm": ">=0.44",
+        "graphql": ">=16",
+        "kysely": ">=0.28",
+        "openapi-x-graphql": ">=1",
+      },
+      "optionalPeers": [
+        "drizzle-orm",
+        "graphql",
+        "kysely",
+        "openapi-x-graphql",
+      ],
     },
     "packages/bus": {
-      "name": "@bunql/bus",
-      "version": "0.1.0",
-      "bin": {
-        "agenticbus": "./src/cli/index.ts",
-      },
+      "name": "bql-bus",
       "devDependencies": {
         "@base-ui/react": "^1.8.0",
         "@tailwindcss/vite": "^4.3.3",
@@ -35,11 +43,7 @@
       },
     },
     "packages/db": {
-      "name": "@bunql/db",
-      "version": "0.0.0",
-      "bin": {
-        "bunql": "src/cli.ts",
-      },
+      "name": "bql-db",
       "devDependencies": {
         "@libsql/client": "^0.18.0",
         "bun-types": "^1.4.2",
@@ -49,18 +53,13 @@
         "kysely-libsql": "^0.7.1",
         "openapi-x-graphql": "^1.0.0",
       },
-      "peerDependencies": {
-        "drizzle-orm": ">=0.44",
-        "graphql": ">=16",
-        "kysely": ">=0.28",
-        "openapi-x-graphql": ">=1",
+    },
+    "site": {
+      "name": "bql-site",
+      "devDependencies": {
+        "si-legacy": "npm:simple-icons@9",
+        "simple-icons": "^16.31.0",
       },
-      "optionalPeers": [
-        "drizzle-orm",
-        "graphql",
-        "kysely",
-        "openapi-x-graphql",
-      ],
     },
   },
   "packages": {
@@ -77,10 +76,6 @@
     "@base-ui/react": ["@base-ui/react@1.8.0", "", { "dependencies": { "@babel/runtime": "^7.29.7", "@base-ui/utils": "0.4.0", "@floating-ui/react-dom": "^2.1.9", "@floating-ui/utils": "^0.2.12", "use-sync-external-store": "^1.6.0" }, "peerDependencies": { "@date-fns/tz": "^1.2.0", "@types/react": "^17 || ^18 || ^19", "date-fns": "^4.0.0", "react": "^17 || ^18 || ^19", "react-dom": "^17 || ^18 || ^19" }, "optionalPeers": ["@date-fns/tz", "@types/react", "date-fns"] }, "sha512-P0/1sxo6SBVZOklKMIedvTWqw2s2IQzi9x5bIVsXu980cuSOD4NeuRSs+/L7LZQfDkZP/uRZyGPyfFl/B1oH+Q=="],
 
     "@base-ui/utils": ["@base-ui/utils@0.4.0", "", { "dependencies": { "@babel/runtime": "^7.29.7", "@floating-ui/utils": "^0.2.12", "reselect": "^5.2.0", "use-sync-external-store": "^1.6.0" }, "peerDependencies": { "@types/react": "^17 || ^18 || ^19", "react": "^17 || ^18 || ^19", "react-dom": "^17 || ^18 || ^19" }, "optionalPeers": ["@types/react"] }, "sha512-bO9fz25kKtPf+aZVyfQrC0PDmJdmVni31W2hCS5/Owb+inwdIL3XU26pCPRPlt4LSxZrBgLwubXQXQlKaFEZzw=="],
-
-    "@bunql/bus": ["@bunql/bus@workspace:packages/bus"],
-
-    "@bunql/db": ["@bunql/db@workspace:packages/db"],
 
     "@bunup/dts": ["@bunup/dts@0.14.53", "", { "dependencies": { "@babel/parser": "^7.28.6", "coffi": "^0.1.37", "oxc-minify": "^0.93.0", "oxc-resolver": "^11.16.2", "oxc-transform": "^0.93.0", "picocolors": "^1.1.1", "std-env": "^3.10.0", "ts-import-resolver": "^0.1.23" }, "peerDependencies": { "typescript": ">=4.5.0" }, "optionalPeers": ["typescript"] }, "sha512-qyHgYEYxcghoChICEhuFKfA/EqqRA9WHOHLXcIkR9c70DgLAEXcOlkYhfBPmGxfMKJYL0X4VtQwst0/AMk9D3g=="],
 
@@ -358,6 +353,12 @@
 
     "@vitejs/plugin-react": ["@vitejs/plugin-react@6.1.1", "", { "dependencies": { "@rolldown/pluginutils": "^1.0.1" }, "peerDependencies": { "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0", "babel-plugin-react-compiler": "^1.0.0", "oxc-transform-react": "^0.145.0", "vite": "^8.0.0" }, "optionalPeers": ["@rolldown/plugin-babel", "babel-plugin-react-compiler", "oxc-transform-react"] }, "sha512-yxLaQV9gkhS8ezJqCM6+ndU7mDY6gqAg75NQ+0IjwEI8IYOmQCgkRwHKVSfWXW076DsqMo0Dk+0FK1U+M5RgFw=="],
 
+    "bql-bus": ["bql-bus@workspace:packages/bus"],
+
+    "bql-db": ["bql-db@workspace:packages/db"],
+
+    "bql-site": ["bql-site@workspace:site"],
+
     "bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
 
     "bunup": ["bunup@0.16.32", "", { "dependencies": { "@bunup/dts": "^0.14.53", "@bunup/shared": "0.16.31", "chokidar": "^5.0.0", "coffi": "^0.1.37", "lightningcss": "^1.32.0", "picocolors": "^1.1.1", "tinyexec": "^1.2.4", "tree-kill": "^1.2.2", "zlye": "^0.4.4" }, "peerDependencies": { "typescript": ">=4.5.0" }, "optionalPeers": ["typescript"], "bin": { "bunup": "dist/cli/index.js" } }, "sha512-w7RpjGl/AlJMRs0EovFJ0ddF5BOnxZlgDt5Q5xamz/WPd74BqJSetaeCQPDBzvSlOe0gZY90q6lFmjip/aKv2w=="],
@@ -465,6 +466,10 @@
     "rolldown": ["rolldown@1.2.7", "", { "dependencies": { "@oxc-project/types": "=0.148.0", "@rolldown/pluginutils": "^1.0.0" }, "optionalDependencies": { "@rolldown/binding-android-arm-eabi": "1.2.7", "@rolldown/binding-android-arm64": "1.2.7", "@rolldown/binding-darwin-arm64": "1.2.7", "@rolldown/binding-darwin-x64": "1.2.7", "@rolldown/binding-freebsd-x64": "1.2.7", "@rolldown/binding-linux-arm-gnueabihf": "1.2.7", "@rolldown/binding-linux-arm64-gnu": "1.2.7", "@rolldown/binding-linux-arm64-musl": "1.2.7", "@rolldown/binding-linux-ppc64-gnu": "1.2.7", "@rolldown/binding-linux-s390x-gnu": "1.2.7", "@rolldown/binding-linux-x64-gnu": "1.2.7", "@rolldown/binding-linux-x64-musl": "1.2.7", "@rolldown/binding-openharmony-arm64": "1.2.7", "@rolldown/binding-win32-arm64-msvc": "1.2.7", "@rolldown/binding-win32-x64-msvc": "1.2.7" }, "bin": { "rolldown": "./bin/cli.mjs" } }, "sha512-g0EtLvBjTUB7jhyV0S/TCup3v/XSVl45vUIGbOGU4QPiyjTenCe4mKuFvW9fEgYmS2Fo42AUssRmNuMziXdrig=="],
 
     "scheduler": ["scheduler@0.27.0", "", {}, "sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q=="],
+
+    "si-legacy": ["simple-icons@9.21.0", "", {}, "sha512-yxjs49nKwff5ozRwPCBVcGG4Ehlg5YiR1g4EJ83zmqc0hYhYb6UQJqiy2WOga2OJ1/qVHaej7q762hYZX/mavA=="],
+
+    "simple-icons": ["simple-icons@16.31.0", "", {}, "sha512-dDEqvQrmxL7ZnqQtGHGjCNW6CfiwzAif+83Hol9JXAnAB6wh2zsZD7Sc1kWT0O/RRAKt7xfG8W6UZhYBPD+GAA=="],
 
     "source-map-js": ["source-map-js@1.2.1", "", {}, "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="],
 

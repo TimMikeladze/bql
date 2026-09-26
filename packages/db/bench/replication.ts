@@ -29,7 +29,7 @@ const SUSTAINED = Number(Bun.argv[3] ?? 2000)
 const SECRET = "bench-cluster-secret"
 const DB = "bench"
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-repl-bench-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-repl-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
 async function startNode(name: string, overrides: ServerConfigInput): Promise<ServerHandle> {

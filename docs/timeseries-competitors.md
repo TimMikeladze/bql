@@ -1,6 +1,6 @@
 # Time-series competitor baseline
 
-Research date: 2026-09-13. These are documented capabilities, not measured performance comparisons. Pin product edition, engine version, hardware, durability, and configuration before benchmarking. The BunQL conclusions below are recommendations; the companion code assessment determines which capabilities are already implemented.
+Research date: 2026-09-13. These are documented capabilities, not measured performance comparisons. Pin product edition, engine version, hardware, durability, and configuration before benchmarking. The bql.sh conclusions below are recommendations; the companion code assessment determines which capabilities are already implemented.
 
 ## What the competitors actually provide
 
@@ -19,7 +19,7 @@ Sources and material qualifications follow.
 
 Hypertables route data into time chunks and prune irrelevant chunks for queries. This is database planning/storage behavior, beyond providing timestamp SQL functions. [Hypertables](https://www.tigerdata.com/docs/learn/hypertables/understand-hypertables)
 
-Hypercore combines row storage for recent writes with compressed column storage. Current documentation describes vectorized aggregation, bloom/minmax batch skipping, metadata-only summaries, and transactional INSERT/UPDATE/DELETE/UPSERT on columnstore data. Therefore, “SQLite supports SQL and is fast at inserts” does not address this analytical baseline. Vendor compression percentages and speedup claims are workload dependent and are not BunQL comparison results. [Hypercore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore)
+Hypercore combines row storage for recent writes with compressed column storage. Current documentation describes vectorized aggregation, bloom/minmax batch skipping, metadata-only summaries, and transactional INSERT/UPDATE/DELETE/UPSERT on columnstore data. Therefore, “SQLite supports SQL and is fast at inserts” does not address this analytical baseline. Vendor compression percentages and speedup claims are workload dependent and are not bql.sh comparison results. [Hypercore](https://www.tigerdata.com/docs/learn/columnar-storage/understand-hypercore)
 
 Continuous aggregates track changed raw data and refresh materializations incrementally. Aggregates can be layered at different resolutions. Combining recent raw data with stored aggregates is opt-in in versions 2.13+. Refresh boundaries, late writes, and retention interactions matter: changing a joined ordinary PostgreSQL table is not tracked like changing the source hypertable. [Continuous aggregates](https://www.tigerdata.com/docs/learn/continuous-aggregates)
 
@@ -53,9 +53,9 @@ Core/Enterprise support scheduled persisted downsampling through the Python proc
 
 Enterprise adds HA, read replicas, and historical query support to Core. Clustered separately documents a Rust/Arrow/DataFusion design with replicated ingestion, recent-data buffers, Parquet object storage, a catalog, and compaction. Its user-defined time/tag partitioning can prune data for matching queries; those exact controls should not be attributed to Core without checking. [Enterprise overview](https://docs.influxdata.com/influxdb3/enterprise/), [Clustered architecture](https://docs.influxdata.com/influxdb3/clustered/reference/internals/storage-engine/), [Clustered partitioning](https://docs.influxdata.com/influxdb3/clustered/admin/custom-partitions/)
 
-## Implications for BunQL
+## Implications for bql.sh
 
-These are engineering hypotheses to validate against BunQL code and measurements:
+These are engineering hypotheses to validate against bql.sh code and measurements:
 
 1. The user selected high-volume infrastructure metrics / IoT and large historical analytics across billions of rows. This supersedes the initial application-telemetry recommendation: evaluate partitioned durable ingestion and native columnar execution first, including one large tenant using multiple cores. Tenant isolation and developer ergonomics remain differentiators, but must accompany sustained ingestion and historical-query performance.
 2. Treat time partitioning, partition pruning, retention, late-data semantics, and rollup correctness as core database behavior. Adding a time-bucket function alone does not establish parity.

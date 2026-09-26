@@ -54,7 +54,7 @@ export interface TestHrana {
 }
 
 export async function startHrana(overrides: ServerConfigInput = {}): Promise<TestHrana> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-hrana-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-hrana-"))
   dirs.push(dir)
   const config = loadConfig({
     env: {},

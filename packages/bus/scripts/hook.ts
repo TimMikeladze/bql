@@ -6,7 +6,7 @@ if (!process.argv.includes("--flush")) {
   const input = JSON.parse(raw);
   const event = {
     id: crypto.randomUUID(),
-    source: `urn:agenticbus:hook:${process.env.BUS_HOOK_PROVIDER ?? "generic"}`,
+    source: `urn:bql-bus:hook:${process.env.BUS_HOOK_PROVIDER ?? "generic"}`,
     type: String(input.hook_event_name ?? "observation"),
     data: input,
   };

@@ -103,8 +103,8 @@ describe("promotion, static topology", () => {
     const created = await post(replica, "/v1/db", { name: "beta" })
     expect(created.status).toBe(201)
     const stat = await replica.fetch("/v1/db/acme")
-    expect(stat.headers.get("BunQL-Role")).toBe("primary")
-    expect(stat.headers.get("BunQL-Primary")).toBeNull()
+    expect(stat.headers.get("BQL-Role")).toBe("primary")
+    expect(stat.headers.get("BQL-Primary")).toBeNull()
     const health = (await replica.json("/healthz")) as { role: string }
     expect(health.role).toBe("primary")
 
@@ -163,7 +163,7 @@ describe("promotion, static topology", () => {
   test("a node holding a stale epoch is fenced by a peer that holds a newer one", async () => {
     // Three nodes and the misconfiguration this is really about: a node is promoted, a follower is
     // moved onto it, and then something points that follower back at the node that was replaced.
-    const primaryDir = tempDir("bunql-old-primary-")
+    const primaryDir = tempDir("bql-old-primary-")
     let old = await startPrimary({}, { dir: primaryDir, node: "old" })
     await createDb(old, "acme", "create table t (v text)")
     await query(old, "acme", "insert into t (v) values ('one')")
@@ -180,7 +180,7 @@ describe("promotion, static topology", () => {
     const newEpoch = next.handle.runtime.registry.open("acme").epoch
 
     // A third node follows the new primary, so it holds the new epoch.
-    const thirdDir = tempDir("bunql-third-")
+    const thirdDir = tempDir("bql-third-")
     let third = await startReplica(next, { node: "third", dir: thirdDir })
     await untilSynced(next, third, "acme")
     expect(third.handle.runtime.registry.open("acme").epoch).toBe(newEpoch)
@@ -201,7 +201,7 @@ describe("promotion, static topology", () => {
     const write = await post(old, "/v1/db/acme/query", { sql: "insert into t (v) values ('no')" })
     expect(write.status).toBe(503)
     expect(errorOf(write.body).code).toBe("NOT_PRIMARY")
-    expect(write.headers.get("BunQL-Role")).toBe("replica")
+    expect(write.headers.get("BQL-Role")).toBe("replica")
 
     // And its lifecycle routes for that database are refused too.
     const deleted = await old.fetch("/v1/db/acme", { method: "DELETE" })

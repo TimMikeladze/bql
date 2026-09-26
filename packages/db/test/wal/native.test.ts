@@ -75,7 +75,7 @@ describe("the native WAL checksum", () => {
     // `features.walsum` is false on a system libsqlite3 and on a vendored build from before
     // `scripts/native/walsum.c` existed — run `bun run sqlite:build`. Everything still works
     // without it; the WAL tail is just 4.5 µs a frame slower.
-    expect(NATIVE).toBe(sqlite().features.walsum && process.env.BUNQL_WAL_NATIVE !== "0")
+    expect(NATIVE).toBe(sqlite().features.walsum && process.env.BQL_WAL_NATIVE !== "0")
   })
 
   test("agrees with checkFrame on every frame of a synthetic WAL, both word orders", () => {
@@ -147,7 +147,7 @@ describe("the native WAL checksum", () => {
   })
 
   test("agrees frame for frame on a WAL SQLite actually wrote", () => {
-    const dir = tempDir("bunql-native-")
+    const dir = tempDir("bql-native-")
     const { db, dbPath } = openPrimary(dir)
     db.exec("create table t(id integer primary key, v text)")
     db.exec("create table u(id integer primary key, b blob)")
@@ -216,10 +216,10 @@ describe("the native WAL checksum", () => {
     }
   })
 
-  test.if(NATIVE)("BUNQL_WAL_NATIVE=0 puts every frame back on the JavaScript", () => {
-    const previous = process.env.BUNQL_WAL_NATIVE
+  test.if(NATIVE)("BQL_WAL_NATIVE=0 puts every frame back on the JavaScript", () => {
+    const previous = process.env.BQL_WAL_NATIVE
     try {
-      process.env.BUNQL_WAL_NATIVE = "0"
+      process.env.BQL_WAL_NATIVE = "0"
       resetWalChecksum()
       expect(walChecksumIsNative()).toBe(false)
       const { header, bytes } = wal(2, 4096, WAL_MAGIC_LE)
@@ -228,8 +228,8 @@ describe("the native WAL checksum", () => {
       expect(b.valid).toBe(a.valid)
       expect(b.next[0]).toBe(a.next[0])
     } finally {
-      if (previous === undefined) delete process.env.BUNQL_WAL_NATIVE
-      else process.env.BUNQL_WAL_NATIVE = previous
+      if (previous === undefined) delete process.env.BQL_WAL_NATIVE
+      else process.env.BQL_WAL_NATIVE = previous
       resetWalChecksum()
     }
     expect(walChecksumIsNative()).toBe(true)

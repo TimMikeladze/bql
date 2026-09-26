@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bql.sh — SQLite as a database server, and a durable message bus</title>
+<meta name="description" content="bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.">
+<link rel="canonical" href="https://bql.dev/">
+<link rel="alternate" type="text/markdown" href="https://bql.dev/index.md">
+<meta name="theme-color" content="#161616" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fcfcfc" media="(prefers-color-scheme: light)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="bql.sh">
+<meta property="og:title" content="bql.sh — SQLite as a database server, and a durable message bus">
+<meta property="og:description" content="bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.">
+<meta property="og:url" content="https://bql.dev/">
+<meta property="og:image" content="https://bql.dev/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:alt" content="bql.sh — SQLite as a database server, and a bus">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="bql.sh — SQLite as a database server, and a durable message bus">
+<meta name="twitter:description" content="bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.">
+<meta name="twitter:image" content="https://bql.dev/og.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%231f1f1f%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%23fafafa%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20transform%3D%22translate(3.2%202.4)%20scale(.8)%22%3E%3Cellipse%20cx%3D%2216%22%20cy%3D%229%22%20rx%3D%228%22%20ry%3D%223%22%2F%3E%3Cpath%20d%3D%22M8%209v7c0%201.7%203.6%203%208%203s8-1.3%208-3V9%22%2F%3E%3Cpath%20d%3D%22M8%2016v6c0%201.7%203.6%203%208%203s8-1.3%208-3v-6%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
+<script>(function () {
+  var k = "bql-theme", d = document.documentElement;
+  var light = window.matchMedia ? matchMedia("(prefers-color-scheme: light)") : null;
+  function pref() { try { return localStorage.getItem(k) || "system"; } catch (e) { return "system"; } }
+  function apply() {
+    var p = pref();
+    d.setAttribute("data-pref", p);
+    d.setAttribute("data-theme", p === "system" ? (light && light.matches ? "light" : "dark") : p);
+  }
+  apply();
+  if (light) light.addEventListener("change", apply);
+  window.__theme = { key: k, pref: pref, apply: apply };
+})();</script>
+<style>
+:root {
+  color-scheme: dark;
+  --paper: oklch(12.5% 0 0);
+  --band: oklch(15.5% 0 0);
+  --raise: oklch(18.5% 0 0);
+  --ink: oklch(98.5% 0 0);
+  --body: oklch(78% 0 0);
+  --soft: oklch(60% 0 0);
+  --line: oklch(100% 0 0 / .11);
+  --line-soft: oklch(100% 0 0 / .06);
+  --accent: oklch(70% 0.16 250);
+  --add: oklch(72% 0.17 150);
+  --del: oklch(68% 0.19 20);
+  --warn: oklch(78% 0.15 85);
+  --t-k: oklch(74% 0.14 300); --t-s: oklch(76% 0.13 150); --t-c: oklch(58% 0 0); --t-n: oklch(80% 0.12 60);
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+:root[data-theme="light"] { color-scheme: light;
+  --paper: oklch(99% 0 0); --band: oklch(97% 0 0); --raise: oklch(100% 0 0);
+  --ink: oklch(14.5% 0 0); --body: oklch(38% 0 0); --soft: oklch(48% 0 0);
+  --line: oklch(0% 0 0 / .12); --line-soft: oklch(0% 0 0 / .06);
+  --accent: oklch(52% 0.18 250);
+  --add: oklch(50% 0.16 150); --del: oklch(50% 0.19 25); --warn: oklch(55% 0.13 80);
+  --t-k: oklch(48% 0.17 300); --t-s: oklch(48% 0.13 150); --t-c: oklch(55% 0 0); --t-n: oklch(52% 0.14 60); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) { color-scheme: light;
+  --paper: oklch(99% 0 0); --band: oklch(97% 0 0); --raise: oklch(100% 0 0);
+  --ink: oklch(14.5% 0 0); --body: oklch(38% 0 0); --soft: oklch(48% 0 0);
+  --line: oklch(0% 0 0 / .12); --line-soft: oklch(0% 0 0 / .06);
+  --accent: oklch(52% 0.18 250);
+  --add: oklch(50% 0.16 150); --del: oklch(50% 0.19 25); --warn: oklch(55% 0.13 80);
+  --t-k: oklch(48% 0.17 300); --t-s: oklch(48% 0.13 150); --t-c: oklch(55% 0 0); --t-n: oklch(52% 0.14 60); }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 4.5rem; }
+body { margin: 0; background: var(--paper); color: var(--body); font: 1rem/1.6 var(--sans); overflow-x: hidden; }
+a { color: inherit; }
+h1, h2, h3, h4 { color: var(--ink); margin: 0; }
+p { margin: 0; }
+code { font: .9em var(--mono); color: var(--ink); background: var(--raise); padding: .1em .32em; border-radius: .28rem; }
+pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-size: inherit; }
+.prose a, .lede a, .explain a, .credit a { color: var(--ink); text-decoration: underline; text-underline-offset: .18em; text-decoration-color: var(--line); transition: text-decoration-color .14s ease; }
+.prose a:hover, .lede a:hover, .explain a:hover, .credit a:hover { text-decoration-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.skip { position: absolute; left: -999px; top: .5rem; z-index: 10; background: var(--ink); color: var(--paper); padding: .5rem .8rem; border-radius: .4rem; }
+.skip:focus { left: .5rem; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.shell { width: min(1180px, calc(100% - 3rem)); margin-inline: auto; }
+.brand, .glyph { flex: none; display: block; }
+.ext { font-size: .75em; opacity: .5; margin-left: .15em; }
+
+/* header */
+.site-header { position: sticky; top: 0; z-index: 5; min-height: 3.75rem; display: flex; align-items: center;
+  background: color-mix(in oklab, var(--paper) 82%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line); }
+.site-header .shell { display: flex; align-items: center; gap: 1.5rem; }
+.wordmark { font-weight: 700; font-size: 1.05rem; color: var(--ink); text-decoration: none; letter-spacing: -.01em; }
+.nav { display: flex; gap: 1.1rem; }
+.nav a { font-size: .875rem; color: var(--soft); text-decoration: none; transition: color .14s ease; }
+.nav a:hover, .nav a[aria-current="page"] { color: var(--ink); }
+.icons { margin-left: auto; display: flex; align-items: center; gap: .75rem; }
+.icons a, .icon-btn { color: var(--soft); display: inline-flex; padding: .25rem; transition: color .14s ease; }
+.icons a:hover, .icon-btn:hover { color: var(--ink); }
+.icon-btn { background: none; border: 1px solid var(--line); border-radius: .6rem; padding: .4rem; cursor: pointer; }
+.theme-toggle .glyph { display: none; }
+:root:not([data-pref]) .theme-toggle .g-system, :root[data-pref="system"] .theme-toggle .g-system,
+:root[data-pref="dark"] .theme-toggle .g-dark, :root[data-pref="light"] .theme-toggle .g-light { display: block; }
+
+/* hero */
+.hero { padding-top: clamp(5rem, 12vw, 9rem); text-align: center; }
+.hero > * { margin-inline: auto; }
+.mark { display: inline-grid; place-items: center; background: var(--raise); border: 1px solid var(--line); border-radius: .8rem; color: var(--ink); }
+.hero h1 { margin-top: 1.6rem; font-size: clamp(2.8rem, 7vw, 5rem); font-weight: 680; letter-spacing: -.045em; line-height: 1; max-width: 18ch; text-wrap: balance; }
+.lede { margin-top: 1.4rem; font-size: clamp(1.05rem, 1.7vw, 1.3rem); line-height: 1.6; max-width: 62ch; color: var(--body); }
+.aud { margin-top: 2.2rem; display: flex; flex-direction: column; align-items: center; }
+.aud > input { position: absolute; opacity: 0; pointer-events: none; }
+.aud-tabs { display: flex; font-size: .8rem; }
+.aud-tabs label { cursor: pointer; color: var(--soft); padding: 0 .8rem; transition: color .14s ease; }
+.aud-tabs label + label { border-left: 1px solid var(--line); }
+#aud-h:checked ~ .aud-tabs label[for="aud-h"], #aud-a:checked ~ .aud-tabs label[for="aud-a"] { color: var(--ink); }
+#aud-h:focus-visible ~ .aud-tabs label[for="aud-h"], #aud-a:focus-visible ~ .aud-tabs label[for="aud-a"] { outline: 2px solid var(--accent); outline-offset: 3px; }
+.aud-panel { display: none; margin-top: .9rem; flex-direction: column; align-items: center; gap: .7rem; max-width: 100%; }
+#aud-h:checked ~ .p-h, #aud-a:checked ~ .p-a { display: flex; }
+.pill { display: inline-flex; align-items: center; gap: .6rem; max-width: 100%; border-radius: 999px; background: var(--raise); border: 1px solid var(--line); padding: .55rem .6rem .55rem 1.1rem; color: var(--ink); }
+.pill .prompt { color: var(--soft); font: .9rem/1.3 var(--mono); }
+.pill code { font: .9rem/1.3 var(--mono); background: none; padding: 0; overflow-wrap: anywhere; text-align: left; }
+.copy { background: none; border: 0; color: var(--soft); cursor: pointer; padding: .3rem; border-radius: 999px; display: inline-flex; transition: color .14s ease; }
+.copy:hover { color: var(--ink); }
+.agent-links { display: flex; flex-wrap: wrap; justify-content: center; gap: .3rem 1.1rem; font-size: .85rem; }
+.agent-links a, .agent-links button { color: var(--soft); background: none; border: 0; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: .18em; text-decoration-color: var(--line); padding: 0; }
+.agent-links a:hover, .agent-links button:hover { color: var(--ink); }
+.version { margin-top: 1.1rem; font-size: .85rem; color: var(--soft); }
+
+/* frames */
+.frame { border: 1px solid var(--line); border-radius: .7rem; overflow: hidden; background: var(--paper); min-width: 0; }
+.bar { display: flex; align-items: center; gap: .6rem; background: var(--band); border-bottom: 1px solid var(--line); padding: .55rem .8rem; font: .8rem/1.3 var(--mono); color: var(--soft); min-width: 0; }
+.bar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--body); }
+.dots { display: flex; gap: .35rem; flex: none; }
+.dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--raise); border: 1px solid var(--line); }
+.chip { margin-left: auto; flex: none; font: .7rem/1 var(--mono); color: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .5rem; }
+.frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.6 var(--mono); color: var(--body); overflow-x: auto; }
+.t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); } .t-n { color: var(--t-n); }
+.prompt-line::before { content: "$ "; color: var(--soft); }
+
+.split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
+.split .frame pre { height: 20rem; overflow: hidden; white-space: pre; }
+
+/* sections */
+.section { padding-block: clamp(3.5rem, 7vw, 6rem); scroll-margin-top: 4.5rem; }
+.section.band { background: var(--band); }
+.section h2 { font-size: clamp(1.35rem, 2.4vw, 1.7rem); font-weight: 650; line-height: 1.2; letter-spacing: -.02em; }
+.explain { margin-top: .6rem; max-width: 68ch; }
+.demo { margin-top: 1.6rem; }
+.centre { text-align: center; }
+.centre .explain, .centre h2 { margin-inline: auto; }
+
+.figures { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2rem; }
+.figures.three { grid-template-columns: repeat(3, 1fr); }
+.fig b { display: block; font-size: clamp(3rem, 7vw, 5.5rem); font-weight: 500; letter-spacing: -.06em; line-height: 1; color: var(--ink); white-space: nowrap; }
+.figures.three .fig b { font-size: clamp(2.2rem, 4.6vw, 3.6rem); }
+.fig span { display: block; margin-top: .6rem; font-size: 1.05rem; color: var(--body); }
+.fig small { display: block; font-size: .75rem; color: var(--soft); font-family: var(--mono); margin-top: .2rem; }
+
+.eco h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.04em; }
+.eco .explain { color: var(--soft); max-width: 60ch; }
+.marks { margin-top: 2.4rem; display: flex; flex-wrap: wrap; justify-content: center; gap: 2.5rem; }
+.marks a { color: var(--soft); transition: color .14s ease; }
+.marks a:hover { color: var(--ink); }
+
+.principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem; }
+.principles h3 { font-size: 1.25rem; font-weight: 500; }
+.principles p { margin-top: .5rem; color: var(--soft); max-width: 34ch; }
+
+.showcase > *, .start > *, .guides > *, .principles > *, .bounds > *, .figures > * { min-width: 0; }
+.showcase { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3rem; align-items: start; }
+.showcase h2 { font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.03em; }
+.control { display: inline-flex; align-items: center; gap: .5rem; padding: .62rem .85rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--raise); color: var(--ink); font: 500 .9rem/1.15 var(--sans); text-decoration: none; transition: background .14s ease, border-color .14s ease; }
+.control:hover { background: color-mix(in oklab, var(--raise) 80%, var(--ink) 4%); }
+.control code { font: .88rem/1.3 var(--mono); background: none; padding: 0; overflow-wrap: anywhere; }
+.control--solid { background: var(--ink); color: var(--paper); border-color: transparent; font-weight: 550; }
+.control--solid:hover { background: color-mix(in oklab, var(--ink) 88%, var(--paper)); }
+.round { border-radius: 999px; }
+.showcase .control { margin-top: 1.6rem; }
+.supports { margin-top: 2rem; font-size: .8rem; color: var(--soft); }
+.avatars { display: flex; align-items: center; margin-top: .6rem; padding-left: .6rem; }
+.avatars span { width: 40px; height: 40px; border-radius: 50%; background: var(--raise); box-shadow: 0 0 0 2px var(--paper); display: grid; place-items: center; margin-left: -.6rem; color: var(--ink); }
+.avatars em { font-style: normal; margin-left: .7rem; color: var(--soft); font-size: .85rem; }
+.tabs > input { position: absolute; opacity: 0; pointer-events: none; }
+.tabrow { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .8rem; }
+.tabrow label { cursor: pointer; font-size: .85rem; color: var(--soft); padding: .35rem .75rem; border-radius: .5rem; transition: color .14s ease; }
+.tabpanel { display: none; }
+.tabpanel .bar .label { margin-inline: auto; }
+.tabpanel pre { max-height: 14rem; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); white-space: pre; }
+.pager { display: flex; gap: .4rem; justify-content: center; margin-top: .8rem; }
+.pager i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
+
+.variants { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.variants figure { margin: 0; min-width: 0; }
+.variants pre { height: 15rem; overflow: auto; }
+.variants figcaption { margin-top: .5rem; font: .75rem/1.4 var(--mono); color: var(--soft); }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+th { text-align: left; font: .72rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--soft); padding: .6rem .8rem .6rem 0; border-bottom: 1px solid var(--line-soft); }
+td { padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink); }
+.demo .table-wrap + .table-wrap { margin-top: 2rem; }
+
+.bounds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; }
+.bounds h3 { font-size: 1rem; font-weight: 600; display: flex; gap: .6rem; align-items: baseline; }
+.bounds h3 span { font: .8rem var(--mono); color: var(--soft); }
+.bounds ul { margin: .8rem 0 0; padding: 0; list-style: none; }
+.bounds li { padding: .6rem 0; border-top: 1px solid var(--line-soft); font-size: .92rem; }
+
+.start { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+
+.today { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1.5rem; }
+.today h2 { font-size: clamp(2rem, 4.5vw, 3rem); letter-spacing: -.04em; max-width: 18ch; line-height: 1.1; }
+.today .acts { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; }
+.outline { display: inline-flex; align-items: center; gap: .5rem; border: 1px solid var(--line); border-radius: 999px; padding: .5rem .5rem .5rem 1rem; color: var(--ink); max-width: 100%; }
+.outline code { background: none; padding: 0; font: .88rem/1.3 var(--mono); }
+.outline .prompt { color: var(--soft); font: .88rem var(--mono); }
+
+.guides { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; }
+.guide { display: block; border: 1px solid var(--line); border-radius: .5rem; background: var(--band); overflow: hidden; text-decoration: none; height: 19rem; position: relative; transition: border-color .14s ease; }
+.guide:hover { border-color: color-mix(in oklab, var(--ink) 30%, transparent); }
+.guide .gt { display: block; padding: 1.2rem 1.2rem 0; font-size: 1rem; color: var(--ink); font-weight: 550; }
+.guide .gb { display: block; padding: .3rem 1.2rem 0; font-size: .88rem; color: var(--soft); }
+.guide .tilt { position: absolute; left: 1.2rem; top: 7.5rem; width: 130%; transform: rotate(-3deg) translate(1rem, .5rem); border: 1px solid var(--line); border-radius: .6rem; background: var(--paper); overflow: hidden; }
+.guide .tilt pre { margin: 0; padding: .9rem 1rem; font: .75rem/1.6 var(--mono); white-space: pre; color: var(--body); height: 14rem; }
+
+.aside { text-align: center; color: var(--soft); font-size: .95rem; padding-block: 1.5rem; }
+
+/* footer */
+.site-footer { border-top: 1px solid var(--line); padding-block: 4rem 2rem; font-size: .875rem; }
+.credit { color: var(--soft); max-width: 60ch; }
+.cols { margin-top: 3rem; display: grid; grid-template-columns: repeat(6, 1fr); row-gap: 3rem; column-gap: 1.5rem; }
+.cols h3 { font-size: .9rem; font-weight: 500; }
+.cols ul { list-style: none; margin: .5rem 0 0; padding: 0; }
+.cols li a { color: var(--soft); text-decoration: none; line-height: 2; font-size: .875rem; transition: color .14s ease; }
+.cols li a:hover { color: var(--ink); }
+.newpill { font-size: .65rem; background: var(--raise); border: 1px solid var(--line); border-radius: 999px; padding: .05rem .4rem; margin-left: .35rem; color: var(--ink); }
+.foot-icons { margin-top: 2.5rem; display: flex; gap: .9rem; }
+.foot-icons a { color: var(--soft); transition: color .14s ease; }
+.foot-icons a:hover { color: var(--ink); }
+.bottom { margin-top: 2.5rem; display: flex; align-items: center; gap: .7rem; font-size: .8rem; color: var(--soft); flex-wrap: wrap; }
+.bottom .mark { border-radius: .35rem; }
+.seg { margin-left: auto; display: inline-flex; background: var(--raise); border: 1px solid var(--line); border-radius: 999px; padding: 2px; }
+.seg button { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 999px; background: none; color: var(--soft); cursor: pointer; padding: 0; }
+:root:not([data-pref]) .seg [data-theme-set="system"], :root[data-pref="system"] .seg [data-theme-set="system"],
+:root[data-pref="dark"] .seg [data-theme-set="dark"], :root[data-pref="light"] .seg [data-theme-set="light"] { background: var(--ink); color: var(--paper); }
+
+/* reference */
+.ref { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; padding-block: 3rem 5rem; }
+.toc { position: sticky; top: 4.5rem; align-self: start; max-height: calc(100vh - 5.5rem); overflow-y: auto; font-size: .82rem; }
+.toc ul { list-style: none; margin: 0; padding: 0; }
+.toc li a { display: block; color: var(--soft); text-decoration: none; padding: .18rem 0; }
+.toc li a:hover { color: var(--ink); }
+.toc .l1 { margin-top: .9rem; } .toc .l1 a { color: var(--ink); font-weight: 600; }
+.toc .l3 a { padding-left: .9rem; }
+.prose { max-width: 76ch; min-width: 0; }
+.prose h1 { font-size: 2.2rem; letter-spacing: -.035em; margin: 3.5rem 0 1rem; scroll-margin-top: 4.5rem; }
+.prose h1:first-child { margin-top: 0; }
+.prose h2 { font-size: 1.4rem; letter-spacing: -.02em; margin: 2.6rem 0 .7rem; scroll-margin-top: 4.5rem; }
+.prose h3, .prose h4 { font-size: 1.1rem; margin: 2rem 0 .6rem; scroll-margin-top: 4.5rem; }
+.prose p, .prose ul, .prose ol, .prose .table-wrap { margin: 0 0 1rem; }
+.prose li { margin: .25rem 0; }
+.prose pre.code { margin: 0 0 1.2rem; padding: 1rem 1.1rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--band); font: .8rem/1.6 var(--mono); overflow-x: auto; }
+
+@media (max-width: 1000px) {
+  .figures { grid-template-columns: repeat(2, 1fr); }
+  .cols { grid-template-columns: repeat(3, 1fr); }
+  .showcase { grid-template-columns: minmax(0, 1fr); }
+  .guides, .variants { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  .shell { width: calc(100% - 2rem); }
+  .nav { display: none; }
+  .hero h1 { font-size: 2.6rem; }
+  .split, .principles, .bounds, .start { grid-template-columns: minmax(0, 1fr); }
+  .split .frame pre { height: 16rem; }
+  .split .frame:first-child pre { height: auto; }
+  .figures.three { grid-template-columns: minmax(0, 1fr); }
+  .fig b { font-size: 3rem; }
+  .cols { grid-template-columns: repeat(2, 1fr); }
+  .ref { grid-template-columns: minmax(0, 1fr); }
+  .toc { position: static; max-height: 18rem; border: 1px solid var(--line); border-radius: .6rem; padding: .5rem 1rem 1rem; }
+  .today .acts { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .control, .guide:hover { transform: none; }
+}
+#tab-0:checked ~ .tabrow label[for="tab-0"]{background:var(--raise);color:var(--ink)}#tab-0:checked ~ .p-0{display:block}#tab-0:focus-visible ~ .tabrow label[for="tab-0"]{outline:2px solid var(--accent)}#tab-0:checked ~ .pager i:nth-child(1){background:var(--ink)}
+#tab-1:checked ~ .tabrow label[for="tab-1"]{background:var(--raise);color:var(--ink)}#tab-1:checked ~ .p-1{display:block}#tab-1:focus-visible ~ .tabrow label[for="tab-1"]{outline:2px solid var(--accent)}#tab-1:checked ~ .pager i:nth-child(2){background:var(--ink)}
+#tab-2:checked ~ .tabrow label[for="tab-2"]{background:var(--raise);color:var(--ink)}#tab-2:checked ~ .p-2{display:block}#tab-2:focus-visible ~ .tabrow label[for="tab-2"]{outline:2px solid var(--accent)}#tab-2:checked ~ .pager i:nth-child(3){background:var(--ink)}
+#tab-3:checked ~ .tabrow label[for="tab-3"]{background:var(--raise);color:var(--ink)}#tab-3:checked ~ .p-3{display:block}#tab-3:focus-visible ~ .tabrow label[for="tab-3"]{outline:2px solid var(--accent)}#tab-3:checked ~ .pager i:nth-child(4){background:var(--ink)}</style>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"bql.sh","description":"bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.","url":"https://bql.dev/","codeRepository":"https://github.com/TimMikeladze/bql","applicationCategory":"DeveloperApplication","programmingLanguage":"TypeScript","runtimePlatform":"Bun","softwareVersion":"0.1.0","license":"https://opensource.org/licenses/MIT","author":{"@type":"Person","name":"linesofcode","url":"https://x.com/linesofcode"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header"><div class="shell">
+<a class="wordmark" href="/">bql.sh</a>
+<nav class="nav" aria-label="Site"><a href="/#realtime">Capabilities</a><a href="/#measured">Measured</a><a href="/reference">Reference</a><a href="https://github.com/TimMikeladze/bql/commits/main" rel="noopener">Changelog<span class="ext" aria-hidden="true">↗</span></a></nav>
+<div class="icons"><a href="https://github.com/TimMikeladze/bql" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg><span class="sr">TimMikeladze/bql on GitHub</span></a><a href="https://x.com/linesofcode" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z"/></svg><span class="sr">linesofcode on X</span></a><a href="https://www.linkedin.com/in/tim-mikeladze" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg><span class="sr">linesofcode on LinkedIn</span></a><button type="button" class="icon-btn theme-toggle" data-theme-cycle aria-label="Theme: system. Click to change"><svg class="glyph g-system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><svg class="glyph g-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg><svg class="glyph g-light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></div>
+</div></header>
+<main id="main">
+<section class="hero shell" aria-labelledby="top-h">
+<span class="mark" style="width:44px;height:44px" aria-hidden="true"><svg width="27" height="27" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="16" cy="9" rx="8" ry="3"/><path d="M8 9v7c0 1.7 3.6 3 8 3s8-1.3 8-3V9"/><path d="M8 16v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span>
+<h1 id="top-h">SQLite as a database server, and a bus</h1>
+<p class="lede">bql.sh is two open source packages: <code>bql.sh</code> serves thousands of SQLite databases from one process, and <code>bql.sh/bus</code> is a durable message bus with leases, retries and a dead-letter path. Built on <a href="https://bun.sh" rel="noopener">Bun</a> and <a href="https://sqlite.org" rel="noopener">SQLite</a> with zero runtime dependencies, by <a href="https://x.com/linesofcode" rel="noopener">linesofcode</a>.</p>
+<div class="aud">
+<input type="radio" name="aud" id="aud-h" checked><input type="radio" name="aud" id="aud-a">
+<div class="aud-tabs"><label for="aud-h">For humans</label><label for="aud-a">For agents</label></div>
+<div class="aud-panel p-h" data-panel="humans"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>git clone https://github.com/TimMikeladze/bql &amp;&amp; cd bql</code><button type="button" class="copy" data-copy="git clone https://github.com/TimMikeladze/bql &amp;&amp; cd bql" aria-label="Copy install command"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div></div>
+<div class="aud-panel p-a" data-panel="agents"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>curl https://bql.dev/llms.txt</code><button type="button" class="copy" data-copy="curl https://bql.dev/llms.txt" aria-label="Copy agent command"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div>
+<div class="agent-links"><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">AGENTS.md</a><button type="button" data-copy-page="/index.md">Copy page as Markdown</button></div></div>
+</div>
+<p class="version">Currently <code>bql.sh</code> v0.1.0 · Neither package is on npm yet</p>
+<div class="split">
+<div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">terminal</span></div><pre><code><span class="prompt-line">bql-bus serve &amp;</span>
+<span class="prompt-line">bql-bus subscribe work <span class="t-s">'work.&gt;'</span></span>
+<span class="prompt-line">bql-bus consume work --exec ./handle.sh &amp;</span>
+<span class="prompt-line">bql-bus publish work.resize <span class="t-s">'{&quot;src&quot;:&quot;a.png&quot;}'</span></span></code></pre></div>
+<div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span class="label">consumer.ts</span></div><pre><code><span class="t-k">import</span> { BusClient, BusConsumer, FatalError } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus/client&quot;</span>;
+
+<span class="t-k">const</span> client = <span class="t-k">new</span> BusClient({ url: <span class="t-s">&quot;http://127.0.0.1:4317&quot;</span>, token: process.env.BUS_TOKEN! });
+
+<span class="t-k">await</span> <span class="t-k">new</span> BusConsumer({
+  client,
+  id: <span class="t-s">&quot;resizer-1&quot;</span>,
+  subscription: <span class="t-s">&quot;work&quot;</span>,
+  prefetch: <span class="t-n">4</span>,
+  <span class="t-k">async</span> handle({ message }, api) {
+    <span class="t-k">if</span> (!supported(message.body)) <span class="t-k">throw</span> <span class="t-k">new</span> FatalError(<span class="t-s">&quot;unsupported format&quot;</span>);
+    <span class="t-k">await</span> api.extend();               <span class="t-c">// renew the lease from a long handler</span>
+    <span class="t-k">return</span> { ok: <span class="t-k">true</span> };              <span class="t-c">// a returned value answers a request</span>
+  },
+}).start();</code></pre></div>
+</div>
+</section>
+<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2><div class="figures"><div class="fig" data-source="repo count: testFiles"><b>151</b><span>test files across both packages</span></div><div class="fig" data-source="repo count: runtimeDependencies"><b>0</b><span>runtime dependencies</span></div><div class="fig" data-source="db README /~(\d+k) writes\/s at 64/"><b>49k</b><span>writes/s at 64 concurrent clients</span></div><div class="fig" data-source="db README /a point read is\s+(\d+ \u00B5s)/"><b>54 µs</b><span>point read over HTTP, one node</span></div></div></div></section>
+<section class="section band eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+<h2 id="ecosystem-h">Reached by what you already run</h2>
+<p class="explain">Bun and SQLite underneath; Drizzle, Kysely and @libsql/client on top; REST, OpenAPI and GraphQL generated; backups to S3, R2 or MinIO; metrics for Prometheus and traces for OpenTelemetry; a Dockerfile and a fly.toml.</p>
+<div class="marks"><a href="https://bun.sh" rel="noopener" aria-label="Bun" title="Bun"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 22.596c6.628 0 12-4.338 12-9.688 0-3.318-2.057-6.248-5.219-7.986-1.286-.715-2.297-1.357-3.139-1.89C14.058 2.025 13.08 1.404 12 1.404c-1.097 0-2.334.785-3.966 1.821a49.92 49.92 0 0 1-2.816 1.697C2.057 6.66 0 9.59 0 12.908c0 5.35 5.372 9.687 12 9.687v.001ZM10.599 4.715c.334-.759.503-1.58.498-2.409 0-.145.202-.187.23-.029.658 2.783-.902 4.162-2.057 4.624-.124.048-.199-.121-.103-.209a5.763 5.763 0 0 0 1.432-1.977Zm2.058-.102a5.82 5.82 0 0 0-.782-2.306v-.016c-.069-.123.086-.263.185-.172 1.962 2.111 1.307 4.067.556 5.051-.082.103-.23-.003-.189-.126a5.85 5.85 0 0 0 .23-2.431Zm1.776-.561a5.727 5.727 0 0 0-1.612-1.806v-.014c-.112-.085-.024-.274.114-.218 2.595 1.087 2.774 3.18 2.459 4.407a.116.116 0 0 1-.049.071.11.11 0 0 1-.153-.026.122.122 0 0 1-.022-.083 5.891 5.891 0 0 0-.737-2.331Zm-5.087.561c-.617.546-1.282.76-2.063 1-.117 0-.195-.078-.156-.181 1.752-.909 2.376-1.649 2.999-2.778 0 0 .155-.118.188.085 0 .304-.349 1.329-.968 1.874Zm4.945 11.237a2.957 2.957 0 0 1-.937 1.553c-.346.346-.8.565-1.286.62a2.178 2.178 0 0 1-1.327-.62 2.955 2.955 0 0 1-.925-1.553.244.244 0 0 1 .064-.198.234.234 0 0 1 .193-.069h3.965a.226.226 0 0 1 .19.07c.05.053.073.125.063.197Zm-5.458-2.176a1.862 1.862 0 0 1-2.384-.245 1.98 1.98 0 0 1-.233-2.447c.207-.319.503-.566.848-.713a1.84 1.84 0 0 1 1.092-.11c.366.075.703.261.967.531a1.98 1.98 0 0 1 .408 2.114 1.931 1.931 0 0 1-.698.869v.001Zm8.495.005a1.86 1.86 0 0 1-2.381-.253 1.964 1.964 0 0 1-.547-1.366c0-.384.11-.76.32-1.079.207-.319.503-.567.849-.713a1.844 1.844 0 0 1 1.093-.108c.367.076.704.262.968.534a1.98 1.98 0 0 1 .4 2.117 1.932 1.932 0 0 1-.702.868Z"/></svg></a><a href="https://sqlite.org" rel="noopener" aria-label="SQLite" title="SQLite"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M21.678.521c-1.032-.92-2.28-.55-3.513.544a8.71 8.71 0 0 0-.547.535c-2.109 2.237-4.066 6.38-4.674 9.544.237.48.422 1.093.544 1.561a13.044 13.044 0 0 1 .164.703s-.019-.071-.096-.296l-.05-.146a1.689 1.689 0 0 0-.033-.08c-.138-.32-.518-.995-.686-1.289-.143.423-.27.818-.376 1.176.484.884.778 2.4.778 2.4s-.025-.099-.147-.442c-.107-.303-.644-1.244-.772-1.464-.217.804-.304 1.346-.226 1.478.152.256.296.698.422 1.186.286 1.1.485 2.44.485 2.44l.017.224a22.41 22.41 0 0 0 .056 2.748c.095 1.146.273 2.13.5 2.657l.155-.084c-.334-1.038-.47-2.399-.41-3.967.09-2.398.642-5.29 1.661-8.304 1.723-4.55 4.113-8.201 6.3-9.945-1.993 1.8-4.692 7.63-5.5 9.788-.904 2.416-1.545 4.684-1.931 6.857.666-2.037 2.821-2.912 2.821-2.912s1.057-1.304 2.292-3.166c-.74.169-1.955.458-2.362.629-.6.251-.762.337-.762.337s1.945-1.184 3.613-1.72C21.695 7.9 24.195 2.767 21.678.521m-18.573.543A1.842 1.842 0 0 0 1.27 2.9v16.608a1.84 1.84 0 0 0 1.835 1.834h9.418a22.953 22.953 0 0 1-.052-2.707c-.006-.062-.011-.141-.016-.2a27.01 27.01 0 0 0-.473-2.378c-.121-.47-.275-.898-.369-1.057-.116-.197-.098-.31-.097-.432 0-.12.015-.245.037-.386a9.98 9.98 0 0 1 .234-1.045l.217-.028c-.017-.035-.014-.065-.031-.097l-.041-.381a32.8 32.8 0 0 1 .382-1.194l.2-.019c-.008-.016-.01-.038-.018-.053l-.043-.316c.63-3.28 2.587-7.443 4.8-9.791.066-.069.133-.128.198-.194Z"/></svg></a><a href="https://orm.drizzle.team" rel="noopener" aria-label="Drizzle" title="Drizzle"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M5.353 11.823a1.036 1.036 0 0 0-.395-1.422 1.063 1.063 0 0 0-1.437.399L.138 16.702a1.035 1.035 0 0 0 .395 1.422 1.063 1.063 0 0 0 1.437-.398l3.383-5.903Zm11.216 0a1.036 1.036 0 0 0-.394-1.422 1.064 1.064 0 0 0-1.438.399l-3.382 5.902a1.036 1.036 0 0 0 .394 1.422c.506.283 1.15.104 1.438-.398l3.382-5.903Zm7.293-4.525a1.036 1.036 0 0 0-.395-1.422 1.062 1.062 0 0 0-1.437.399l-3.383 5.902a1.036 1.036 0 0 0 .395 1.422 1.063 1.063 0 0 0 1.437-.399l3.383-5.902Zm-11.219 0a1.035 1.035 0 0 0-.394-1.422 1.064 1.064 0 0 0-1.438.398l-3.382 5.903a1.036 1.036 0 0 0 .394 1.422c.506.282 1.15.104 1.438-.399l3.382-5.902Z"/></svg></a><a href="https://github.com/tursodatabase/libsql-client-ts" rel="noopener" aria-label="@libsql/client" title="@libsql/client"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="m23.31.803-.563-.42-1.11 1.189-.891-1.286-.512.235.704 1.798-.326.35L18.082 0l-.574.284 2.25 4.836-2.108.741h-.05l-1.143-1.359-1.144 1.36H8.687l-1.144-1.36-1.146 1.363H6.36l-2.12-.745L6.491.284 5.919 0l-2.53 2.668-.327-.349.705-1.798-.512-.236-.89 1.287L1.253.382.69.804 2.42 3.69l-.89.939.311 2.375 2.061.787L3.9 8.817H1.947v.444l.755 1.078 1.197.433v6.971l3.057 4.55L7.657 24l1.101-1.606L9.9 24l.999-1.606L12 24l1.102-1.606L14.1 24l1.141-1.606L16.343 24l.701-1.706 3.058-4.55v-6.972l1.196-.433.756-1.078v-.444h-1.952l.003-1.03 2.054-.784.311-2.375-.89-.939zm-8.93 18.718H8.033l.793-1.615.794 1.615.793-1.083.793 1.083.794-1.083.793 1.083.794-1.083.793 1.083.793-1.615.794 1.615zm3.886-7.39-3.3 1.084-.143 3.061-2.827.627-2.826-.627-.142-3.06-3.3-1.085v-1.635l4.266 1.21-.052 4.126h4.109l-.052-4.127 4.266-1.209z"/></svg></a><a href="https://graphql.org" rel="noopener" aria-label="GraphQL" title="GraphQL"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12.002 0a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm8.54 4.931a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm0 9.862a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm-8.54 4.931a2.138 2.138 0 1 0 0 4.276 2.138 2.138 0 1 0 0-4.276zm-8.542-4.93a2.138 2.138 0 1 0 0 4.276 2.138 2.138 0 1 0 0-4.277zm0-9.863a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm8.542-3.378L2.953 6.777v10.448l9.049 5.224 9.047-5.224V6.777zm0 1.601 7.66 13.27H4.34zm-1.387.371L3.97 15.037V7.363zm2.774 0 6.646 3.838v7.674zM5.355 17.44h13.293l-6.646 3.836z"/></svg></a><a href="https://www.openapis.org" rel="noopener" aria-label="OpenAPI 3.1" title="OpenAPI 3.1"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M21.039 0a2.959 2.959 0 00-2.65 4.274l-6.447 6.447a2.96 2.96 0 101.335 1.336l6.447-6.447A2.959 2.959 0 1021.04 0zM10.628 2.745c-.072 0-.143.003-.214.004-.072.002-.143.002-.215.005-.447.018-.893.064-1.335.138l-.03.005-.185.033-.105.02a7.718 7.718 0 00-.289.062l-.032.008a10.69 10.69 0 00-2.55.95l-.155.089c-.063.034-.125.07-.187.105-.046.027-.093.051-.14.079H5.19l-.01.005-.036.02v.002l.111.184 3.15 5.23a4.168 4.168 0 01.38-.202 4.294 4.294 0 011.628-.413c.071-.004.143-.008.214-.008zm.428.01v6.333c.325.034.647.103.96.209l4.66-4.66c-.173-.12-.348-.237-.528-.347l-.026-.015c-.056-.035-.112-.067-.168-.1l-.098-.056-.099-.055a12.735 12.735 0 00-.171-.092l-.027-.014a10.628 10.628 0 00-1.425-.617c-.69-.241-1.403-.41-2.128-.505l-.089-.012-.09-.01a6.56 6.56 0 00-.17-.019l-.049-.004-.204-.017a6.44 6.44 0 00-.255-.015c-.031-.003-.062-.003-.093-.004zM4.782 4.498a9.92 9.92 0 00-1.36 1.062l4.461 4.461.018.018c.049-.04.098-.078.149-.116l-.011-.018zm-1.67 1.36c-.05.05-.098.103-.147.154l-.149.155c-.33.357-.63.73-.902 1.118l-.039.056a10.588 10.588 0 00-.216.326 10.6 10.6 0 00-1.65 5.276l-.006.215-.003.214h6.317c0-.072.007-.143.01-.214.005-.072.006-.144.013-.215.081-.822.399-1.625.952-2.3.045-.055.096-.106.144-.16.048-.052.093-.107.144-.158zm16.255 1.464l-4.663 4.663c.106.312.175.634.21.959h6.332l-.004-.094a11.579 11.579 0 00-.032-.456l-.005-.052a13.044 13.044 0 00-.026-.241v-.009l-.033-.24v-.009a10.618 10.618 0 00-.327-1.493l-.003-.01a15.839 15.839 0 00-.07-.228l-.01-.03a14.111 14.111 0 00-.069-.204l-.02-.055a5.65 5.65 0 00-.153-.405 7.84 7.84 0 00-.093-.227 16.67 16.67 0 00-.063-.144l-.037-.081a13.776 13.776 0 00-.08-.171l-.024-.052-.096-.194-.014-.027a11.2 11.2 0 00-.112-.212l-.004-.008a10.615 10.615 0 00-.604-.98zm-4.43 6.05c0 .071-.006.142-.01.214-.003.072-.005.143-.012.214a4.29 4.29 0 01-.952 2.301c-.045.055-.096.107-.144.16-.048.053-.093.108-.144.159l4.467 4.467c.051-.051.099-.104.148-.155.05-.052.1-.103.148-.155.331-.358.633-.733.905-1.122l.032-.046.098-.144.085-.13.04-.063a10.597 10.597 0 001.647-5.272c.003-.071.004-.143.006-.214.001-.071.004-.143.004-.214zM.01 13.8l.004.093.01.179.005.076.017.206.005.046c.007.076.015.153.024.228l.003.022a9.605 9.605 0 00.033.248c.072.505.182 1.005.327 1.497l.002.006c.022.077.047.154.071.23l.004.014.005.014a15.737 15.737 0 00.153.439l.03.08.059.148a7.702 7.702 0 00.093.228l.062.14.038.084.078.169.027.054a10.677 10.677 0 00.225.441l.025.043 5.408-3.258.02-.012a4.314 4.314 0 01-.395-1.414h-.025zm.505 2.846l-.206.058.002.005zm6.425-1.052l-5.415 3.262c.083.139.17.273.259.406l.008.014.004.005.008.014h.001c.007.012.014.022.022.032l.001.002v.001a10.634 10.634 0 00.298.417l.006.008a9.963 9.963 0 00.29.368l.033.04c.043.052.086.103.13.153l.057.065.112.127.064.069.029.031.083.09.035.035c.049.051.098.103.149.153L7.58 16.42a3.86 3.86 0 01-.285-.321 4.422 4.422 0 01-.356-.505zm6.416 1.111c-.05.04-.1.079-.15.116l.011.018 3.257 5.407c.151-.099.3-.2.446-.307.315-.232.62-.484.914-.756l-4.46-4.46zm-5.457.003l-.015.015-4.46 4.46a8.966 8.966 0 00.195.176c.022.02.043.04.065.058l.152.13a10.622 10.622 0 00.215.174l.023.017.191.148.008.005c.268.2.547.389.834.564l.03.018.164.097.101.057a5.458 5.458 0 00.27.148c.008.004.016.01.025.013.162.085.327.164.493.24l.158-.385 2.243-5.448.009-.02a4.328 4.328 0 01-.701-.467zm4.951.353c-.061.037-.124.07-.187.104a4.318 4.318 0 01-3.271.336c-.069-.02-.135-.047-.203-.071-.067-.024-.136-.044-.202-.072l-2.242 5.444-.088.213-.075.183v.001l.017.007a.137.137 0 00.019.007l.005.003c.052.021.106.04.159.06.067.027.133.053.2.077l.102.04c.702.247 1.43.42 2.168.518l.087.012.09.01.172.019a7.173 7.173 0 00.252.022c.023.001.048.001.071.003l.184.011.112.005a7.06 7.06 0 00.358.007h.05a10.667 10.667 0 001.793-.15l.185-.034.105-.02.109-.023.18-.04.032-.008a10.684 10.684 0 002.55-.95c.052-.028.104-.06.156-.089.063-.034.125-.07.187-.105.043-.024.087-.047.13-.073h.001l.002-.002.002-.001.002-.001.007-.004.042-.025-.11-.183-.11-.184zm3.262 5.414l-.042.025.042-.024zm-.05.029zm-.005.004h-.002z"/></svg></a><a href="https://aws.amazon.com/s3/" rel="noopener" aria-label="Amazon S3" title="Amazon S3"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M20.913 13.147l.12-.895c.947.576 1.258.922 1.354 1.071-.16.031-.562.046-1.474-.176zm-2.174 7.988a.547.547 0 0 0-.005.073c0 .084-.207.405-1.124.768a10.28 10.28 0 0 1-1.438.432c-1.405.325-3.128.504-4.853.504-4.612 0-7.412-1.184-7.412-1.704a.547.547 0 0 0-.005-.073L1.81 5.602c.135.078.28.154.432.227.042.02.086.038.128.057.134.062.272.122.417.18l.179.069c.154.058.314.114.478.168.043.013.084.029.13.043.207.065.423.127.646.187l.176.044c.175.044.353.087.534.127a23.414 23.414 0 0 0 .843.17l.121.023c.252.045.508.085.768.122.071.011.144.02.216.03.2.027.4.053.604.077l.24.027c.245.026.49.05.74.07l.081.009c.275.022.552.04.83.056l.233.012c.21.01.422.018.633.025a33.088 33.088 0 0 0 2.795-.026l.232-.011c.278-.016.555-.034.83-.056l.08-.008c.25-.02.497-.045.742-.072l.238-.026c.205-.024.408-.05.609-.077.07-.01.141-.019.211-.03.261-.037.519-.078.772-.122l.111-.02c.215-.04.427-.082.634-.125l.212-.047c.186-.041.368-.085.546-.13l.166-.042c.225-.06.444-.122.654-.189.04-.012.077-.026.115-.038a10.6 10.6 0 0 0 .493-.173c.058-.021.114-.044.17-.066.15-.06.293-.12.43-.185.038-.017.079-.034.116-.052.153-.073.3-.15.436-.228l-.976 7.245c-2.488-.78-5.805-2.292-7.311-3a1.09 1.09 0 0 0-1.088-1.085c-.6 0-1.088.489-1.088 1.088 0 .6.488 1.089 1.088 1.089.196 0 .378-.056.537-.148 1.72.812 5.144 2.367 7.715 3.15zm-7.42-20.047c5.677 0 9.676 1.759 9.75 2.736l-.014.113c-.01.033-.031.067-.048.101-.015.028-.026.057-.047.087-.024.033-.058.068-.09.102-.028.03-.051.06-.084.09-.038.035-.087.07-.133.105-.04.03-.074.06-.119.091-.053.036-.116.071-.177.107-.05.03-.095.06-.15.09-.068.036-.147.073-.222.11-.059.028-.114.057-.177.085-.084.038-.177.074-.268.111-.068.027-.13.054-.203.082-.097.036-.205.072-.31.107-.075.026-.148.053-.228.079-.111.035-.233.069-.35.103-.085.024-.165.05-.253.073-.124.034-.258.065-.389.098-.093.022-.181.046-.278.068-.139.032-.287.061-.433.091-.098.02-.191.041-.293.06-.155.03-.32.057-.482.084-.1.018-.198.036-.302.052-.166.026-.342.048-.515.072-.11.014-.213.03-.325.044-.181.023-.372.041-.56.06-.11.012-.218.025-.332.036-.188.016-.386.029-.58.043-.122.009-.24.02-.364.028-.207.012-.422.02-.635.028-.12.005-.234.012-.354.016a35.605 35.605 0 0 1-2.069 0c-.12-.004-.234-.011-.352-.016-.214-.008-.43-.016-.637-.028-.122-.008-.238-.02-.36-.027-.195-.015-.394-.028-.584-.044-.11-.01-.215-.024-.324-.035-.19-.02-.384-.038-.568-.06l-.315-.044c-.176-.024-.355-.046-.525-.073-.1-.015-.192-.033-.29-.05-.167-.028-.335-.055-.494-.086-.096-.018-.183-.038-.276-.056-.151-.032-.305-.062-.45-.095-.09-.02-.173-.043-.26-.064-.138-.034-.277-.067-.407-.102-.082-.022-.157-.046-.235-.069a11.75 11.75 0 0 1-.368-.108c-.075-.024-.141-.049-.213-.073-.11-.037-.223-.075-.325-.113-.067-.025-.125-.051-.188-.077-.096-.038-.195-.076-.282-.115-.06-.027-.11-.054-.166-.08-.08-.039-.162-.077-.233-.116-.052-.028-.094-.055-.142-.084-.063-.038-.13-.075-.185-.113-.043-.029-.075-.058-.113-.086-.048-.037-.098-.073-.139-.11-.032-.029-.054-.057-.08-.087-.033-.035-.069-.07-.093-.104-.02-.03-.031-.058-.046-.086-.018-.035-.039-.068-.049-.102l-.015-.113c.076-.977 4.074-2.736 9.748-2.736zm12.182 12.124c-.118-.628-.84-1.291-2.31-2.128l.963-7.16a.531.531 0 0 0 .005-.073C22.16 1.581 16.447 0 11.32 0 6.194 0 .482 1.581.482 3.851a.58.58 0 0 0 .005.072L2.819 21.25c.071 2.002 5.236 2.75 8.5 2.75 1.805 0 3.615-.188 5.098-.531.598-.138 1.133-.3 1.592-.48 1.18-.467 1.789-1.053 1.813-1.739l.945-7.018c.557.131 1.016.197 1.389.197.54 0 .902-.137 1.134-.413a.956.956 0 0 0 .21-.804Z"/></svg></a><a href="https://www.cloudflare.com/developer-platform/r2/" rel="noopener" aria-label="Cloudflare R2" title="Cloudflare R2"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M16.5088 16.8447c.1475-.5068.0908-.9707-.1553-1.3154-.2246-.3164-.6045-.499-1.0615-.5205l-8.6592-.1123a.1559.1559 0 0 1-.1333-.0713c-.0283-.042-.0351-.0986-.021-.1553.0278-.084.1123-.1484.2036-.1562l8.7359-.1123c1.0351-.0489 2.1601-.8868 2.5537-1.9136l.499-1.3013c.0215-.0561.0293-.1128.0147-.168-.5625-2.5463-2.835-4.4453-5.5499-4.4453-2.5039 0-4.6284 1.6177-5.3876 3.8614-.4927-.3658-1.1187-.5625-1.794-.499-1.2026.119-2.1665 1.083-2.2861 2.2856-.0283.31-.0069.6128.0635.894C1.5683 13.171 0 14.7754 0 16.752c0 .1748.0142.3515.0352.5273.0141.083.0844.1475.1689.1475h15.9814c.0909 0 .1758-.0645.2032-.1553l.12-.4268zm2.7568-5.5634c-.0771 0-.1611 0-.2383.0112-.0566 0-.1054.0415-.127.0976l-.3378 1.1744c-.1475.5068-.0918.9707.1543 1.3164.2256.3164.6055.498 1.0625.5195l1.8437.1133c.0557 0 .1055.0263.1329.0703.0283.043.0351.1074.0214.1562-.0283.084-.1132.1485-.204.1553l-1.921.1123c-1.041.0488-2.1582.8867-2.5527 1.914l-.1406.3585c-.0283.0713.0215.1416.0986.1416h6.5977c.0771 0 .1474-.0489.169-.126.1122-.4082.1757-.837.1757-1.2803 0-2.6025-2.125-4.727-4.7344-4.727"/></svg></a><a href="https://min.io" rel="noopener" aria-label="MinIO" title="MinIO"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M13.2072.006c-.6216-.0478-1.2.1943-1.6211.582a2.15 2.15 0 0 0-.0938 3.0352l3.4082 3.5507a3.042 3.042 0 0 1-.664 4.6875l-.463.2383V7.2853a15.4198 15.4198 0 0 0-8.0174 10.4862v.0176l6.5487-3.3281v7.621L13.7794 24V13.6817l.8965-.4629a4.4432 4.4432 0 0 0 1.2207-7.0292l-3.371-3.5254a.7489.7489 0 0 1 .037-1.0547.7522.7522 0 0 1 1.0567.0371l.4668.4863-.006.0059 4.0704 4.2441a.0566.0566 0 0 0 .082 0 .06.06 0 0 0 0-.0703l-3.1406-5.1425-.1484.1425.1484-.1445C14.4945.3926 13.8287.0538 13.2072.006Zm-.9024 9.8652v2.9941l-4.1523 2.1484a13.9787 13.9787 0 0 1 2.7676-3.9277 14.1784 14.1784 0 0 1 1.3847-1.2148z"/></svg></a><a href="https://prometheus.io" rel="noopener" aria-label="Prometheus" title="Prometheus"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 0C5.373 0 0 5.372 0 12c0 6.627 5.373 12 12 12s12-5.373 12-12c0-6.628-5.373-12-12-12zm0 22.46c-1.885 0-3.414-1.26-3.414-2.814h6.828c0 1.553-1.528 2.813-3.414 2.813zm5.64-3.745H6.36v-2.046h11.28v2.046zm-.04-3.098H6.391c-.037-.043-.075-.086-.111-.13-1.155-1.401-1.427-2.133-1.69-2.879-.005-.025 1.4.287 2.395.511 0 0 .513.119 1.262.255-.72-.843-1.147-1.915-1.147-3.01 0-2.406 1.845-4.508 1.18-6.207.648.053 1.34 1.367 1.387 3.422.689-.951.977-2.69.977-3.755 0-1.103.727-2.385 1.454-2.429-.648 1.069.168 1.984.894 4.256.272.854.237 2.29.447 3.201.07-1.892.395-4.652 1.595-5.605-.529 1.2.079 2.702.494 3.424.671 1.164 1.078 2.047 1.078 3.716a4.642 4.642 0 01-1.11 2.996c.792-.149 1.34-.283 1.34-.283l2.573-.502s-.374 1.538-1.81 3.019z"/></svg></a><a href="https://opentelemetry.io" rel="noopener" aria-label="OpenTelemetry" title="OpenTelemetry"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12.6974 13.1173c-1.0224 1.0224-1.0224 2.68 0 3.7024 1.0224 1.0224 2.68 1.0224 3.7024 0 1.0224-1.0223 1.0224-2.68 0-3.7024-1.0223-1.0223-2.68-1.0223-3.7024 0zm2.7677 2.7701c-.5063.5063-1.3267.5063-1.833 0s-.5063-1.3266 0-1.833c.5063-.5062 1.3267-.5062 1.833 0 .5063.504.5063 1.3267 0 1.833zM16.356.2355l-1.6041 1.6042c-.314.314-.314.83 0 1.144L21.015 9.247c.314.314.83.314 1.144 0l1.6042-1.6041c.314-.314.314-.83 0-1.144L17.4976.2354c-.314-.314-.8276-.314-1.1416 0zM5.1173 20.734c.2848-.2848.2848-.7497 0-1.0345l-.8155-.8155c-.2848-.2848-.7497-.2848-1.0345 0l-1.6845 1.6845-.0024.0024-.4625-.4625c-.2556-.2556-.6718-.2556-.925 0-.2556.2556-.2556.6718 0 .925l2.775 2.775c.2556.2556.6718.2556.925 0 .2532-.2556.2556-.6718 0-.925l-.4625-.4625.0024-.0024zm8.4856-15.893-3.5637 3.5637c-.3164.3164-.3164.8374 0 1.1538l2.2006 2.2005c1.5554-1.1197 3.7365-.981 5.1361.4187l1.7819-1.7818c.3164-.3165.3164-.8374 0-1.1538l-4.401-4.401c-.3165-.319-.8374-.319-1.1539 0zm-2.2881 7.8455-1.2999-1.2999c-.3043-.3043-.8033-.3043-1.1076 0l-4.5836 4.586c-.3042.3043-.3042.8033 0 1.1076l2.5973 2.5973c.3043.3043.8033.3043 1.1076 0l2.9478-2.9527c-.6231-1.2877-.5112-2.8431.3384-4.0383z"/></svg></a><a href="https://www.docker.com" rel="noopener" aria-label="Docker" title="Docker"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.184-.186h-2.12a.186.186 0 00-.186.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288Z"/></svg></a><a href="https://fly.io" rel="noopener" aria-label="Fly.io" title="Fly.io"><svg class="brand" width="40" height="40" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M11.987 0c-2.45-.01-5.002.925-6.541 2.897-1.17 1.502-1.664 3.474-1.49 5.356.29 2.112 1.476 3.96 2.676 5.672a41.5 41.5 0 0 0 4.216 4.831c-1.063.832-1.943 2.286-1.357 3.644.821 2.32 4.665 2.05 5.122-.372.39-1.288-.694-2.533-1.428-3.309 2.388-2.431 4.706-5.036 6.17-8.145.595-1.32.902-2.802.614-4.24-.28-2.341-1.823-4.473-3.967-5.46C14.76.266 13.364.016 11.987 0m-.236 1.577v15.534C9.881 13.483 7.724 9.266 8.73 5.069c.35-1.539 1.253-3.309 3.02-3.492m1.996.04c1.534.357 3.031 1.096 3.906 2.48 1.3 1.93 1.318 4.55.1 6.521-1.268 2.395-3.06 4.463-4.916 6.415 1.472-2.974 3.074-6.106 3.182-9.5-.043-2.08-.438-4.612-2.272-5.916M11.97 20.103c.848.342 1.597 1.983.153 2.173-.664.15-1.367-.599-.995-1.222.213-.355.488-.73.842-.95"/></svg></a></div>
+</div></section>
+<section class="section" id="principles" aria-labelledby="principles-h"><div class="shell"><h2 id="principles-h" class="sr">Principles</h2>
+<div class="principles"><div><h3>Zero runtime dependencies</h3><p>Neither <code>package.json</code> has a <code>dependencies</code> field. The OTLP exporter and the JSON Schema validator are written, not installed.</p></div><div><h3>The write path never waits</h3><p>A write checks a lease its own node holds, in memory. Raft and S3 shipping run beside the commit, never in front of it.</p></div><div><h3>Refuse rather than guess</h3><p>Promotion answers <code>BEHIND</code> or <code>LEASE_HELD</code>. An unimplemented schema keyword fails registration. An integer past 2^53 is never rounded.</p></div></div>
+</div></section>
+<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
+<div>
+<h2 id="showcase-h">One engine, four ways in</h2>
+<p class="explain">The same database answers a tagged template over HTTP, a synchronous call in your own process, and a raw <code>bun:ffi</code> driver. The bus runs its handler inside the SQLite transaction that acks it.</p>
+<a class="control control--solid round" href="/reference"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M8 7h7"/></svg>Visit Documentation</a>
+<p class="supports">Supports</p>
+<div class="avatars"><span title="bun"><svg class="brand" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 22.596c6.628 0 12-4.338 12-9.688 0-3.318-2.057-6.248-5.219-7.986-1.286-.715-2.297-1.357-3.139-1.89C14.058 2.025 13.08 1.404 12 1.404c-1.097 0-2.334.785-3.966 1.821a49.92 49.92 0 0 1-2.816 1.697C2.057 6.66 0 9.59 0 12.908c0 5.35 5.372 9.687 12 9.687v.001ZM10.599 4.715c.334-.759.503-1.58.498-2.409 0-.145.202-.187.23-.029.658 2.783-.902 4.162-2.057 4.624-.124.048-.199-.121-.103-.209a5.763 5.763 0 0 0 1.432-1.977Zm2.058-.102a5.82 5.82 0 0 0-.782-2.306v-.016c-.069-.123.086-.263.185-.172 1.962 2.111 1.307 4.067.556 5.051-.082.103-.23-.003-.189-.126a5.85 5.85 0 0 0 .23-2.431Zm1.776-.561a5.727 5.727 0 0 0-1.612-1.806v-.014c-.112-.085-.024-.274.114-.218 2.595 1.087 2.774 3.18 2.459 4.407a.116.116 0 0 1-.049.071.11.11 0 0 1-.153-.026.122.122 0 0 1-.022-.083 5.891 5.891 0 0 0-.737-2.331Zm-5.087.561c-.617.546-1.282.76-2.063 1-.117 0-.195-.078-.156-.181 1.752-.909 2.376-1.649 2.999-2.778 0 0 .155-.118.188.085 0 .304-.349 1.329-.968 1.874Zm4.945 11.237a2.957 2.957 0 0 1-.937 1.553c-.346.346-.8.565-1.286.62a2.178 2.178 0 0 1-1.327-.62 2.955 2.955 0 0 1-.925-1.553.244.244 0 0 1 .064-.198.234.234 0 0 1 .193-.069h3.965a.226.226 0 0 1 .19.07c.05.053.073.125.063.197Zm-5.458-2.176a1.862 1.862 0 0 1-2.384-.245 1.98 1.98 0 0 1-.233-2.447c.207-.319.503-.566.848-.713a1.84 1.84 0 0 1 1.092-.11c.366.075.703.261.967.531a1.98 1.98 0 0 1 .408 2.114 1.931 1.931 0 0 1-.698.869v.001Zm8.495.005a1.86 1.86 0 0 1-2.381-.253 1.964 1.964 0 0 1-.547-1.366c0-.384.11-.76.32-1.079.207-.319.503-.567.849-.713a1.844 1.844 0 0 1 1.093-.108c.367.076.704.262.968.534a1.98 1.98 0 0 1 .4 2.117 1.932 1.932 0 0 1-.702.868Z"/></svg></span><span title="drizzle"><svg class="brand" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M5.353 11.823a1.036 1.036 0 0 0-.395-1.422 1.063 1.063 0 0 0-1.437.399L.138 16.702a1.035 1.035 0 0 0 .395 1.422 1.063 1.063 0 0 0 1.437-.398l3.383-5.903Zm11.216 0a1.036 1.036 0 0 0-.394-1.422 1.064 1.064 0 0 0-1.438.399l-3.382 5.902a1.036 1.036 0 0 0 .394 1.422c.506.283 1.15.104 1.438-.398l3.382-5.903Zm7.293-4.525a1.036 1.036 0 0 0-.395-1.422 1.062 1.062 0 0 0-1.437.399l-3.383 5.902a1.036 1.036 0 0 0 .395 1.422 1.063 1.063 0 0 0 1.437-.399l3.383-5.902Zm-11.219 0a1.035 1.035 0 0 0-.394-1.422 1.064 1.064 0 0 0-1.438.398l-3.382 5.903a1.036 1.036 0 0 0 .394 1.422c.506.282 1.15.104 1.438-.399l3.382-5.902Z"/></svg></span><span title="turso"><svg class="brand" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="m23.31.803-.563-.42-1.11 1.189-.891-1.286-.512.235.704 1.798-.326.35L18.082 0l-.574.284 2.25 4.836-2.108.741h-.05l-1.143-1.359-1.144 1.36H8.687l-1.144-1.36-1.146 1.363H6.36l-2.12-.745L6.491.284 5.919 0l-2.53 2.668-.327-.349.705-1.798-.512-.236-.89 1.287L1.253.382.69.804 2.42 3.69l-.89.939.311 2.375 2.061.787L3.9 8.817H1.947v.444l.755 1.078 1.197.433v6.971l3.057 4.55L7.657 24l1.101-1.606L9.9 24l.999-1.606L12 24l1.102-1.606L14.1 24l1.141-1.606L16.343 24l.701-1.706 3.058-4.55v-6.972l1.196-.433.756-1.078v-.444h-1.952l.003-1.03 2.054-.784.311-2.375-.89-.939zm-8.93 18.718H8.033l.793-1.615.794 1.615.793-1.083.793 1.083.794-1.083.793 1.083.794-1.083.793 1.083.793-1.615.794 1.615zm3.886-7.39-3.3 1.084-.143 3.061-2.827.627-2.826-.627-.142-3.06-3.3-1.085v-1.635l4.266 1.21-.052 4.126h4.109l-.052-4.127 4.266-1.209z"/></svg></span><span title="graphql"><svg class="brand" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12.002 0a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm8.54 4.931a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm0 9.862a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm-8.54 4.931a2.138 2.138 0 1 0 0 4.276 2.138 2.138 0 1 0 0-4.276zm-8.542-4.93a2.138 2.138 0 1 0 0 4.276 2.138 2.138 0 1 0 0-4.277zm0-9.863a2.138 2.138 0 1 0 0 4.277 2.138 2.138 0 1 0 0-4.277zm8.542-3.378L2.953 6.777v10.448l9.049 5.224 9.047-5.224V6.777zm0 1.601 7.66 13.27H4.34zm-1.387.371L3.97 15.037V7.363zm2.774 0 6.646 3.838v7.674zM5.355 17.44h13.293l-6.646 3.836z"/></svg></span><span title="openapi"><svg class="brand" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M21.039 0a2.959 2.959 0 00-2.65 4.274l-6.447 6.447a2.96 2.96 0 101.335 1.336l6.447-6.447A2.959 2.959 0 1021.04 0zM10.628 2.745c-.072 0-.143.003-.214.004-.072.002-.143.002-.215.005-.447.018-.893.064-1.335.138l-.03.005-.185.033-.105.02a7.718 7.718 0 00-.289.062l-.032.008a10.69 10.69 0 00-2.55.95l-.155.089c-.063.034-.125.07-.187.105-.046.027-.093.051-.14.079H5.19l-.01.005-.036.02v.002l.111.184 3.15 5.23a4.168 4.168 0 01.38-.202 4.294 4.294 0 011.628-.413c.071-.004.143-.008.214-.008zm.428.01v6.333c.325.034.647.103.96.209l4.66-4.66c-.173-.12-.348-.237-.528-.347l-.026-.015c-.056-.035-.112-.067-.168-.1l-.098-.056-.099-.055a12.735 12.735 0 00-.171-.092l-.027-.014a10.628 10.628 0 00-1.425-.617c-.69-.241-1.403-.41-2.128-.505l-.089-.012-.09-.01a6.56 6.56 0 00-.17-.019l-.049-.004-.204-.017a6.44 6.44 0 00-.255-.015c-.031-.003-.062-.003-.093-.004zM4.782 4.498a9.92 9.92 0 00-1.36 1.062l4.461 4.461.018.018c.049-.04.098-.078.149-.116l-.011-.018zm-1.67 1.36c-.05.05-.098.103-.147.154l-.149.155c-.33.357-.63.73-.902 1.118l-.039.056a10.588 10.588 0 00-.216.326 10.6 10.6 0 00-1.65 5.276l-.006.215-.003.214h6.317c0-.072.007-.143.01-.214.005-.072.006-.144.013-.215.081-.822.399-1.625.952-2.3.045-.055.096-.106.144-.16.048-.052.093-.107.144-.158zm16.255 1.464l-4.663 4.663c.106.312.175.634.21.959h6.332l-.004-.094a11.579 11.579 0 00-.032-.456l-.005-.052a13.044 13.044 0 00-.026-.241v-.009l-.033-.24v-.009a10.618 10.618 0 00-.327-1.493l-.003-.01a15.839 15.839 0 00-.07-.228l-.01-.03a14.111 14.111 0 00-.069-.204l-.02-.055a5.65 5.65 0 00-.153-.405 7.84 7.84 0 00-.093-.227 16.67 16.67 0 00-.063-.144l-.037-.081a13.776 13.776 0 00-.08-.171l-.024-.052-.096-.194-.014-.027a11.2 11.2 0 00-.112-.212l-.004-.008a10.615 10.615 0 00-.604-.98zm-4.43 6.05c0 .071-.006.142-.01.214-.003.072-.005.143-.012.214a4.29 4.29 0 01-.952 2.301c-.045.055-.096.107-.144.16-.048.053-.093.108-.144.159l4.467 4.467c.051-.051.099-.104.148-.155.05-.052.1-.103.148-.155.331-.358.633-.733.905-1.122l.032-.046.098-.144.085-.13.04-.063a10.597 10.597 0 001.647-5.272c.003-.071.004-.143.006-.214.001-.071.004-.143.004-.214zM.01 13.8l.004.093.01.179.005.076.017.206.005.046c.007.076.015.153.024.228l.003.022a9.605 9.605 0 00.033.248c.072.505.182 1.005.327 1.497l.002.006c.022.077.047.154.071.23l.004.014.005.014a15.737 15.737 0 00.153.439l.03.08.059.148a7.702 7.702 0 00.093.228l.062.14.038.084.078.169.027.054a10.677 10.677 0 00.225.441l.025.043 5.408-3.258.02-.012a4.314 4.314 0 01-.395-1.414h-.025zm.505 2.846l-.206.058.002.005zm6.425-1.052l-5.415 3.262c.083.139.17.273.259.406l.008.014.004.005.008.014h.001c.007.012.014.022.022.032l.001.002v.001a10.634 10.634 0 00.298.417l.006.008a9.963 9.963 0 00.29.368l.033.04c.043.052.086.103.13.153l.057.065.112.127.064.069.029.031.083.09.035.035c.049.051.098.103.149.153L7.58 16.42a3.86 3.86 0 01-.285-.321 4.422 4.422 0 01-.356-.505zm6.416 1.111c-.05.04-.1.079-.15.116l.011.018 3.257 5.407c.151-.099.3-.2.446-.307.315-.232.62-.484.914-.756l-4.46-4.46zm-5.457.003l-.015.015-4.46 4.46a8.966 8.966 0 00.195.176c.022.02.043.04.065.058l.152.13a10.622 10.622 0 00.215.174l.023.017.191.148.008.005c.268.2.547.389.834.564l.03.018.164.097.101.057a5.458 5.458 0 00.27.148c.008.004.016.01.025.013.162.085.327.164.493.24l.158-.385 2.243-5.448.009-.02a4.328 4.328 0 01-.701-.467zm4.951.353c-.061.037-.124.07-.187.104a4.318 4.318 0 01-3.271.336c-.069-.02-.135-.047-.203-.071-.067-.024-.136-.044-.202-.072l-2.242 5.444-.088.213-.075.183v.001l.017.007a.137.137 0 00.019.007l.005.003c.052.021.106.04.159.06.067.027.133.053.2.077l.102.04c.702.247 1.43.42 2.168.518l.087.012.09.01.172.019a7.173 7.173 0 00.252.022c.023.001.048.001.071.003l.184.011.112.005a7.06 7.06 0 00.358.007h.05a10.667 10.667 0 001.793-.15l.185-.034.105-.02.109-.023.18-.04.032-.008a10.684 10.684 0 002.55-.95c.052-.028.104-.06.156-.089.063-.034.125-.07.187-.105.043-.024.087-.047.13-.073h.001l.002-.002.002-.001.002-.001.007-.004.042-.025-.11-.183-.11-.184zm3.262 5.414l-.042.025.042-.024zm-.05.029zm-.005.004h-.002z"/></svg></span><em>+ more</em></div>
+</div>
+<div class="tabs"><input type="radio" name="tab" id="tab-0" checked><input type="radio" name="tab" id="tab-1"><input type="radio" name="tab" id="tab-2"><input type="radio" name="tab" id="tab-3">
+<div class="tabrow" role="presentation"><label for="tab-0">Client</label><label for="tab-1">Embedded</label><label for="tab-2">Driver</label><label for="tab-3">Transactional ack</label></div>
+<div class="tabpanel p-0"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">client.ts</span><button type="button" class="copy" data-copy="import { createClient } from &quot;bql.sh/client&quot;
+
+const client = createClient({ url: &quot;http://localhost:4321&quot;, token })   // token, or the admin key
+const db = client.db(&quot;acme&quot;)
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${&quot;write it&quot;})`.run()
+written.lastInsertRowid // 1          · also .affectedRows, .txid, .command, .count
+
+const todos = await db.sql`select * from todos where done = ${0}`  // [{ id: 1, title: &quot;write it&quot;, done: 0 }]
+const one = await db.sql`select title from todos where id = ${1}`.first()
+const rows = await db.sql`select id, title from todos`.values()    // [[1, &quot;write it&quot;]]
+
+await db.batch([db.stmt`insert into todos(title) values ('a')`, db.stmt`update todos set done = 1`])
+await db.transaction(async (tx) =&gt; {                               // over the socket, else a baton
+  await tx.sql`insert into todos(title) values (${&quot;in a transaction&quot;})`
+})
+
+const live = db.live`select * from todos where done = 0`.key(&quot;id&quot;)
+live.on(&quot;rows&quot;, (event) =&gt; render(event.rows))                     // full result, then diffs
+live.on(&quot;diff&quot;, (event) =&gt; patch(event.added, event.removed, event.updated))
+
+for await (const event of db.changes({ tables: [&quot;todos&quot;] })) {
+  console.log(event.txid, event.changes)                           // reconnects and resumes on its own
+}" aria-label="Copy client.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/client&quot;</span>
+
+<span class="t-k">const</span> client = createClient({ url: <span class="t-s">&quot;http://localhost:4321&quot;</span>, token })   <span class="t-c">// token, or the admin key</span>
+<span class="t-k">const</span> db = client.db(<span class="t-s">&quot;acme&quot;</span>)
+
+<span class="t-k">await</span> db.sql<span class="t-s">`create table todos(id integer primary key, title text, done integer default 0)`</span>.run()
+<span class="t-k">const</span> written = <span class="t-k">await</span> db.sql<span class="t-s">`insert into todos(title) values (${&quot;write it&quot;})`</span>.run()
+written.lastInsertRowid <span class="t-c">// 1          · also .affectedRows, .txid, .command, .count</span>
+
+<span class="t-k">const</span> todos = <span class="t-k">await</span> db.sql<span class="t-s">`select * from todos where done = ${0}`</span>  <span class="t-c">// [{ id: 1, title: &quot;write it&quot;, done: 0 }]</span>
+<span class="t-k">const</span> one = <span class="t-k">await</span> db.sql<span class="t-s">`select title from todos where id = ${1}`</span>.first()
+<span class="t-k">const</span> rows = <span class="t-k">await</span> db.sql<span class="t-s">`select id, title from todos`</span>.values()    <span class="t-c">// [[1, &quot;write it&quot;]]</span>
+
+<span class="t-k">await</span> db.batch([db.stmt<span class="t-s">`insert into todos(title) values ('a')`</span>, db.stmt<span class="t-s">`update todos set done = 1`</span>])
+<span class="t-k">await</span> db.transaction(<span class="t-k">async</span> (tx) =&gt; {                               <span class="t-c">// over the socket, else a baton</span>
+  <span class="t-k">await</span> tx.sql<span class="t-s">`insert into todos(title) values (${&quot;in a transaction&quot;})`</span>
+})
+
+<span class="t-k">const</span> live = db.live<span class="t-s">`select * from todos where done = 0`</span>.key(<span class="t-s">&quot;id&quot;</span>)
+live.on(<span class="t-s">&quot;rows&quot;</span>, (event) =&gt; render(event.rows))                     <span class="t-c">// full result, then diffs</span>
+live.on(<span class="t-s">&quot;diff&quot;</span>, (event) =&gt; patch(event.added, event.removed, event.updated))
+
+<span class="t-k">for</span> <span class="t-k">await</span> (<span class="t-k">const</span> event <span class="t-k">of</span> db.changes({ tables: [<span class="t-s">&quot;todos&quot;</span>] })) {
+  console.log(event.txid, event.changes)                           <span class="t-c">// reconnects and resumes on its own</span>
+}</code></pre></div></div><div class="tabpanel p-1"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">embedded.ts</span><button type="button" class="copy" data-copy="import { Bql } from &quot;bql.sh&quot;
+
+const bq = await Bql.open({ dir: &quot;./data&quot; })
+const db = await bq.create(&quot;acme&quot;)                   // or bq.db(&quot;acme&quot;) for one that exists
+
+await db.sql`create table todos(id integer primary key, title text)`.run()
+db.sync.sql`insert into todos(title) values (${&quot;fast path&quot;})`.run()  // no promise at all
+const rows = db.sync.sql`select * from todos`.all()
+
+bq.on(&quot;commit&quot;, ({ db, txid }) =&gt; console.log(db, txid))
+for await (const event of db.changes()) console.log(event)           // the bus, not HTTP
+
+await bq.serve({ port: 4321 })                       // the same engine, now over HTTP/WS/SSE" aria-label="Copy embedded.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-k">import</span> { Bql } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh&quot;</span>
+
+<span class="t-k">const</span> bq = <span class="t-k">await</span> Bql.open({ dir: <span class="t-s">&quot;./data&quot;</span> })
+<span class="t-k">const</span> db = <span class="t-k">await</span> bq.create(<span class="t-s">&quot;acme&quot;</span>)                   <span class="t-c">// or bq.db(&quot;acme&quot;) for one that exists</span>
+
+<span class="t-k">await</span> db.sql<span class="t-s">`create table todos(id integer primary key, title text)`</span>.run()
+db.sync.sql<span class="t-s">`insert into todos(title) values (${&quot;fast path&quot;})`</span>.run()  <span class="t-c">// no promise at all</span>
+<span class="t-k">const</span> rows = db.sync.sql<span class="t-s">`select * from todos`</span>.all()
+
+bq.on(<span class="t-s">&quot;commit&quot;</span>, ({ db, txid }) =&gt; console.log(db, txid))
+<span class="t-k">for</span> <span class="t-k">await</span> (<span class="t-k">const</span> event <span class="t-k">of</span> db.changes()) console.log(event)           <span class="t-c">// the bus, not HTTP</span>
+
+<span class="t-k">await</span> bq.serve({ port: <span class="t-n">4321</span> })                       <span class="t-c">// the same engine, now over HTTP/WS/SSE</span></code></pre></div></div><div class="tabpanel p-2"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">driver.ts</span><button type="button" class="copy" data-copy="import { Database } from &quot;bql.sh/sqlite&quot;
+
+const db = Database.open(&quot;app.db&quot;)
+db.exec(&quot;create table t(id integer primary key, v text)&quot;)
+db.prepare(&quot;insert into t(v) values (?)&quot;).run(&quot;hello&quot;)
+db.prepare(&quot;select * from t where id = ?&quot;).get(1)   // { id: 1, v: &quot;hello&quot; }
+db.onUpdate((op, dbName, table, rowid) =&gt; console.log(op, table, rowid))
+db.close()" aria-label="Copy driver.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-k">import</span> { Database } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/sqlite&quot;</span>
+
+<span class="t-k">const</span> db = Database.open(<span class="t-s">&quot;app.db&quot;</span>)
+db.exec(<span class="t-s">&quot;create table t(id integer primary key, v text)&quot;</span>)
+db.prepare(<span class="t-s">&quot;insert into t(v) values (?)&quot;</span>).run(<span class="t-s">&quot;hello&quot;</span>)
+db.prepare(<span class="t-s">&quot;select * from t where id = ?&quot;</span>).get(<span class="t-n">1</span>)   <span class="t-c">// { id: 1, v: &quot;hello&quot; }</span>
+db.onUpdate((op, dbName, table, rowid) =&gt; console.log(op, table, rowid))
+db.close()</code></pre></div></div><div class="tabpanel p-3"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bus.ts</span><button type="button" class="copy" data-copy="import { createBus } from &quot;bql.sh/bus&quot;;
+
+const bus = createBus({ path: &quot;./data/bus.db&quot;, blobDirectory: &quot;./data/blobs&quot; });
+bus.store.raw().run(&quot;CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)&quot;);
+
+bus.consumeTransactional({
+  subscription: &quot;work&quot;,
+  // Synchronous, and that is load-bearing: an `await` in here would let another
+  // statement interleave into the transaction this exists to provide.
+  handle: (envelope, db) =&gt; {
+    db.run(&quot;INSERT INTO processed (seq) VALUES (?)&quot;, [envelope.message.seq]);
+  },
+});" aria-label="Copy bus.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-k">import</span> { createBus } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus&quot;</span>;
+
+<span class="t-k">const</span> bus = createBus({ path: <span class="t-s">&quot;./data/bus.db&quot;</span>, blobDirectory: <span class="t-s">&quot;./data/blobs&quot;</span> });
+bus.store.raw().run(<span class="t-s">&quot;CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)&quot;</span>);
+
+bus.consumeTransactional({
+  subscription: <span class="t-s">&quot;work&quot;</span>,
+  <span class="t-c">// Synchronous, and that is load-bearing: an `await` in here would let another</span>
+  <span class="t-c">// statement interleave into the transaction this exists to provide.</span>
+  handle: (envelope, db) =&gt; {
+    db.run(<span class="t-s">&quot;INSERT INTO processed (seq) VALUES (?)&quot;</span>, [envelope.message.seq]);
+  },
+});</code></pre></div></div>
+<div class="pager" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+</div>
+</div></section>
+<section class="section" id="realtime" aria-labelledby="realtime-h"><div class="shell">
+<h2 id="realtime-h">Realtime from SQLite's own hooks</h2>
+<p class="explain">Read <code>/changes</code> as SSE, or subscribe with <code>db.live</code> and <code>.key(&quot;id&quot;)</code> for diffs. Every commit arrives as one <code>change</code> event, driven by the <code>preupdate</code>/<code>update</code> hooks rather than triggers.</p>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ curl -N &quot;localhost:4321/v1/db/acme/changes?include=row&amp;token=$TOKEN&quot;</span><span class="chip">captured output</span></div><pre><code>TOKEN=$(curl -sX POST localhost:<span class="t-n">4321</span>/v1/tokens -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> \
+        -H <span class="t-s">'content-type: application/json'</span> \
+        -d <span class="t-s">'{&quot;dbs&quot;:[&quot;acme&quot;],&quot;scope&quot;:&quot;ro&quot;,&quot;ttl&quot;:86400}'</span> | jq -r .token)
+
+curl -N <span class="t-s">&quot;localhost:4321/v1/db/acme/changes?include=row&amp;token=$TOKEN&quot;</span>
+<span class="t-c"># retry: 1000</span>
+<span class="t-c"># : open</span>
+<span class="t-c">#</span>
+<span class="t-c"># id: 3</span>
+<span class="t-c"># event: change</span>
+<span class="t-c"># data: {&quot;txid&quot;:3,&quot;changes&quot;:[{&quot;table&quot;:&quot;todos&quot;,&quot;op&quot;:&quot;insert&quot;,&quot;rowid&quot;:2,&quot;pk&quot;:{&quot;id&quot;:2},&quot;row&quot;:{…}}]}</span></code></pre></div></div>
+</div></section>
+<section class="section band" id="txid" aria-labelledby="txid-h"><div class="shell">
+<h2 id="txid-h">Every write answers with a txid</h2>
+<p class="explain">Each response names the transaction it landed in. The client's default <code>consistency: &quot;ryw&quot;</code> sends the highest one it has seen as <code>BQL-Min-Txid</code>, so a read never goes backwards.</p>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ curl -sX POST localhost:4321/v1/db -H &quot;authorization: Bearer $KEY&quot; \</span><span class="chip">captured output</span></div><pre><code>KEY=&lt;the admin key it printed&gt;
+curl -sX POST localhost:<span class="t-n">4321</span>/v1/db -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> \
+     -H <span class="t-s">'content-type: application/json'</span> -d <span class="t-s">'{&quot;name&quot;:&quot;acme&quot;}'</span>
+
+curl -sX POST localhost:<span class="t-n">4321</span>/v1/db/acme/query -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> \
+     -H <span class="t-s">'content-type: application/json'</span> \
+     -d <span class="t-s">'{&quot;sql&quot;:&quot;create table todos(id integer primary key, title text)&quot;}'</span>
+<span class="t-c"># {&quot;columns&quot;:[],&quot;types&quot;:[],&quot;rows&quot;:[],&quot;rowsAffected&quot;:0,&quot;lastInsertRowid&quot;:null,&quot;txid&quot;:1,...}</span>
+
+curl -sX POST localhost:<span class="t-n">4321</span>/v1/db/acme/query -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> \
+     -H <span class="t-s">'content-type: application/json'</span> \
+     -d <span class="t-s">'{&quot;sql&quot;:&quot;insert into todos(title) values (?)&quot;,&quot;args&quot;:[&quot;write it&quot;]}'</span>
+<span class="t-c"># {&quot;columns&quot;:[],&quot;types&quot;:[],&quot;rows&quot;:[],&quot;rowsAffected&quot;:1,&quot;lastInsertRowid&quot;:1,&quot;txid&quot;:2,...}</span></code></pre></div></div>
+</div></section>
+<section class="section" id="replicas" aria-labelledby="replicas-h"><div class="shell">
+<h2 id="replicas-h">Replicas that forward writes</h2>
+<p class="explain">Start a second node with <code>--replica-of</code> and a shared <code>--cluster-secret</code>. It serves reads locally and forwards writes to the primary, answering with the primary's txid already applied.</p>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ curl -sD- -H &quot;authorization: Bearer $KEY&quot; -H 'content-type: application/json' \</span><span class="chip">captured output</span></div><pre><code>curl -sD- -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> -H <span class="t-s">'content-type: application/json'</span> \
+     -d <span class="t-s">'{&quot;sql&quot;:&quot;insert into notes (body) values (@1)&quot;,&quot;args&quot;:[&quot;through the replica&quot;]}'</span> \
+     http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>/v1/db/acme/query
+<span class="t-c"># BQL-Role: replica</span>
+<span class="t-c"># BQL-Primary: ws://127.0.0.1:4501/v1/replication</span>
+<span class="t-c"># BQL-Txid: 2</span>
+
+curl -s -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>/v1/db/acme/replication
+<span class="t-c"># {&quot;role&quot;:&quot;replica&quot;,&quot;connected&quot;:true,&quot;applied&quot;:2,&quot;lagTxid&quot;:0,&quot;bootstrapping&quot;:false,...}</span></code></pre></div></div>
+</div></section>
+<section class="section band" id="promotion" aria-labelledby="promotion-h"><div class="shell">
+<h2 id="promotion-h">Promotion that refuses to guess</h2>
+<p class="explain"><code>bql promote</code> moves one database to a new primary and fences the old one by epoch. <code>--force</code> overrides exactly <code>STREAM_LIVE</code>, <code>LEASE_HELD</code> and <code>BEHIND</code>, and nothing else.</p>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql promote acme --url http://127.0.0.1:4502</span><span class="chip">captured output</span></div><pre><code>bql promote acme --url http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>        <span class="t-c"># addresses the candidate, not the cluster</span>
+<span class="t-c"># acme promoted on http://127.0.0.1:4502: epoch 4, txid 918</span>
+<span class="t-c"># n2 takes acme at epoch 4, fencing n1</span></code></pre></div></div>
+</div></section>
+<section class="section" id="backup" aria-labelledby="backup-h"><div class="shell">
+<h2 id="backup-h">Backed up to any bucket</h2>
+<p class="explain">Pass <code>--s3</code> and every database's log and snapshots ship continuously to S3, R2, Tigris or MinIO. A slow bucket makes the node report <code>behind</code>; it never slows a commit.</p>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql backup status acme</span><span class="chip">captured output</span></div><pre><code>export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…
+bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
+
+bql backup status acme
+<span class="t-c"># acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)</span>
+
+bql restore acme --from s3://backups/prod --at <span class="t-n">2026</span>-<span class="t-n">09</span>-11T10:<span class="t-n">00</span>:00Z --into acme-recovered</code></pre></div></div>
+</div></section>
+<section class="section band" id="orms" aria-labelledby="orms-h"><div class="shell">
+<h2 id="orms-h">ORMs reach it unmodified</h2>
+<p class="explain">It speaks libsql's Hrana, so <code>@libsql/client</code> connects as is. <code>bql.sh/kysely</code> and <code>bql.sh/drizzle</code> map transactions and batches onto bql.sh's own routes.</p>
+<div class="demo"><div class="variants"><figure><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">libsql.ts</span></div><pre><code><span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;@libsql/client&quot;</span>
+
+<span class="t-c">// The trailing slash matters: the client resolves `v2/pipeline` relative to this URL.</span>
+<span class="t-k">const</span> primary = createClient({ url: <span class="t-s">&quot;http://127.0.0.1:4501/v1/db/acme/&quot;</span>, authToken: KEY })
+<span class="t-k">const</span> replica = createClient({ url: <span class="t-s">&quot;http://127.0.0.1:4502/v1/db/acme/&quot;</span>, authToken: KEY })
+
+<span class="t-k">await</span> primary.execute(<span class="t-s">&quot;insert into notes (body) values ('written by @libsql/client')&quot;</span>)
+<span class="t-k">await</span> replica.execute(<span class="t-s">&quot;select id, body from notes order by id&quot;</span>)  <span class="t-c">// already applied</span>
+<span class="t-k">await</span> replica.execute(<span class="t-s">&quot;insert into notes (body) values ('nope')&quot;</span>) <span class="t-c">// LibsqlError: NOT_PRIMARY</span></code></pre></div><figcaption>@libsql/client, Hrana over HTTP</figcaption></figure><figure><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">kysely.ts</span></div><pre><code><span class="t-k">import</span> { Kysely, <span class="t-k">type</span> Generated } <span class="t-k">from</span> <span class="t-s">&quot;kysely&quot;</span>
+<span class="t-k">import</span> { BqlDialect } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/kysely&quot;</span>
+
+<span class="t-k">interface</span> Database {
+  todos: { id: Generated&lt;number&gt;; title: string; done: Generated&lt;number&gt; }
+}
+
+<span class="t-k">const</span> db = <span class="t-k">new</span> Kysely&lt;Database&gt;({
+  dialect: <span class="t-k">new</span> BqlDialect({ url: <span class="t-s">&quot;http://localhost:4321&quot;</span>, token, db: <span class="t-s">&quot;acme&quot;</span> }),
+})
+
+<span class="t-k">const</span> written = <span class="t-k">await</span> db
+  .insertInto(<span class="t-s">&quot;todos&quot;</span>)
+  .values({ title: <span class="t-s">&quot;write it&quot;</span> })
+  .returningAll()
+  .executeTakeFirstOrThrow()
+
+<span class="t-k">await</span> db.transaction().execute(<span class="t-k">async</span> (trx) =&gt; {        <span class="t-c">// one bql.sh transaction, not a loose begin</span>
+  <span class="t-k">await</span> trx.updateTable(<span class="t-s">&quot;todos&quot;</span>).set({ done: <span class="t-n">1</span> }).where(<span class="t-s">&quot;id&quot;</span>, <span class="t-s">&quot;=&quot;</span>, written.id).execute()
+})</code></pre></div><figcaption>bql.sh/kysely, BqlDialect</figcaption></figure><figure><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">drizzle.ts</span></div><pre><code><span class="t-k">import</span> { eq } <span class="t-k">from</span> <span class="t-s">&quot;drizzle-orm&quot;</span>
+<span class="t-k">import</span> { integer, sqliteTable, text } <span class="t-k">from</span> <span class="t-s">&quot;drizzle-orm/sqlite-core&quot;</span>
+<span class="t-k">import</span> { drizzle } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/drizzle&quot;</span>
+
+<span class="t-k">const</span> todos = sqliteTable(<span class="t-s">&quot;todos&quot;</span>, {
+  id: integer(<span class="t-s">&quot;id&quot;</span>).primaryKey({ autoIncrement: <span class="t-k">true</span> }),
+  title: text(<span class="t-s">&quot;title&quot;</span>).notNull(),
+  done: integer(<span class="t-s">&quot;done&quot;</span>).notNull().default(<span class="t-n">0</span>),
+})
+
+<span class="t-k">const</span> db = drizzle({ url: <span class="t-s">&quot;http://localhost:4321&quot;</span>, token, db: <span class="t-s">&quot;acme&quot;</span> }, { schema: { todos } })
+
+<span class="t-k">const</span> [written] = <span class="t-k">await</span> db.insert(todos).values({ title: <span class="t-s">&quot;write it&quot;</span> }).returning()
+<span class="t-k">await</span> db.transaction(<span class="t-k">async</span> (tx) =&gt; {
+  <span class="t-k">await</span> tx.update(todos).set({ done: <span class="t-n">1</span> }).where(eq(todos.id, written.id))
+})</code></pre></div><figcaption>bql.sh/drizzle, drizzle()</figcaption></figure></div></div>
+</div></section>
+<section class="section" id="subjects" aria-labelledby="subjects-h"><div class="shell">
+<h2 id="subjects-h">Subjects, fanned out on pull</h2>
+<p class="explain"><code>*</code> matches one token and <code>&gt;</code> the rest, the NATS convention. Fan-out happens when a consumer pulls, so publishing is O(1) in subscriptions and <code>deliverFrom: &quot;beginning&quot;</code> reads last week.</p>
+<div class="demo"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">subjects</span></div><pre><code>orders.eu.created        a concrete subject
+orders.*.created         matches orders.eu.created, not orders.eu.west.created
+orders.&gt;                 matches both
+&gt;                        everything</code></pre></div></div>
+</div></section>
+<section class="section band" id="exactly-once" aria-labelledby="exactly-once-h"><div class="shell">
+<h2 id="exactly-once-h">Three tiers of exactly-once</h2>
+<p class="explain">At-least-once by default. <code>ack(id, { publish: [...] })</code> commits the ack and its outputs together, and <code>api.effect</code> records an external call alongside the ack. The last tier's window is named, not hidden.</p>
+<div class="demo"><div class="table-wrap"><table><thead><tr><th scope="col">Tier</th><th scope="col">Guarantee</th><th scope="col">Requires</th></tr></thead><tbody><tr><td><strong>Transactional ack</strong></td><td>Exactly-once <em>processing</em> — the handler's writes and the ack are one SQLite transaction</td><td>Embedded mode (<code>createBus</code>), a synchronous handler</td></tr><tr><td><strong>Atomic read-process-write</strong></td><td>Exactly-once <em>within the bus</em> — <code>ack(id, { publish: [...] })</code> commits both or neither</td><td>Nothing; it is an option on <code>ack</code></td></tr><tr><td><strong>Fenced, ledgered effects</strong></td><td>Tight effectively-once against the outside world</td><td>A destination with a conditional write, or an idempotent one</td></tr></tbody></table></div></div>
+</div></section>
+<section class="section" id="schemas" aria-labelledby="schemas-h"><div class="shell">
+<h2 id="schemas-h">Schemas with computed compatibility</h2>
+<p class="explain">Register JSON Schema 2020-12 with <code>--compat backward</code>, bind it to a subject pattern in <code>warn</code> mode, then <code>enforce</code>. A version that breaks the declared mode is a 409 naming the pointer.</p>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql-bus schema register order ./order.json --compat backward</span><span class="chip">captured output</span></div><pre><code>bql-bus schema register order ./order.json --compat backward
+bql-bus schema bind <span class="t-s">'orders.&gt;'</span> order --mode warn      <span class="t-c"># then --mode enforce</span>
+bql-bus schema check order ./order-v2.json            <span class="t-c"># dry-run the compat check</span></code></pre></div></div>
+</div></section>
+<section class="section band" id="proven" aria-labelledby="proven-h"><div class="shell">
+<h2 id="proven-h">Proven with real processes</h2>
+<p class="explain"><code>bun run test:e2e</code> runs competing consumers, a SIGKILL mid-message, a poison message and a cross-process request. No mocks; <code>bun run soak --fault post-ack</code> crashes at chosen points.</p>
+<div class="demo"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bun run test:e2e</span></div><pre><code>ok   eight messages were handled with none left pending or dead — pending=<span class="t-n">0</span> dead=<span class="t-n">0</span>
+ok   a second subscription received the same messages independently — <span class="t-n">8</span> envelopes
+ok   killed worker-a while it held the slow message
+ok   a surviving consumer recovered the expired lease — attempt <span class="t-n">2</span>, now on worker-b
+ok   the poison message reached the dead-letter subject with its reason — unsupported payload
+ok   a request was answered by a consumer in another process — <span class="t-s">&quot;HELLO BUS&quot;</span>
+ok   a long handler is running as a real child process — pid <span class="t-n">86892</span>
+ok   cancelling the message cancelled its in-flight delivery — <span class="t-n">1</span> delivery
+ok   the consumer's child process actually stopped
+ok   a repeated dedupe key does not publish twice</code></pre></div></div>
+</div></section>
+<p class="aside shell">Want it without a server? <code>Bql.open()</code> runs the same engine in your process — see <a href="/reference#db-embedded">Embedded</a>.</p>
+<section class="section band" id="measured" aria-labelledby="measured-h"><div class="shell">
+<h2 id="measured-h">Measured, including where it loses</h2>
+<p class="explain"><code>bun run bench</code> on an M5 Pro, as ratios against <code>bun:sqlite</code> because the ratio holds still. Writes inside a transaction are still slightly slower than <code>bun:sqlite</code>; the table says so.</p>
+<div class="demo"><div class="figures three"><div class="fig" data-source="db README /\| point read by primary key \| ([\d.]+ \u2013 [\d.]+x) \|/"><b>1.02 – 1.14x</b><span>point read vs bun:sqlite</span></div><div class="fig" data-source="db README /\| insert inside a transaction \| ([\d.]+ \u2013 [\d.]+x) \|/"><b>0.84 – 0.95x</b><span>insert in a transaction vs bun:sqlite</span></div><div class="fig" data-source="db README /\| commit \u2192 applied on the replica \| (\d+ \u00B5s) \|/"><b>265 µs</b><span>p50 commit → applied on a replica</span></div></div></div>
+<div class="demo"><div class="table-wrap"><table><thead><tr><th scope="col">op</th><th scope="col">bql vs <code>bun:sqlite</code></th></tr></thead><tbody><tr><td>point read by primary key</td><td>1.02 – 1.14x</td></tr><tr><td>100-row scan to objects</td><td>1.17 – 1.39x</td></tr><tr><td>insert inside a transaction</td><td>0.84 – 0.95x</td></tr><tr><td>the same insert with an update hook installed</td><td>not available in <code>bun:sqlite</code></td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th scope="col">leg</th><th scope="col">p50</th><th scope="col">p90</th></tr></thead><tbody><tr><td>write on the primary over HTTP</td><td>374 µs</td><td>492 µs</td></tr><tr><td>commit → applied on the replica</td><td>265 µs</td><td>323 µs</td></tr><tr><td>write forwarded through the replica</td><td>404 µs</td><td>494 µs</td></tr><tr><td>write, <code>ack: &quot;replica&quot;</code></td><td>379 µs</td><td>442 µs</td></tr><tr><td>write, <code>ack: &quot;quorum&quot;</code></td><td>359 µs</td><td>417 µs</td></tr></tbody></table></div></div>
+</div></section>
+<section class="section" id="boundaries" aria-labelledby="boundaries-h"><div class="shell">
+<h2 id="boundaries-h">Boundaries</h2>
+<p class="explain">What the repository proves, what it chose, and what it does not do yet. See <a href="/reference#bus-boundaries">the bus's boundaries</a> in full.</p>
+<div class="demo bounds"><div><h3>What holds<span>3</span></h3><ul><li>A restore replays through the replica's verifier: it reproduces the target txid checksum for checksum, or fails loudly.</li><li><code>ack: &quot;replica&quot;</code> makes a failover lossless; the old primary is fenced by epoch.</li><li>The bus survives SIGTERM and SIGKILL mid-flight in <code>bun run soak</code>, with nothing lost.</li></ul></div><div><h3>What is a judgement<span>3</span></h3><ul><li>The default <code>ack: &quot;fsync&quot;</code> costs about 2.7x on a single write against <code>ack: &quot;local&quot;</code>.</li><li>Bus replication is asynchronous; its failover RPO is measured in tens of messages.</li><li>Ordering is off by default, because it costs throughput most work does not need.</li></ul></div><div><h3>What is not here yet<span>3</span></h3><ul><li>Neither package is on npm; the release is blocked on one secret. Use a clone.</li><li>The packages do not depend on each other yet; the transactional outbox is next.</li><li><code>bql.sh/bus</code> is not on the Windows CI gate, and Kysely's <code>.stream()</code> is not implemented.</li></ul></div></div>
+</div></section>
+<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
+<h2 id="start-h">Start from a clone</h2>
+<p class="explain">Neither package is on npm yet, so <code>git clone</code> is the install. <code>bun run typecheck</code> and <code>bun run test</code> are the whole gate CI runs.</p>
+<div class="demo start"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ git clone https://github.com/TimMikeladze/bql &amp;&amp; cd bql</span><span class="chip">captured output</span></div><pre><code>git clone https://github.com/TimMikeladze/bql &amp;&amp; cd bql
+bun install
+bun run db sqlite:build     <span class="t-c"># once per machine → packages/db/vendor/sqlite/libsqlite3.{dylib,so,dll}</span>
+bun run db test             <span class="t-c"># optional, and the fastest way to know the build is good</span></code></pre></div><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bun run typecheck</span><span class="chip">captured output</span></div><pre><code>bun install
+
+bun run typecheck          <span class="t-c"># the repository's scripts, then both halves</span>
+bun run test               <span class="t-c"># both halves</span>
+bun run bytes              <span class="t-c"># no raw control bytes in any tracked file</span>
+
+bun run db sqlite:build    <span class="t-c"># build the pinned libsqlite3 bql.sh needs</span>
+bun run db test
+bun run bus test
+bun run bus dev</code></pre></div></div>
+</div></section>
+<section class="section" id="today" aria-labelledby="today-h"><div class="shell today">
+<h2 id="today-h">Run the bus and three consumers now</h2>
+<div class="acts"><a class="control control--solid round" href="/reference"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M8 7h7"/></svg>Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>bun run bus dev</code><button type="button" class="copy" data-copy="bun run bus dev" aria-label="Copy dev command"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></span></div>
+</div></section>
+<section class="section band" id="guides" aria-labelledby="guides-h"><div class="shell">
+<h2 id="guides-h">Guides</h2>
+<p class="explain">The design notes behind three of the sharpest edges, from <code>packages/*/docs</code>.</p>
+<div class="demo guides"><a class="guide" href="https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/exactly-once.md" rel="noopener"><span class="gt">Exactly-once, in three tiers<span class="ext" aria-hidden="true">↗</span></span><span class="gb">What each tier guarantees, what it costs, and where the last one stops.</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">handler.ts</span></span><pre><code><span class="t-k">async</span> handle({ message }, api) {
+  <span class="t-c">// Committed with the ack, not before it: a crash cannot produce this message</span>
+  <span class="t-c">// without also finishing the one that caused it.</span>
+  api.emit({ subject: <span class="t-s">&quot;thumbnails.ready&quot;</span>, body: { id: message.body.id } });
+
+  <span class="t-c">// At most once, with the result recorded alongside the ack. A redelivery</span>
+  <span class="t-c">// replays it instead of charging the card again.</span>
+  <span class="t-k">const</span> charge = <span class="t-k">await</span> api.effect(<span class="t-s">`charge:${message.body.orderId}`</span>, () =&gt;
+    payments.charge(message.body),
+  );
+
+  <span class="t-c">// This attempt, for a conditional write at the destination.</span>
+  <span class="t-k">await</span> store.put(key, bytes, { ifMatch: api.fence });
+}</code></pre></span></a><a class="guide" href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md" rel="noopener"><span class="gt">The cluster and its leases<span class="ext" aria-hidden="true">↗</span></span><span class="gb">Why two primaries are impossible by the guard margin, not by hope.</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bql.toml</span></span><pre><code>[cluster]
+enabled = false        <span class="t-c"># peers alone turn it on</span>
+peers = []             <span class="t-c"># [&quot;n1=ws://a:4321&quot;, &quot;ws://b:4321&quot;]</span>
+advertise = <span class="t-s">&quot;&quot;</span>         <span class="t-c"># also the HTTP base clients are redirected to</span>
+zone = <span class="t-s">&quot;&quot;</span>
+leaseTtlMs = <span class="t-n">3000</span>
+leaseRenewMs = <span class="t-n">1000</span>
+leaseGuardMs = <span class="t-n">500</span>     <span class="t-c"># the margin that makes two primaries impossible</span>
+electionTimeoutMs = <span class="t-n">1500</span>
+heartbeatMs = <span class="t-n">300</span></code></pre></span></a><a class="guide" href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/m3-wal.md" rel="noopener"><span class="gt">WAL shipping, byte by byte<span class="ext" aria-hidden="true">↗</span></span><span class="gb">Committed pages out of the -wal, as self-verifying records.</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">wal.ts</span></span><pre><code><span class="t-k">import</span> { Database } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/sqlite&quot;</span>
+<span class="t-k">import</span> { computeFull, decode, TxnLog, TxnRecorder, WalApplier } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/wal&quot;</span>
+
+<span class="t-k">const</span> db = Database.open(<span class="t-s">&quot;primary/main.db&quot;</span>)
+db.exec(<span class="t-s">&quot;pragma wal_autocheckpoint = 0&quot;</span>)            <span class="t-c">// we own checkpoints</span>
+db.exec(<span class="t-s">&quot;create table t(id integer primary key, v text)&quot;</span>)
+db.walCheckpoint(<span class="t-s">&quot;TRUNCATE&quot;</span>)                        <span class="t-c">// the file alone is now the whole state</span>
+
+<span class="t-c">// A replica starts as a physical copy, so its page numbers match.</span>
+<span class="t-k">await</span> Bun.write(<span class="t-s">&quot;replica/main.db&quot;</span>, Bun.file(<span class="t-s">&quot;primary/main.db&quot;</span>))
+<span class="t-k">const</span> base = computeFull(<span class="t-s">&quot;replica/main.db&quot;</span>, { includeWal: <span class="t-k">false</span> })
+
+<span class="t-k">const</span> recorder = TxnRecorder.open({ dbPath: <span class="t-s">&quot;primary/main.db&quot;</span> })
+<span class="t-k">const</span> log = TxnLog.open({ dir: <span class="t-s">&quot;primary&quot;</span> })
+<span class="t-k">const</span> applier = <span class="t-k">new</span> WalApplier({ dbPath: <span class="t-s">&quot;replica/main.db&quot;</span>, dir: <span class="t-s">&quot;replica&quot;</span> })
+applier.seed({
+  txid: <span class="t-n">0n</span>,
+  postChecksum: base.checksum,
+  dbSizePages: base.pages,
+  pageSize: base.pageSize,
+})
+
+db.exec(<span class="t-s">&quot;insert into t(v) values ('hello')&quot;</span>)
+<span class="t-k">for</span> (<span class="t-k">const</span> txn <span class="t-k">of</span> recorder.poll()) {
+  applier.apply(decode(log.append(txn)).record)     <span class="t-c">// the bytes are also the wire format</span>
+}</code></pre></span></a></div>
+</div></section>
+</main>
+<footer class="site-footer"><div class="shell">
+<p class="credit">bql.sh is built by <a href="https://x.com/linesofcode" rel="noopener">linesofcode</a>, who also builds <a href="https://github.com/TimMikeladze/dagr" rel="noopener">dagr</a>, a workflow engine on one SQLite journal that uses this bus for remote steps.</p>
+<nav class="cols" aria-label="Footer"><div><h3>bql.sh</h3><ul><li><a href="/">Home</a></li><li><a href="/reference">Reference</a></li><li><a href="/llms.txt">llms.txt</a></li><li><a href="/AGENTS.md">AGENTS.md</a></li></ul></div><div><h3>bql.sh</h3><ul><li><a href="https://github.com/TimMikeladze/bql/tree/main/packages/db" rel="noopener">README<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/api.md" rel="noopener">API<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/design.md" rel="noopener">Design<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/benchmarks.md" rel="noopener">Benchmarks<span class="ext" aria-hidden="true">↗</span></a></li></ul></div><div><h3>bql.sh/bus</h3><ul><li><a href="https://github.com/TimMikeladze/bql/tree/main/packages/bus" rel="noopener">README<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/exactly-once.md" rel="noopener">Exactly-once<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/schemas.md" rel="noopener">Schemas<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/operations.md" rel="noopener">Operations<span class="ext" aria-hidden="true">↗</span></a></li></ul></div><div><h3>Learn</h3><ul><li><a href="https://github.com/TimMikeladze/bql/blob/main/docs/monorepo.md" rel="noopener">Why one repository<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md" rel="noopener">Promotion<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/r5-orm.md" rel="noopener">ORM mapping<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/performance.md" rel="noopener">Performance<span class="ext" aria-hidden="true">↗</span></a></li></ul></div><div><h3>Community</h3><ul><li><a href="https://github.com/TimMikeladze/bql" rel="noopener">GitHub<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://github.com/TimMikeladze/bql/issues" rel="noopener">Issues<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://x.com/linesofcode" rel="noopener">X<span class="ext" aria-hidden="true">↗</span></a></li><li><a href="https://discord.com/users/linesofcode" rel="noopener">Discord<span class="ext" aria-hidden="true">↗</span></a></li></ul></div><div><h3>Legal</h3><ul><li><a href="https://github.com/TimMikeladze/bql/blob/main/LICENSE" rel="noopener">MIT License<span class="ext" aria-hidden="true">↗</span></a></li></ul></div></nav>
+<div class="foot-icons"><a href="https://github.com/TimMikeladze/bql" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg><span class="sr">TimMikeladze/bql on GitHub</span></a><a href="https://x.com/linesofcode" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z"/></svg><span class="sr">linesofcode on X</span></a><a href="https://www.linkedin.com/in/tim-mikeladze" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg><span class="sr">linesofcode on LinkedIn</span></a><a href="https://discord.com/users/linesofcode" rel="noopener"><svg class="brand" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg><span class="sr">linesofcode on Discord</span></a></div>
+<div class="bottom"><span class="mark" style="width:20px;height:20px" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="16" cy="9" rx="8" ry="3"/><path d="M8 9v7c0 1.7 3.6 3 8 3s8-1.3 8-3V9"/><path d="M8 16v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span><span>© 2026 linesofcode</span><div class="seg" role="group" aria-label="Theme"><button type="button" data-theme-set="system" aria-label="Use system theme"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></button><button type="button" data-theme-set="light" aria-label="Use light theme"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button><button type="button" data-theme-set="dark" aria-label="Use dark theme"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></button></div></div>
+</div></footer>
+<script>(function () {
+  var order = ["system", "dark", "light"], t = window.__theme;
+  function set(p) { try { localStorage.setItem(t.key, p); } catch (e) {} t.apply(); label(); }
+  function label() {
+    var p = t.pref();
+    document.querySelectorAll("[data-theme-cycle]").forEach(function (b) { b.setAttribute("aria-label", "Theme: " + p + ". Click to change"); });
+    document.querySelectorAll("[data-theme-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-theme-set") === p)); });
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    if (b.hasAttribute("data-theme-cycle")) set(order[(order.indexOf(t.pref()) + 1) % 3]);
+    else if (b.hasAttribute("data-theme-set")) set(b.getAttribute("data-theme-set"));
+    else if (b.hasAttribute("data-copy")) navigator.clipboard.writeText(b.getAttribute("data-copy"));
+    else if (b.hasAttribute("data-copy-page")) fetch(b.getAttribute("data-copy-page")).then(function (r) { return r.text(); }).then(function (s) { navigator.clipboard.writeText(s); });
+  });
+  label();
+})();</script>
+</body>
+</html>

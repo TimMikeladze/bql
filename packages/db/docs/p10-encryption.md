@@ -12,11 +12,11 @@ whole reason this is a track. Meeting it honestly is most of the work; the AES i
 ## 1. What exists today: nothing, and the primitive was never the problem
 
 `grep -rn "encrypt\|cipher\|Cipher\|Encrypt\|AES" src/` returns nothing. There is no key, no
-keyring, no setting, and no written statement of where BunQL's plaintext boundary is.
+keyring, no setting, and no written statement of where bql.sh's plaintext boundary is.
 
 The cryptography is free: Bun ships WebCrypto and `node:crypto`, so AES-256-GCM costs no
-dependency and no vendoring. **The problem is that BunQL does not own the writes.** SQLite writes
-`main.db` and `-wal` through its own VFS, and BunQL has never registered one — it reaches
+dependency and no vendoring. **The problem is that bql.sh does not own the writes.** SQLite writes
+`main.db` and `-wal` through its own VFS, and bql.sh has never registered one — it reaches
 `sqlite3_file*` through `file_control` for the WAL lock set (`src/wal/shmlock.ts`) and for nothing
 else.
 
@@ -32,8 +32,8 @@ is the half-build the prompt forbids.
 | --- | --- | --- | --- |
 | `main.db` | SQLite's VFS | every row | pages encrypted beneath SQLite |
 | `-wal` | SQLite's VFS | every row, recently | frames encrypted — and `src/wal/tailer.ts` reads this file **directly**, so it must decrypt |
-| `-shm` | SQLite, and BunQL through its own mapping (E2) | page numbers, frame checksums, read marks — **no row data** | **excluded, deliberately.** It is derived, it is recreated on first open, and it is the one file mechanism A rewrites under lock. Encrypting it buys nothing and breaks E2 |
-| replica apply | `WalApplier` `pwrite`s pages into the file (`src/wal/applier.ts:613`), bypassing the VFS entirely | every row | encrypt with the same key, in BunQL's own code |
+| `-shm` | SQLite, and bql.sh through its own mapping (E2) | page numbers, frame checksums, read marks — **no row data** | **excluded, deliberately.** It is derived, it is recreated on first open, and it is the one file mechanism A rewrites under lock. Encrypting it buys nothing and breaks E2 |
+| replica apply | `WalApplier` `pwrite`s pages into the file (`src/wal/applier.ts:613`), bypassing the VFS entirely | every row | encrypt with the same key, in bql.sh's own code |
 | log segments | `src/wal/log.ts`, via `encode()` (`src/wal/record.ts:131`) | `TxnRecord` bodies **are page images** | ciphertext pages end to end |
 | snapshots | `src/wal/snapshot.ts:137`, a `copyFileSync`/reflink of `main.db` | the whole database | nothing — ciphertext copies fine. But the **key must outlive the copy**, which is the restore story |
 | bucket | `src/storage/shipper.ts:547,586` | the same segments and snapshots | nothing extra, *if* the records were already ciphertext |
@@ -41,7 +41,7 @@ is the half-build the prompt forbids.
 | process memory | — | decrypted pages, in SQLite's page cache | **nothing, and say so.** Encryption at rest does not defend a live node |
 
 Two rows decide the shape of everything else. `-wal` is read directly by the tailer, and the
-applier writes pages directly to `main.db`: **three of BunQL's own components bypass the VFS**, so
+applier writes pages directly to `main.db`: **three of bql.sh's own components bypass the VFS**, so
 a VFS alone is not a complete answer either. Whatever encrypts must be reachable from both sides.
 
 ## 3. The design that works
@@ -50,8 +50,8 @@ a VFS alone is not a complete answer either. Whatever encrypts must be reachable
 
 This is not a new kind of thing in this repo. `scripts/sqlite.ts:146` already compiles
 `[sqlite3.c, scripts/native/walsum.c]` into **one** library, and `src/sqlite/lib.ts` resolves
-BunQL's own symbols out of it as an optional family (`docs/p3-wal-checksum.md`). A VFS shim goes in
-beside `walsum.c` — 134 lines today — and is registered by a `bunql_vfs_register` the driver calls
+bql.sh's own symbols out of it as an optional family (`docs/p3-wal-checksum.md`). A VFS shim goes in
+beside `walsum.c` — 134 lines today — and is registered by a `bql_vfs_register` the driver calls
 at open.
 
 Why C and not `bun:ffi`:
@@ -70,7 +70,7 @@ here. The page header stays plaintext only in so far as the page *number* is imp
 which is unavoidable in any page-level scheme and must be stated: **an attacker with the file
 learns the database's size and shape, not its rows.**
 
-The three bypass paths are BunQL's own and share the key:
+The three bypass paths are bql.sh's own and share the key:
 
 - **the tailer** decrypts frames as it reads them — it already parses frame headers
   (`src/wal/codec.ts`), so this is one call at a boundary it owns;
@@ -90,10 +90,10 @@ before any code, because it is invisible afterwards.
   variable and a KMS are three different products. This is the part that is a design argument
   rather than an implementation.
 - **A rotation story, and it is a fork.** Changing a database's key rewrites every page of it.
-  BunQL already has the primitive — `fork` is a snapshot reflink plus a new tenant
+  bql.sh already has the primitive — `fork` is a snapshot reflink plus a new tenant
   (`src/tenant/tenant.ts:1603`) — so rotation is "fork under the new key, cut over, drop the old",
   which is honest and operable and is *not* free at size.
-- **The feature is absent on a distribution libsqlite3.** This would be the first BunQL feature
+- **The feature is absent on a distribution libsqlite3.** This would be the first bql.sh feature
   where the vendored build is a *requirement* rather than a preference — every other capability
   degrades (`docs/c6-packaging.md`). A node configured for encryption on a system library must
   refuse to start, the way `[sqlite] defensive` already does (`docs/p1-pragmas.md`).

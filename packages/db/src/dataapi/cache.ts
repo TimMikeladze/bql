@@ -1,7 +1,7 @@
 // Invariant: a cached schema is only ever served for the `PRAGMA schema_version` it was read at.
 // That counter is SQLite's own, incremented by every DDL statement on the database, so a
 // `CREATE TABLE`, an `ALTER TABLE` or a `DROP` invalidates the cache by itself and nothing else
-// in BunQL has to remember to. The check costs one pragma per request — a prepared read on a
+// in bql.sh has to remember to. The check costs one pragma per request — a prepared read on a
 // pooled connection — against re-reading `table_list`, `table_xinfo`, `foreign_key_list`,
 // `index_list` and `index_info` for every table.
 //

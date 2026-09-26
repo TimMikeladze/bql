@@ -19,7 +19,7 @@ import {
   type Principal,
 } from "../../src/server/auth.ts"
 import { AuthorizerHub } from "../../src/realtime/authorizer.ts"
-import { BunQLError, mapError } from "../../src/server/errors.ts"
+import { BqlError, mapError } from "../../src/server/errors.ts"
 import { cleanupTempDirs, tempDb } from "../sqlite/tmp.ts"
 
 afterAll(cleanupTempDirs)
@@ -74,7 +74,7 @@ function codeOf(fn: () => unknown): string {
   try {
     fn()
   } catch (err) {
-    return err instanceof SqliteError ? err.code : (err as BunQLError).code
+    return err instanceof SqliteError ? err.code : (err as BqlError).code
   }
   throw new Error("expected the statement to fail")
 }
@@ -83,7 +83,7 @@ describe("scope", () => {
   test("a token with no claim on the database is refused before any SQL runs", () => {
     const db = fresh()
     const elsewhere = tokenPrincipal(claimsFor({ rw: ["other"] }))
-    expect(() => policyFor(db, elsewhere, "acme")).toThrow(BunQLError)
+    expect(() => policyFor(db, elsewhere, "acme")).toThrow(BqlError)
     expect(statusOf(() => policyFor(db, elsewhere, "acme"))).toBe(403)
     db.close()
   })

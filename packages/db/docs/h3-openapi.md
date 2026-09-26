@@ -10,7 +10,7 @@ cosmetic — `operationId`, component names, `$ref`s, descriptions — are the p
 the generated GraphQL schema is *called*, and a shortcut here becomes a missing field there.
 
 ```ts
-import { buildDocument } from "@bunql/db/openapi"
+import { buildDocument } from "bql.sh/openapi"
 
 const document = buildDocument(registry, {
   servers: [{ url: "https://sql.example.com" }],
@@ -39,13 +39,13 @@ Everything below is enforced at build time by throwing, not left to a reviewer.
 
 ## The error rule
 
-`Operation.errors` is a list of BunQL error codes. Each becomes a **documented response under its
+`Operation.errors` is a list of bql.sh error codes. Each becomes a **documented response under its
 real status**, never a `default` that shrugs.
 
 `src/server/errors.ts` is the authority on the code→status mapping and **this module does not keep
 a second copy of it**. `statusForCode` asks that module twice:
 
-1. `ERROR_STATUS[code]` for a BunQL code (`NOT_PRIMARY` → 503, `QUOTA_EXCEEDED` → 507).
+1. `ERROR_STATUS[code]` for a bql.sh code (`NOT_PRIMARY` → 503, `QUOTA_EXCEEDED` → 507).
 2. For a `SQLITE_*` name, `mapError(new SqliteError("", rc))` — the real function, on a real
    `SqliteError`, with `rc` recovered by inverting `RESULT_CODE_NAMES`. So the prefix rules in
    `fromSqlite` (`SQLITE_CONSTRAINT*` → 409, `SQLITE_BUSY*` → `BUSY` 503, `SQLITE_FULL` →
@@ -98,7 +98,7 @@ client *this endpoint takes no credential*. An operation with no `security` at a
 `security` key, which means "unspecified"; the two are different and a generator treats them
 differently.
 
-## The BunQL value encoding survives
+## The bql.sh value encoding survives
 
 `s.int64()` publishes `anyOf: [{"type":"integer"}, {"$i": "<decimal>"}]` and `s.blob()` publishes
 `{"$b": "<base64>"}`. The emitter copies them through untouched. Flattening an int64 to a plain
@@ -222,7 +222,7 @@ object — see the findings below.
 - **No `default` response.** Every error this API can produce has a status; a `default` would be an
   admission that the emitter did not know.
 - **No `webhooks`, no `callbacks`, no `links`, no `$defs` hoisting beyond named nodes.** Nothing in
-  BunQL's operation model produces them.
+  bql.sh's operation model produces them.
 - **No operation-level `deprecated`** — see below.
 
 ## Findings

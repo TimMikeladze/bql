@@ -1,5 +1,5 @@
 // Invariant: a value a handler returns reaches the wire as the encoding of design §6.1, using the
-// *same* leaf encoder BunQL's own routes use. `JSON.stringify` cannot carry a `bigint` — it throws
+// *same* leaf encoder bql.sh's own routes use. `JSON.stringify` cannot carry a `bigint` — it throws
 // — and turns a `Uint8Array` into `{"0":1,"1":2}`, which is silent data loss. Core's `s.int64()`
 // and `s.blob()` hand a handler real `bigint` and `Uint8Array` values, so every response that
 // carries one has to be walked before it is stringified.

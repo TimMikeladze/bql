@@ -8,10 +8,10 @@ adds, in build order, with the wire protocol decided up front so every milestone
 | id | scope | owns | depends on |
 |---|---|---|---|
 | R1 | replication transport: frame codec, primary endpoint, replica client, replica-mode tenants, bootstrap by snapshot, resume, epoch fencing | `src/replication/`, replica mode in `src/tenant/`, `/v1/replication` in `src/server/`, CLI flags | — |
-| R2 | durability and routing: `ack: replica\|quorum`, write forwarding from replica to primary, read-your-writes across nodes, `BunQL-Role`/`BunQL-Primary`, a server-side transaction queue | `src/replication/ack.ts`, `src/server/exec.ts`, `routes.ts`, `ws.ts` | R1 |
-| R3 | S3 shipper and restore over `Bun.S3Client`, retention and compaction, `bunql restore --from s3://…` | `src/storage/`, CLI | R1 (shares the log iterator, not the transport) |
+| R2 | durability and routing: `ack: replica\|quorum`, write forwarding from replica to primary, read-your-writes across nodes, `BQL-Role`/`BQL-Primary`, a server-side transaction queue | `src/replication/ack.ts`, `src/server/exec.ts`, `routes.ts`, `ws.ts` | R1 |
+| R3 | S3 shipper and restore over `Bun.S3Client`, retention and compaction, `bql restore --from s3://…` | `src/storage/`, CLI | R1 (shares the log iterator, not the transport) |
 | R4 | Hrana compat: `GET /v2` + `POST /v2/pipeline`, then `/v3/pipeline`, `/v3/cursor`, WS subprotocols | `src/server/hrana/` | — |
-| R5 | ORM adapters `@bunql/db/kysely` and `@bunql/db/drizzle` | `src/kysely.ts`, `src/drizzle.ts` | — |
+| R5 | ORM adapters `bql.sh/kysely` and `bql.sh/drizzle` | `src/kysely.ts`, `src/drizzle.ts` | — |
 
 R5 and R4 do not touch replication and can run beside R1. R2 must follow R1.
 
@@ -128,7 +128,7 @@ and no local log of its own authorship. Add `role: "primary" | "replica"` to `Te
 
 ## Configuration
 
-New `[replication]` section, with the usual `BUNQL_REPLICATION_*` overrides:
+New `[replication]` section, with the usual `BQL_REPLICATION_*` overrides:
 
 ```toml
 [replication]
@@ -143,15 +143,15 @@ reconnectMs = 250         # exponential backoff to 10 s
 forwardWrites = true      # R2
 ```
 
-CLI: `bunql serve --replica-of wss://…`, `--cluster-secret <s>`, `--follow a,b`. A node with
+CLI: `bql serve --replica-of wss://…`, `--cluster-secret <s>`, `--follow a,b`. A node with
 `secret` unset answers `/v1/replication` with 403 `REPLICATION_DISABLED`.
 
 ## Observability
 
 `GET /v1/db/:db/replication` gains real content on a primary: `replicas: [{node, stream, txid,
 lag, ackedAt}]`. On a replica it reports `role:"replica"`, `primary`, `applied`, `lagTxid`,
-`connected`. `/metrics` gains `bunql_replication_lag_txid`, `bunql_replication_connected`,
-`bunql_replication_bytes_total`, `bunql_replication_records_total`.
+`connected`. `/metrics` gains `bql_replication_lag_txid`, `bql_replication_connected`,
+`bql_replication_bytes_total`, `bql_replication_records_total`.
 
 ## Test bar
 

@@ -17,7 +17,7 @@ const running: ServerHandle[] = []
 
 export const CLUSTER_SECRET = "test-cluster-secret-0123456789"
 
-export function tempDir(prefix = "bunql-repl-"): string {
+export function tempDir(prefix = "bql-repl-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   dirs.push(dir)
   return dir
@@ -74,9 +74,9 @@ async function start(dir: string, overrides: ServerConfigInput): Promise<Node> {
   })
   const handle = await startServer(config, {
     log: () => {},
-    // `BUNQL_TEST_REPLICATION_LOG=1` turns the nodes' internal failures back on, which is the
+    // `BQL_TEST_REPLICATION_LOG=1` turns the nodes' internal failures back on, which is the
     // first thing to reach for when a replication test goes quiet instead of red.
-    onError: process.env.BUNQL_TEST_REPLICATION_LOG
+    onError: process.env.BQL_TEST_REPLICATION_LOG
       ? (err) => console.error(`[${config.server.node}]`, err)
       : () => {},
   })
@@ -105,7 +105,7 @@ export function startPrimary(
   overrides: ServerConfigInput = {},
   options: { dir?: string; node?: string } = {},
 ): Promise<Node> {
-  return start(options.dir ?? tempDir("bunql-primary-"), {
+  return start(options.dir ?? tempDir("bql-primary-"), {
     ...overrides,
     server: { node: options.node ?? "primary", ...overrides.server },
     replication: { secret: CLUSTER_SECRET, ...overrides.replication },
@@ -117,7 +117,7 @@ export function startReplica(
   primary: Node,
   options: { node?: string; dir?: string; follow?: string[]; overrides?: ServerConfigInput } = {},
 ): Promise<Node> {
-  const dir = options.dir ?? tempDir("bunql-replica-")
+  const dir = options.dir ?? tempDir("bql-replica-")
   const overrides = options.overrides ?? {}
   return start(dir, {
     ...overrides,

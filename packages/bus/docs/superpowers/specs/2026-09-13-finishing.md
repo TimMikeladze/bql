@@ -1,4 +1,4 @@
-# Finishing AgenticBus: the decisions
+# Finishing bql.sh/bus: the decisions
 
 Status: implemented. Companion to [the design](2026-09-12-message-bus.md), which stays the
 authority on *what the bus is*. This one records the decisions taken while closing the list in
@@ -107,7 +107,7 @@ format, `--log-level` / `BUS_LOG_LEVEL`. The bus logs one line per lifecycle eve
 that is the loudest thing in the system and says the least.
 
 **Backup.** `VACUUM INTO` rather than a filesystem copy: it is SQLite's supported online backup,
-it is consistent under WAL without stopping writes, and it needs no `sqlite3` binary. `agenticbus
+it is consistent under WAL without stopping writes, and it needs no `sqlite3` binary. `bql-bus
 backup <dir>` writes `bus.db` plus a copy of the blob directory. Restore is documented as
 stop → replace → start, because a restore under a running process is the one thing a
 single-writer design cannot make safe.
@@ -153,7 +153,7 @@ The platform health check is `/health` alone. `/ready` also requires that a cons
 in recently — a genuine signal, and the wrong one for a check that restarts the machine, because
 a freshly deployed bus with no consumers yet is healthy rather than broken.
 
-Deployed and checked: `agenticbus-demo.fly.dev`, with a consumer on a laptop registering over TLS
+Deployed and checked: `bql-bus-demo.fly.dev`, with a consumer on a laptop registering over TLS
 and a request round-tripping through it.
 
 ## What is not done

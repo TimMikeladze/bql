@@ -195,9 +195,9 @@ export class ReplicationServer {
   /** P9: whether this node's records carry row changes. Announced on every `SUBSCRIBED`. */
   readonly recordsLogical: boolean
 
-  /** Bytes handed to `ws.send`, for `bunql_replication_bytes_total`. */
+  /** Bytes handed to `ws.send`, for `bql_replication_bytes_total`. */
   bytesSent = 0
-  /** `TXN` frames sent, for `bunql_replication_records_total`. */
+  /** `TXN` frames sent, for `bql_replication_records_total`. */
   recordsSent = 0
 
   #conns = new Set<Conn>()
@@ -228,10 +228,10 @@ export class ReplicationServer {
     this.#onEpochAhead = options.onEpochAhead ?? (() => {})
     this.#generationOf = options.generationOf ?? (() => null)
     this.#onError =
-      options.onError ?? ((err: unknown) => console.error("bunql: replication", err))
+      options.onError ?? ((err: unknown) => console.error("bql: replication", err))
   }
 
-  /** Replica connections currently attached, for `bunql_replication_connected`. */
+  /** Replica connections currently attached, for `bql_replication_connected`. */
   get connections(): number {
     return this.#conns.size
   }

@@ -3,7 +3,7 @@
 // able to tell whether it exists, and a request with a malformed body must not have opened a
 // connection to find that out.
 //
-// Handlers return a `Response`; the four `BunQL-*` headers, CORS and the metrics tick are added
+// Handlers return a `Response`; the four `BQL-*` headers, CORS and the metrics tick are added
 // once by the wrapper in `app.ts`, so nothing below repeats them.
 //
 // Second invariant: a route that mutates the database set or the bytes of a database runs on a
@@ -52,7 +52,7 @@ import {
   type TableScope,
   type TokenGrant,
 } from "./auth.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 import {
   assertStatement,
   awaitTxid,
@@ -106,17 +106,17 @@ async function readJson<T>(ctx: RouteContext, max: number): Promise<T> {
   if (ctx.body) return ((await ctx.body()) ?? {}) as T
   const declared = Number(ctx.request.headers.get("content-length") ?? "0")
   if (Number.isFinite(declared) && declared > max) {
-    throw new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
+    throw new BqlError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
   }
   const text = await ctx.request.text()
   if (text.length > max) {
-    throw new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
+    throw new BqlError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
   }
   if (text.length === 0) return {} as T
   try {
     return JSON.parse(text) as T
   } catch {
-    throw BunQLError.badRequest("request body is not valid JSON")
+    throw BqlError.badRequest("request body is not valid JSON")
   }
 }
 
@@ -127,7 +127,7 @@ function principalOf(ctx: RouteContext): Promise<Principal> {
 
 function requireAdmin(principal: Principal): void {
   if (principal.kind !== "admin") {
-    throw BunQLError.notAuthorized("this route needs the admin key")
+    throw BqlError.notAuthorized("this route needs the admin key")
   }
 }
 
@@ -142,7 +142,7 @@ function requireAdmin(principal: Principal): void {
  * over the replication stream to exist here, so the round trip buys nothing the operator cannot
  * get by addressing the primary; and a delete has no safe forwarding story at all while promotion
  * does not exist. The shape is the one statement writes already answer with when forwarding is
- * off — `503 NOT_PRIMARY` plus `BunQL-Primary` — so a client that follows that header already
+ * off — `503 NOT_PRIMARY` plus `BQL-Primary` — so a client that follows that header already
  * knows what to do with this.
  *
  * Node-local maintenance (`snapshot`, `checkpoint`) and every read route stay open: they act on
@@ -150,13 +150,13 @@ function requireAdmin(principal: Principal): void {
  */
 function requirePrimary(ctx: RouteContext): void {
   if (ctx.runtime.role !== "replica") return
-  throw BunQLError.notPrimary(ctx.runtime.primaryUrl ?? undefined)
+  throw BqlError.notPrimary(ctx.runtime.primaryUrl ?? undefined)
 }
 
 /** The same gate for a route that names a database, against that database's live role. */
 function requirePrimaryFor(ctx: RouteContext, db: string): void {
   if (ctx.runtime.roleFor(db) !== "replica") return
-  throw BunQLError.notPrimary(ctx.runtime.primaryUrlFor(db) ?? undefined)
+  throw BqlError.notPrimary(ctx.runtime.primaryUrlFor(db) ?? undefined)
 }
 
 /**
@@ -184,7 +184,7 @@ export function dbName(ctx: RouteContext): string {
     const label = host.split(".")[0]
     if (label && label !== host) return label
   }
-  throw BunQLError.badRequest("no database in the request")
+  throw BqlError.badRequest("no database in the request")
 }
 
 /** Resolves the principal, checks its scope on the database, and opens the tenant. */
@@ -294,7 +294,7 @@ export const txBegin: Handler = async (ctx) => {
     return json({ tx: session.baton, expiresInMs: ctx.runtime.config.limits.txIdleTimeoutMs })
   } catch (err) {
     const mapped = mapTenantError(err, ctx.runtime.primaryUrlFor(tenant.name))
-    if (mapped instanceof BunQLError && mapped.code === "TX_BUSY") {
+    if (mapped instanceof BqlError && mapped.code === "TX_BUSY") {
       return json(
         {
           error: {
@@ -378,7 +378,7 @@ export const txRollback = endTx("rollback")
  * (`docs/r10-read-transactions.md`) and with no new consistency primitive under it. Design §11's
  * `sqlite3_snapshot` is measured and refused; `experiments/snapshot.ts` is the measurement.
  *
- * It is **not** `BunQL-Min-Txid`, which is the thing a reader will reach for first. That header is
+ * It is **not** `BQL-Min-Txid`, which is the thing a reader will reach for first. That header is
  * a *floor* — "do not answer until the tenant has reached txid N" — so two reads that both satisfy
  * it can see different databases, because the second sees everything that landed in between. A
  * read session is a *point*: every statement in it sees the database as of the session's first
@@ -410,7 +410,7 @@ export const readBegin: Handler = async (ctx) => {
     const mapped = mapTenantError(err, ctx.runtime.primaryUrlFor(tenant.name))
     // `[limits] maxReadTx` is R10's bound, unchanged, and answers R10's code. The shape is the
     // writer's, down to `Retry-After`, because to a client it means the same thing: come back.
-    if (mapped instanceof BunQLError && mapped.code === "TX_BUSY") {
+    if (mapped instanceof BqlError && mapped.code === "TX_BUSY") {
       return json(
         {
           error: {
@@ -454,7 +454,7 @@ function assertReadOnlyStatement(
     }
   })
   if (readonly) return
-  throw new BunQLError("SQLITE_READONLY", "attempt to write in a read session", 403)
+  throw new BqlError("SQLITE_READONLY", "attempt to write in a read session", 403)
 }
 
 /** A statement inside a read session. The baton alone identifies the database. */
@@ -630,7 +630,7 @@ function longPoll(
 ): Promise<ChangeEvent[]> {
   const replay = realtime.ring.since(since)
   if (replay === "reset") {
-    throw BunQLError.resetRequired(`the change ring no longer holds txid ${since}`)
+    throw BqlError.resetRequired(`the change ring no longer holds txid ${since}`)
   }
   const filtered = tables ? filterTables(replay, tables) : replay
   if (filtered.length > 0 || waitMs === 0) return Promise.resolve(filtered)
@@ -674,14 +674,14 @@ function liveEventName(event: LiveEvent): "rows" | "diff" {
 export const live: Handler = async (ctx) => {
   const { principal, tenant, name } = await open(ctx, "ro")
   const sql = ctx.url.searchParams.get("sql")
-  if (!sql) throw BunQLError.badRequest("live needs a sql parameter")
+  if (!sql) throw BqlError.badRequest("live needs a sql parameter")
   const argsRaw = ctx.url.searchParams.get("args")
   let args: Args | undefined
   if (argsRaw) {
     try {
       args = JSON.parse(argsRaw) as Args
     } catch {
-      throw BunQLError.badRequest("args must be a JSON array or object")
+      throw BqlError.badRequest("args must be a JSON array or object")
     }
   }
   const key = ctx.url.searchParams.get("key") ?? undefined
@@ -769,7 +769,7 @@ export function resolveAt(tenant: Tenant, at: number | string): bigint {
   }
   const ms = typeof at === "number" ? at : Date.parse(at)
   if (!Number.isFinite(ms)) {
-    throw BunQLError.badRequest(`at must be a txid or a timestamp, got ${JSON.stringify(at)}`)
+    throw BqlError.badRequest(`at must be a txid or a timestamp, got ${JSON.stringify(at)}`)
   }
   return txidAtTime(tenant, ms)
 }
@@ -792,7 +792,7 @@ function txidAtTime(tenant: Tenant, ms: number): bigint {
     }
   }
   if (best === null) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `no transaction at or before ${new Date(ms).toISOString()} is still in the log for ` +
         `${tenant.name}; the oldest it holds is txid ${tenant.log.firstTxid ?? 0n}`,
     )
@@ -804,7 +804,7 @@ export const createDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   requirePrimary(ctx)
   const body = await readJson<CreateBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
-  if (typeof body.name !== "string") throw BunQLError.badRequest("create needs a name")
+  if (typeof body.name !== "string") throw BqlError.badRequest("create needs a name")
   assertValidName(body.name)
   // C3: in a cluster, the placement function names the node a database is created on, and every
   // node computes the same answer from the same replicated membership — so two nodes cannot both
@@ -849,7 +849,7 @@ export const listDbs: Handler = async (ctx) => {
   return json({
     // L3: the node's ceiling and what it is holding against it. This registry is the router's on a
     // sharded node, so `maxOpen` here is `[data] maxOpen` as configured rather than any worker's
-    // share of it — the same number `bunql_max_open_tenants` reports.
+    // share of it — the same number `bql_max_open_tenants` reports.
     open: live ? live.size : (openNames as Set<string>).size,
     maxOpen: ctx.runtime.registry.maxOpen,
     databases: rows.map((row) => {
@@ -938,10 +938,10 @@ export const updateDb: Handler = async (ctx) => {
     foreignKeys?: boolean | null
     ackWithoutReplicas?: "error" | "allow" | null
   }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
-  if (!ctx.runtime.registry.has(name)) throw BunQLError.dbNotFound(name)
+  if (!ctx.runtime.registry.has(name)) throw BqlError.dbNotFound(name)
   if (body.foreignKeys !== undefined) {
     if (body.foreignKeys !== null && typeof body.foreignKeys !== "boolean") {
-      throw BunQLError.badRequest("foreignKeys must be true, false, or null to follow the node")
+      throw BqlError.badRequest("foreignKeys must be true, false, or null to follow the node")
     }
     ctx.runtime.evict(name)
     ctx.runtime.registry.setForeignKeys(name, body.foreignKeys)
@@ -949,7 +949,7 @@ export const updateDb: Handler = async (ctx) => {
   if (body.ackWithoutReplicas !== undefined) {
     const value = body.ackWithoutReplicas
     if (value !== null && value !== "error" && value !== "allow") {
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         'ackWithoutReplicas must be "error", "allow", or null to follow the node',
       )
     }
@@ -964,7 +964,7 @@ export const deleteDb: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const name = dbName(ctx)
   requirePrimaryFor(ctx, name)
-  if (!ctx.runtime.registry.has(name)) throw BunQLError.dbNotFound(name)
+  if (!ctx.runtime.registry.has(name)) throw BqlError.dbNotFound(name)
   ctx.runtime.evict(name)
   try {
     const trash = ctx.runtime.registry.delete(name)
@@ -1018,7 +1018,7 @@ export const restoreDb: Handler = async (ctx) => {
 
   const tenant = ctx.runtime.tenant(name)
   const at = body.at === undefined ? tenant.txid : resolveAt(tenant, body.at)
-  if (at <= 0n) throw BunQLError.badRequest("restore needs a positive txid in `at`")
+  if (at <= 0n) throw BqlError.badRequest("restore needs a positive txid in `at`")
   const into = body.into ?? `${name}-restore-${at}`.slice(0, 64)
   assertValidName(into)
   try {
@@ -1046,7 +1046,7 @@ function storeFor(
   const s3 = ctx.runtime.config.s3
   const bucket = body.bucket ?? s3.bucket
   if (!bucket) {
-    throw new BunQLError(
+    throw new BqlError(
       "S3_DISABLED",
       "this node has no [s3] bucket configured, so it has no backups to read",
       503,
@@ -1087,7 +1087,7 @@ function bucketTarget(at: number | string | undefined): RestoreTarget | undefine
   }
   const ms = Date.parse(trimmed)
   if (!Number.isFinite(ms)) {
-    throw BunQLError.badRequest(`at must be a txid or a timestamp, got ${JSON.stringify(at)}`)
+    throw BqlError.badRequest(`at must be a txid or a timestamp, got ${JSON.stringify(at)}`)
   }
   return { timestamp: ms }
 }
@@ -1097,19 +1097,19 @@ function mapRestoreError(err: unknown): unknown {
   if (!(err instanceof RestoreError)) return err
   switch (err.code) {
     case "BAD_REQUEST":
-      return BunQLError.badRequest(err.message)
+      return BqlError.badRequest(err.message)
     case "CONFLICT":
-      return new BunQLError("CONFLICT", err.message, 409)
+      return new BqlError("CONFLICT", err.message, 409)
     case "S3_NO_MANIFEST":
-      return new BunQLError("S3_NO_MANIFEST", err.message, 404)
+      return new BqlError("S3_NO_MANIFEST", err.message, 404)
     case "S3_UNREACHABLE":
-      return new BunQLError("S3_UNREACHABLE", err.message, 503)
+      return new BqlError("S3_UNREACHABLE", err.message, 503)
     case "BUSY":
-      return BunQLError.busy(err.message)
+      return BqlError.busy(err.message)
     default:
       // `S3_INCOMPLETE` and `S3_CORRUPT`: the bucket is not restorable to what was asked for, and
       // the request is what named it, so 400 rather than 500.
-      return new BunQLError(err.code, err.message, 400)
+      return new BqlError(err.code, err.message, 400)
   }
 }
 
@@ -1260,19 +1260,19 @@ export const importDb: Handler = async (ctx) => {
   assertValidName(name)
   const runtime = ctx.runtime
   if (runtime.registry.has(name)) {
-    throw new BunQLError("CONFLICT", `database ${name} already exists`, 409)
+    throw new BqlError("CONFLICT", `database ${name} already exists`, 409)
   }
   const max = runtime.config.limits.maxImportBytes
   const declared = Number(ctx.request.headers.get("content-length") ?? "0")
   if (Number.isFinite(declared) && declared > max) {
-    throw new BunQLError("PAYLOAD_TOO_LARGE", `a database larger than ${max} bytes`, 413)
+    throw new BqlError("PAYLOAD_TOO_LARGE", `a database larger than ${max} bytes`, 413)
   }
   const bytes = new Uint8Array(await ctx.request.arrayBuffer())
   if (bytes.byteLength > max) {
-    throw new BunQLError("PAYLOAD_TOO_LARGE", `a database larger than ${max} bytes`, 413)
+    throw new BqlError("PAYLOAD_TOO_LARGE", `a database larger than ${max} bytes`, 413)
   }
   if (bytes.byteLength < 512 || !startsWithMagic(bytes)) {
-    throw BunQLError.badRequest("the body does not begin with the SQLite file header")
+    throw BqlError.badRequest("the body does not begin with the SQLite file header")
   }
   try {
     const tenant = await runtime.registry.importDatabase(name, bytes)
@@ -1297,7 +1297,7 @@ export const checkpointDb: Handler = async (ctx) => {
   const body = await readJson<{ mode?: string }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   const mode = (body.mode ?? "PASSIVE").toUpperCase()
   if (mode !== "PASSIVE" && mode !== "FULL" && mode !== "RESTART" && mode !== "TRUNCATE") {
-    throw BunQLError.badRequest(`unknown checkpoint mode ${JSON.stringify(body.mode)}`)
+    throw BqlError.badRequest(`unknown checkpoint mode ${JSON.stringify(body.mode)}`)
   }
   try {
     const result = tenant.checkpoint(mode)
@@ -1382,15 +1382,15 @@ export const mintToken: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const body = await readJson<TokenBody>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   const dbs = body.dbs ?? (body.db ? [body.db] : [])
-  if (dbs.length === 0) throw BunQLError.badRequest("a token needs at least one database glob")
+  if (dbs.length === 0) throw BqlError.badRequest("a token needs at least one database glob")
   for (const glob of dbs) {
     if (typeof glob !== "string" || glob.length === 0) {
-      throw BunQLError.badRequest("every entry of dbs must be a non-empty string")
+      throw BqlError.badRequest("every entry of dbs must be a non-empty string")
     }
   }
   const scope = body.scope ?? "ro"
   if (scope !== "ro" && scope !== "rw") {
-    throw BunQLError.badRequest(`scope must be "ro" or "rw", got ${JSON.stringify(body.scope)}`)
+    throw BqlError.badRequest(`scope must be "ro" or "rw", got ${JSON.stringify(body.scope)}`)
   }
   const ttlMs = body.ttlMs ?? (body.ttl !== undefined ? body.ttl * 1000 : undefined)
   const grant: TokenGrant = {
@@ -1421,7 +1421,7 @@ function toStandardBase64(segment: string): string {
 export const revokeToken: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const jti = ctx.params.jti
-  if (!jti) throw BunQLError.badRequest("no token id in the path")
+  if (!jti) throw BqlError.badRequest("no token id in the path")
   ctx.runtime.registry.catalog.revokeToken(jti)
   return json({ jti, revoked: true })
 }
@@ -1453,7 +1453,7 @@ export const promoteDb: Handler = async (ctx) => {
   const body = await readJson<{ force?: boolean }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   const outcome = await ctx.runtime.promoter.promote(name, { force: body.force === true })
   if (!outcome.ok) {
-    throw new BunQLError(outcome.code, outcome.why, PROMOTION_STATUS[outcome.code] ?? 409, {
+    throw new BqlError(outcome.code, outcome.why, PROMOTION_STATUS[outcome.code] ?? 409, {
       ...(ctx.runtime.primaryUrlFor(name) ? { primary: ctx.runtime.primaryUrlFor(name) as string } : {}),
     })
   }
@@ -1474,7 +1474,7 @@ export const cluster: Handler = async (ctx) => {
   requireAdmin(await principalOf(ctx))
   const node = ctx.runtime.cluster
   if (!node) {
-    throw new BunQLError(
+    throw new BqlError(
       "CLUSTER_DISABLED",
       "this node has no [cluster] section enabled, so it is not in a raft group",
       503,
@@ -1484,7 +1484,7 @@ export const cluster: Handler = async (ctx) => {
   if (!view) {
     // C4d: only reachable through a routing bug. `/v1/cluster` names no database, so the router —
     // the thread that holds the raft log, the term and the transport — is what answers it.
-    throw new BunQLError(
+    throw new BqlError(
       "CLUSTER_DISABLED",
       "the control plane runs on this node's router thread, which is what answers /v1/cluster",
       503,
@@ -1522,7 +1522,7 @@ function replicationMetrics(runtime: ServerRuntime): ReplicationMetrics | null {
   }
 }
 
-/** The `bunql_s3_*` and `bunql_upload_*` series, or null on a node with no bucket configured. */
+/** The `bql_s3_*` and `bql_upload_*` series, or null on a node with no bucket configured. */
 function storageMetrics(runtime: ServerRuntime): StorageMetrics | null {
   const pool = runtime.storage
   if (!pool) return null

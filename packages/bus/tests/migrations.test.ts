@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { afterAll, expect, test } from "bun:test";
 import { BusStore, SCHEMA_VERSION } from "../src/bus/store";
 
-const scratch = await mkdtemp(`${tmpdir()}/agenticbus-migrations-`);
+const scratch = await mkdtemp(`${tmpdir()}/bql-bus-migrations-`);
 afterAll(() => rm(scratch, { recursive: true, force: true }));
 
 /**

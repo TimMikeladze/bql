@@ -10,7 +10,7 @@
 // this process's memory, so a baton that outlived a restart could only ever be refused.
 
 import { constantTimeEqual } from "../auth.ts"
-import { BunQLError } from "../errors.ts"
+import { BqlError } from "../errors.ts"
 
 export interface BatonClaim {
   streamId: number
@@ -53,7 +53,7 @@ export class BatonSigner {
       throw forged()
     }
     if (expiresAt <= now) {
-      throw new BunQLError("BAD_REQUEST", "the baton has expired; open a new stream", 400)
+      throw new BqlError("BAD_REQUEST", "the baton has expired; open a new stream", 400)
     }
     return { streamId, seq }
   }
@@ -63,6 +63,6 @@ export class BatonSigner {
   }
 }
 
-function forged(): BunQLError {
-  return new BunQLError("BAD_REQUEST", "the baton is not one this server issued", 400)
+function forged(): BqlError {
+  return new BqlError("BAD_REQUEST", "the baton is not one this server issued", 400)
 }

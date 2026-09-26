@@ -75,7 +75,7 @@ async function startCluster(
 
   const nodes: Node[] = []
   for (const { id, listener } of listeners) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-cluster-${id}-`))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bql-cluster-${id}-`))
     dirs.push(dir)
     const peers = Object.fromEntries(Object.entries(urls).filter(([peer]) => peer !== id))
     const node = new ClusterNode({
@@ -91,7 +91,7 @@ async function startCluster(
       leaseGuardMs: 200,
       proposeTimeoutMs: 5000,
       ...(options.bootstrap === false ? { bootstrap: false } : {}),
-      onError: process.env.BUNQL_TEST_CLUSTER_LOG ? (err) => console.error(id, err) : () => {},
+      onError: process.env.BQL_TEST_CLUSTER_LOG ? (err) => console.error(id, err) : () => {},
     })
     await node.start()
     listener.attach(node)

@@ -129,7 +129,7 @@ Nothing. That is the answer, and it is enforced rather than hoped for.
 - **A reader arriving during an apply** cannot take a read mark, gets `SQLITE_BUSY` from
   `walTryBeginRead`, and enters SQLite's own `WAL_RETRY` loop — a scheduler yield for the first few
   attempts, then a growing `sqlite3OsSleep`, bounded by the connection's busy handler.
-  `busy_timeout` is already 5000 on every connection BunQL opens. An apply holds the locks for the
+  `busy_timeout` is already 5000 on every connection bql.sh opens. An apply holds the locks for the
   length of §4.3, which is microseconds plus one `fdatasync`.
 - **A reader that reads the wal-index header before taking any lock** — which is what
   `walTryBeginRead` does, `walIndexReadHdr` running before the read mark is claimed — can catch a
@@ -289,8 +289,8 @@ no-ops without being touched. `applier.checkpoint()` under A answers
 
 ```toml
 [replication]
-apply = "pages"       # BUNQL_REPLICATION_APPLY. "pages" = mechanism A, "wal" = mechanism B.
-applyBusyMs = 5000    # BUNQL_REPLICATION_APPLY_BUSY_MS. How long an apply waits for the WAL locks.
+apply = "pages"       # BQL_REPLICATION_APPLY. "pages" = mechanism A, "wal" = mechanism B.
+applyBusyMs = 5000    # BQL_REPLICATION_APPLY_BUSY_MS. How long an apply waits for the WAL locks.
 ```
 
 `"pages"` is the default. `docs/c6-packaging.md`'s rule — a setting that changes *meaning* does not
@@ -398,7 +398,7 @@ and A gains it. Every other test in that file, and both e2e replication scenario
   on the primary: `ChecksumMismatch` (phase `post`) raised loudly, the stream re-subscribed, the
   replica **re-snapshotted** and converged — `computeFull` on the two files identical,
   `pragma integrity_check` `ok`, `-wal` still 0 bytes.
-- `BUNQL_REPLICATION_APPLY=wal` on the running replica: back-out works, reports `"apply": "wal"`,
+- `BQL_REPLICATION_APPLY=wal` on the running replica: back-out works, reports `"apply": "wal"`,
   stays in step. Restarting it back on `"pages"` over the WAL B had left folded it away and carried
   on.
 

@@ -34,7 +34,7 @@ export interface RouterHost {
   /** Bun's own pub/sub, for a change event a worker published. */
   publish(topic: string, data: string): unknown
   /**
-   * C4d: a worker flipped a database's role. The router reads the catalog for `BunQL-Role` and for
+   * C4d: a worker flipped a database's role. The router reads the catalog for `BQL-Role` and for
    * the `requirePrimary` gate on `POST /v1/db`, and a row rewritten on another thread reaches no
    * `onChange` here — so a node promoted on a worker would keep calling itself a replica.
    */
@@ -168,7 +168,7 @@ export class WorkerPool {
     warnFdBudget(config.data.maxOpen, (message) => console.warn(message))
     if (maxOpenThrashes(config.data.maxOpen, size)) {
       console.warn(
-        `bunql: maxOpen ${config.data.maxOpen} across ${size} workers is ${share} databases per ` +
+        `bql: maxOpen ${config.data.maxOpen} across ${size} workers is ${share} databases per ` +
           `shard, which will evict and reopen on most requests. Raise maxOpen to at least ` +
           `${size * 8} or lower workers.`,
       )
@@ -231,7 +231,7 @@ export class WorkerPool {
   /**
    * Runs a request on the worker that owns `db` and returns its answer. The worker's app has
    * already applied `wrap()`, so what comes back is the finished response — headers, CORS, the
-   * `BunQL-*` set and C2's `307` included — and the router adds nothing to it.
+   * `BQL-*` set and C2's `307` included — and the router adds nothing to it.
    */
   async fetch(index: number, request: Request, preread?: Uint8Array): Promise<Response> {
     const id = this.#seq++

@@ -1,4 +1,4 @@
-// Invariant: every response leaves through one wrapper, so the four `BunQL-*` headers of design
+// Invariant: every response leaves through one wrapper, so the four `BQL-*` headers of design
 // §6, the CORS headers, the error mapping of §6.6 and the metrics tick are applied in exactly one
 // place. A handler that forgets them cannot exist.
 //
@@ -26,7 +26,7 @@ import {
 import { Catalog, type Tenant, TenantRegistry } from "../tenant/index.ts"
 import { Authenticator, type RevocationList } from "./auth.ts"
 import { loadConfig, resolveAuth, type ServerConfig, type ServerConfigInput } from "./config.ts"
-import { BunQLError, errorResponse } from "./errors.ts"
+import { BqlError, errorResponse } from "./errors.ts"
 import { failedIndexOf } from "./exec.ts"
 import { Metrics } from "./metrics.ts"
 import type { Operation } from "../core/index.ts"
@@ -124,17 +124,17 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
     try {
       response = await handler(ctx)
     } catch (err) {
-      refused = err instanceof BunQLError ? err.code : null
+      refused = err instanceof BqlError ? err.code : null
       response = errorResponse(err, {
         ...(ctx.txid !== undefined ? { txid: ctx.txid } : {}),
         ...(failedIndexOf(err) !== undefined ? { failedIndex: failedIndexOf(err) } : {}),
       })
       // A 500 is a bug in this server, and the client is told nothing about it, so it has to be
-      // reported here or it is lost. A `BunQLError` is never that: every code in `ERROR_STATUS`
+      // reported here or it is lost. A `BqlError` is never that: every code in `ERROR_STATUS`
       // is a refusal this server wrote on purpose, and several of them are 5xx — `NOT_PRIMARY`,
       // `NO_REPLICAS`, `ACK_TIMEOUT`, `BUSY`, `QUOTA_EXCEEDED`. Logging those with a stack trace
       // buries the real bugs in the noise of a replica answering the question it is supposed to.
-      const deliberate = err instanceof BunQLError && err.code !== "INTERNAL"
+      const deliberate = err instanceof BqlError && err.code !== "INTERNAL"
       if (response.status >= 500 && !deliberate) runtime.report(err)
     }
     const durationUs = Math.round((Bun.nanoseconds() - startedNs) / 1000)
@@ -158,7 +158,7 @@ function wrap(runtime: ServerRuntime, handler: Handler) {
     // fetch"), so a `307` across nodes turns a refusal a client can retry into a `401` it cannot
     // explain. Same-origin — one load balancer in front of the cluster, which is how §5.3's
     // redirect is meant to be deployed — keeps the header and the client is genuinely helped.
-    // Otherwise the answer stays `503 NOT_PRIMARY` with `BunQL-Primary`, and the SDK retries
+    // Otherwise the answer stays `503 NOT_PRIMARY` with `BQL-Primary`, and the SDK retries
     // against that node itself, carrying its own token. `docs/c2-promotion.md` argues it out.
     //
     // Either shape is only ever produced for a refusal taken *before* the statement ran — every
@@ -270,7 +270,7 @@ export async function createApp(runtime: ServerRuntime, pool?: WorkerPool): Prom
       shut: (conn, code, reason) => replRouter.shut(conn, code, reason),
       announce: () => {
         // A worker's database set moved — a bootstrap created a replica row, a delete removed one.
-        // The router derives `BunQL-Role` and C3b's plan from its own read of that catalog, and a
+        // The router derives `BQL-Role` and C3b's plan from its own read of that catalog, and a
         // row another thread wrote reaches no `onChange` here.
         runtime.promoter.refresh()
         replRouter.announce()
@@ -513,7 +513,7 @@ function forwardByPath(runtime: ServerRuntime, pool: WorkerPool) {
     const named = (request as Request & { params?: Record<string, string> }).params?.db
     const db = named ?? routingName(runtime.config, request, new URL(request.url))
     if (db === null || db === undefined) {
-      return errorResponse(new BunQLError("BAD_REQUEST", "no database in the request", 400))
+      return errorResponse(new BqlError("BAD_REQUEST", "no database in the request", 400))
     }
     return pool.fetch(pool.shardOf(db), request)
   }
@@ -590,7 +590,7 @@ function upgradeReplication(
 ): Response | undefined {
   if (!runtime.replication && !replRouter) {
     return errorResponse(
-      new BunQLError(
+      new BqlError(
         "REPLICATION_DISABLED",
         "this node has no cluster secret, so it does not replicate",
         403,
@@ -702,7 +702,7 @@ function upgradeCluster(
   const cluster = runtime.cluster
   if (!cluster) {
     return errorResponse(
-      new BunQLError(
+      new BqlError(
         "CLUSTER_DISABLED",
         "this node has no [cluster] section enabled, so it is not in a raft group",
         403,
@@ -715,7 +715,7 @@ function upgradeCluster(
     // listener, so an upgrade cannot reach a worker's runtime. Either way this says where the
     // control plane is instead of throwing a 500 at a peer (C4d §5).
     return errorResponse(
-      new BunQLError(
+      new BqlError(
         "CLUSTER_DISABLED",
         "this node's raft transport is not running, so it cannot accept a peer",
         503,
@@ -884,7 +884,7 @@ export async function startServer(
 
   // The pool is started before the listener so a worker that cannot build its runtime fails
   // `startServer` rather than leaving a node that answers `DB_NOT_FOUND` for a shard.
-  const onError = options.onError ?? ((err: unknown) => console.error("bunql:", err))
+  const onError = options.onError ?? ((err: unknown) => console.error("bql:", err))
   const pool = workers > 1 ? await WorkerPool.start(config, onError) : null
   /** C4d's probe tick, or null on a node that is not both clustered and sharded. */
   let clusterProbe: ReturnType<typeof setInterval> | null = null
@@ -972,8 +972,8 @@ export async function startServer(
   const log = options.log ?? ((message: string) => console.log(message))
   if (resolved.adminKeyGenerated) {
     log(
-      `bunql: generated an admin key and wrote it to ${resolved.keysFile}\n` +
-        `bunql: admin key: ${resolved.adminKey}`,
+      `bql: generated an admin key and wrote it to ${resolved.keysFile}\n` +
+        `bql: admin key: ${resolved.adminKey}`,
     )
   }
 

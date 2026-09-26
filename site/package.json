@@ -1,0 +1,15 @@
+{
+  "name": "bql-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run src/build.ts",
+    "og": "bun run scripts/og.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "si-legacy": "npm:simple-icons@9",
+    "simple-icons": "^16.31.0"
+  }
+}

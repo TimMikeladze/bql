@@ -11,5 +11,5 @@ export async function slow(ctx: {
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return { slug, host: process.env.AGENTICBUS_WORKER ?? "unknown" };
+  return { slug, host: process.env.BQL_BUS_WORKER ?? "unknown" };
 }

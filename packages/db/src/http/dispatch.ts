@@ -138,7 +138,7 @@ export function createDispatcher<Ctx>(
   options: DispatchOptions = {},
 ): Dispatcher {
   const root = build(compileRegistry(registry, contextFor, options))
-  const origin = options.origin ?? "http://bunql.internal"
+  const origin = options.origin ?? "http://bql.internal"
   const fallback = options.fallback ?? notFound
 
   return async function dispatch(input, init): Promise<Response> {

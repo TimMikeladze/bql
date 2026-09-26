@@ -123,7 +123,7 @@ this database after this node was:
 
 1. the database is put into replica mode locally (the mirror of the flip above), so every write
    path answers `NOT_PRIMARY` from that instant,
-2. the subscribing node is recorded as where the database went, so `BunQL-Primary` points at it,
+2. the subscribing node is recorded as where the database went, so `BQL-Primary` points at it,
 3. if this node knows an HTTP base for the new primary it also re-follows it, so the demoted node
    converges without an operator.
 
@@ -138,8 +138,8 @@ existing `DIVERGED` path, unchanged.
 
 | transport | what a client sees |
 |---|---|
-| HTTP, the node knows an HTTP base for the new primary | `307` with `Location` and `BunQL-Primary` |
-| HTTP, the node knows only a `ws://…/v1/replication` (static topology) | `503 NOT_PRIMARY` with `BunQL-Primary`, exactly as phase 1 |
+| HTTP, the node knows an HTTP base for the new primary | `307` with `Location` and `BQL-Primary` |
+| HTTP, the node knows only a `ws://…/v1/replication` (static topology) | `503 NOT_PRIMARY` with `BQL-Primary`, exactly as phase 1 |
 | WebSocket | a `{"event":"moved","db":…,"primary":…}` frame to every socket subscribed to that database |
 
 ### Retrying a write — the sharp edge
@@ -237,15 +237,15 @@ after the primary has gone and before the operator promotes.
 
 ## Deviations from the brief
 
-- **`307` is same-origin only.** The brief and design §5.3 ask for `307` + `BunQL-Primary`.
+- **`307` is same-origin only.** The brief and design §5.3 ask for `307` + `BQL-Primary`.
   Answering `307` across nodes is actively worse than `503`: following a cross-origin redirect
   strips `Authorization` (Fetch standard), so `fetch` follows it, the new primary answers `401`,
   and the client cannot tell why. So the redirect is answered when the target shares the request's
   origin — one load balancer in front of the cluster, which is the deployment §5.3 describes — and
-  `503 NOT_PRIMARY` with `BunQL-Primary` and `Location` otherwise. The SDK replays either.
+  `503 NOT_PRIMARY` with `BQL-Primary` and `Location` otherwise. The SDK replays either.
 
 - **C1 left its server wiring undone.** `docs/plan-phase2.md` puts the `[cluster]` section,
-  `GET /v1/cluster`, `bunql cluster` and the raft socket in C1; the commit message says they are
+  `GET /v1/cluster`, `bql cluster` and the raft socket in C1; the commit message says they are
   "a separate milestone". C2 cannot be exercised without them, so they are here.
 
 - **The write path gate is in `src/server/exec.ts`.** That file is not in C2's owned list, but it

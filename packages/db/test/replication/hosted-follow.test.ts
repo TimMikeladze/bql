@@ -34,7 +34,7 @@ const dirs: string[] = []
 const registries: TenantRegistry[] = []
 
 function tempRegistry(): TenantRegistry {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-follow-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-follow-"))
   dirs.push(dir)
   const registry = TenantRegistry.open({ dir })
   registries.push(registry)

@@ -8,7 +8,7 @@
 //
 // Second invariant: nothing here re-implements a route. The worker builds the same `createApp`
 // every single-threaded node builds, and this file only matches a path to a handler and turns the
-// `Response` back into messages. `wrap()` has already run inside that app, so the `BunQL-*`
+// `Response` back into messages. `wrap()` has already run inside that app, so the `BQL-*`
 // headers, the CORS headers, the metrics tick and C2's `307` are the worker's and the router
 // forwards them untouched.
 //
@@ -26,7 +26,7 @@ import type {
 import { createApp, createRuntime, type App } from "../app.ts"
 import type { ServerConfig } from "../config.ts"
 import type { RegistryStats } from "../../tenant/index.ts"
-import { BunQLError, errorResponse } from "../errors.ts"
+import { BqlError, errorResponse } from "../errors.ts"
 import type { ServerRuntime } from "../runtime.ts"
 import {
   closeSocket as closeWsSocket,
@@ -430,7 +430,7 @@ async function runHandler(
 }
 
 function notFound(current: WorkerState, pathname: string): Response {
-  return errorResponse(new BunQLError("BAD_REQUEST", `no route for ${pathname}`, 404), {}, {
+  return errorResponse(new BqlError("BAD_REQUEST", `no route for ${pathname}`, 404), {}, {
     [HEADERS.node]: current.runtime.node,
   })
 }
@@ -445,7 +445,7 @@ function assertOwned(current: WorkerState, url: URL, headers: [string, string][]
   if (db === null) return
   const owner = shardOf(db, current.workers)
   if (owner === current.index) return
-  throw new BunQLError(
+  throw new BqlError(
     "INTERNAL",
     `database ${JSON.stringify(db)} belongs to worker ${owner}, not ${current.index}`,
     500,

@@ -31,8 +31,8 @@ Both surfaces now name the ceiling:
 
 ```
 GET /v1/db → { "open": 3, "maxOpen": 1024, "databases": [ … ] }
-/metrics   → bunql_open_tenants 3
-             bunql_max_open_tenants 1024
+/metrics   → bql_open_tenants 3
+             bql_max_open_tenants 1024
 ```
 
 ## 3. Deviations from the plan
@@ -48,7 +48,7 @@ So the share floors at one, and `maxOpenThrashes()` warns at start when the divi
 under eight:
 
 ```
-bunql: maxOpen 16 across 4 workers is 4 databases per shard, which will evict and reopen on
+bql: maxOpen 16 across 4 workers is 4 databases per shard, which will evict and reopen on
 most requests. Raise maxOpen to at least 32 or lower workers.
 ```
 
@@ -79,7 +79,7 @@ warning where there is a limit to read and none where there is not.
 | criterion | result |
 |---|---|
 | a node started with `workers: 8, maxOpen: 1024` holds at most 1024 tenants across every shard | **yes.** `test/server/max-open.test.ts` runs the same shape smaller — `workers: 4, maxOpen: 40`, sixty databases all touched — and asserts at most forty open. Run against a tree with the division removed it reports sixty, so it discriminates |
-| `GET /v1/db` and `/metrics` agree on the total | **yes**, and on the ceiling: the test compares `open`/`maxOpen` from the listing against `bunql_open_tenants`/`bunql_max_open_tenants` |
+| `GET /v1/db` and `/metrics` agree on the total | **yes**, and on the ceiling: the test compares `open`/`maxOpen` from the listing against `bql_open_tenants`/`bql_max_open_tenants` |
 | the fd warning fires once with the node's real requirement | **yes.** One probe, memoised, on the router; `warnFdBudget(config.data.maxOpen)` before the workers are spawned; `fdBudget: false` on every worker registry |
 
 ## 5. What it touched
@@ -89,4 +89,4 @@ warning where there is a limit to read and none where there is not.
 `src/tenant/index.ts`, `src/server/workers/pool.ts` (the division, the two warnings),
 `src/server/runtime.ts` (`fdBudget: false` on a shard), `src/server/routes.ts` (`open`/`maxOpen` on
 the listing), `src/server/registry.ts` (the response schema), `src/server/metrics.ts`
-(`bunql_max_open_tenants`), `src/server/workers/router.ts`, `docs/api.md`, `docs/design.md` §4.7.
+(`bql_max_open_tenants`), `src/server/workers/router.ts`, `docs/api.md`, `docs/design.md` §4.7.

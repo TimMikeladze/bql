@@ -41,7 +41,7 @@ function recordAt(txid: bigint, ageMs = 0): TxnRecordInput {
 
 /** A log of `count` one-record segments, every record stamped `ageMs` in the past. */
 function agedLog(count: number, ageMs: number): TxnLog {
-  const log = TxnLog.open({ dir: tempDir("bunql-retain-"), fsync: "never", segmentBytes: 1 })
+  const log = TxnLog.open({ dir: tempDir("bql-retain-"), fsync: "never", segmentBytes: 1 })
   for (let i = 1; i <= count; i++) log.append(recordAt(BigInt(i), ageMs))
   return log
 }

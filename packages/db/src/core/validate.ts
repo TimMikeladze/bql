@@ -62,7 +62,7 @@ export interface ValidateOptions {
   maxProblems?: number
 }
 
-const INVALID = Symbol("bunql.validate.invalid")
+const INVALID = Symbol("bql.validate.invalid")
 type Outcome = unknown | typeof INVALID
 
 const INT_TEXT = /^[+-]?[0-9]+$/

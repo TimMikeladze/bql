@@ -1,0 +1,205 @@
+# bql.sh
+
+> bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.
+
+bql.sh is two open source packages: `bql.sh` serves thousands of SQLite databases from one process, and `bql.sh/bus` is a durable message bus with leases, retries and a dead-letter path. Built on [Bun](https://bun.sh) and [SQLite](https://sqlite.org) with zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
+
+Status: `bql.sh` v0.1.0. Neither package is on npm yet; install from a clone.
+
+## Realtime from SQLite's own hooks
+
+Read `/changes` as SSE, or subscribe with `db.live` and `.key("id")` for diffs. Every commit arrives as one `change` event, driven by the `preupdate`/`update` hooks rather than triggers.
+
+```sh
+TOKEN=$(curl -sX POST localhost:4321/v1/tokens -H "authorization: Bearer $KEY" \
+        -H 'content-type: application/json' \
+        -d '{"dbs":["acme"],"scope":"ro","ttl":86400}' | jq -r .token)
+
+curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
+# retry: 1000
+# : open
+#
+# id: 3
+# event: change
+# data: {"txid":3,"changes":[{"table":"todos","op":"insert","rowid":2,"pk":{"id":2},"row":{…}}]}
+```
+
+## Every write answers with a txid
+
+Each response names the transaction it landed in. The client's default `consistency: "ryw"` sends the highest one it has seen as `BQL-Min-Txid`, so a read never goes backwards.
+
+```sh
+KEY=<the admin key it printed>
+curl -sX POST localhost:4321/v1/db -H "authorization: Bearer $KEY" \
+     -H 'content-type: application/json' -d '{"name":"acme"}'
+
+curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
+     -H 'content-type: application/json' \
+     -d '{"sql":"create table todos(id integer primary key, title text)"}'
+# {"columns":[],"types":[],"rows":[],"rowsAffected":0,"lastInsertRowid":null,"txid":1,...}
+
+curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
+     -H 'content-type: application/json' \
+     -d '{"sql":"insert into todos(title) values (?)","args":["write it"]}'
+# {"columns":[],"types":[],"rows":[],"rowsAffected":1,"lastInsertRowid":1,"txid":2,...}
+```
+
+## Replicas that forward writes
+
+Start a second node with `--replica-of` and a shared `--cluster-secret`. It serves reads locally and forwards writes to the primary, answering with the primary's txid already applied.
+
+```sh
+curl -sD- -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+     -d '{"sql":"insert into notes (body) values (@1)","args":["through the replica"]}' \
+     http://127.0.0.1:4502/v1/db/acme/query
+# BQL-Role: replica
+# BQL-Primary: ws://127.0.0.1:4501/v1/replication
+# BQL-Txid: 2
+
+curl -s -H "authorization: Bearer $KEY" http://127.0.0.1:4502/v1/db/acme/replication
+# {"role":"replica","connected":true,"applied":2,"lagTxid":0,"bootstrapping":false,...}
+```
+
+## Promotion that refuses to guess
+
+`bql promote` moves one database to a new primary and fences the old one by epoch. `--force` overrides exactly `STREAM_LIVE`, `LEASE_HELD` and `BEHIND`, and nothing else.
+
+```sh
+bql promote acme --url http://127.0.0.1:4502        # addresses the candidate, not the cluster
+# acme promoted on http://127.0.0.1:4502: epoch 4, txid 918
+# n2 takes acme at epoch 4, fencing n1
+```
+
+## Backed up to any bucket
+
+Pass `--s3` and every database's log and snapshots ship continuously to S3, R2, Tigris or MinIO. A slow bucket makes the node report `behind`; it never slows a commit.
+
+```sh
+export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…
+bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
+
+bql backup status acme
+# acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)
+
+bql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+```
+
+## ORMs reach it unmodified
+
+It speaks libsql's Hrana, so `@libsql/client` connects as is. `bql.sh/kysely` and `bql.sh/drizzle` map transactions and batches onto bql.sh's own routes.
+
+@libsql/client, Hrana over HTTP:
+
+```ts
+import { createClient } from "@libsql/client"
+
+// The trailing slash matters: the client resolves `v2/pipeline` relative to this URL.
+const primary = createClient({ url: "http://127.0.0.1:4501/v1/db/acme/", authToken: KEY })
+const replica = createClient({ url: "http://127.0.0.1:4502/v1/db/acme/", authToken: KEY })
+
+await primary.execute("insert into notes (body) values ('written by @libsql/client')")
+await replica.execute("select id, body from notes order by id")  // already applied
+await replica.execute("insert into notes (body) values ('nope')") // LibsqlError: NOT_PRIMARY
+```
+
+bql.sh/kysely, BqlDialect:
+
+```ts
+import { Kysely, type Generated } from "kysely"
+import { BqlDialect } from "bql.sh/kysely"
+
+interface Database {
+  todos: { id: Generated<number>; title: string; done: Generated<number> }
+}
+
+const db = new Kysely<Database>({
+  dialect: new BqlDialect({ url: "http://localhost:4321", token, db: "acme" }),
+})
+
+const written = await db
+  .insertInto("todos")
+  .values({ title: "write it" })
+  .returningAll()
+  .executeTakeFirstOrThrow()
+
+await db.transaction().execute(async (trx) => {        // one bql.sh transaction, not a loose begin
+  await trx.updateTable("todos").set({ done: 1 }).where("id", "=", written.id).execute()
+})
+```
+
+bql.sh/drizzle, drizzle():
+
+```ts
+import { eq } from "drizzle-orm"
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
+import { drizzle } from "bql.sh/drizzle"
+
+const todos = sqliteTable("todos", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  done: integer("done").notNull().default(0),
+})
+
+const db = drizzle({ url: "http://localhost:4321", token, db: "acme" }, { schema: { todos } })
+
+const [written] = await db.insert(todos).values({ title: "write it" }).returning()
+await db.transaction(async (tx) => {
+  await tx.update(todos).set({ done: 1 }).where(eq(todos.id, written.id))
+})
+```
+
+## Subjects, fanned out on pull
+
+`*` matches one token and `>` the rest, the NATS convention. Fan-out happens when a consumer pulls, so publishing is O(1) in subscriptions and `deliverFrom: "beginning"` reads last week.
+
+```
+orders.eu.created        a concrete subject
+orders.*.created         matches orders.eu.created, not orders.eu.west.created
+orders.>                 matches both
+>                        everything
+```
+
+## Three tiers of exactly-once
+
+At-least-once by default. `ack(id, { publish: [...] })` commits the ack and its outputs together, and `api.effect` records an external call alongside the ack. The last tier's window is named, not hidden.
+
+| Tier | Guarantee | Requires |
+| --- | --- | --- |
+| **Transactional ack** | Exactly-once *processing* — the handler's writes and the ack are one SQLite transaction | Embedded mode (`createBus`), a synchronous handler |
+| **Atomic read-process-write** | Exactly-once *within the bus* — `ack(id, { publish: [...] })` commits both or neither | Nothing; it is an option on `ack` |
+| **Fenced, ledgered effects** | Tight effectively-once against the outside world | A destination with a conditional write, or an idempotent one |
+
+## Schemas with computed compatibility
+
+Register JSON Schema 2020-12 with `--compat backward`, bind it to a subject pattern in `warn` mode, then `enforce`. A version that breaks the declared mode is a 409 naming the pointer.
+
+```sh
+bql-bus schema register order ./order.json --compat backward
+bql-bus schema bind 'orders.>' order --mode warn      # then --mode enforce
+bql-bus schema check order ./order-v2.json            # dry-run the compat check
+```
+
+## Proven with real processes
+
+`bun run test:e2e` runs competing consumers, a SIGKILL mid-message, a poison message and a cross-process request. No mocks; `bun run soak --fault post-ack` crashes at chosen points.
+
+```
+ok   eight messages were handled with none left pending or dead — pending=0 dead=0
+ok   a second subscription received the same messages independently — 8 envelopes
+ok   killed worker-a while it held the slow message
+ok   a surviving consumer recovered the expired lease — attempt 2, now on worker-b
+ok   the poison message reached the dead-letter subject with its reason — unsupported payload
+ok   a request was answered by a consumer in another process — "HELLO BUS"
+ok   a long handler is running as a real child process — pid 86892
+ok   cancelling the message cancelled its in-flight delivery — 1 delivery
+ok   the consumer's child process actually stopped
+ok   a repeated dedupe key does not publish twice
+```
+
+## Links
+
+- [Reference](https://bql.dev/reference): the full README of each package
+- [Reference as Markdown](https://bql.dev/reference.md)
+- [This page as Markdown](https://bql.dev/index.md)
+- [AGENTS.md](https://bql.dev/AGENTS.md)
+- [Repository](https://github.com/TimMikeladze/bql)

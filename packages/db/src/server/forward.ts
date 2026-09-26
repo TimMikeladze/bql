@@ -24,7 +24,7 @@ import type {
 import { ForwardError, type ForwardBody } from "../replication/index.ts"
 import type { Tenant } from "../tenant/index.ts"
 import { ADMIN, type Principal, requireScope, type TokenClaims, tokenPrincipal } from "./auth.ts"
-import { BunQLError, mapError } from "./errors.ts"
+import { BqlError, mapError } from "./errors.ts"
 import {
   assertStatement,
   executeBatch,
@@ -72,7 +72,7 @@ function principalFrom(wire: WirePrincipal | undefined): Principal {
   if (wire?.kind === "token" && wire.claims && typeof wire.claims === "object") {
     return tokenPrincipal(wire.claims)
   }
-  throw BunQLError.unauthenticated("the forwarded write carried no usable principal")
+  throw BqlError.unauthenticated("the forwarded write carried no usable principal")
 }
 
 // ── the replica's side ─────────────────────────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ export class Forwarder {
       body,
     })) as { tx?: string; expiresInMs?: number }
     if (typeof answer?.tx !== "string") {
-      throw new BunQLError("INTERNAL", "the primary opened a transaction without a baton", 500)
+      throw new BqlError("INTERNAL", "the primary opened a transaction without a baton", 500)
     }
     this.#remote.set(answer.tx, {
       baton: answer.tx,
@@ -274,7 +274,7 @@ export class Forwarder {
 
   async #send(db: string, op: string, payload: ForwardPayload): Promise<unknown> {
     const replica = this.runtime.replica
-    if (!replica) throw BunQLError.notPrimary(this.runtime.primaryUrlFor(db) ?? undefined)
+    if (!replica) throw BqlError.notPrimary(this.runtime.primaryUrlFor(db) ?? undefined)
     this.runtime.metrics.forwarded()
     try {
       return await replica.forward({ db, op, body: payload })
@@ -291,8 +291,8 @@ export class Forwarder {
     // A `NOT_PRIMARY` from the primary is itself a pre-execution refusal — it was fenced, or it
     // never owned this database — so it stays a `NOT_PRIMARY` and stays safe to retry. A
     // `FORWARD_TIMEOUT` never becomes one, because that one means "may or may not have committed".
-    if (err.code === "NOT_PRIMARY") return BunQLError.notPrimary(primary ?? undefined)
-    const mapped = new BunQLError(err.code, err.message, err.status, {
+    if (err.code === "NOT_PRIMARY") return BqlError.notPrimary(primary ?? undefined)
+    const mapped = new BqlError(err.code, err.message, err.status, {
       ...(details.txid !== undefined ? { txid: details.txid } : {}),
       ...(primary ? { primary } : {}),
     })
@@ -335,7 +335,7 @@ export async function runForward(
       case "tx.rollback":
         return await forwardedTxEnd(runtime, principal, payload, request.op === "tx.commit")
       default:
-        throw BunQLError.badRequest(`a replica forwarded an unknown op ${JSON.stringify(request.op)}`)
+        throw BqlError.badRequest(`a replica forwarded an unknown op ${JSON.stringify(request.op)}`)
     }
   } catch (err) {
     throw asWireError(err)
@@ -430,11 +430,11 @@ async function forwardedTxEnd(
  * the client eventually sees are the ones this node decided on — a `SQLITE_CONSTRAINT` stays a
  * `SQLITE_CONSTRAINT` with its 409, rather than becoming somebody's idea of a transport failure.
  */
-function asWireError(err: unknown): BunQLError {
+function asWireError(err: unknown): BqlError {
   const { status, body } = mapError(err, {
     ...(failedIndexOf(err) !== undefined ? { failedIndex: failedIndexOf(err) } : {}),
   })
-  const wire = new BunQLError(body.error.code, body.error.message, status, {
+  const wire = new BqlError(body.error.code, body.error.message, status, {
     ...(body.error.txid !== undefined ? { txid: body.error.txid } : {}),
     ...(body.error.failedIndex !== undefined ? { failedIndex: body.error.failedIndex } : {}),
   })

@@ -1,4 +1,4 @@
-// `bunql promote` and `bunql cluster`, spawned as an operator runs them, against real nodes.
+// `bql promote` and `bql cluster`, spawned as an operator runs them, against real nodes.
 //
 // The CLI addresses the node that should become the primary, not the cluster: promotion is that
 // node's own copy being accepted, so `--url` names the candidate.
@@ -36,9 +36,9 @@ interface Ran {
   stderr: string
 }
 
-async function bunql(url: string, adminKey: string, ...args: string[]): Promise<Ran> {
+async function bql(url: string, adminKey: string, ...args: string[]): Promise<Ran> {
   const child = Bun.spawn(["bun", CLI, ...args], {
-    env: { ...process.env, BUNQL_URL: url, BUNQL_ADMIN_KEY: adminKey, BUNQL_TOKEN: "" },
+    env: { ...process.env, BQL_URL: url, BQL_ADMIN_KEY: adminKey, BQL_TOKEN: "" },
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -50,9 +50,9 @@ async function bunql(url: string, adminKey: string, ...args: string[]): Promise<
   return { code, stdout, stderr }
 }
 
-const on = (node: Node, ...args: string[]): Promise<Ran> => bunql(node.url, node.adminKey, ...args)
+const on = (node: Node, ...args: string[]): Promise<Ran> => bql(node.url, node.adminKey, ...args)
 
-describe("bunql promote", () => {
+describe("bql promote", () => {
   test("promotes a replica whose primary is gone, end to end", async () => {
     const primary = await startPrimary()
     await createDb(primary, "acme", "create table t (v text)")
@@ -74,7 +74,7 @@ describe("bunql promote", () => {
     expect(promoted.stdout).toContain("acme promoted")
     expect(promoted.stdout).toContain("epoch 1")
 
-    // It is a primary now, and `bunql exec` against it writes.
+    // It is a primary now, and `bql exec` against it writes.
     const wrote = await on(replica, "exec", "acme", "--sql", "insert into t (v) values ('two')")
     expect(wrote.code).toBe(0)
     const read = await on(replica, "exec", "acme", "--sql", "select count(*) as n from t", "--json")
@@ -107,7 +107,7 @@ describe("bunql promote", () => {
   })
 })
 
-describe("bunql cluster", () => {
+describe("bql cluster", () => {
   test("reports membership, the term and where each database lives", async () => {
     const servers = await startCluster(3)
     await waitFor("a raft leader", () => servers.some((s) => s.handle.runtime.cluster?.isLeader()))
@@ -115,10 +115,10 @@ describe("bunql cluster", () => {
     // C3's create gate: only the node the placement function names may create it, so the test asks
     // the same function the cluster does rather than assuming the first node.
     const owner = homeServer(servers, "acme")
-    const created = await bunql(owner.url, owner.adminKey, "db", "create", "acme")
+    const created = await bql(owner.url, owner.adminKey, "db", "create", "acme")
     expect(created.code).toBe(0)
 
-    const json = await bunql(owner.url, owner.adminKey, "cluster", "--json")
+    const json = await bql(owner.url, owner.adminKey, "cluster", "--json")
     expect(json.code).toBe(0)
     const view = JSON.parse(json.stdout) as {
       id: string
@@ -134,7 +134,7 @@ describe("bunql cluster", () => {
       leaseHeldHere: true,
     })
 
-    const table = await bunql(owner.url, owner.adminKey, "cluster")
+    const table = await bql(owner.url, owner.adminKey, "cluster")
     expect(table.code).toBe(0)
     expect(table.stdout).toContain("acme")
     expect(table.stdout).toContain("term")

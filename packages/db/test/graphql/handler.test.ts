@@ -1,6 +1,6 @@
 // The endpoint against real rows. Four of these are not about GraphQL at all — they are about
 // what the wiring must not lose on the way through a generated resolver and an in-process
-// dispatch: the token's per-table ACL, a 64-bit integer, a BunQL error's code, and the limits that
+// dispatch: the token's per-table ACL, a 64-bit integer, a bql.sh error's code, and the limits that
 // stand between a text query and an arbitrarily expensive one.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
@@ -112,7 +112,7 @@ describe("what the wiring must not lose", () => {
       `mutation { updateFile(id: "1", input: { body: { b: "aGk=" } }) { body { b } } }`,
     )
     expect(written.body.data?.updateFile).toEqual({ body: { b: "aGk=" } })
-    // On the wire it is the `{"$b": …}` the rest of BunQL speaks, not the GraphQL spelling.
+    // On the wire it is the `{"$b": …}` the rest of bql.sh speaks, not the GraphQL spelling.
     const rest = await fixture.data.dispatchAs(fixture.data.token())("/v1/db/gqlhandler/api/files")
     expect(await rest.json()).toEqual([{ id: 1, body: { $b: "aGk=" } }])
   })
@@ -132,7 +132,7 @@ describe("what the wiring must not lose", () => {
     expect(refusal?.extensions?.status).toBe(403)
   })
 
-  test("a BunQL error keeps its code instead of arriving as an opaque failure", async () => {
+  test("a bql.sh error keeps its code instead of arriving as an opaque failure", async () => {
     const { body } = await fixture.ask(
       `mutation { createUser(input: { id: 1, name: "clash" }) { id } }`,
     )

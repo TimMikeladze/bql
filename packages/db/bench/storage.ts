@@ -4,7 +4,7 @@
 //   bun run bench/storage.ts [records]
 //
 // The bucket is `test/storage/fake-s3.ts`, the same in-process S3 the storage tests run against.
-// That makes this a measurement of BunQL's side of the wire — batching, the segment layout, the
+// That makes this a measurement of bql.sh's side of the wire — batching, the segment layout, the
 // manifest write and `Bun.S3Client`'s request path — with the network and a real S3's queueing
 // taken out. A number from a real bucket will be slower and is a different question; this one is
 // the ceiling, and the one that regresses when the shipper does.
@@ -15,7 +15,7 @@
 // Throughput is measured commit-to-bucket over the whole burst, never over the flush at the end:
 // the shipper runs on a timer while the writes are happening, so by the time the last commit
 // lands most of the burst is already in the bucket and the final drain is a tail, not the work.
-// Two byte counts come out of it, because they answer different questions — what BunQL pushed
+// Two byte counts come out of it, because they answer different questions — what bql.sh pushed
 // (the shipper re-uploads a segment as it grows) and what the bucket ends up holding.
 
 import fs from "node:fs"
@@ -30,10 +30,10 @@ const RECORDS = Number(Bun.argv[2] ?? 2000)
 const STEADY = Math.max(20, Math.min(200, Math.round(RECORDS / 10)))
 const DB = "bench"
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-s3-bench-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-s3-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
-const bucket = await FakeS3.start({ bucket: "bunql-bench" })
+const bucket = await FakeS3.start({ bucket: "bql-bench" })
 const prefix = `bench-${Date.now().toString(36)}/`
 
 const config = loadConfig({

@@ -15,7 +15,7 @@ Reproduced by hand on two nodes, before this milestone:
 5. The primary serves `NEW-GENERATION`. The replica serves `OLD-GENERATION`, **at the same
    txid**, with no error and nothing in either log.
 
-Step 5 is the severity. Both nodes stand at txid 2, so a `BunQL-Min-Txid: 2` read — the
+Step 5 is the severity. Both nodes stand at txid 2, so a `BQL-Min-Txid: 2` read — the
 read-your-writes check — is *satisfied* by the replica. The consistency mechanism certifies the
 wrong answer. Nothing logs, nothing 503s, no metric moves.
 

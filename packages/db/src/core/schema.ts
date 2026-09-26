@@ -211,8 +211,8 @@ export type EnumMember = string | number | boolean | null
 /** How a node's values are encoded on the wire, for the three that are not plain JSON. */
 export type Codec = "int64" | "blob" | "sqlite"
 
-const OPTIONAL = Symbol("bunql.schema.optional")
-const CODEC = Symbol("bunql.schema.codec")
+const OPTIONAL = Symbol("bql.schema.optional")
+const CODEC = Symbol("bql.schema.codec")
 
 /** The `{"$i": "<decimal>"}` of design §6.1, as a JSON Schema branch. */
 const INT_TAG: JsonSchemaNode = Object.freeze({
@@ -429,7 +429,7 @@ export const s = {
   string(): StringSchema {
     return node({ type: "string" }) as StringSchema
   },
-  /** `{"type": "integer"}` — a plain JSON integer, not BunQL's int64 encoding. */
+  /** `{"type": "integer"}` — a plain JSON integer, not bql.sh's int64 encoding. */
   int(): NumberSchema {
     return node({ type: "integer" }) as NumberSchema
   },
@@ -478,7 +478,7 @@ export const s = {
     return node({ anyOf: Object.freeze([...members]) }) as SchemaNode<Infer<M[number]>>
   },
   /**
-   * A SQLite integer as BunQL puts it on the wire (design §6.1): a JSON number while it survives
+   * A SQLite integer as bql.sh puts it on the wire (design §6.1): a JSON number while it survives
    * one, and `{"$i": "<decimal>"}` beyond ±2^53. Both branches are published, so a client reading
    * the document knows it has to handle the tagged form.
    */
@@ -498,7 +498,7 @@ export const s = {
       "blob",
     ) as SchemaNode<Uint8Array>
   },
-  /** Any one SQLite value, in BunQL's encoding. A `boolean` is accepted and stored as 0 or 1. */
+  /** Any one SQLite value, in bql.sh's encoding. A `boolean` is accepted and stored as 0 or 1. */
   sqliteValue(): SchemaNode<null | number | bigint | string | Uint8Array> {
     return tagged(
       node({
@@ -511,7 +511,7 @@ export const s = {
           BLOB_TAG,
           FLOAT_TAG,
         ]),
-        description: "One SQLite value in BunQL's encoding (design §6.1).",
+        description: "One SQLite value in bql.sh's encoding (design §6.1).",
       }),
       "sqlite",
     ) as SchemaNode<null | number | bigint | string | Uint8Array>

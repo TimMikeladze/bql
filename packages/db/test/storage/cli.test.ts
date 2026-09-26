@@ -1,4 +1,4 @@
-// `bunql backup` and `bunql restore --from s3://…` as an operator runs them: a spawned process
+// `bql backup` and `bql restore --from s3://…` as an operator runs them: a spawned process
 // against a server that is shipping to a bucket.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
@@ -22,7 +22,7 @@ beforeAll(async () => {
     env: {},
     overrides: {
       server: { port: 0, host: "127.0.0.1", node: "cli-node" },
-      data: { dir: tempDir("bunql-s3-cli-") },
+      data: { dir: tempDir("bql-s3-cli-") },
       s3: {
         ...credentials,
         prefix,
@@ -48,13 +48,13 @@ interface Ran {
   stderr: string
 }
 
-async function bunql(...args: string[]): Promise<Ran> {
+async function bql(...args: string[]): Promise<Ran> {
   const child = Bun.spawn(["bun", CLI, ...args], {
     env: {
       ...process.env,
-      BUNQL_URL: `http://127.0.0.1:${handle.server.port}`,
-      BUNQL_ADMIN_KEY: handle.adminKey as string,
-      BUNQL_TOKEN: "",
+      BQL_URL: `http://127.0.0.1:${handle.server.port}`,
+      BQL_ADMIN_KEY: handle.adminKey as string,
+      BQL_TOKEN: "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -70,9 +70,9 @@ async function bunql(...args: string[]): Promise<Ran> {
 describe("parsing an s3 url", () => {
   test("splits the bucket from the prefix", () => {
     expect(parseS3Url("s3://backups")).toEqual({ bucket: "backups" })
-    expect(parseS3Url("s3://backups/bunql/prod")).toEqual({
+    expect(parseS3Url("s3://backups/bql/prod")).toEqual({
       bucket: "backups",
-      prefix: "bunql/prod",
+      prefix: "bql/prod",
     })
   })
 
@@ -82,31 +82,31 @@ describe("parsing an s3 url", () => {
   })
 })
 
-describe("bunql backup and restore", () => {
+describe("bql backup and restore", () => {
   test("status, verify and a restore from the bucket", async () => {
-    expect((await bunql("db", "create", "books")).code).toBe(0)
+    expect((await bql("db", "create", "books")).code).toBe(0)
     expect(
-      (await bunql("exec", "books", "--sql", "create table b (id integer primary key, t text)")).code,
+      (await bql("exec", "books", "--sql", "create table b (id integer primary key, t text)")).code,
     ).toBe(0)
     for (let i = 1; i <= 5; i++) {
-      await bunql("exec", "books", "--sql", `insert into b (id, t) values (${i}, 'book ${i}')`)
+      await bql("exec", "books", "--sql", `insert into b (id, t) values (${i}, 'book ${i}')`)
     }
     await handle.runtime.storage?.flush()
 
-    const status = await bunql("backup", "status", "books")
+    const status = await bql("backup", "status", "books")
     expect(status.code).toBe(0)
     expect(status.stdout).toContain("shipped txid 6")
     expect(status.stdout).toContain("caught up")
 
-    const verified = await bunql("backup", "verify", "books", "--at", "6")
+    const verified = await bql("backup", "verify", "books", "--at", "6")
     expect(verified.code).toBe(0)
     expect(verified.stdout).toContain("restorable to txid 6")
 
-    const generations = await bunql("backup", "generations", "books", "--json")
+    const generations = await bql("backup", "generations", "books", "--json")
     expect(generations.code).toBe(0)
     expect(JSON.parse(generations.stdout).generations).toHaveLength(1)
 
-    const restored = await bunql(
+    const restored = await bql(
       "restore",
       "books",
       "--from",
@@ -120,19 +120,19 @@ describe("bunql backup and restore", () => {
     expect(restored.stdout).toContain("books-old")
     expect(restored.stdout).toContain("at txid 4")
 
-    const rows = await bunql("exec", "books-old", "--sql", "select count(*) as n from b", "--json")
+    const rows = await bql("exec", "books-old", "--sql", "select count(*) as n from b", "--json")
     expect(rows.code).toBe(0)
     expect(JSON.parse(rows.stdout)[0].n).toBe(3)
   })
 
   test("verifying a database with nothing shipped fails with a readable message", async () => {
-    const result = await bunql("backup", "verify", "absent")
+    const result = await bql("backup", "verify", "absent")
     expect(result.code).toBe(1)
     expect(result.stderr).toContain("S3_NO_MANIFEST")
   })
 
   test("an unknown backup subcommand is refused", async () => {
-    const result = await bunql("backup", "wat", "books")
+    const result = await bql("backup", "wat", "books")
     expect(result.code).toBe(1)
     expect(result.stderr).toContain("unknown backup command")
   })

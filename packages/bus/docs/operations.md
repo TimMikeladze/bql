@@ -1,4 +1,4 @@
-# Running AgenticBus
+# Running bql.sh/bus
 
 One process owns one SQLite file. Everything below follows from that.
 
@@ -14,8 +14,8 @@ nothing at all, because observing is a read.
 
 ```yaml
 scrape_configs:
-  - job_name: agenticbus
-    authorization: { credentials_file: /etc/prometheus/agenticbus.token }
+  - job_name: bql-bus
+    authorization: { credentials_file: /etc/prometheus/bql-bus.token }
     static_configs: [{ targets: ["bus.internal:4317"] }]
 ```
 
@@ -26,45 +26,45 @@ reported.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
-| `agenticbus_messages_published` · `_deduplicated` · `_requeued` | counter | `workspace` |
-| `agenticbus_deliveries_claimed` · `_acked` · `_nacked` · `_dead` | counter | `workspace`, `subscription` |
-| `agenticbus_deliveries_ack_replayed` | counter | `workspace`, `subscription` |
-| `agenticbus_deliveries_acked_with_publish` · `_acked_transactional` | counter | `workspace`, `subscription` |
-| `agenticbus_deliveries_reclaimed` · `_cancelled` | counter | `workspace` |
-| `agenticbus_keys_blocked` · `agenticbus_subscriptions_quarantined` | counter | `workspace`, `subscription` |
-| `agenticbus_effects_claimed` · `_recorded` · `_replayed` · `_retried` | counter | |
-| `agenticbus_schema_violations` | counter | `workspace`, `schema`, `mode` |
-| `agenticbus_blobs_unreadable` | counter | `workspace`, `subscription` |
-| `agenticbus_publish_duration` · `agenticbus_ack_duration` | summary (ms) | `workspace` |
-| `agenticbus_claim_duration` | summary (ms) | `workspace`, `subscription` |
-| `agenticbus_delivery_age` | summary (ms) | `workspace`, `subscription` |
-| `agenticbus_message_age_at_ack` | summary (ms) | `workspace`, `subscription` |
-| `agenticbus_subscription_lag` | gauge | `workspace`, `subscription` |
-| `agenticbus_subscription_deliveries` | gauge | `workspace`, `subscription`, `status` |
-| `agenticbus_subscription_oldest_pending_age_ms` | gauge | `workspace`, `subscription` |
-| `agenticbus_subscription_in_flight` · `_dlq_depth` | gauge | `workspace`, `subscription` |
-| `agenticbus_subscription_paused` | gauge | `workspace`, `subscription` |
-| `agenticbus_messages` · `_last_seq` | gauge | `workspace` |
-| `agenticbus_workspace_bytes` · `_quota_bytes` · `_quota_messages` | gauge | `workspace` (only where a quota is set) |
-| `agenticbus_consumers` · `_consumers_live` | gauge | `workspace` |
-| `agenticbus_db_bytes` · `_wal_bytes` · `_disk_free_bytes` · `_writable` | gauge | — (admin scrape only) |
-| `agenticbus_blobs_missing` | gauge | |
-| `agenticbus_replication_lag_seq` · `_lag_ms` | gauge | — (on a follower) |
+| `bql_bus_messages_published` · `_deduplicated` · `_requeued` | counter | `workspace` |
+| `bql_bus_deliveries_claimed` · `_acked` · `_nacked` · `_dead` | counter | `workspace`, `subscription` |
+| `bql_bus_deliveries_ack_replayed` | counter | `workspace`, `subscription` |
+| `bql_bus_deliveries_acked_with_publish` · `_acked_transactional` | counter | `workspace`, `subscription` |
+| `bql_bus_deliveries_reclaimed` · `_cancelled` | counter | `workspace` |
+| `bql_bus_keys_blocked` · `bql_bus_subscriptions_quarantined` | counter | `workspace`, `subscription` |
+| `bql_bus_effects_claimed` · `_recorded` · `_replayed` · `_retried` | counter | |
+| `bql_bus_schema_violations` | counter | `workspace`, `schema`, `mode` |
+| `bql_bus_blobs_unreadable` | counter | `workspace`, `subscription` |
+| `bql_bus_publish_duration` · `bql_bus_ack_duration` | summary (ms) | `workspace` |
+| `bql_bus_claim_duration` | summary (ms) | `workspace`, `subscription` |
+| `bql_bus_delivery_age` | summary (ms) | `workspace`, `subscription` |
+| `bql_bus_message_age_at_ack` | summary (ms) | `workspace`, `subscription` |
+| `bql_bus_subscription_lag` | gauge | `workspace`, `subscription` |
+| `bql_bus_subscription_deliveries` | gauge | `workspace`, `subscription`, `status` |
+| `bql_bus_subscription_oldest_pending_age_ms` | gauge | `workspace`, `subscription` |
+| `bql_bus_subscription_in_flight` · `_dlq_depth` | gauge | `workspace`, `subscription` |
+| `bql_bus_subscription_paused` | gauge | `workspace`, `subscription` |
+| `bql_bus_messages` · `_last_seq` | gauge | `workspace` |
+| `bql_bus_workspace_bytes` · `_quota_bytes` · `_quota_messages` | gauge | `workspace` (only where a quota is set) |
+| `bql_bus_consumers` · `_consumers_live` | gauge | `workspace` |
+| `bql_bus_db_bytes` · `_wal_bytes` · `_disk_free_bytes` · `_writable` | gauge | — (admin scrape only) |
+| `bql_bus_blobs_missing` | gauge | |
+| `bql_bus_replication_lag_seq` · `_lag_ms` | gauge | — (on a follower) |
 
 Counters reset when the process restarts, as Prometheus counters are meant to — use `rate()`.
 
 The alerts worth having, in the order you will want them:
 
-1. `agenticbus_subscription_oldest_pending_age_ms` above what the work is allowed to wait. Depth
+1. `bql_bus_subscription_oldest_pending_age_ms` above what the work is allowed to wait. Depth
    tells you how much is queued; **age** tells you how long the front of the queue has been
    there, which is the number a person actually cares about.
-2. `agenticbus_subscription_deliveries{status="dead"}` moving at all — something is failing every
+2. `bql_bus_subscription_deliveries{status="dead"}` moving at all — something is failing every
    attempt.
-3. `agenticbus_writable == 0` or `agenticbus_disk_free_bytes` near the watermark. Publishes are
+3. `bql_bus_writable == 0` or `bql_bus_disk_free_bytes` near the watermark. Publishes are
    already being refused with 507 at that point.
-4. `agenticbus_replication_lag_seq` above the RPO you are willing to state. That gauge *is* the
+4. `bql_bus_replication_lag_seq` above the RPO you are willing to state. That gauge *is* the
    promise.
-5. `agenticbus_subscription_lag` climbing without bound — nothing is consuming.
+5. `bql_bus_subscription_lag` climbing without bound — nothing is consuming.
 
 Summaries carry `_count`, `_sum`, `_min` and `_max` rather than buckets. Bucket boundaries depend
 on the workload and a wrong default is worse than an honest summary; a host that wants quantiles
@@ -117,7 +117,7 @@ redelivered once their lease expires — at-least-once, working as designed.
 ## Backup and restore
 
 ```sh
-agenticbus backup /backups/agenticbus-$(date +%F)
+bql-bus backup /backups/bql-bus-$(date +%F)
 ```
 
 `VACUUM INTO` plus a copy of the blob directory, taken from a second connection **while the bus
@@ -129,9 +129,9 @@ Restoring is stop → replace → start, and that ordering is not negotiable: a 
 cannot make a restore under a running process safe.
 
 ```sh
-systemctl stop agenticbus                 # or: fly machine stop
-agenticbus restore /backups/2026-09-13 --data /data
-systemctl start agenticbus
+systemctl stop bql-bus                 # or: fly machine stop
+bql-bus restore /backups/2026-09-13 --data /data
+systemctl start bql-bus
 ```
 
 `restore` does the whole thing — copies the snapshot and the blob directory, removes the `-wal`
@@ -141,7 +141,7 @@ migrated, or a blob directory that did not come along, fails here rather than du
 It refuses to overwrite a database that is already there unless you pass `--force`.
 
 ```
-$ agenticbus restore /backups/2026-09-13 --data /data
+$ bql-bus restore /backups/2026-09-13 --data /data
 {"data":"/data","lastSeq":48213,"messages":48213,"subscriptions":4,"blobsMissing":0}
 ```
 
@@ -149,8 +149,8 @@ $ agenticbus restore /backups/2026-09-13 --data /data
 want when the thing to undo is a batch somebody published rather than a disk that died:
 
 ```sh
-agenticbus restore /backups/2026-09-13 --data /data --until-seq 48120
-agenticbus restore /backups/2026-09-13 --data /data --until-time '2026-09-13T09:15:00Z'
+bql-bus restore /backups/2026-09-13 --data /data --until-seq 48120
+bql-bus restore /backups/2026-09-13 --data /data --until-time '2026-09-13T09:15:00Z'
 ```
 
 Messages past the cut are removed, their unfinished deliveries go with them, and every
@@ -159,7 +159,7 @@ silently skip everything published after the recovery point.
 
 What this is *not*: replay from an archive of shipped log segments. The log written after a
 snapshot lives on whatever was following the leader at the time, which is what
-`agenticbus follow` is for.
+`bql-bus follow` is for.
 
 `bun run drill:restore` is the check, and it is the reason any of this is believable: it
 publishes — including a body large enough to go to a blob — backs up, **wipes the data
@@ -186,7 +186,7 @@ unprivileged user, and takes SIGTERM as a drain signal.
 
 ```sh
 fly apps create my-bus
-fly volumes create agenticbus_data --size 1 --region sjc --app my-bus
+fly volumes create bql_bus_data --size 1 --region sjc --app my-bus
 fly secrets set BUS_SIGNING_KEY=$(openssl rand -base64 32) \
                 BUS_ADMIN_TOKEN=$(openssl rand -base64 32) --app my-bus
 fly deploy --app my-bus
@@ -211,15 +211,15 @@ A remote consumer needs only the URL and a scoped token:
 
 ```sh
 BUS_URL=https://my-bus.fly.dev \
-BUS_TOKEN=$(agenticbus token --consumer laptop-1 --subscribe rpc) \
-  agenticbus consume rpc --exec ./handle.sh
+BUS_TOKEN=$(bql-bus token --consumer laptop-1 --subscribe rpc) \
+  bql-bus consume rpc --exec ./handle.sh
 ```
 
 ## Continuity
 
 ```sh
 # on the replica
-agenticbus follow https://bus.internal:4317 --data /replica --port 4317
+bql-bus follow https://bus.internal:4317 --data /replica --port 4317
 ```
 
 A follower pulls `/api/log?after=N` and the subscription cursors and applies them, keeping the
@@ -235,8 +235,8 @@ deliveries from the cursors through the same code path a cold start uses.
 **Failover is fenced.** Both nodes must be able to see one lease object:
 
 ```sh
-agenticbus serve  --data /data     --lease /shared/agenticbus.lease   # the leader
-agenticbus promote --data /replica --lease /shared/agenticbus.lease   # the new one
+bql-bus serve  --data /data     --lease /shared/bql-bus.lease   # the leader
+bql-bus promote --data /replica --lease /shared/bql-bus.lease   # the new one
 ```
 
 `promote` acquires the lease, and the epoch it grants is stamped into the replica's database. The
@@ -253,8 +253,8 @@ put — the seam is the point.
 
 | | |
 | --- | --- |
-| `agenticbus_replication_lag_seq` | messages the replica has not applied |
-| `agenticbus_replication_lag_ms` | how old the newest applied message is |
+| `bql_bus_replication_lag_seq` | messages the replica has not applied |
+| `bql_bus_replication_lag_ms` | how old the newest applied message is |
 
 `bun run drill:failover` promotes under continuous publish and prints the RPO it measured; on a
 laptop that is **tens of messages**. Alert on the gauges. Whatever number you tolerate is the
@@ -274,7 +274,7 @@ settable with `--min-free-bytes`:
 - **Claims, acks and nacks keep working**, because a full disk is exactly when consumers need to
   be able to drain.
 
-Losing writes loudly beats a crash loop. `agenticbus_writable` is the gauge.
+Losing writes loudly beats a crash loop. `bql_bus_writable` is the gauge.
 
 The WAL has a ceiling too: `wal_autocheckpoint`, plus a `wal_checkpoint(TRUNCATE)` on the sweep
 once `-wal` passes `--wal-checkpoint-bytes` (8 MiB by default). The truncate is best-effort — a
@@ -287,8 +287,8 @@ All off by default. A limit set without knowing the workload is how a healthy fl
 throttled at 3am.
 
 ```sh
-agenticbus serve --publish-rate 500 --claim-rate 200 --max-polls 8
-agenticbus quota set --messages 1000000 --bytes 10000000000 --subscriptions 50 --workspace acme
+bql-bus serve --publish-rate 500 --claim-rate 200 --max-polls 8
+bql-bus quota set --messages 1000000 --bytes 10000000000 --subscriptions 50 --workspace acme
 ```
 
 Limits are per **token subject**, in memory, per process. They answer 429 with `Retry-After`.
@@ -299,10 +299,10 @@ quota.
 ## Keys, revocation and the audit trail
 
 ```sh
-agenticbus keys rotate                 # a new active key; the old one still verifies
-agenticbus keys retire k1              # once tokens signed by k1 have expired
-agenticbus revoke <jti>                # withdraw one token
-agenticbus audit --limit 100           # who did what
+bql-bus keys rotate                 # a new active key; the old one still verifies
+bql-bus keys retire k1              # once tokens signed by k1 have expired
+bql-bus revoke <jti>                # withdraw one token
+bql-bus audit --limit 100           # who did what
 ```
 
 Rotation has an overlap window on purpose: it used to be the only revocation mechanism, so it had

@@ -1,4 +1,4 @@
-# BunQL — design proposal (v0, for review)
+# bql.sh — design proposal (v0, for review)
 
 Multi-tenant SQLite on Bun: one process, thousands of databases, sub-millisecond queries over
 HTTP/WebSocket/SSE, physical WAL-shipping replication, realtime change feeds and live queries,
@@ -30,7 +30,7 @@ nodes, and a server-side transaction queue (R2). Continuous backup to any S3-com
 over `Bun.S3Client`, with a specified bucket layout, retention and point-in-time restore onto a
 node that has never seen the database (R3). The libsql-compatible Hrana surface — `/v2/pipeline`,
 `/v3/pipeline`, `/v3/cursor` and the `hrana3`/`hrana2` sockets — so `@libsql/client`,
-`drizzle-orm/libsql` and `kysely-libsql` work unmodified (R4). `@bunql/db/kysely` and `@bunql/db/drizzle`,
+`drizzle-orm/libsql` and `kysely-libsql` work unmodified (R4). `bql.sh/kysely` and `bql.sh/drizzle`,
 both optional peers, with no runtime dependency added (R5).
 
 | path | budget (§10) | measured | verdict |
@@ -52,10 +52,10 @@ shipper keeps up with 29k single-row commits a second against an in-process buck
 
 **Deferred to phase 2 (§5.3, §11) — and phase 2 has since been built; every item below shipped.**
 The cluster: a Raft control plane, placement, leases, failover and `moved`, plus
-`POST /v1/db/{db}/promote`, `bunql promote`, `bunql cluster`, the `[cluster]` config section and
+`POST /v1/db/{db}/promote`, `bql promote`, `bql cluster`, the `[cluster]` config section and
 `workers: N`. **A replica can be promoted** — C2, `docs/c2-promotion.md`; the demotion is persisted,
-so an old primary restarted with no `--replica-of` still reads `BunQL-Role: replica` and refuses a
-write. Also built: replica apply mechanism A (§4.5, C5), `BunQL.open({s3})` for the embedded
+so an old primary restarted with no `--replica-of` still reads `BQL-Role: replica` and refuses a
+write. Also built: replica apply mechanism A (§4.5, C5), `Bql.open({s3})` for the embedded
 engine, and forwarding admin routes from a replica.
 
 **Phase 3, as run (§11).** Logical CDC shipped (`docs/p9-logical-cdc.md`): a replica's change feed
@@ -139,7 +139,7 @@ column a statement touches at prepare time), `progress_handler` (cancelled a run
 Caveat that shaped the driver decision (§4.1): this only works when bun:sqlite and bun:ffi
 share one libsqlite3 instance. True on macOS with `Database.setCustomSQLite(homebrew)`; on
 Linux `setCustomSQLite` is a silent no-op, Bun's SQLite is statically linked and not exported.
-A 30-line loadable-extension shim (`experiments/bunql_native.c`) recovers *most* hooks on Linux
+A 30-line loadable-extension shim (`experiments/bql_native.c`) recovers *most* hooks on Linux
 from Bun's bundled SQLite — verified in Docker: `update_hook` and progress-handler cancellation
 work through the `sqlite3_api_routines` table (wal/update/commit hooks, authorizer, progress,
 limit), but that table has no session/preupdate entries.
@@ -154,7 +154,7 @@ limit), but that table has no session/preupdate entries.
 | single-row autocommit insert (WAL, sync=NORMAL) | 6.2 µs | 11.1 µs |
 
 Hook cost is ~50 ns per row — **for the `update_hook` in the row above, which is the fallback
-engine.** The preupdate hook BunQL actually runs costs 250–350 ns a row, measured in
+engine.** The preupdate hook bql.sh actually runs costs 250–350 ns a row, measured in
 `docs/performance.md` §11; it reads the values, which is what the change feed is for. Realtime
 driven by hooks is cheap, not free.
 
@@ -201,7 +201,7 @@ placement (§5.5), not by threads on the hot path.
 
 ### 4.1 Engine: our own `bun:ffi` SQLite driver over a vendored libsqlite3
 
-Decision: **do not build on `bun:sqlite`.** Ship `@bunql/sqlite-{darwin-arm64,linux-x64,linux-arm64}`
+Decision: **do not build on `bun:sqlite`.** Ship `@bql/sqlite-{darwin-arm64,linux-x64,linux-arm64}`
 (prebuilt libsqlite3 with `ENABLE_SESSION`, `PREUPDATE_HOOK`, `SNAPSHOT`, `DBSTAT_VTAB`, `FTS5`,
 `RTREE`, `JSON`, `MATH`, `STAT4`, `UNLOCK_NOTIFY`, `USE_URI`, `DEFAULT_WAL_SYNCHRONOUS=1`), and a thin TypeScript driver
 using `dlopen` + `CFunction`. Why:
@@ -212,7 +212,7 @@ using `dlopen` + `CFunction`. Why:
 - One SQLite instance per process → no cross-instance POSIX-lock footguns.
 - We choose compile flags and can add a VFS shim later without waiting on Bun.
 
-Driver shape (internal, but `@bunql/db/sqlite` is exported for people who just want a faster
+Driver shape (internal, but `bql.sh/sqlite` is exported for people who just want a faster
 bun:sqlite):
 
 ```ts
@@ -245,7 +245,7 @@ write to a fresh path.
 - Per-tenant knobs applied on open: `page_size`, `journal_mode=wal`, `synchronous=NORMAL`,
   `wal_autocheckpoint=0` (we checkpoint), `max_page_count` (storage quota, enforced by SQLite),
   `busy_timeout`, `sqlite3_limit` set (SQL length, compound select, variable count, expr depth).
-- A local catalog `data/_system.db` (itself a BunQL database, replicated like any other in
+- A local catalog `data/_system.db` (itself a bql.sh database, replicated like any other in
   cluster mode) holds tenants, tokens, positions, placement.
 
 ### 4.3 Write path and WAL tailer
@@ -269,7 +269,7 @@ Crash recovery on the primary is the replica applier pointed at itself: each Txn
 its WAL position (salts, frame index) and an xxh3 of every page it wrote. On open, compare the
 last record's pages with the database; if they differ, the record is applied (log ahead of DB);
 if the WAL holds valid frames beyond the last record, they are tailed into new records (DB ahead
-of log). One code path, no `_bunql` bookkeeping table inside user databases.
+of log). One code path, no `_bql` bookkeeping table inside user databases.
 
 Checkpoint policy (we own it, no autocheckpoint): `PASSIVE` when WAL > 4 MB *and* the log
 has shipped past `mxFrame`; `TRUNCATE` when idle > 1 s and no reader holds a snapshot;
@@ -308,7 +308,7 @@ in LiteFS.
   shipper that falls behind the retention window re-bootstraps from snapshot + tail.
 - **S3 shipper** (Litestream role, built in): snapshots + segments to any S3-compatible
   bucket via `Bun.S3Client` (R2, Tigris, MinIO). Restore = latest snapshot ≤ target + replay
-  segments to txid/timestamp. `bunql restore acme --at 2026-09-11T10:00Z --into acme-recovered`.
+  segments to txid/timestamp. `bql restore acme --at 2026-09-11T10:00Z --into acme-recovered`.
 - **Fork/branch** = snapshot reflink + new tenant + fresh log. O(1). `POST /v1/db {from:{db,at}}`.
 
 ### 4.5 Replica apply — **A is built and is the default (C5, 2026-09-12)**
@@ -401,9 +401,9 @@ warning, which is the answer rather than a failure to read one.
 One node, no peers. Still has: txid per database, local log, snapshots, PITR, S3 shipping.
 
 ### 5.2 Primary + replicas (static topology)
-`bunql serve --replica-of wss://primary/v1/replication`. Replicas serve reads, forward writes to
+`bql serve --replica-of wss://primary/v1/replication`. Replicas serve reads, forward writes to
 the primary (transparent to clients), and stream every tenant or a configured subset.
-Promotion is manual (`bunql promote`) or scripted; epoch increments and the old primary is
+Promotion is manual (`bql promote`) or scripted; epoch increments and the old primary is
 fenced on reconnect.
 
 ### 5.3 Cluster (rf ≥ 2, automatic failover) — phase 3
@@ -417,12 +417,12 @@ fenced on reconnect.
 - **Only the node the placement function names may create a database**, and every node computes the
   same answer from the same replicated membership, so the create gate costs no quorum — that is
   what stops two nodes both creating `acme`. A node holding no copy of a database the cluster does
-  know answers `NOT_PRIMARY` + `BunQL-Primary` (a same-origin `307`) rather than `404`.
+  know answers `NOT_PRIMARY` + `BQL-Primary` (a same-origin `307`) rather than `404`.
 - The placement is **not recorded**. `DbState.replicas` means "nodes that have told the cluster they
   hold a copy", which is what `pickFailover` reads, and an intended set written into the same field
   would let a lapsed lease be granted to a node with no data.
 - Failover: lease expires → Raft leader picks the replica with the highest acked txid →
-  new epoch → clients are redirected (`307` with `BunQL-Primary` header, or WS `moved` frame).
+  new epoch → clients are redirected (`307` with `BQL-Primary` header, or WS `moved` frame).
 - Alternative adapters (`coordination: "etcd" | "postgres"`) are possible but not planned.
 - With `[server] workers > 1` the control plane stays on the router thread and the lease deadline
   is *pushed* to the worker that takes the write, converted onto that thread's own monotonic clock
@@ -432,7 +432,7 @@ fenced on reconnect.
 ### 5.4 Consistency guarantees, stated plainly
 - Per database: serializable on the primary (one writer, SQLite).
 - Replicas: snapshot-consistent at some txid; never torn; lag is typically < 1 ms on LAN.
-- **Read-your-writes**: every response carries `BunQL-Txid`. Send `BunQL-Min-Txid` (or SDK does
+- **Read-your-writes**: every response carries `BQL-Txid`. Send `BQL-Min-Txid` (or SDK does
   it automatically) and a replica waits up to `waitMs` (default 2000) or forwards to primary.
 - **The barriers themselves** are issued inline, on the write path, by the tenant that needs them.
   `[durability] fsyncSweep = "shared"` (L5) moves the log's *interval* barriers — hygiene for
@@ -496,10 +496,10 @@ compat layer: `{ "p": { "ro": { "ns": ["acme"] }, "rw": { "ns": ["acme-*"] } }, 
 revocation list and `kid` key rotation (both missing in Turso). Admin API key from config for
 lifecycle routes. Read-only tokens are safe to hand to browsers.
 
-Common response headers: `BunQL-Txid` (last txid of the db as served), `BunQL-Node`,
-`BunQL-Role: primary|replica`, `BunQL-Duration-Us`.
+Common response headers: `BQL-Txid` (last txid of the db as served), `BQL-Node`,
+`BQL-Role: primary|replica`, `BQL-Duration-Us`.
 
-Common request options (body fields or headers): `ack`, `minTxid` (`BunQL-Min-Txid`),
+Common request options (body fields or headers): `ack`, `minTxid` (`BQL-Min-Txid`),
 `consistency: "primary"|"any"`, `timeoutMs`, `rows: "array"|"object"`, `maxRows`.
 
 ### 6.1 Query / execute
@@ -519,7 +519,7 @@ POST /v1/db/acme/query
 
 `vmSteps` (from `sqlite3_stmt_status`) is the cost unit for quotas and billing; SQLite has no
 native `rows_read` (libsql patched one in), and VM steps are the honest equivalent. Response
-header `BunQL-Role` tells clients whether a replica served the read.
+header `BQL-Role` tells clients whether a replica served the read.
 
 `args` positional array or named object (`{"id": 10}` binds `:id`/`@id`/`$id`).
 Writes use the same endpoint; `rowsAffected`/`lastInsertRowid` populate and `txid` advances.
@@ -581,7 +581,7 @@ served. `docs/p9-logical-cdc.md`.
 
 Same feed without SSE, ElectricSQL-style long-poll for HTTP-only clients and CDNs:
 `GET /v1/db/acme/changes?since=4800&wait=30000` returns a JSON array of the same `change` objects
-plus `BunQL-Txid`; responses for a `since` in the past are immutable and cacheable, only the
+plus `BQL-Txid`; responses for a `since` in the past are immutable and cacheable, only the
 live tail waits. `since` older than the ring returns `409 RESET_REQUIRED`.
 
 ```http
@@ -617,7 +617,7 @@ event: diff      data: {"txid":4820,"added":[...],"removed":[[7]],"updated":[...
 HTTP status maps: 400 SQL/parse errors, 401/403 auth, 404 unknown db, 409 constraint,
 408 timeout (`QUERY_TIMEOUT`), 413 `RESULT_TOO_LARGE` (`[limits] maxResultBytes` reached mid-step),
 425 `TXID_NOT_AVAILABLE` (replica couldn't reach `minTxid`), 503 `NOT_PRIMARY` with
-`BunQL-Primary` header, 503 `WRITE_QUEUE_FULL` with `Retry-After` and `WRITE_QUEUE_TIMEOUT`
+`BQL-Primary` header, 503 `WRITE_QUEUE_FULL` with `Retry-After` and `WRITE_QUEUE_TIMEOUT`
 (admission control, L2), 429 `PIN_LIMIT` and 503 `TOO_MANY_OPEN` (L4), 507 `QUOTA_EXCEEDED`.
 
 ### 6.7 Compatibility surface: Hrana (libsql wire protocol)
@@ -634,7 +634,7 @@ Hrana's string-encoded `replication_index` is our `txid`; `last_insert_rowid` is
 integers are `{"type":"integer","value":"42"}`. Cheap, buys the whole libsql/Turso client
 ecosystem on day one.
 
-## 7. WebSocket protocol (`/v1/ws`, sub-protocol `bunql.v1`)
+## 7. WebSocket protocol (`/v1/ws`, sub-protocol `bql.v1`)
 
 One socket, many databases, pipelined, JSON text frames (binary is reserved for replication).
 Auth via `Authorization` header, `?token=`, or a first `{"op":"hello","token":"…"}` message
@@ -683,14 +683,14 @@ body`. Bodies are TxnRecords or small CBOR-free fixed structs.
 
 ## 9. Library surfaces (TypeScript)
 
-### 9.1 Client (`@bunql/db/client`) — runs in browsers, Bun, Node, Workers
+### 9.1 Client (`bql.sh/client`) — runs in browsers, Bun, Node, Workers
 
 Modelled on `Bun.SQL` (which has had a SQLite adapter since Bun 1.3) so the tagged-template
 shape, `.values()`, `.raw()`, `sql.unsafe()`, `sql.begin()` and the result array's `.count`,
 `.command`, `.lastInsertRowid`, `.affectedRows` are already familiar; we add `.txid`.
 
 ```ts
-import { createClient } from "@bunql/db/client"
+import { createClient } from "bql.sh/client"
 
 const client = createClient({ url: "https://sql.example.com", token, consistency: "ryw" })
 const db = client.db("acme")
@@ -708,7 +708,7 @@ for await (const ev of feed) render(ev)
 const live = db.live<Todo>`select * from todos where done = 0`.key("id")
 live.on("rows", rows => ...); live.on("diff", d => ...); live.close()
 
-client.txid("acme")   // last observed txid; sent as BunQL-Min-Txid automatically
+client.txid("acme")   // last observed txid; sent as BQL-Min-Txid automatically
 
 await client.admin.create("acme", { pageSize: 4096 })   // the control plane of §6.5, same client
 await client.admin.fork("acme-copy", "acme", 4812)      // …snapshot, restore, promote, backup, tokens
@@ -718,12 +718,12 @@ await client.admin.fork("acme-copy", "acme", 4812)      // …snapshot, restore,
 `"any"` accepts any replica state. The client uses HTTP for one-shots and lazily opens the WS
 for subscriptions and transactions.
 
-### 9.2 Embedded (`bunql`) — in-process on Bun, same interface plus a sync escape hatch
+### 9.2 Embedded (`bql`) — in-process on Bun, same interface plus a sync escape hatch
 
 ```ts
-import { BunQL } from "@bunql/db"
+import { Bql } from "bql.sh"
 
-const bq = await BunQL.open({ dir: "./data", s3: { bucket: "backups" } })
+const bq = await Bql.open({ dir: "./data", s3: { bucket: "backups" } })
 const db = bq.db("acme")                            // implements the same Db interface as the client
 await db.sql`select 1`                              // resolves synchronously under the hood
 db.sync.sql`select 1`.all()                         // zero-overhead path for hot loops
@@ -734,22 +734,22 @@ await bq.snapshot("acme"); await bq.restore("acme", { at: 4800 }); bq.checkpoint
 bq.serve({ port: 4321, hrana: true })               // expose the same engine over HTTP/WS/SSE
 ```
 
-Adapters shipped: `@bunql/db/kysely` (Dialect), `@bunql/db/drizzle` (via Hrana or native). Both work
+Adapters shipped: `bql.sh/kysely` (Dialect), `bql.sh/drizzle` (via Hrana or native). Both work
 against the client and the embedded `Db`.
 
 ### 9.3 CLI
 
 ```
-bunql serve [--dir ./data] [--port 4321] [--replica-of wss://…] [--config bunql.toml]
-bunql db create|list|stat|delete|fork <name> [--from <db>[@txid|@time]]
-bunql snapshot <db> · bunql restore <db> --at <txid|time> [--into <name>]
-bunql token --db acme --scope ro --ttl 30d [--tables 'todos:r,users:rw']
-bunql shell <db>          (REPL over WS)
-bunql promote <db>        (static topology)
-bunql cluster status|join|leave
+bql serve [--dir ./data] [--port 4321] [--replica-of wss://…] [--config bql.toml]
+bql db create|list|stat|delete|fork <name> [--from <db>[@txid|@time]]
+bql snapshot <db> · bql restore <db> --at <txid|time> [--into <name>]
+bql token --db acme --scope ro --ttl 30d [--tables 'todos:r,users:rw']
+bql shell <db>          (REPL over WS)
+bql promote <db>        (static topology)
+bql cluster status|join|leave
 ```
 
-### 9.4 Config (`bunql.toml`, parsed with `Bun.TOML`; every key has an env override)
+### 9.4 Config (`bql.toml`, parsed with `Bun.TOML`; every key has an env override)
 
 ```toml
 [server]  port = 4321  host = "0.0.0.0"  hrana = true  tenantFromHost = false
@@ -760,11 +760,11 @@ bunql cluster status|join|leave
 [limits]  queryTimeoutMs = 10_000  writeTimeoutMs = 30_000  txIdleTimeoutMs = 5_000  maxRows = 10_000
           maxResultBytes = 67_108_864  maxQueuedWrites = 256  maxQueuedWriteBytes = 8_388_608
           queueWaitMs = 5_000  maxPinnedPerPrincipal = 64
-[s3]      bucket = "backups"  endpoint = "https://…"  prefix = "bunql/"  shipIntervalMs = 1000
+[s3]      bucket = "backups"  endpoint = "https://…"  prefix = "bql/"  shipIntervalMs = 1000
           concurrency = 4  maxConcurrentUploads = 0  uploadWaitMs = 5_000
 [replication] role = "primary"        # or "replica"; primary = "wss://…"
 [cluster] enabled = false  rf = 2  peers = ["…"]  leaseTtlMs = 3000
-[auth]    adminKey = "${BUNQL_ADMIN_KEY}"  jwtKey = "${BUNQL_JWT_ED25519}"
+[auth]    adminKey = "${BQL_ADMIN_KEY}"  jwtKey = "${BQL_JWT_ED25519}"
 ```
 
 ## 10. Performance budget (targets, single node, M-series / modern x86)
@@ -793,7 +793,7 @@ The **query-plan cache** this row used to name is struck rather than deferred: i
 and sharing one across connections — the improvement the name implies — is impossible in SQLite
 rather than unbuilt. What P7 found instead was a ceiling with no setting and no metric: six tables
 take the data API's generated workload from a 100% hit rate to 0%, at 81x a hit per `prepare`.
-`[sqlite] statementCache` and `bunql_statement_cache_*` are the answer; `docs/p7-plan-cache.md` is
+`[sqlite] statementCache` and `bql_statement_cache_*` are the answer; `docs/p7-plan-cache.md` is
 the measurement.
 
 **"WAL-decoded"** has gone from this row's CDC bullet, and the words are the whole correction. The
@@ -832,7 +832,7 @@ Tests: WAL codec property tests against SQLite's own files; a deterministic repl
 simulator (fault injection: dropped frames, restarts, stale epochs); Jepsen-style linearizability
 check on `ack: quorum`; `experiments/` kept as benchmarks.
 
-## 12. Prior art and what BunQL borrows
+## 12. Prior art and what bql.sh borrows
 
 | system | mechanism | what we take | what we leave |
 |---|---|---|---|

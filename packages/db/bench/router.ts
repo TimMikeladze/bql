@@ -19,7 +19,7 @@
 //     difference this harness can report.
 //
 // Targets are servers started by `--targets`; `control*` are `bench/router-control.ts` modes and
-// `node*` are real `bunql serve` processes.
+// `node*` are real `bql serve` processes.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -93,7 +93,7 @@ try {
 
 function report(samples: Map<string, number[]>): void {
   console.log(
-    `\nbunql router resolution · ${CLIENTS} load processes · ${LANES} lanes each · ${SECONDS}s · ` +
+    `\nbql router resolution · ${CLIENTS} load processes · ${LANES} lanes each · ${SECONDS}s · ` +
       `${ROUNDS} interleaved rounds · Bun ${Bun.version} · ${process.platform}/${process.arch} · ` +
       `${os.cpus().length} cores\n`,
   )
@@ -277,7 +277,7 @@ async function start(name: string, port: number): Promise<Target> {
   const at = (kind as string).indexOf("@")
   const tree = at >= 0 ? (kind as string).slice(at + 1) : path.join(import.meta.dir, "..")
   const workers = workersText ? Number(workersText) : WORKERS
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-router-${port}-`))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `bql-router-${port}-`))
   const proc = Bun.spawn(
     [
       process.execPath,
@@ -296,7 +296,7 @@ async function start(name: string, port: number): Promise<Target> {
     {
       stdout: "ignore",
       stderr: "inherit",
-      env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+      env: { ...process.env, BQL_AUTH_ADMIN_KEY: ADMIN, BQL_CONFIG: "" },
     },
   )
   await waitFor(url)

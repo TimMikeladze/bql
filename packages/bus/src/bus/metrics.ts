@@ -48,7 +48,7 @@ interface Series {
   max: number;
 }
 
-/** `agenticbus.claim.duration` -> `agenticbus_claim_duration`. Dots are illegal. */
+/** `bql-bus.claim.duration` -> `bql_bus_claim_duration`. Dots are illegal. */
 function metricName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_]/g, "_");
 }

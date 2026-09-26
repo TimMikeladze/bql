@@ -13,7 +13,7 @@ import {
 } from "../../src/http/index.ts"
 import { contextFor, type Ctx, fixtureRegistry } from "./fixture.ts"
 
-const BASE = "http://bunql.test"
+const BASE = "http://bql.test"
 
 /** Calls a compiled route table the way Bun would, with the `:param` values already matched. */
 function serve(calls: string[], options = {}) {
@@ -61,7 +61,7 @@ describe("a well-formed request", () => {
 })
 
 describe("a malformed request", () => {
-  test("is a 400 in BunQL's error shape, reporting every problem, before the handler", async () => {
+  test("is a 400 in bql.sh's error shape, reporting every problem, before the handler", async () => {
     const calls: string[] = []
     const table = compileRoutes(fixtureRegistry(calls), contextFor) as Record<string, any>
     const request = new Request(`${BASE}/v1/db/acme/rows?limit=500`, { method: "GET" })

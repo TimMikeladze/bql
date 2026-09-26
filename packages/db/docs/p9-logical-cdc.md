@@ -290,7 +290,7 @@ unchanged rather than papered over.
 | `bench/replication.ts` reports the size ratio; `docs/performance.md` carries it | **yes.** Four shapes, `docs/performance.md` §11 |
 | `docs/p9-logical-cdc.md` exists, argues the refusal, scores itself | this file |
 | design §11's phase-3 row loses "WAL-decoded", with a pointer | **yes**, plus §11's prose, the "Deferred to phase 3" paragraph, the as-built differences line, and §6.4 |
-| `bun test` and `bun test` with `BUNQL_WAL_NATIVE=0` both green; each new test run once against a tree with the fix removed and seen to fail | **yes**, both green; the removals and what they said are in §8 |
+| `bun test` and `bun test` with `BQL_WAL_NATIVE=0` both green; each new test run once against a tree with the fix removed and seen to fail | **yes**, both green; the removals and what they said are in §8 |
 
 ## 8. Each test, run against a tree with the mechanism removed
 
@@ -306,7 +306,7 @@ Nine breaks, one at a time, each reverted before the next.
 | `#emit` ignores `conn.maxRecordVersion` | "a v1-only replica…" — 1 fail |
 | `encode` writes version 2 unconditionally | 6 fail, three of them pre-existing tests: "round-trips every field", "flags survive and combine with zstd", "records sit back to back". The version byte is load-bearing outside P9's own tests |
 | the logical trailer's bounds check | **passed.** The bad length fell through to the page-count assertion, which threw `WalFormatError` too — so the test asserted "refused", not "refused by this guard". Tightened to match the message; it then fails |
-| `setPath`'s `logicalChanges` exception | "[replication] logicalChanges is a level…" — 1 fail. Without it, `BUNQL_REPLICATION_LOGICAL_CHANGES=row` coerces through the boolean branch to `false` and the feature is silently off |
+| `setPath`'s `logicalChanges` exception | "[replication] logicalChanges is a level…" — 1 fail. Without it, `BQL_REPLICATION_LOGICAL_CHANGES=row` coerces through the boolean branch to `false` and the feature is silently off |
 
 Two of the nine did not bite, and both were the test's fault rather than the mechanism's. Both are
 fixed and re-checked.

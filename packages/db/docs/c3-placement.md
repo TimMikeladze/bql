@@ -89,7 +89,7 @@ that did it by returning a different answer is how a control plane corrupts a da
 
 Today `roleFor(db)` answers the node's own role for an unknown name, so the request runs and ends in
 `DB_NOT_FOUND`. With placement there is a better answer, and the machinery for it already exists:
-`NOT_PRIMARY` carrying `BunQL-Primary`, which `wrap()` turns into a **same-origin `307`** and which
+`NOT_PRIMARY` carrying `BQL-Primary`, which `wrap()` turns into a **same-origin `307`** and which
 the SDK already retries cross-origin (`docs/c2-promotion.md` argues out why it is same-origin only).
 
 So: a request naming a database **this node has no copy of**, when the control plane **does** know
@@ -188,7 +188,7 @@ independence, zone spread when there are enough zones and graceful degradation w
 `rf` larger than the cluster, `rf` of 1, an empty cluster.
 
 `test/cluster/place-e2e.test.ts` — three real nodes: a database created on the node the function
-names is created; the same name attempted on another node is refused with `BunQL-Primary` naming the
+names is created; the same name attempted on another node is refused with `BQL-Primary` naming the
 home; a request for it on a third node is refused the same way rather than `404`; `GET /v1/cluster`
 shows the replica set placement chose; a node joining does **not** move a live primary.
 
@@ -269,7 +269,7 @@ each holds exactly two upstreams, each connected, each carrying the right stream
   covers a *flip*; a bootstrap **creates** the row instead, and that reaches no `onChange` on the
   router — so `roleFor` still answered "primary" for a database this node holds a replica copy of.
   The planner now reads the catalog row, which is true on every thread, and the router refreshes its
-  `Promoter` when a worker's database set moves (`repl.announce`), which also fixes `BunQL-Role`.
+  `Promoter` when a worker's database set moves (`repl.announce`), which also fixes `BQL-Role`.
 
 ### 7.2 What C3b changed about C3a's tests, and why that is right
 

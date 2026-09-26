@@ -105,7 +105,7 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
       );
   };
 
-  const scratch = await mkdtemp(`${tmpdir()}/agenticbus-soak-`);
+  const scratch = await mkdtemp(`${tmpdir()}/bql-bus-soak-`);
   const receipts = `${scratch}/receipts`;
   await mkdir(receipts, { recursive: true });
   const signingKey = generateKey();
@@ -120,10 +120,10 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
     args: string[],
     extra: Record<string, string> = {},
   ) => {
-    // `AGENTICBUS_BIN` swaps the CLI for a compiled binary, so the same
+    // `BQL_BUS_BIN` swaps the CLI for a compiled binary, so the same
   // end-to-end checks run against the artefact that actually ships. A binary
   // nobody executed in CI is not a release artefact.
-  const binary = process.env.AGENTICBUS_BIN;
+  const binary = process.env.BQL_BUS_BIN;
   const command =
     binary && args[0] === "src/cli/index.ts"
       ? [binary, ...args.slice(1)]
@@ -641,7 +641,7 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
       "/metrics scrapes clean",
       scrape.status === 200 &&
         malformed.length === 0 &&
-        text.includes('agenticbus_subscription_lag{subscription="soak"'),
+        text.includes('bql_bus_subscription_lag{subscription="soak"'),
       malformed.length > 0
         ? `malformed: ${malformed[0]}`
         : scrape.status !== 200

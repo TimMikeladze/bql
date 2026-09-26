@@ -45,12 +45,12 @@ with a request-shaped object:
 **A thread that hops every request keeps most of its ceiling.** A `Bun.serve` that answers from its
 own thread against one that posts every request to a Worker and awaits the reply:
 
-| | direct | hopped | BunQL today |
+| | direct | hopped | bql.sh today |
 |---|---|---|---|
 | HTTP, 64 connections | 147 691 req/s | **127 911 req/s** | ~50 000 req/s |
 | WebSocket, 32 sockets × 16 in flight | 463 363 msg/s | **307 413 msg/s** | 130 000 msg/s |
 
-So a single thread that does nothing but frame and forward leaves 2.6x headroom over BunQL's
+So a single thread that does nothing but frame and forward leaves 2.6x headroom over bql.sh's
 current HTTP ceiling and 2.4x over its WebSocket one. **The router is not the bottleneck** — which
 is the measurement that decides §3, because the objection to a router was that HTTP framing at
 35 µs would cap the node below what four processes already do.
@@ -291,7 +291,7 @@ touched at all.** That is the measure of whether the seam was cut in the right p
 
 ```toml
 [server]
-workers = 1            # BUNQL_SERVER_WORKERS. 1 = today's single-threaded node.
+workers = 1            # BQL_SERVER_WORKERS. 1 = today's single-threaded node.
                        # 0 = one per core, capped at 8.
 ```
 
@@ -384,7 +384,7 @@ Two facts a router does not itself hold, and used to answer from what it *did* h
   the router, which owns no tenant, and false of the node. It is now one gather of the workers'
   open sets and live positions. A round trip on an admin listing route, and `openStates()` is null
   on every thread that holds its own tenants, so a single-threaded node pays nothing for it.
-- **The `bunql_s3_*` gauges were omitted**, because a shipper is per database and a database lives
+- **The `bql_s3_*` gauges were omitted**, because a shipper is per database and a database lives
   on a worker. They are back, and the merge is exact rather than a convention: the shards hold
   **disjoint** databases, so it is the same rule `ShipperPool.totals` already applies across one
   node's databases — `shippedTxid` takes the max, `pendingRecords`, `errors` and `bytes` sum, and

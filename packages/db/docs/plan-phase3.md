@@ -77,7 +77,7 @@ Three of `docs/prompt-phase3.md`'s four questions are already answered by readin
 **`SQLITE_PREPARE_PERSISTENT` is already set.** `:291` — `prepareStatement(this, sql,
 SQLITE_PREPARE_PERSISTENT)`. There is nothing to turn on.
 
-**The cache cannot be shared across connections, and this is a SQLite fact rather than a BunQL
+**The cache cannot be shared across connections, and this is a SQLite fact rather than a bql.sh
 omission.** A `sqlite3_stmt*` belongs to the `sqlite3*` it was compiled against; there is no API
 that lets two connections execute one prepared statement, and no API that exposes a compiled plan
 apart from a statement. A tenant holds one writer and up to `readers` (default 2,
@@ -87,7 +87,7 @@ for something that cannot exist.
 
 **A cached statement survives DDL on its own.** Since `prepare_v2`, `sqlite3_step` re-prepares
 transparently on `SQLITE_SCHEMA`; the handle stays valid and the caller never sees the code.
-The one BunQL-specific hazard is not DDL but the authorizer: `authorizer()`
+The one BQL-specific hazard is not DDL but the authorizer: `authorizer()`
 (`src/sqlite/database.ts:423`) re-arms `sqlite3_set_authorizer` on every change precisely because
 that is what expires statements compiled under the old verdicts — the file header says so and it
 is correct. **Both belong in a test rather than in a belief**, and P7 writes them.
@@ -191,10 +191,10 @@ than trust this paragraph.
 ## The product question, answered first — and the answer is yes, there is a caller
 
 `docs/r10-read-transactions.md` §4 declined a fourth baton mode on the grounds that the native
-surface's consistent-read answer is `BunQL-Min-Txid`. That is correct about read-your-writes and
+surface's consistent-read answer is `BQL-Min-Txid`. That is correct about read-your-writes and
 **not** an answer to this milestone, because the two do different things:
 
-- `BunQL-Min-Txid` (`src/server/exec.ts:262-263`) is a **floor**: "do not answer until the tenant
+- `BQL-Min-Txid` (`src/server/exec.ts:262-263`) is a **floor**: "do not answer until the tenant
   has reached txid N." Two reads that both satisfy it can see different databases, because the
   second sees every write that landed in between.
 - A read transaction (`Tenant.readTxBegin`, `src/tenant/tenant.ts:1313`) is a **point**.
@@ -203,7 +203,7 @@ The caller is anything that needs a point and takes more than one request to rea
 pagination that must not skip or duplicate rows under concurrent writes, a dashboard issuing eight
 queries that must agree, an export read by an external tool. R10 built the mechanism for **Hrana
 only** (`src/server/hrana/execute.ts`), so today that capability exists for a `@libsql/client`
-caller and for nobody on BunQL's own `/v1` surface.
+caller and for nobody on bql.sh's own `/v1` surface.
 
 **So the gap is a surface, not a mechanism.** That is what P8 ships.
 
@@ -216,7 +216,7 @@ PASSIVE, FULL, RESTART and TRUNCATE alike. A snapshot handle held outside a read
 alive therefore means suppressing *all* checkpointing for the session's lifetime, by hand.
 
 The obvious hope is that this buys bounded WAL growth where a held reader does not. It does not.
-Measured — 3 000 writes, autocheckpoint off as a BunQL tenant has it:
+Measured — 3 000 writes, autocheckpoint off as a bql.sh tenant has it:
 
 | | isolation holds | WAL after 3 000 writes |
 | --- | --- | --- |
@@ -238,7 +238,7 @@ Against that it costs four things:
    There is no old version of a page for a snapshot to name. A read transaction works there, and
    works *because* the lease makes the applier answer `ApplyBusy` and back off.
 3. **It means hand-rolling read-mark protection**, in a node that would then have two mechanisms
-   pinning the WAL — SQLite's, and BunQL's — that must agree. Getting that wrong is a torn read.
+   pinning the WAL — SQLite's, and bql.sh's — that must agree. Getting that wrong is a torn read.
 4. **It would need its own bounds**, its own metric and its own expiry, all duplicating
    `maxReadTx`, `readTxTimeoutMs` and `TX_BUSY`, which already exist and are already tested.
 
@@ -250,7 +250,7 @@ everywhere.
 
 *(One thing the spike does not settle, recorded so nobody claims it was: whether a future
 checkpoint policy that is aware of open read marks could let a snapshot outlive a PASSIVE pass.
-It could not without BunQL writing read marks into the wal-index for readers that do not exist,
+It could not without bql.sh writing read marks into the wal-index for readers that do not exist,
 which is the same class of trick E2 spent a session undoing on Windows.)*
 
 ## What P8 builds
@@ -399,7 +399,7 @@ cooperating primary — that is a new milestone with its own justification, not 
   against a primary with the flag **on** receives v1 records and keeps replicating, rather than
   failing on a version it never asked for.
 - `bench/replication.ts` reports the record-size ratio with and without, in `docs/performance.md`.
-- `bun test` and `bun test` with `BUNQL_WAL_NATIVE=0` both green; each new test run once against a
+- `bun test` and `bun test` with `BQL_WAL_NATIVE=0` both green; each new test run once against a
   tree with the fix removed and seen to fail.
 
 ---
@@ -412,8 +412,8 @@ cooperating primary — that is a new milestone with its own justification, not 
 setting and no plaintext boundary written down anywhere.
 
 The primitive is not the problem: Bun ships WebCrypto and `node:crypto`, so AES-256-GCM costs no
-dependency. **The problem is that BunQL does not own the writes.** SQLite writes `main.db` and
-`-wal` through its own VFS, and BunQL has never registered one — it reaches `sqlite3_file*` through
+dependency. **The problem is that bql.sh does not own the writes.** SQLite writes `main.db` and
+`-wal` through its own VFS, and bql.sh has never registered one — it reaches `sqlite3_file*` through
 `file_control` for locks (`src/wal/shmlock.ts`) and nothing more.
 
 Every one of these is a plaintext path and a full answer must cover all of them:
@@ -422,7 +422,7 @@ Every one of these is a plaintext path and a full answer must cover all of them:
 | --- | --- | --- |
 | `main.db` | SQLite's VFS | pages encrypted beneath SQLite |
 | `-wal` | SQLite's VFS | frames encrypted; `src/wal/tailer.ts` reads this file directly and must decrypt |
-| `-shm` | SQLite, and BunQL through its mapping (E2) | page numbers and checksums, no row data — out of scope, and say so |
+| `-shm` | SQLite, and bql.sh through its mapping (E2) | page numbers and checksums, no row data — out of scope, and say so |
 | replica apply | `WalApplier` `pwrite`s pages into the file (`src/wal/applier.ts:613`) | must encrypt with the same key, bypassing the VFS entirely |
 | log segments | `src/wal/log.ts` | `TxnRecord` bodies are page images |
 | snapshots | `src/wal/snapshot.ts:137`, a reflink copy | ciphertext copies fine; the key must outlive the copy |
@@ -435,7 +435,7 @@ A `[security] encrypt = true` that covers the first row and not the rest is the 
 ## The design that does work
 
 **A page-encrypting VFS shim written in C, compiled into the vendored artefact beside
-`scripts/native/walsum.c`.** This is not a new kind of thing: P3 already ships BunQL's own C in
+`scripts/native/walsum.c`.** This is not a new kind of thing: P3 already ships bql.sh's own C in
 that artefact and resolves it as optional symbols (`src/sqlite/lib.ts`, `docs/p3-wal-checksum.md`).
 It keeps zero runtime dependencies — nothing is installed, the same `bun run sqlite:build` produces
 it — and it costs no `JSCallback` on the page path, which a VFS written in Bun FFI would, once per
@@ -444,7 +444,7 @@ page read and write, re-entering JS from inside a SQLite call. That is the segfa
 point read is 0.79 µs today.
 
 It also answers every row of the table above, because the three writers that bypass the VFS are
-BunQL's own and share the key: the applier encrypts the pages it writes, the tailer decrypts the
+bql.sh's own and share the key: the applier encrypts the pages it writes, the tailer decrypts the
 frames it reads, and the log, the snapshots and the bucket carry ciphertext pages end to end. The
 rolling checksum picks one side — **ciphertext**, so that a replica verifies what it received
 without holding a key — and says so.
@@ -452,7 +452,7 @@ without holding a key — and says so.
 The parts nobody should discover late: a key lifecycle (per tenant, derived from a node key, held
 where?), a rotation story (rotation is a rewrite of every page of a database, so it is a fork), a
 `-shm` exclusion documented rather than forgotten, and the fact that **the feature is absent on a
-distro libsqlite3**, which makes it the first BunQL feature where the vendored build is not a
+distro libsqlite3**, which makes it the first bql.sh feature where the vendored build is not a
 performance preference but a requirement.
 
 ## The recommendation
@@ -521,7 +521,7 @@ measured against the 50 ns the design claimed (P9 §5).
 ## Gates — all green before anything is called finished
 
     bun test                              baseline: 1530 pass, 2 skip, 0 fail, 133 files, ~50s
-    bun test  with BUNQL_WAL_NATIVE=0     proves the JavaScript WAL-checksum fallback
+    bun test  with BQL_WAL_NATIVE=0     proves the JavaScript WAL-checksum fallback
     bun run typecheck
     bun run bytes                         from the repo root
     bun run routes:check

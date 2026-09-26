@@ -72,7 +72,7 @@ describe("shipping and restoring", () => {
     expect(shipper.shippedTxid).toBe(tenant.txid)
     expect(shipper.behind).toBe(false)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -101,7 +101,7 @@ describe("shipping and restoring", () => {
     await shipper.flush()
     expect(shipper.shippedTxid).toBe(tenant.txid)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -135,7 +135,7 @@ describe("shipping and restoring", () => {
     shipper.bind(tenant)
     await shipper.flush()
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -226,7 +226,7 @@ describe("failure handling", () => {
     expect(verified.ok).toBe(false)
     expect(verified.missing).toContain(victim.key)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     await expect(
       restoreFromBucket({ store: backend.store(), prefix, db: "holed", dir: into }),
     ).rejects.toMatchObject({ code: "S3_INCOMPLETE" })
@@ -247,7 +247,7 @@ describe("failure handling", () => {
     const key = (manifest.segments[0] as { key: string }).key
     backend.fake.corrupt(key, new Uint8Array(Bun.zstdCompressSync(new Uint8Array(64))))
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     await expect(
       restoreFromBucket({ store: backend.store(), prefix, db: "corrupt", dir: into }),
     ).rejects.toMatchObject({ code: "S3_CORRUPT" })
@@ -313,7 +313,7 @@ describe("failure handling", () => {
     await shipper.flush()
     expect(shipper.shippedTxid).toBe(tenant.txid)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({ store: backend.store(), prefix, db: "blip", dir: into })
     expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
     await shipper.close()
@@ -353,7 +353,7 @@ describe("failure handling", () => {
     expect(shipper.behind).toBe(false)
     expect(shipper.shippedTxid).toBe(tenant.txid)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -379,7 +379,7 @@ describe("failure handling", () => {
     expect(shipper.shippedTxid).toBe(tenant.txid)
     expect(shipper.behind).toBe(false)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -428,7 +428,7 @@ describe("retention", () => {
     // And what is left is genuinely restorable, which is the only claim that matters.
     const verified = await verifyBucket({ store: backend.store(), prefix, db: "keep" })
     expect(verified.ok).toBe(true)
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({ store: backend.store(), prefix, db: "keep", dir: into })
     expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
     await shipper.close()
@@ -501,7 +501,7 @@ describe("verify and generations", () => {
     expect(after.generation).not.toBe(original.generation)
     expect(after.generations.length).toBe(2)
     // The old timeline is still restorable, because retention has not touched it.
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const restored = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -538,7 +538,7 @@ describe("a shipper that loses and regains its tenant", () => {
     await shipper.flush()
     expect(shipper.shippedTxid).toBe(reopened.txid)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -597,7 +597,7 @@ describe("a snapshot base", () => {
     expect(manifest.snapshots.length).toBe(1)
     expect(BigInt(manifest.snapshots[0]?.txid ?? "-1")).toBeGreaterThan(0n)
 
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({ store: backend.store(), prefix, db: "aged", dir: into })
     expect(result.txid).toBe(tenant.txid)
     expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
@@ -647,7 +647,7 @@ describe("the segment index", () => {
     expect(manifest.shippedTxid).toBe(tenant.txid.toString())
 
     // Bounded and still restorable byte for byte, which is the only thing the inventory is for.
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({
       store: backend.store(),
       prefix,
@@ -729,7 +729,7 @@ describe("the segment index", () => {
 
     const verified = await verifyBucket({ store: backend.store(), prefix, db: "pruned" })
     expect(verified.ok).toBe(true)
-    const into = tempDir("bunql-restore-")
+    const into = tempDir("bql-restore-")
     const result = await restoreFromBucket({ store: backend.store(), prefix, db: "pruned", dir: into })
     expect(dumpFile(result.path)).toBe(dumpFile(tenant.dbPath))
     await shipper.close()
@@ -753,7 +753,7 @@ describe("the segment index", () => {
     await backend.store().put(key as string, '{"version":2,"db":"torn","segm', "application/json")
 
     await expect(
-      restoreFromBucket({ store: backend.store(), prefix, db: "torn", dir: tempDir("bunql-restore-") }),
+      restoreFromBucket({ store: backend.store(), prefix, db: "torn", dir: tempDir("bql-restore-") }),
     ).rejects.toMatchObject({ code: "S3_INDEX_UNREADABLE" })
     await shipper.close()
   })

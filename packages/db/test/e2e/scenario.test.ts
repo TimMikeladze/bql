@@ -9,7 +9,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import type { BunQLClientError } from "../../src/client/errors.ts"
+import type { BqlClientError } from "../../src/client/errors.ts"
 import { createClient, type Client, type Db } from "../../src/client/index.ts"
 import type { ServerHandle } from "../../src/server/app.ts"
 import { tenantDir } from "../../src/tenant/index.ts"
@@ -77,7 +77,7 @@ async function restart(): Promise<void> {
 
 beforeAll(async () => {
   dataDir = tempDir()
-  scratch = tempDir("bunql-e2e-scratch-")
+  scratch = tempDir("bql-e2e-scratch-")
   handle = await serve(dataDir, 0)
   port = handle.server.port as number
   url = `http://127.0.0.1:${port}`
@@ -95,7 +95,7 @@ afterAll(async () => {
 
 // ── 1. three tenants ───────────────────────────────────────────────────────────────────────────
 
-describe("bunql end to end", () => {
+describe("bql end to end", () => {
   test("creates three databases, each with its own schema and txid space", async () => {
     for (const name of DBS) {
       const created = await api("/v1/db", { method: "POST", body: JSON.stringify({ name }) })
@@ -543,11 +543,11 @@ describe("bunql end to end", () => {
 })
 
 /** The error a promise rejected with. Fails the test when it resolved instead. */
-async function failure(promise: PromiseLike<unknown>): Promise<BunQLClientError> {
+async function failure(promise: PromiseLike<unknown>): Promise<BqlClientError> {
   try {
     await promise
   } catch (err) {
-    return err as BunQLClientError
+    return err as BqlClientError
   }
   throw new Error("expected the call to fail, and it did not")
 }

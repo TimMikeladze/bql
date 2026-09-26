@@ -58,7 +58,7 @@ export function fromBase64(text: string): Uint8Array {
   return out
 }
 
-/** Thrown when a value cannot cross the boundary; the caller sees it as a `BunQLClientError`. */
+/** Thrown when a value cannot cross the boundary; the caller sees it as a `BqlClientError`. */
 export class ValueError extends Error {
   constructor(message: string) {
     super(message)

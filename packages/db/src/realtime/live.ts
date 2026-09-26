@@ -15,7 +15,7 @@ import type {
   ResultRows,
   Value,
 } from "../client/protocol.ts"
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import type { EncodedRows } from "../server/json.ts"
 import type { Database } from "../sqlite/index.ts"
 import type { AuthorizerHub } from "./authorizer.ts"
@@ -144,23 +144,23 @@ export class LiveQueryRegistry {
    */
   subscribe(options: LiveSubscribeOptions): string {
     if (this.#subs.size >= this.maxLiveQueries) {
-      throw new BunQLError(
+      throw new BqlError(
         "TOO_MANY_REQUESTS",
         `this database already has ${this.maxLiveQueries} live queries`,
       )
     }
     const readSet = readSetOf(this.db, options.sql, this.#hub ? { hub: this.#hub } : {})
     if (readSet.writesDetected) {
-      throw BunQLError.badRequest("a live query must be read-only")
+      throw BqlError.badRequest("a live query must be read-only")
     }
     if (readSet.columns.length === 0) {
-      throw BunQLError.badRequest("a live query must return rows")
+      throw BqlError.badRequest("a live query must return rows")
     }
     let keyIndex = -1
     if (options.key !== undefined) {
       keyIndex = readSet.columns.indexOf(options.key)
       if (keyIndex < 0) {
-        throw BunQLError.badRequest(
+        throw BqlError.badRequest(
           `key ${JSON.stringify(options.key)} is not one of the result columns: ${readSet.columns.join(", ")}`,
         )
       }

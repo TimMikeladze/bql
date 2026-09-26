@@ -1,4 +1,4 @@
-# P1 — the SQLite settings BunQL never exposed
+# P1 — the SQLite settings bql.sh never exposed
 
 Written 2026-09-12, out of the audit in `docs/performance.md` §7. That section found nine settings
 set deliberately and thirteen inherited from whatever libsqlite3 happened to load. This milestone
@@ -9,7 +9,7 @@ reached at all.
 
 From `docs/c6-packaging.md`: **a setting that adds a capability or changes only performance may
 have a new default; a setting that changes what a SQL statement means may not.** Every semantic
-knob below therefore defaults to what BunQL does today, and only the writer's page cache moves.
+knob below therefore defaults to what bql.sh does today, and only the writer's page cache moves.
 
 ## `[sqlite]`
 
@@ -23,13 +23,13 @@ trustedSchema = true         # PRAGMA trusted_schema; false is SQLite's hardenin
 cellSizeCheck = false        # PRAGMA cell_size_check; true costs writes and catches corrupt pages
 ```
 
-Every key gets `BUNQL_SQLITE_*` for free, since the env table is generated from the defaults.
+Every key gets `BQL_SQLITE_*` for free, since the env table is generated from the defaults.
 
 ### Why the writer's cache moves, and nothing else does
 
 Measured (`docs/performance.md` §4E): at SQLite's default 2 MiB, a 20 000-row transaction spills
 6.5 MB of dirty pages into the `-wal` and takes 41 ms; at 8 MiB it spills nothing and takes 23 ms.
-Single-row writes — BunQL's actual shape — do not move at all (4.67 µs against 4.54). The cache is
+Single-row writes — bql.sh's actual shape — do not move at all (4.67 µs against 4.54). The cache is
 allocated lazily, so an idle tenant pays nothing: a connection costs ~0.1 MB at open whatever the
 cap, and only grows to the cap if the workload touches that many pages.
 
@@ -78,8 +78,8 @@ our own record, and checks that an orphan insert is actually refused once it is 
 other switch here that changes what a statement means. The remedy this section predicted is what
 was built: `scripts/native/walsum.c` — which P3 had by then made a real file with the
 optional-symbol machinery around it — gained a three-line non-variadic shim,
-`int bunql_db_config_int(sqlite3*, int op, int v, int *out)`, and `src/sqlite/lib.ts` declares it
-optionally beside `bunql_wal_*`. So it is a **capability of the vendored build**: present in the
+`int bql_db_config_int(sqlite3*, int op, int v, int *out)`, and `src/sqlite/lib.ts` declares it
+optionally beside `bql_wal_*`. So it is a **capability of the vendored build**: present in the
 artefact `bun run sqlite:build` produces, absent on a system libsqlite3, and a node configured
 `defensive = true` on such a build **refuses to start** rather than quietly not hardening.
 
@@ -110,7 +110,7 @@ register, so SQLite reads whatever was on the stack. The one apparent success wa
 
 **The remedy, when it is wanted:** `scripts/sqlite.ts` already compiles the amalgamation, so it can
 compile a three-line non-variadic shim beside it —
-`int bunql_db_config_int(sqlite3*, int op, int v, int *out)` — and `src/sqlite/lib.ts` can declare
+`int bql_db_config_int(sqlite3*, int op, int v, int *out)` — and `src/sqlite/lib.ts` can declare
 it optional exactly as it declares `sqlite3_snapshot_*`. That makes `defensive` a *capability* of
 the vendored build, reported by `features` and absent on a system library, which is the pattern the
 driver already uses. **This is what was built**, once P3 had made `walsum.c` exist; see the top of

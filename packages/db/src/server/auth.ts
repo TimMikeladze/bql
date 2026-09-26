@@ -44,7 +44,7 @@ import {
   SQLITE_UPDATE,
 } from "../sqlite/constants.ts"
 import type { Authorizer, Database } from "../sqlite/index.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 import { fromBase64, toBase64Url } from "./json.ts"
 
 // ── Claims (design §6: libsql's shape, extended with `t` and a real `jti`/`kid`) ────────────────
@@ -117,7 +117,7 @@ function decodeSegment(segment: string): unknown {
   try {
     return JSON.parse(decoder.decode(fromBase64(segment)))
   } catch {
-    throw BunQLError.unauthenticated("token is not valid JWT")
+    throw BqlError.unauthenticated("token is not valid JWT")
   }
 }
 
@@ -165,7 +165,7 @@ export class AuthKeys {
     const privateKey = await importOrFail("pkcs8", bytes, ["sign"])
     const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as Ed25519Jwk
     if (typeof jwk.x !== "string") {
-      throw BunQLError.badRequest("private key does not carry its public half")
+      throw BqlError.badRequest("private key does not carry its public half")
     }
     const raw = fromBase64(jwk.x)
     const publicKey = await importOrFail("raw", raw, ["verify"])
@@ -176,7 +176,7 @@ export class AuthKeys {
   static async fromRawPublic(raw: Uint8Array | string): Promise<AuthKeys> {
     const bytes = typeof raw === "string" ? fromBase64(raw) : raw
     if (bytes.byteLength !== 32) {
-      throw BunQLError.badRequest(`an Ed25519 public key is 32 bytes, got ${bytes.byteLength}`)
+      throw BqlError.badRequest(`an Ed25519 public key is 32 bytes, got ${bytes.byteLength}`)
     }
     const publicKey = await importOrFail("raw", bytes, ["verify"])
     return new AuthKeys(await deriveKid(bytes), publicKey, null, bytes)
@@ -185,9 +185,9 @@ export class AuthKeys {
   /** Loads either half from a JWK (`kty: "OKP"`, `crv: "Ed25519"`). */
   static async fromJwk(jwk: Ed25519Jwk): Promise<AuthKeys> {
     if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519") {
-      throw BunQLError.badRequest("expected an OKP/Ed25519 JWK")
+      throw BqlError.badRequest("expected an OKP/Ed25519 JWK")
     }
-    if (typeof jwk.x !== "string") throw BunQLError.badRequest("JWK has no public component")
+    if (typeof jwk.x !== "string") throw BqlError.badRequest("JWK has no public component")
     const raw = fromBase64(jwk.x)
     const publicKey = await importOrFail("raw", raw, ["verify"])
     if (typeof jwk.d !== "string") {
@@ -208,20 +208,20 @@ export class AuthKeys {
   }
 
   async exportPkcs8(): Promise<Bytes> {
-    if (!this.privateKey) throw BunQLError.badRequest("this key has no private half")
+    if (!this.privateKey) throw BqlError.badRequest("this key has no private half")
     return new Uint8Array(await crypto.subtle.exportKey("pkcs8", this.privateKey))
   }
 
   async exportJwk(which: "public" | "private" = "public"): Promise<Ed25519Jwk> {
     if (which === "private") {
-      if (!this.privateKey) throw BunQLError.badRequest("this key has no private half")
+      if (!this.privateKey) throw BqlError.badRequest("this key has no private half")
       return (await crypto.subtle.exportKey("jwk", this.privateKey)) as Ed25519Jwk
     }
     return (await crypto.subtle.exportKey("jwk", this.publicKey)) as Ed25519Jwk
   }
 
   async sign(data: Uint8Array): Promise<Bytes> {
-    if (!this.privateKey) throw BunQLError.badRequest("this key has no private half")
+    if (!this.privateKey) throw BqlError.badRequest("this key has no private half")
     return new Uint8Array(await crypto.subtle.sign(ED25519, this.privateKey, src(data)))
   }
 
@@ -244,7 +244,7 @@ async function importOrFail(
       usages,
     )) as CryptoKey
   } catch {
-    throw BunQLError.badRequest(`not a usable Ed25519 ${format} key`)
+    throw BqlError.badRequest(`not a usable Ed25519 ${format} key`)
   }
 }
 
@@ -295,13 +295,13 @@ export class KeyRing {
   /** The key new tokens are signed with. */
   get signing(): AuthKeys {
     const key = this.#signingKid ? this.#keys.get(this.#signingKid) : undefined
-    if (!key) throw new BunQLError("INTERNAL", "no signing key is configured", 500)
+    if (!key) throw new BqlError("INTERNAL", "no signing key is configured", 500)
     return key
   }
 
   setSigning(kid: string): this {
     const key = this.#keys.get(kid)
-    if (!key?.canSign) throw BunQLError.badRequest(`no signing key with kid ${kid}`)
+    if (!key?.canSign) throw BqlError.badRequest(`no signing key with kid ${kid}`)
     this.#signingKid = kid
     this.#version += 1
     return this
@@ -475,37 +475,37 @@ export async function verifyToken(
   if (cached) return checkClaims(cached, token, options)
 
   const parts = token.split(".")
-  if (parts.length !== 3) throw BunQLError.unauthenticated("token is not a JWT")
+  if (parts.length !== 3) throw BqlError.unauthenticated("token is not a JWT")
   const [headerText, claimsText, signatureText] = parts as [string, string, string]
 
   const header = decodeSegment(headerText) as JwtHeader
-  if (!header || typeof header !== "object") throw BunQLError.unauthenticated("malformed JWT header")
+  if (!header || typeof header !== "object") throw BqlError.unauthenticated("malformed JWT header")
   if (header.alg !== "EdDSA") {
-    throw BunQLError.unauthenticated(`unsupported JWT algorithm ${String(header.alg)}`)
+    throw BqlError.unauthenticated(`unsupported JWT algorithm ${String(header.alg)}`)
   }
   if (header.typ !== undefined && header.typ.toUpperCase() !== "JWT") {
-    throw BunQLError.unauthenticated(`unsupported JWT type ${String(header.typ)}`)
+    throw BqlError.unauthenticated(`unsupported JWT type ${String(header.typ)}`)
   }
 
   const key = header.kid ? ring.get(header.kid) : ring.soleKey()
-  if (!key) throw BunQLError.unauthenticated("token was signed by an unknown key")
+  if (!key) throw BqlError.unauthenticated("token was signed by an unknown key")
 
   let signature: Uint8Array
   try {
     signature = fromBase64(signatureText)
   } catch {
-    throw BunQLError.unauthenticated("malformed JWT signature")
+    throw BqlError.unauthenticated("malformed JWT signature")
   }
   const ok = await key.verify(encoder.encode(`${headerText}.${claimsText}`), signature)
-  if (!ok) throw BunQLError.unauthenticated("token signature does not check out")
+  if (!ok) throw BqlError.unauthenticated("token signature does not check out")
 
   const claims = decodeSegment(claimsText) as TokenClaims
-  if (!claims || typeof claims !== "object") throw BunQLError.unauthenticated("malformed JWT claims")
+  if (!claims || typeof claims !== "object") throw BqlError.unauthenticated("malformed JWT claims")
   if (typeof claims.jti !== "string" || claims.jti.length === 0) {
-    throw BunQLError.unauthenticated("token has no jti")
+    throw BqlError.unauthenticated("token has no jti")
   }
   if (claims.kid !== undefined && header.kid !== undefined && claims.kid !== header.kid) {
-    throw BunQLError.unauthenticated("token header and claims disagree about the key")
+    throw BqlError.unauthenticated("token header and claims disagree about the key")
   }
 
   options.cache?.set(token, claims, ring.version)
@@ -526,14 +526,14 @@ async function checkClaims(
   const slack = options.clockToleranceSec ?? 30
   if (typeof claims.exp === "number" && claims.exp + slack < nowSec) {
     options.cache?.delete(token)
-    throw BunQLError.unauthenticated("token has expired")
+    throw BqlError.unauthenticated("token has expired")
   }
   if (typeof claims.nbf === "number" && claims.nbf - slack > nowSec) {
-    throw BunQLError.unauthenticated("token is not valid yet")
+    throw BqlError.unauthenticated("token is not valid yet")
   }
   if (options.revocations && (await options.revocations.isRevoked(claims.jti))) {
     options.cache?.delete(token)
-    throw BunQLError.unauthenticated("token has been revoked")
+    throw BqlError.unauthenticated("token has been revoked")
   }
   return claims
 }
@@ -640,9 +640,9 @@ export function pinOwner(principal: Principal): PinHolder {
 export function requireScope(principal: Principal, db: string, need: Scope): Scope {
   if (principal.kind === "admin") return "rw"
   const scope = principal.scopeFor(db)
-  if (scope === null) throw BunQLError.notAuthorized(`token has no access to database ${db}`)
+  if (scope === null) throw BqlError.notAuthorized(`token has no access to database ${db}`)
   if (need === "rw" && scope !== "rw") {
-    throw BunQLError.notAuthorized(`token is read-only on database ${db}`)
+    throw BqlError.notAuthorized(`token is read-only on database ${db}`)
   }
   return scope
 }
@@ -699,13 +699,13 @@ export class Authenticator {
    */
   async authenticate(source: Request | string | null | undefined): Promise<Principal> {
     const token = typeof source === "string" ? source : source ? tokenFromRequest(source) : null
-    if (!token) throw BunQLError.unauthenticated("no bearer token")
+    if (!token) throw BqlError.unauthenticated("no bearer token")
     return this.authenticateToken(token)
   }
 
   async authenticateToken(token: string): Promise<Principal> {
     if (this.#adminKey && constantTimeEqual(encoder.encode(token), this.#adminKey)) return ADMIN
-    if (this.keys.size === 0) throw BunQLError.unauthenticated("this node accepts no tokens")
+    if (this.keys.size === 0) throw BqlError.unauthenticated("this node accepts no tokens")
     const claims = await verifyToken(this.keys, token, {
       now: this.#now(),
       clockToleranceSec: this.#clockToleranceSec,
@@ -991,7 +991,7 @@ export function applyPolicy(
     return { scope: "rw", release: restore }
   }
   const scope = principal.scopeFor(dbName)
-  if (scope === null) throw BunQLError.notAuthorized(`token has no access to database ${dbName}`)
+  if (scope === null) throw BqlError.notAuthorized(`token has no access to database ${dbName}`)
   hub.bypass(() => setQueryOnly(db, options.queryOnly ?? scope === "ro"))
   hub.setBase(
     buildAuthorizer({

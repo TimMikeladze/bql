@@ -12,7 +12,7 @@
 // runs the whole batch and `fetch_cursor` hands out slices of the entries it produced.
 
 import type { Principal } from "../auth.ts"
-import { BunQLError } from "../errors.ts"
+import { BqlError } from "../errors.ts"
 import type { ServerRuntime } from "../runtime.ts"
 import { cursorEntries, describe, executeStmt, runBatch, runSequence } from "./execute.ts"
 import { hranaStatus, toHranaError } from "./errors.ts"
@@ -164,7 +164,7 @@ async function greet(ws: HranaSocket, jwt: string | null | undefined): Promise<v
     if (jwt) {
       data.principal = await data.runtime.auth.authenticateToken(jwt)
     } else if (!data.principal) {
-      throw BunQLError.unauthenticated("this socket needs a token in its hello")
+      throw BqlError.unauthenticated("this socket needs a token in its hello")
     }
     send(ws, { type: "hello_ok" })
   } catch (err) {
@@ -175,17 +175,17 @@ async function greet(ws: HranaSocket, jwt: string | null | undefined): Promise<v
 
 function streamOf(data: HranaSocketData, id: unknown): HranaStream {
   if (typeof id !== "number" || !Number.isInteger(id)) {
-    throw BunQLError.badRequest("stream_id must be an integer")
+    throw BqlError.badRequest("stream_id must be an integer")
   }
   const stream = data.streams.get(id)
-  if (!stream || stream.closed) throw BunQLError.badRequest(`no stream ${id} is open`)
+  if (!stream || stream.closed) throw BqlError.badRequest(`no stream ${id} is open`)
   stream.lastUsedMs = Date.now()
   return stream
 }
 
 function needsV3(data: HranaSocketData, what: string): void {
   if (data.version < 3) {
-    throw BunQLError.badRequest(`${what} needs the hrana3 subprotocol, and this socket is hrana2`)
+    throw BqlError.badRequest(`${what} needs the hrana3 subprotocol, and this socket is hrana2`)
   }
 }
 
@@ -198,11 +198,11 @@ async function handle(ws: HranaSocket, request: WsRequest): Promise<WsResponse> 
     case "open_stream": {
       const id = request.stream_id
       if (typeof id !== "number" || !Number.isInteger(id)) {
-        throw BunQLError.badRequest("stream_id must be an integer")
+        throw BqlError.badRequest("stream_id must be an integer")
       }
-      if (data.streams.has(id)) throw BunQLError.badRequest(`stream ${id} is already open`)
+      if (data.streams.has(id)) throw BqlError.badRequest(`stream ${id} is already open`)
       if (data.streams.size >= MAX_SOCKET_STREAMS) {
-        throw new BunQLError("TOO_MANY_REQUESTS", "this socket holds all the streams it will", 429)
+        throw new BqlError("TOO_MANY_REQUESTS", "this socket holds all the streams it will", 429)
       }
       // `false`: this socket answers in arrival order, so a `BEGIN` that waited for the writer
       // would stall the statements that release it. See `HranaStream.waitsForWriter`.
@@ -248,11 +248,11 @@ async function handle(ws: HranaSocket, request: WsRequest): Promise<WsResponse> 
       needsV3(data, "open_cursor")
       const id = request.cursor_id
       if (typeof id !== "number" || !Number.isInteger(id)) {
-        throw BunQLError.badRequest("cursor_id must be an integer")
+        throw BqlError.badRequest("cursor_id must be an integer")
       }
-      if (data.cursors.has(id)) throw BunQLError.badRequest(`cursor ${id} is already open`)
+      if (data.cursors.has(id)) throw BqlError.badRequest(`cursor ${id} is already open`)
       if (data.cursors.size >= MAX_CURSORS) {
-        throw new BunQLError("TOO_MANY_REQUESTS", "this socket holds all the cursors it will", 429)
+        throw new BqlError("TOO_MANY_REQUESTS", "this socket holds all the cursors it will", 429)
       }
       const stream = streamOf(data, request.stream_id)
       data.cursors.set(id, { entries: await cursorEntries(service, stream, request.batch), at: 0 })
@@ -261,7 +261,7 @@ async function handle(ws: HranaSocket, request: WsRequest): Promise<WsResponse> 
     case "fetch_cursor": {
       needsV3(data, "fetch_cursor")
       const cursor = data.cursors.get(request.cursor_id)
-      if (!cursor) throw BunQLError.badRequest(`no cursor ${request.cursor_id} is open`)
+      if (!cursor) throw BqlError.badRequest(`no cursor ${request.cursor_id} is open`)
       const max = Number.isInteger(request.max_count) && request.max_count > 0 ? request.max_count : 1
       const entries = cursor.entries.slice(cursor.at, cursor.at + max)
       cursor.at += entries.length
@@ -272,7 +272,7 @@ async function handle(ws: HranaSocket, request: WsRequest): Promise<WsResponse> 
       data.cursors.delete(request.cursor_id)
       return { type: "close_cursor" }
     default:
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         `unknown Hrana request type ${JSON.stringify((request as { type?: unknown })?.type)}`,
       )
   }
@@ -288,11 +288,11 @@ function storeOwner(data: HranaSocketData): HranaStream {
   return {
     sql: data.sql,
     storeSql(id: number, sql: string): void {
-      if (data.sql.has(id)) throw BunQLError.badRequest(`sql_id ${id} is already stored`)
+      if (data.sql.has(id)) throw BqlError.badRequest(`sql_id ${id} is already stored`)
       data.sql.set(id, sql)
     },
     closeSql(id: number): void {
-      if (!data.sql.delete(id)) throw BunQLError.badRequest(`no SQL is stored under id ${id}`)
+      if (!data.sql.delete(id)) throw BqlError.badRequest(`no SQL is stored under id ${id}`)
     },
   } as unknown as HranaStream
 }

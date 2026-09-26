@@ -39,7 +39,7 @@ const textsAt = Bun.argv.indexOf("--texts")
 const WORKING = textsAt >= 0 ? Bun.argv[textsAt + 1]!.split(",").map(Number) : [8, 32, 64, 65, 96, 256]
 const ITER = 20_000
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-cache-"))
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-cache-"))
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }))
 const db = Database.open(path.join(dir, "cache.db"))
 db.exec("pragma synchronous = normal")
@@ -120,7 +120,7 @@ console.log(
  * table count is the lever, because every table contributes its own texts and they share a cache.
  */
 async function dataApiCensus(tables: number, statementCache: number): Promise<void> {
-  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-cache-api-"))
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "bql-cache-api-"))
   const api = Database.open(path.join(dir2, "api.db"), { statementCache })
   for (let t = 0; t < tables; t++) {
     api.exec(

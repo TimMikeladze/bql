@@ -14,7 +14,7 @@ Paste the block below into `/goal`.
 ---
 
 ```
-Work in /Users/tim/workspace/bunql/packages/db. The L track (docs/plan-limits.md, L1–L8) is
+Work in /Users/tim/workspace/bql/packages/db. The L track (docs/plan-limits.md, L1–L8) is
 finished and pushed; CI is green on macOS, Linux, Windows and the new tarball job. This is
 phase 3 of docs/design.md §11 — the last named phase.
 
@@ -79,7 +79,7 @@ shape exactly: use it where the loaded library has it, fall back with a document
 where it does not, and never let a query's answer depend on which library was found.
 
 The harder half is the product question, and it must be answered in the plan **before** any
-code: what is this for that `BunQL-Min-Txid` does not already do? docs/r10-read-transactions.md
+code: what is this for that `BQL-Min-Txid` does not already do? docs/r10-read-transactions.md
 §4 declined a fourth baton mode for exactly this reason, and P2 repeats that mistake if it
 ships a mechanism looking for a caller. If the answer is "a multi-request consistent read that
 holds no transaction and no reader", say so and design the surface around that; if there is no
@@ -146,7 +146,7 @@ why phase 3 does not ship it.
 2. **The npm release**, which is blocked on Tim and not on you: `NPM_TOKEN` in the repository
    settings, then set `version` and push a `v` tag. Everything else is built and has never
    run. Do not attempt it; remind him it is one secret away.
-3. **`@bunql/sqlite-*` prebuilt libraries.** docs/c6-packaging.md §6. Removes the C-compiler
+3. **`@bql/sqlite-*` prebuilt libraries.** docs/c6-packaging.md §6. Removes the C-compiler
    requirement for consumers, and L7 just proved the tarball builds its own engine.
 4. **Re-measure docs/performance.md §5's worker ladder** — it still describes the *old*
    defaults and could not be retaken on a noisy machine. §8 says how to tell whether the
@@ -172,7 +172,7 @@ why phase 3 does not ship it.
 ## Gates — all green before anything is called finished
 
     bun test                              baseline today: 1530 pass, 2 skip, 0 fail, 133 files, ~50s
-    bun test  with BUNQL_WAL_NATIVE=0     proves the JavaScript WAL-checksum fallback
+    bun test  with BQL_WAL_NATIVE=0     proves the JavaScript WAL-checksum fallback
     bun run typecheck
     bun run bytes                         from the repo root
     bun run routes:check

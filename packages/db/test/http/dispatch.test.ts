@@ -105,7 +105,7 @@ describe("the dispatcher and a real Bun.serve", () => {
   for (const { name, path, init } of cases) {
     test(`agree on ${name}`, async () => {
       const overSocket = await read(await fetch(served.base + path, init))
-      const inProcess = await read(await dispatch(`http://bunql.test${path}`, init))
+      const inProcess = await read(await dispatch(`http://bql.test${path}`, init))
       expect(inProcess.status).toBe(overSocket.status)
       expect(inProcess.body).toBe(overSocket.body)
       expect(inProcess.contentType).toBe(overSocket.contentType)
@@ -176,7 +176,7 @@ describe("the matcher copies Bun's rules", () => {
   for (const [name, method, path] of rules) {
     test(name, async () => {
       const overSocket = await read(await fetch(precedence.base + path, { method }))
-      const inProcess = await read(await precedenceDispatch(`http://bunql.test${path}`, { method }))
+      const inProcess = await read(await precedenceDispatch(`http://bql.test${path}`, { method }))
       expect([inProcess.status, inProcess.body]).toEqual([overSocket.status, overSocket.body])
     })
   }
@@ -196,7 +196,7 @@ describe("createDispatcher", () => {
     const asFetch: (
       ...args: Parameters<typeof globalThis.fetch>
     ) => ReturnType<typeof globalThis.fetch> = precedenceDispatch
-    const response = await asFetch(new Request("http://bunql.test/y/7/lit"))
+    const response = await asFetch(new Request("http://bql.test/y/7/lit"))
     expect(await response.json()).toEqual({ hit: "yLit", params: { a: "7" } })
   })
 })

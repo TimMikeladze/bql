@@ -152,8 +152,8 @@ describe("HTTP across the boundary", () => {
 
   test("metrics are every worker's counters added together", async () => {
     const body = await (await server.fetch("/metrics")).text()
-    const writes = /bunql_writes_total\{[^}]*\} (\d+)/.exec(body)
-    const tenants = /bunql_tenants\{[^}]*\} (\d+)/.exec(body)
+    const writes = /bql_writes_total\{[^}]*\} (\d+)/.exec(body)
+    const tenants = /bql_tenants\{[^}]*\} (\d+)/.exec(body)
     // Each shard ran its own writes; one worker's count alone could not reach the total.
     expect(Number(writes?.[1] ?? 0)).toBeGreaterThanOrEqual(NAMES.length)
     expect(Number(tenants?.[1] ?? 0)).toBeGreaterThanOrEqual(NAMES.length)
@@ -299,7 +299,7 @@ async function open(): Promise<{
   wait(match: (frame: Frame) => boolean, timeoutMs?: number): Promise<Frame>
   close(): void
 }> {
-  const socket = new WebSocket(server.wsUrl(), "bunql.v1")
+  const socket = new WebSocket(server.wsUrl(), "bql.v1")
   const seen: Frame[] = []
   const waiters: { match: (frame: Frame) => boolean; resolve: (frame: Frame) => void }[] = []
   socket.onmessage = (event) => {

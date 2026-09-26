@@ -1,0 +1,18 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "bql-site",
+      "devDependencies": {
+        "si-legacy": "npm:simple-icons@9",
+        "simple-icons": "^16.31.0",
+      },
+    },
+  },
+  "packages": {
+    "si-legacy": ["simple-icons@9.21.0", "", {}, "sha512-yxjs49nKwff5ozRwPCBVcGG4Ehlg5YiR1g4EJ83zmqc0hYhYb6UQJqiy2WOga2OJ1/qVHaej7q762hYZX/mavA=="],
+
+    "simple-icons": ["simple-icons@16.31.0", "", {}, "sha512-dDEqvQrmxL7ZnqQtGHGjCNW6CfiwzAif+83Hol9JXAnAB6wh2zsZD7Sc1kWT0O/RRAKt7xfG8W6UZhYBPD+GAA=="],
+  }
+}

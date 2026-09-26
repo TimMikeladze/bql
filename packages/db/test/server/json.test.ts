@@ -14,7 +14,7 @@ import {
   toBase64,
   toBase64Url,
 } from "../../src/server/json.ts"
-import { BunQLError } from "../../src/server/errors.ts"
+import { BqlError } from "../../src/server/errors.ts"
 import type { ObjectRow, Value } from "../../src/client/protocol.ts"
 import { cleanupTempDirs, tempDb } from "../sqlite/tmp.ts"
 
@@ -86,14 +86,14 @@ describe("decodeArg", () => {
   })
 
   test("rejects what it cannot bind, as a 400", () => {
-    expect(() => decodeArg({ $i: "12.5" })).toThrow(BunQLError)
-    expect(() => decodeArg({ $f: "huge" })).toThrow(BunQLError)
-    expect(() => decodeArg({ nope: 1 })).toThrow(BunQLError)
+    expect(() => decodeArg({ $i: "12.5" })).toThrow(BqlError)
+    expect(() => decodeArg({ $f: "huge" })).toThrow(BqlError)
+    expect(() => decodeArg({ nope: 1 })).toThrow(BqlError)
     try {
       decodeArg({ nope: 1 })
     } catch (err) {
-      expect((err as BunQLError).status).toBe(400)
-      expect((err as BunQLError).code).toBe("BAD_REQUEST")
+      expect((err as BqlError).status).toBe(400)
+      expect((err as BqlError).code).toBe("BAD_REQUEST")
     }
   })
 
@@ -102,7 +102,7 @@ describe("decodeArg", () => {
     expect(fromBase64(toBase64(bytes))).toEqual(bytes)
     expect(fromBase64(toBase64Url(bytes))).toEqual(bytes)
     expect(toBase64Url(bytes)).not.toContain("=")
-    expect(() => fromBase64("!!!!")).toThrow(BunQLError)
+    expect(() => fromBase64("!!!!")).toThrow(BqlError)
   })
 })
 

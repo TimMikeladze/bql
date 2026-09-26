@@ -75,7 +75,7 @@ export class FakeS3 {
   #nextUpload = 1
 
   constructor(options: FakeS3Options = {}) {
-    this.bucket = options.bucket ?? "bunql-test"
+    this.bucket = options.bucket ?? "bql-test"
   }
 
   static async start(options: FakeS3Options = {}): Promise<FakeS3> {

@@ -1,6 +1,6 @@
 // The control plane of design §6.5, as methods rather than as hand-written fetch calls:
 // `client.admin.create("acme")` instead of a `POST /v1/db` a caller builds, and the same
-// `BunQLClientError` on the way back out.
+// `BqlClientError` on the way back out.
 //
 // Invariant: every request here goes through the same `HttpClient` a statement does, so the token,
 // the headers and the error mapping of §6.6 stay in the one place `http.ts` claims them.
@@ -13,7 +13,7 @@
 //
 // `docs/m9-client-admin.md` is the plan of record.
 
-import { BunQLClientError } from "./errors.ts"
+import { BqlClientError } from "./errors.ts"
 import { HttpClient, readJson, type RawBody } from "./http.ts"
 import { HEADERS } from "./protocol.ts"
 import type {
@@ -48,7 +48,7 @@ export type FileBody = Blob | ArrayBuffer | ArrayBufferView | ReadableStream<Uin
 /** A database name in a path. Valid names encode to themselves; anything else cannot escape. */
 function seg(name: string): string {
   if (typeof name !== "string" || name.length === 0) {
-    throw BunQLClientError.client("a database name is required")
+    throw BqlClientError.client("a database name is required")
   }
   return encodeURIComponent(name)
 }
@@ -148,7 +148,7 @@ export class Admin {
     // `readJson` throws the server's own error; a body it never returns from is not read here,
     // because the successful answer is the file itself.
     if (!response.ok) await readJson(response, `GET ${path}`)
-    if (!response.body) throw BunQLClientError.client(`${path} answered without a body`)
+    if (!response.body) throw BqlClientError.client(`${path} answered without a body`)
     const length = response.headers.get("content-length")
     return {
       txid: Number(response.headers.get(HEADERS.txid) ?? 0),
@@ -215,7 +215,7 @@ export class Admin {
   mintToken(options: TokenOptions): Promise<MintedToken> {
     const dbs = options.dbs ?? (options.db !== undefined ? [options.db] : [])
     if (dbs.length === 0) {
-      throw BunQLClientError.client("a token needs at least one database or glob in `dbs`")
+      throw BqlClientError.client("a token needs at least one database or glob in `dbs`")
     }
     return this.#http.json<MintedToken>("/v1/tokens", {
       method: "POST",

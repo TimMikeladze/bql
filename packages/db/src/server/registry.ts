@@ -6,7 +6,7 @@
 // Each `handler` is the `Handler` from `src/server/routes.ts`, unchanged, taking the `RouteContext`
 // `app.ts` builds — but the schemas below are **enforced**, not only published
 // (`docs/h8-validated-requests.md`). `app.ts` mounts each operation as `executeOperation` inside
-// its own `wrap()`: the wrapper stays outermost because it is the one place the four `BunQL-*`
+// its own `wrap()`: the wrapper stays outermost because it is the one place the four `BQL-*`
 // headers, CORS, the metrics tick and C2's same-origin `307` are applied, and the `307` has to
 // know *which error code* a handler refused with, which `compileOperation` would have turned into
 // a `Response` first. Core validates the path, the query and the headers before the handler; the
@@ -16,11 +16,11 @@
 //
 // Two bodies below are described and not checked, both deliberately: `importDatabase` carries a
 // raw SQLite file its handler streams itself, and `databaseGraphql` has to answer a malformed
-// query in GraphQL's own `{errors: [...]}` envelope rather than BunQL's. Neither reaches
+// query in GraphQL's own `{errors: [...]}` envelope rather than bql.sh's. Neither reaches
 // `readJson`. `test/server/registry.test.ts` checks the live answers against the response schemas,
 // so a lie in either direction fails a test rather than living in the document.
 //
-// `src/server/hrana/` stays out: `/v2/pipeline` carries libsql's RPC envelope, not BunQL's API,
+// `src/server/hrana/` stays out: `/v2/pipeline` carries libsql's RPC envelope, not bql.sh's API,
 // and an OpenAPI document of one opaque envelope helps nobody. `app.ts` mounts it separately.
 
 import { type Operation, Registry, s, type Schema } from "../core/index.ts"
@@ -50,7 +50,7 @@ const Statement = s
   .object({ sql: s.string(), args: Args.optional() })
   .id("Statement")
 
-/** The `BunQL-*` options of design §6, which every statement route accepts in its body. */
+/** The `BQL-*` options of design §6, which every statement route accepts in its body. */
 const options = {
   ack: s.enum(["local", "fsync", "replica", "quorum"] as const).optional(),
   minTxid: s.int().optional(),
@@ -142,7 +142,7 @@ const COMMON = ["BAD_REQUEST", "UNAUTHENTICATED", "NOT_AUTHORIZED"] as const
 const ON_DB = [...COMMON, "DB_NOT_FOUND"] as const
 /**
  * Those, plus the ones a statement can raise. The `SQLITE_*` names are here because SQLite's own
- * diagnostics travel in `error.code` as well as BunQL's — `src/openapi/errors.ts` maps them
+ * diagnostics travel in `error.code` as well as bql.sh's — `src/openapi/errors.ts` maps them
  * through the real `mapError()`, so `SQLITE_CONSTRAINT` documents the 409 a unique index answers.
  */
 const ON_STATEMENT = [
@@ -338,7 +338,7 @@ const SPECS: Spec[] = [
     description:
       "One consistent snapshot held across several requests, on a pooled reader. It takes no " +
       "writer, so it neither blocks writes on a primary nor is refused on a replica, and it is " +
-      "not `BunQL-Min-Txid`: that header is a floor two reads can satisfy while seeing different " +
+      "not `BQL-Min-Txid`: that header is a floor two reads can satisfy while seeing different " +
       "databases, and a session is a point. `[limits] maxReadTx` (16 per database) answers the " +
       "next one `409 TX_BUSY`. `docs/p8-read-sessions.md`.",
     tags: ["transactions"],
@@ -528,7 +528,7 @@ const SPECS: Spec[] = [
     method: "get",
     path: "/v1/db/:db/dump",
     summary: "Stream the database file out",
-    description: "As of a snapshot taken now; `BunQL-Txid` is the txid it is consistent at.",
+    description: "As of a snapshot taken now; `BQL-Txid` is the txid it is consistent at.",
     tags: ["lifecycle"],
     security: "admin",
     response: s.string().describe("The raw SQLite file."),
@@ -811,7 +811,7 @@ export function serverRegistry(
   switches: SurfaceSwitches,
 ): Registry<RouteContext> {
   const registry = new Registry<RouteContext>({
-    title: "BunQL",
+    title: "bql.sh",
     version: API_VERSION,
     description:
       "SQLite as a multi-tenant database server for Bun. This document describes the node's " +
@@ -914,7 +914,7 @@ export function serverRegistry(
       summary: "This server's own OpenAPI 3.1 document",
       description:
         "Open, with no authentication: it names no database and carries no tenant data, and it " +
-        "is the same document on every BunQL node.",
+        "is the same document on every bql.sh node.",
       tags: ["operations"],
       security: "none",
       response: opaque("An OpenAPI 3.1 document."),

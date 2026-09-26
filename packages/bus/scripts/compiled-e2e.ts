@@ -27,7 +27,7 @@ async function run(command: string[], env: Record<string, string> = {}) {
 const target = `bun-${process.platform === "darwin" ? "darwin" : "linux"}-${
   process.arch === "arm64" ? "arm64" : "x64"
 }`;
-const binary = `${root}/dist/bin/agenticbus-${target.replace(/^bun-/, "")}`;
+const binary = `${root}/dist/bin/bql-bus-${target.replace(/^bun-/, "")}`;
 
 if (!(await Bun.file(binary).exists())) {
   console.log("building the binary first…");
@@ -36,7 +36,7 @@ if (!(await Bun.file(binary).exists())) {
 }
 
 console.log(`\n— end-to-end against ${binary}\n`);
-const e2e = await run(["bun", "scripts/e2e.ts"], { AGENTICBUS_BIN: binary });
+const e2e = await run(["bun", "scripts/e2e.ts"], { BQL_BUS_BIN: binary });
 if (e2e !== 0) {
   console.error("the compiled binary failed the end-to-end suite");
   process.exit(1);

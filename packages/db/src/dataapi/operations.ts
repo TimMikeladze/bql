@@ -31,7 +31,7 @@ import {
   s,
   type Schema,
 } from "../core/index.ts"
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import { type DataApiContext, type DataValue, rowObjects } from "./context.ts"
 import {
   bindValue,
@@ -191,7 +191,7 @@ function tableOperations(
   const assertDb = (ctx: DataApiContext, path: Row): void => {
     const asked = path.db
     if (typeof asked === "string" && asked !== ctx.db) {
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         `this API was generated for database ${ctx.db} and cannot serve ${JSON.stringify(asked)}`,
       )
     }
@@ -283,7 +283,7 @@ function tableOperations(
     handler: async (input, ctx) => {
       assertDb(ctx, input.path)
       const rows = (Array.isArray(input.body) ? input.body : [input.body]) as Row[]
-      if (rows.length === 0) throw BunQLError.badRequest("an insert needs at least one row")
+      if (rows.length === 0) throw BqlError.badRequest("an insert needs at least one row")
       const { columns, values } = insertMatrix(writable, rows)
       const result = await ctx.exec(
         buildStatement({ kind: "insert", table, columns, rows: values, returning: table.columns }),
@@ -319,7 +319,7 @@ function tableOperations(
           set.push({ column, value: patch[column.name] as DataValue })
         }
       }
-      if (set.length === 0) throw BunQLError.badRequest("the body set no columns")
+      if (set.length === 0) throw BqlError.badRequest("the body set no columns")
       const result = await ctx.exec(
         buildStatement({
           kind: "update",
@@ -372,7 +372,7 @@ function missing(table: TableInfo, keys: readonly KeyParam[], path: Row): never 
   const key = keys
     .map(({ column, parameter }) => `${column.name}=${String(path[parameter] ?? "")}`)
     .join(", ")
-  throw BunQLError.notFound(`no row of ${table.name} with ${key}`)
+  throw BqlError.notFound(`no row of ${table.name} with ${key}`)
 }
 
 /**
@@ -390,7 +390,7 @@ function insertMatrix(
   const values = rows.map((row, index) =>
     columns.map((column) => {
       if (!Object.hasOwn(row, column.name)) {
-        throw BunQLError.badRequest(
+        throw BqlError.badRequest(
           `row ${index} does not set "${column.name}", which another row of the same insert does; ` +
             "every row of a bulk insert must name the same columns",
         )
@@ -405,7 +405,7 @@ function insertMatrix(
 function onlyKeys(query: Row, allowed: readonly string[]): void {
   for (const key of Object.keys(query)) {
     if (query[key] === undefined || allowed.includes(key)) continue
-    throw BunQLError.badRequest(`unknown query parameter ${JSON.stringify(key)}`)
+    throw BqlError.badRequest(`unknown query parameter ${JSON.stringify(key)}`)
   }
 }
 

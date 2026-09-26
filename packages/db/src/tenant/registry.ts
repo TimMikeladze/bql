@@ -13,7 +13,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import { Database } from "../sqlite/index.ts"
 import { type ApplyMechanism, computeFull } from "../wal/index.ts"
 import { FsyncSweep } from "../durability/index.ts"
@@ -233,7 +233,7 @@ export function warnFdBudget(tenants: number, warn?: (message: string) => void):
   if (limit === null || needed <= limit) return
   const say = warn ?? ((message: string) => console.warn(message))
   say(
-    `bunql: maxOpen ${tenants} needs about ${needed} file descriptors but ulimit -n is ` +
+    `bql: maxOpen ${tenants} needs about ${needed} file descriptors but ulimit -n is ` +
       `${limit}. Lower maxOpen to ${Math.floor(limit / FDS_PER_TENANT)} or raise the limit.`,
   )
 }
@@ -276,7 +276,7 @@ export class TenantRegistry {
   #pinned = new Map<string, Map<string, number>>()
   /** The same thing from the other side, so `maxPinnedPerPrincipal` is a `Set.size` (L4). */
   #pinnedByOwner = new Map<string, Set<string>>()
-  /** Opens refused because the LRU was entirely pinned; `bunql_open_refused_total`. */
+  /** Opens refused because the LRU was entirely pinned; `bql_open_refused_total`. */
   #openRefused = 0
   /**
    * Per-database `ackWithoutReplicas`, memoised. `AckTracker` asks on every `replica`/`quorum`
@@ -344,7 +344,7 @@ export class TenantRegistry {
       return hit
     }
     const row = this.catalog.getTenant(name)
-    if (!row) throw BunQLError.dbNotFound(name)
+    if (!row) throw BqlError.dbNotFound(name)
     return this.#openRow(row)
   }
 
@@ -399,7 +399,7 @@ export class TenantRegistry {
       return hit
     }
     const row = this.catalog.getTenant(name)
-    if (!row) throw BunQLError.dbNotFound(name)
+    if (!row) throw BqlError.dbNotFound(name)
     if (row.role !== "replica") {
       this.release(name)
       this.catalog.setRole(name, "replica")
@@ -441,7 +441,7 @@ export class TenantRegistry {
   installSnapshot(name: string, install: SnapshotInstall): Tenant {
     this.#assertOpen()
     const row = this.catalog.getTenant(name)
-    if (!row) throw BunQLError.dbNotFound(name)
+    if (!row) throw BqlError.dbNotFound(name)
     // Every holder's pins, so they can be put back exactly as they were rather than collapsed
     // into one anonymous one — with the owner now being the principal, that distinction is the
     // per-principal cap (L4).
@@ -536,7 +536,7 @@ export class TenantRegistry {
   delete(name: string): string {
     this.#assertOpen()
     const row = this.catalog.getTenant(name)
-    if (!row) throw BunQLError.dbNotFound(name)
+    if (!row) throw BqlError.dbNotFound(name)
     const tenant = this.open(name)
     this.#open.delete(name)
     this.#clearPins(name)
@@ -573,7 +573,7 @@ export class TenantRegistry {
   pin(name: string, owner = "default", options: PinOptions = {}): void {
     const held = this.#pinnedByOwner.get(owner)
     if (options.capped && held && !held.has(name) && held.size >= this.maxPinnedPerPrincipal) {
-      throw new BunQLError(
+      throw new BqlError(
         "PIN_LIMIT",
         `this principal already holds ${this.maxPinnedPerPrincipal} databases open with ` +
           `subscriptions; close one before subscribing to ${name}`,
@@ -636,7 +636,7 @@ export class TenantRegistry {
    */
   setForeignKeys(name: string, value: boolean | null): void {
     this.#assertOpen()
-    if (!this.catalog.getTenant(name)) throw BunQLError.dbNotFound(name)
+    if (!this.catalog.getTenant(name)) throw BqlError.dbNotFound(name)
     this.catalog.setForeignKeys(name, value)
     this.release(name)
   }
@@ -649,7 +649,7 @@ export class TenantRegistry {
    */
   setAckWithoutReplicas(name: string, value: AckWithoutReplicas | null): void {
     this.#assertOpen()
-    if (!this.catalog.getTenant(name)) throw BunQLError.dbNotFound(name)
+    if (!this.catalog.getTenant(name)) throw BqlError.dbNotFound(name)
     this.catalog.setAckWithoutReplicas(name, value)
     this.#ackOverrides.set(name, value)
   }
@@ -828,7 +828,7 @@ export class TenantRegistry {
     // overshoots, still by one statement, still on purpose.
     if (this.#open.size >= this.maxOpen && this.#evict(this.maxOpen - 1) === "pinned") {
       this.#openRefused += 1
-      throw new BunQLError(
+      throw new BqlError(
         "TOO_MANY_OPEN",
         `this node holds its maxOpen of ${this.maxOpen} databases open and every one of them is ` +
           `pinned by a subscription; cannot open ${row.name}`,
@@ -922,7 +922,7 @@ export class TenantRegistry {
   #report(err: unknown): void {
     const onError = this.#options.onError
     if (onError) onError(err)
-    else console.error("bunql: tenant registry", err)
+    else console.error("bql: tenant registry", err)
   }
 
   #assertOpen(): void {

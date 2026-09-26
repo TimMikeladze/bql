@@ -1,21 +1,21 @@
-# R5 — ORM adapters: `@bunql/db/kysely` and `@bunql/db/drizzle`
+# R5 — ORM adapters: `bql.sh/kysely` and `bql.sh/drizzle`
 
 Companion to `plan-phase1.md` R5 and `design.md` §9.1. What the two adapters are, how to use them,
 which route the Drizzle one takes and why, and everything they cannot do.
 
 | file | what |
 |---|---|
-| `src/kysely.ts` | `BunQLDialect` / `bunqlDialect()` — Kysely's own `Sqlite*` adapter, compiler and introspector, with BunQL as the transport |
-| `src/drizzle.ts` | `drizzle()` / `libsqlClient()` — a libsql-shaped `Client` over a BunQL `Db`, handed to Drizzle's own libsql session |
+| `src/kysely.ts` | `BqlDialect` / `bqlDialect()` — Kysely's own `Sqlite*` adapter, compiler and introspector, with bql.sh as the transport |
+| `src/drizzle.ts` | `drizzle()` / `libsqlClient()` — a libsql-shaped `Client` over a bql.sh `Db`, handed to Drizzle's own libsql session |
 
 Both are peer-optional: `kysely` and `drizzle-orm` are devDependencies here and
-`peerDependenciesMeta.optional`, so BunQL still installs with neither. Nothing else under `src/`
+`peerDependenciesMeta.optional`, so bql.sh still installs with neither. Nothing else under `src/`
 imports either package, and the runtime dependency count is still zero.
 
 Every adapter takes the same three sources:
 
 - a client `Db` — `createClient({url, token}).db("acme")`;
-- an embedded `Db` — `(await BunQL.open({dir})).db("acme")`, no HTTP in the middle;
+- an embedded `Db` — `(await Bql.open({dir})).db("acme")`, no HTTP in the middle;
 - `{url, token, db}`, which the adapter builds a client from and owns. That client is opened with
   `intMode: "bigint"` rather than the SDK's `"number"`, because an ORM that throws on an integer
   past 2^53 is worse than one that hands back a bigint. Pass `intMode` yourself to change it.
@@ -24,7 +24,7 @@ Every adapter takes the same three sources:
 
 ```ts
 import { Kysely, type Generated } from "kysely"
-import { BunQLDialect } from "@bunql/db/kysely"
+import { BqlDialect } from "bql.sh/kysely"
 
 interface Database {
   todos: {
@@ -35,9 +35,9 @@ interface Database {
 }
 
 const db = new Kysely<Database>({
-  dialect: new BunQLDialect({
-    url: process.env.BUNQL_URL ?? "http://localhost:4321",
-    token: process.env.BUNQL_TOKEN,
+  dialect: new BqlDialect({
+    url: process.env.BQL_URL ?? "http://localhost:4321",
+    token: process.env.BQL_TOKEN,
     db: "acme",
   }),
 })
@@ -69,17 +69,17 @@ await db.destroy() // closes the client the dialect opened for {url, db}
 ```
 
 That example was run verbatim against a live server to check this page, after
-`bunql db create acme`. A `Db` you pass in yourself is never closed by `destroy()` — only a client
+`bql db create acme`. A `Db` you pass in yourself is never closed by `destroy()` — only a client
 the dialect opened is.
 
-`bunqlDialect(options)` is the same thing as a function. Both accept a bare `Db`, `{db}`, or
+`bqlDialect(options)` is the same thing as a function. Both accept a bare `Db`, `{db}`, or
 `{db, statement, transaction}`, where `statement` is the per-statement options of design §6
 (`timeoutMs`, `maxRows`, `ack`, `consistency`) and `transaction` is `{mode, via, ack}` — `via:
 "http"` forces the baton of §6.3 instead of the socket.
 
 ### How it maps
 
-| Kysely | BunQL |
+| Kysely | bql.sh |
 |---|---|
 | `executeQuery` | `db.execute(sql, params)` → `{rows, insertId: lastInsertRowid as bigint, numAffectedRows: BigInt(rowsAffected)}` |
 | `beginTransaction` | `db.transaction()`, parked (below) |
@@ -88,8 +88,8 @@ the dialect opened is.
 | `createAdapter` / `createQueryCompiler` / `createIntrospector` | `SqliteAdapter`, `SqliteQueryCompiler`, `SqliteIntrospector`, unchanged |
 | `streamQuery` | throws |
 
-**A Kysely transaction is one BunQL transaction.** Kysely's driver contract is
-`begin(connection)` … `commit(connection)`, and BunQL's is a callback: `db.transaction(async tx =>
+**A Kysely transaction is one bql.sh transaction.** Kysely's driver contract is
+`begin(connection)` … `commit(connection)`, and bql.sh's is a callback: `db.transaction(async tx =>
 …)`. The adapter bridges them by opening the callback and parking it on a promise that commit
 resolves and rollback rejects; every statement on that connection then runs through the `Tx` the
 callback was handed. The obvious alternative — sending `begin` and `commit` as one-shot statements
@@ -104,7 +104,7 @@ connection here is a wrapper over the one multiplexed `Db`, so they are free.
 ```ts
 import { eq, sql } from "drizzle-orm"
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { drizzle } from "@bunql/db/drizzle"
+import { drizzle } from "bql.sh/drizzle"
 
 const todos = sqliteTable("todos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -114,8 +114,8 @@ const todos = sqliteTable("todos", {
 
 const db = drizzle(
   {
-    url: process.env.BUNQL_URL ?? "http://localhost:4321",
-    token: process.env.BUNQL_TOKEN,
+    url: process.env.BQL_URL ?? "http://localhost:4321",
+    token: process.env.BQL_TOKEN,
     db: "acme",
   },
   { schema: { todos } },
@@ -139,9 +139,9 @@ console.log(written?.id, open)
 db.$client.close() // closes the client this adapter opened for {url, db}
 ```
 
-`db.$client` is the libsql-shaped shim, and `db.$client.bunql` is the BunQL `Db` under it.
+`db.$client` is the libsql-shaped shim, and `db.$client.bql` is the bql.sh `Db` under it.
 `libsqlClient(db, options)` is exported on its own for anything else that wants a libsql client
-over BunQL.
+over bql.sh.
 
 ### Why the libsql route, not `sqlite-proxy`
 
@@ -151,14 +151,14 @@ This adapter takes the libsql door — `drizzle-orm/libsql/driver-core`'s `const
 with a client of ours — because of what each one does with a transaction:
 
 - **`sqlite-proxy` has no transaction to hand us.** Its session emulates one by sending `begin`,
-  the statements, and `commit` through the same stateless callback. Over BunQL every one of those
+  the statements, and `commit` through the same stateless callback. Over bql.sh every one of those
   is an independent request against a tenant whose writer wraps each statement in its own
   transaction, so `begin` would commit immediately and roll back nothing. Intercepting the three
   keywords inside the callback would work for one transaction at a time and silently interleave
   two.
 - **The libsql session asks the client for a transaction object** (`client.transaction()` → a
   handle with `execute`, `commit`, `rollback`) and routes every statement inside the block through
-  it. That is exactly the shape of BunQL's baton, so transactions are real, and nested ones are
+  it. That is exactly the shape of bql.sh's baton, so transactions are real, and nested ones are
   savepoints on the same open transaction.
 - **`db.batch()` is real too.** The libsql session calls `client.batch(statements)`, which maps
   onto `POST /v1/db/{db}/batch` — one transaction, one txid, `failedIndex` on the statement that
@@ -168,7 +168,7 @@ with a client of ours — because of what each one does with a transaction:
 The cost of that door is one cast: `driver-core` exports `construct` at runtime but leaves it out
 of its `.d.ts`, so the adapter names its type itself and throws a clear error if a future
 `drizzle-orm` stops exporting it. `drizzle-orm/libsql` itself is not importable here — it
-statically imports `@libsql/client`, which BunQL does not depend on.
+statically imports `@libsql/client`, which bql.sh does not depend on.
 
 ### What the shim answers with
 
@@ -180,34 +180,34 @@ touches and answers in exactly its shapes.
   (`Array.prototype.slice.call(row)`) and as an object (`Object.keys(row)`), and only that shape
   answers both. A duplicate column name keeps the first, as libsql does.
 - **Blobs arrive as `ArrayBuffer`**, which is what libsql sends and what Drizzle's own
-  `normalizeFieldValue` turns into a `Buffer`. Answering with the `Uint8Array` BunQL's codec
+  `normalizeFieldValue` turns into a `Buffer`. Answering with the `Uint8Array` bql.sh's codec
   produces would quietly give a `blob({mode: "bigint"})` column the wrong value.
 - `lastInsertRowid` is a `bigint` or `undefined`; `rowsAffected` is a number; `columnTypes` is
-  BunQL's `types`.
-- `client.protocol` is `"bunql"`, not libsql's `"http"`/`"ws"`.
+  bql.sh's `types`.
+- `client.protocol` is `"bql"`, not libsql's `"http"`/`"ws"`.
 - `client.migrate(statements)` is the same atomic batch as `client.batch(statements)`.
 
 ## Limitations
 
 **Both adapters**
 
-- **No streaming.** BunQL answers a statement with its whole result set (design §6.1) and has no
+- **No streaming.** bql.sh answers a statement with its whole result set (design §6.1) and has no
   cursor route in phase 1, so Kysely's `.stream()` throws with that message rather than pretending,
   and Drizzle has no streaming API over a remote driver anyway. Page with `limit`/`offset`, and cap
   a statement with `maxRows`.
-- **One open transaction per database, everywhere.** A BunQL tenant has a single writer and an open
+- **One open transaction per database, everywhere.** A bql.sh tenant has a single writer and an open
   transaction holds it; a second `begin` on the same database is `TX_BUSY` (409). Within one
   adapter instance that never surfaces (below), but two adapter instances, two processes, or an
   adapter beside a plain client will collide.
-- **DDL is not transactional.** `SqliteAdapter.supportsTransactionalDdl` is false and BunQL agrees:
+- **DDL is not transactional.** `SqliteAdapter.supportsTransactionalDdl` is false and bql.sh agrees:
   SQLite's `create table` inside a transaction is real, but a failed migration does not unwind the
   statements that ran before it in a separate request.
-- **Errors keep BunQL's `code`.** Everything the client throws is a `BunQLClientError` carrying the
+- **Errors keep bql.sh's `code`.** Everything the client throws is a `BqlClientError` carrying the
   server's code — `SQLITE_CONSTRAINT_UNIQUE`, `DB_NOT_FOUND`, `TXID_NOT_AVAILABLE`. Kysely
-  propagates it as-is; Drizzle wraps it in a `DrizzleQueryError`, so the BunQL error is the
+  propagates it as-is; Drizzle wraps it in a `DrizzleQueryError`, so the bql.sh error is the
   `cause`.
 - **Read-your-writes is the client's, not the ORM's.** `consistency: "ryw"` (the default) sends the
-  highest txid this client has seen as `BunQL-Min-Txid`, so a read after a write through the same
+  highest txid this client has seen as `BQL-Min-Txid`, so a read after a write through the same
   client never goes backwards. Two clients are two bookkeepers.
 
 **Kysely**
@@ -216,12 +216,12 @@ touches and answers in exactly its shapes.
   is `false`, so Kysely wraps every connection acquisition in its own mutex: one statement in
   flight at a time, and concurrent transactions queue rather than colliding. That is what keeps
   `TX_BUSY` out of the way, and it is also a throughput cap on a remote database — use a second
-  `Kysely`, or the BunQL client directly, for concurrent reads.
+  `Kysely`, or the bql.sh client directly, for concurrent reads.
 - `isolationLevel` in a transaction is refused; SQLite has none.
   `accessMode: "read only"` opens the transaction `deferred` instead of `immediate`.
 - Savepoints work through `db.startTransaction()` and `trx.savepoint(name)`; they are the plain
   `savepoint` / `rollback to` / `release` SQL Kysely compiles, run inside the open transaction.
-- The result array Kysely hands back is BunQL's own `Result`, so it carries `txid`, `vmSteps`,
+- The result array Kysely hands back is bql.sh's own `Result`, so it carries `txid`, `vmSteps`,
   `durationUs` and the rest as non-enumerable properties. Nothing that iterates, spreads or
   serialises the rows can see them.
 - The migrator works, and is covered by a test: `Migrator` from `kysely/migration` over this
@@ -238,7 +238,7 @@ touches and answers in exactly its shapes.
   gives you — fails with a message saying so instead of hanging. The queue is per `Db`, so two
   `drizzle()` instances over one `Db` share it; two clients over one database do not.
 - `client.sync()` and `client.executeMultiple()` are not implemented: the first is for libsql's
-  embedded replicas, the second would need multi-statement SQL, which BunQL refuses by design
+  embedded replicas, the second would need multi-statement SQL, which bql.sh refuses by design
   (one statement per request).
 - `drizzle-orm/libsql/migrator` works, and is covered by a test: it reads a migrations folder,
   applies it through `client.migrate()` (our atomic batch), records the hashes, and is a no-op on

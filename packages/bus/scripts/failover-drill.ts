@@ -18,7 +18,7 @@ import { generateKey } from "../src/bus/tokens";
 import { BusClient, BusRequestError } from "../src/client/bus";
 
 const root = resolve(import.meta.dir, "..");
-const scratch = await mkdtemp(`${tmpdir()}/agenticbus-failover-`);
+const scratch = await mkdtemp(`${tmpdir()}/bql-bus-failover-`);
 const signingKey = generateKey();
 const adminToken = generateKey();
 const lease = `${scratch}/lease.json`;
@@ -45,7 +45,7 @@ async function freePort(start: number): Promise<number> {
 }
 
 const children = new Map<string, ReturnType<typeof Bun.spawn>>();
-const binary = process.env.AGENTICBUS_BIN;
+const binary = process.env.BQL_BUS_BIN;
 const spawn = (name: string, args: string[]) => {
   const child = Bun.spawn(
     binary ? [binary, ...args] : [process.execPath, "src/cli/index.ts", ...args],
@@ -232,7 +232,7 @@ try {
   console.log(
     `\nRPO at this failover: ${lagAtFailover} message(s).\n` +
       `Replication is asynchronous, so a failover loses up to the current lag.\n` +
-      `agenticbus.replication.lag_seq and lag_ms are the gauges that carry it;\n` +
+      `bql-bus.replication.lag_seq and lag_ms are the gauges that carry it;\n` +
       `alert on them, because this number is the promise you are making.`,
   );
 } finally {

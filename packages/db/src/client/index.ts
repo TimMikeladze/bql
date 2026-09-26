@@ -7,11 +7,11 @@
 //
 // Second invariant: `consistency: "ryw"` is bookkeeping, not a request option. The highest txid
 // this client has seen for a database — from a result, a change event or a live result — travels
-// as `BunQL-Min-Txid` on the next request to it, which is exactly what design §5.4 asks a client
+// as `BQL-Min-Txid` on the next request to it, which is exactly what design §5.4 asks a client
 // to do.
 
 import { Admin } from "./admin.ts"
-import { BunQLClientError, asClientError } from "./errors.ts"
+import { BqlClientError, asClientError } from "./errors.ts"
 import {
   ChangeFeed,
   LiveQuery,
@@ -195,7 +195,7 @@ function asStatement(item: BatchItem): StatementRequest {
   const statement = typeof candidate.toJSON === "function" ? candidate.toJSON() : item
   const sql = (statement as StatementRequest).sql
   if (typeof sql !== "string" || sql.length === 0) {
-    throw BunQLClientError.client("every batch item needs a non-empty sql string")
+    throw BqlClientError.client("every batch item needs a non-empty sql string")
   }
   return statement as StatementRequest
 }
@@ -240,7 +240,7 @@ class RemoteDb implements Db {
   async batch(items: BatchItem[], options: BatchOptions = {}): Promise<Result<JsRow>[]> {
     const statements = items.map(asStatement)
     if (statements.length === 0) {
-      throw BunQLClientError.client("batch needs at least one statement")
+      throw BqlClientError.client("batch needs at least one statement")
     }
     const body: Record<string, unknown> = {
       statements,
@@ -279,7 +279,7 @@ class RemoteDb implements Db {
       } catch (err) {
         // A socket that cannot be opened is a transport problem, not the caller's: fall back to
         // the baton rather than failing a transaction the server would have accepted.
-        if (err instanceof BunQLClientError && err.code === "CLIENT" && !options.via) {
+        if (err instanceof BqlClientError && err.code === "CLIENT" && !options.via) {
           return await this.#httpTransaction(fn, options)
         }
         throw err
@@ -531,7 +531,7 @@ export function createClient(options: ClientOptions): Client {
     options.fetch ??
     ((globalThis as { fetch?: FetchLike }).fetch as FetchLike | undefined)
   if (!fetchImpl) {
-    throw BunQLClientError.client("this runtime has no fetch; pass one as `fetch` to createClient")
+    throw BqlClientError.client("this runtime has no fetch; pass one as `fetch` to createClient")
   }
   const consistency = options.consistency ?? "ryw"
   const intMode = options.intMode ?? "number"
@@ -590,7 +590,7 @@ export function createClient(options: ClientOptions): Client {
     db(name?: string): Db {
       const target = name ?? options.db
       if (!target) {
-        throw BunQLClientError.client(
+        throw BqlClientError.client(
           "no database: pass a name to client.db() or `db` to createClient",
         )
       }
@@ -610,7 +610,7 @@ export function createClient(options: ClientOptions): Client {
 }
 
 export { Admin, type FileBody } from "./admin.ts"
-export { BunQLClientError } from "./errors.ts"
+export { BqlClientError } from "./errors.ts"
 export {
   ChangeFeed,
   LiveQuery,

@@ -121,7 +121,7 @@ async function run(workers: number): Promise<number> {
 }
 
 console.log(
-  `bunql hop bench · ${SHAPE} messages · ${CONCURRENT} in flight · ${SECONDS}s` +
+  `bql hop bench · ${SHAPE} messages · ${CONCURRENT} in flight · ${SECONDS}s` +
     `${BATCH ? " · batched per tick" : ""} · Bun ${Bun.version} · ${process.platform}/${process.arch}`,
 )
 console.log("")

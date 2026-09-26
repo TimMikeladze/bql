@@ -38,9 +38,9 @@ const BODY = JSON.stringify({
 /** The headers a `/v1/db/{db}/query` answer actually carries, as the worker sends them. */
 const PAIRS: [string, string][] = [
   ["content-type", "application/json"],
-  ["bunql-node", "bench"],
-  ["bunql-role", "primary"],
-  ["bunql-txid", "1"],
+  ["bql-node", "bench"],
+  ["bql-role", "primary"],
+  ["bql-txid", "1"],
 ]
 
 const server = Bun.serve({

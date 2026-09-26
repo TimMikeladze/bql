@@ -372,7 +372,7 @@ export class Catalog implements RevocationList {
     return Number(result.changes) > 0
   }
 
-  /** Removes the row and everything filed under it. Used by tests and `bunql db purge`. */
+  /** Removes the row and everything filed under it. Used by tests and `bql db purge`. */
   purgeTenant(name: string): void {
     this.#assertOpen()
     this.db.run("delete from snapshots where db = ?", [name])

@@ -2,7 +2,7 @@
 // `intMode`, batches, and the read-your-writes header the client is supposed to send on its own.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { BunQLClientError, createClient } from "../../src/client/index.ts"
+import { BqlClientError, createClient } from "../../src/client/index.ts"
 import { HEADERS } from "../../src/client/protocol.ts"
 import { failure, plain, startClientFixture, stopAll, type ClientFixture } from "./harness.ts"
 
@@ -98,10 +98,10 @@ describe("execute", () => {
     expect(plain(rows)).toEqual([{ one: 1 }])
   })
 
-  test("a SQLite failure arrives as a BunQLClientError with the server's code", async () => {
+  test("a SQLite failure arrives as a BqlClientError with the server's code", async () => {
     const db = fixture.client.db("acme")
     const error = await failure(db.sql`select * from nope`)
-    expect(error).toBeInstanceOf(BunQLClientError)
+    expect(error).toBeInstanceOf(BqlClientError)
     expect(error.code).toBe("SQLITE_ERROR")
     expect(error.status).toBe(400)
     expect(error.message).toContain("nope")
@@ -111,7 +111,7 @@ describe("execute", () => {
   // it found (`docs/h8-validated-requests.md`). Dropping them here would leave a caller re-guessing
   // which field was wrong out of a summary message.
   test("a schema refusal keeps every problem the server listed", () => {
-    const error = BunQLClientError.fromBody(
+    const error = BqlClientError.fromBody(
       {
         error: {
           code: "BAD_REQUEST",
@@ -285,6 +285,6 @@ describe("createClient", () => {
   })
 
   test("a url that is not http is refused before anything is sent", () => {
-    expect(() => createClient({ url: "file:///tmp/x" })).toThrow(BunQLClientError)
+    expect(() => createClient({ url: "file:///tmp/x" })).toThrow(BqlClientError)
   })
 })

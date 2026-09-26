@@ -84,7 +84,7 @@ test("an unregistered target is dropped from the round", async () => {
 })
 
 test("a log written to under the sweep is fsynced without the write path waiting", async () => {
-  const dir = tempDir("bunql-sweep-")
+  const dir = tempDir("bql-sweep-")
   const registry = TenantRegistry.open({ dir, fsyncSweep: "shared" })
   const sweep = registry.fsyncSweep
   expect(sweep).not.toBeNull()
@@ -109,7 +109,7 @@ test("ack: fsync does its own barrier, so the sweep finds nothing to do", async 
   // The other half of the crash case, and cheap enough to assert directly: under the node's
   // default ack the log is already clean by the time the sweep reaches it, because `#syncDurable`
   // flushed it inline before the caller was answered. The sweep issues no barrier at all.
-  const dir = tempDir("bunql-sweep-ack-")
+  const dir = tempDir("bql-sweep-ack-")
   const registry = TenantRegistry.open({ dir, fsyncSweep: "shared" })
   const sweep = registry.fsyncSweep
   const tenant = await registry.create("acme")
@@ -126,7 +126,7 @@ test("ack: fsync does its own barrier, so the sweep finds nothing to do", async 
 })
 
 test("per-db is the default and creates no sweep at all", async () => {
-  const dir = tempDir("bunql-sweep-off-")
+  const dir = tempDir("bql-sweep-off-")
   const registry = TenantRegistry.open({ dir })
   expect(registry.fsyncSweep).toBeNull()
   expect(registry.stats().fsync).toBeNull()
@@ -138,7 +138,7 @@ test("a kill -9 never loses a txid an ack: fsync caller was answered", async () 
   // path. With `fsyncSweep: "shared"` on and every write at `ack: "fsync"`, the last txid the
   // writer printed is one it was told was on disk — so it has to still be there after the process
   // is killed outright.
-  const dir = tempDir("bunql-sweep-kill-")
+  const dir = tempDir("bql-sweep-kill-")
   const writer = Bun.spawn(
     [process.execPath, "run", path.join(import.meta.dir, "sweep-writer.ts"), dir],
     { stdout: "pipe", stderr: "pipe" },

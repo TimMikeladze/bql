@@ -8,7 +8,7 @@
 // declaration of the same keywords — the two cannot drift because there is one of them.
 //
 // Only the parts of 3.1 this emitter produces are modelled. `webhooks`, `callbacks`, `links`,
-// `discriminator` and the OAuth2 flow objects are absent because nothing in BunQL's operation
+// `discriminator` and the OAuth2 flow objects are absent because nothing in bql.sh's operation
 // model produces them; the `[extension: string]: unknown` index signatures carry `x-` keys and
 // anything a later milestone adds.
 

@@ -42,7 +42,7 @@ let hranaReplica: Client
 let expectedRows = 0
 
 beforeAll(async () => {
-  bucket = await FakeS3.start({ bucket: "bunql-e2e" })
+  bucket = await FakeS3.start({ bucket: "bql-e2e" })
   prefix = `phase1-${Date.now().toString(36)}/`
   primary = await startPrimary({
     s3: {

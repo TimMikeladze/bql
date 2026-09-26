@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import path from "node:path"
-import { BunQLError } from "../../src/server/errors.ts"
+import { BqlError } from "../../src/server/errors.ts"
 import {
   assertValidName,
   fileDescriptorLimit,
@@ -19,7 +19,7 @@ describe("tenant registry", () => {
       expect(() => assertValidName(name)).not.toThrow()
     }
     for (const name of ["", "-acme", "Acme", "acme/evil", "../etc", "a".repeat(65), "_system"]) {
-      expect(() => assertValidName(name)).toThrow(BunQLError)
+      expect(() => assertValidName(name)).toThrow(BqlError)
     }
   })
 
@@ -33,7 +33,7 @@ describe("tenant registry", () => {
     expect(reg.has("acme")).toBe(true)
     expect(reg.open("acme")).toBe(tenant)
     await expect(reg.create("acme")).rejects.toThrow(TenantError)
-    expect(() => reg.open("nope")).toThrow(BunQLError)
+    expect(() => reg.open("nope")).toThrow(BqlError)
 
     await reg.create("beta")
     expect(reg.list().map((row) => row.name)).toEqual(["acme", "beta"])

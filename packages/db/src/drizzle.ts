@@ -1,8 +1,8 @@
-// Drizzle over BunQL (plan-phase1.md R5), through Drizzle's own libsql session.
+// Drizzle over bql.sh (plan-phase1.md R5), through Drizzle's own libsql session.
 //
-// Invariant: this module is a libsql-shaped `Client` over a BunQL `Db` and nothing else. Drizzle's
+// Invariant: this module is a libsql-shaped `Client` over a bql.sh `Db` and nothing else. Drizzle's
 // libsql driver core (`drizzle-orm/libsql/driver-core`) takes any object with `execute`, `batch`
-// and `transaction` on it, so BunQL gets Drizzle's real transactions and its real `db.batch()`
+// and `transaction` on it, so bql.sh gets Drizzle's real transactions and its real `db.batch()`
 // rather than the `begin`/`commit`-as-one-shot-statements emulation `sqlite-proxy` would have to
 // use — which over HTTP would commit nothing, because each statement on the tenant's writer is its
 // own transaction.
@@ -30,7 +30,7 @@ import type { JsValue } from "./client/values.ts"
 
 // ── the libsql shapes we answer with ───────────────────────────────────────────────────────────
 //
-// Declared here rather than imported: `@libsql/client` is not a dependency of BunQL, and these are
+// Declared here rather than imported: `@libsql/client` is not a dependency of bql.sh, and these are
 // the only parts of its surface Drizzle's session touches.
 
 /** A row as `@libsql/client` builds it: array-like, plus one enumerable property per column. */
@@ -49,7 +49,7 @@ export type LibSqlArgs = readonly unknown[] | Record<string, unknown>
 
 export type LibSqlStatement = string | { sql: string; args?: LibSqlArgs }
 
-/** libsql's transaction modes. `"write"` and `"deferred"` are BunQL's `immediate`/`deferred`. */
+/** libsql's transaction modes. `"write"` and `"deferred"` are bql.sh's `immediate`/`deferred`. */
 export type LibSqlTransactionMode = "write" | "read" | "deferred"
 
 export interface LibSqlTransaction {
@@ -70,11 +70,11 @@ export interface LibSqlClient {
   migrate(statements: LibSqlStatement[]): Promise<LibSqlResultSet[]>
   transaction(mode?: LibSqlTransactionMode): Promise<LibSqlTransaction>
   close(): void
-  /** The BunQL handle underneath, for anything this shim does not cover. */
-  readonly bunql: Db
+  /** The bql.sh handle underneath, for anything this shim does not cover. */
+  readonly bql: Db
 }
 
-// ── BunQL → libsql ─────────────────────────────────────────────────────────────────────────────
+// ── bql.sh → libsql ─────────────────────────────────────────────────────────────────────────────
 
 function statementOf(statement: LibSqlStatement, args?: LibSqlArgs): { sql: string; args?: LibSqlArgs } {
   if (typeof statement === "string") {
@@ -132,7 +132,7 @@ interface RowsResult {
   readonly lastInsertRowid: number | bigint | string | null
 }
 
-/** One BunQL result as a libsql `ResultSet`. */
+/** One bql.sh result as a libsql `ResultSet`. */
 function toResultSet(values: readonly JsValue[][], meta: RowsResult): LibSqlResultSet {
   const columns = meta.columns
   const rows = values.map((row) => toRow(row, columns))
@@ -156,10 +156,10 @@ function toResultSet(values: readonly JsValue[][], meta: RowsResult): LibSqlResu
 }
 
 /** Rejecting the parked transaction callback with this asks for a rollback; it is not an error. */
-const ROLLBACK = Symbol("bunql.drizzle.rollback")
+const ROLLBACK = Symbol("bql.drizzle.rollback")
 
 /**
- * One transaction at a time per database. A BunQL tenant has a single writer and an open
+ * One transaction at a time per database. A bql.sh tenant has a single writer and an open
  * transaction holds it, so a second `db.transaction()` while one is open is `TX_BUSY` from the
  * server — which two concurrent request handlers would hit routinely. They queue here instead.
  * The wait is capped, because a transaction opened from inside another one on the same handle
@@ -193,7 +193,7 @@ class WriterQueue {
             () =>
               reject(
                 new Error(
-                  `bunql/drizzle: waited ${waitMs} ms for the open transaction on ${db} to end. ` +
+                  `bql/drizzle: waited ${waitMs} ms for the open transaction on ${db} to end. ` +
                     "A transaction cannot be opened from inside another one on the same database; " +
                     "use the `tx` the callback gives you, or raise transactionWaitMs.",
                 ),
@@ -288,7 +288,7 @@ async function parkTransaction(
     }
   }
   const run = async (one: LibSqlStatement, args?: LibSqlArgs): Promise<LibSqlResultSet> => {
-    if (settled) throw new Error("bunql/drizzle: this transaction is already closed")
+    if (settled) throw new Error("bql/drizzle: this transaction is already closed")
     const request = statementOf(one, args)
     const result = await tx.execute(request.sql, request.args as readonly unknown[], statement).values()
     return toResultSet(result as unknown as JsValue[][], result)
@@ -325,7 +325,7 @@ export interface LibSqlClientOptions {
 }
 
 /**
- * A BunQL `Db` behind the part of `@libsql/client`'s `Client` that Drizzle uses. Useful on its own
+ * A bql.sh `Db` behind the part of `@libsql/client`'s `Client` that Drizzle uses. Useful on its own
  * for anything else that takes a libsql client.
  */
 export function libsqlClient(db: Db, options: LibSqlClientOptions = {}): LibSqlClient {
@@ -342,7 +342,7 @@ export function libsqlClient(db: Db, options: LibSqlClientOptions = {}): LibSqlC
   const batch = async (statements: LibSqlStatement[]): Promise<LibSqlResultSet[]> => {
     if (statements.length === 0) return []
     const items = statements.map((one) => statementOf(one))
-    // One BunQL batch is one transaction over one txid (design §6.2), which is what libsql's
+    // One bql.sh batch is one transaction over one txid (design §6.2), which is what libsql's
     // default batch mode promises too.
     const results = await db.batch(
       items.map((item) => ({
@@ -355,11 +355,11 @@ export function libsqlClient(db: Db, options: LibSqlClientOptions = {}): LibSqlC
   }
 
   return {
-    protocol: "bunql",
+    protocol: "bql",
     get closed(): boolean {
       return closed
     },
-    bunql: db,
+    bql: db,
     execute,
     batch,
     migrate: batch,
@@ -374,7 +374,7 @@ export function libsqlClient(db: Db, options: LibSqlClientOptions = {}): LibSqlC
 // ── the entry point ────────────────────────────────────────────────────────────────────────────
 
 /** A client this adapter builds and owns, rather than a `Db` the caller already has. */
-export interface BunQLDrizzleClientConfig extends Omit<ClientOptions, "db" | "url" | "intMode"> {
+export interface BqlDrizzleClientConfig extends Omit<ClientOptions, "db" | "url" | "intMode"> {
   /** Base URL of the server, `https://sql.example.com`. */
   url: string
   /** Database name on that server. */
@@ -387,9 +387,9 @@ export interface BunQLDrizzleClientConfig extends Omit<ClientOptions, "db" | "ur
   intMode?: ClientOptions["intMode"]
 }
 
-export type BunQLDrizzleSource = Db | LibSqlClient | BunQLDrizzleClientConfig
+export type BqlDrizzleSource = Db | LibSqlClient | BqlDrizzleClientConfig
 
-export interface BunQLDrizzleConfig<TSchema extends Record<string, unknown>>
+export interface BqlDrizzleConfig<TSchema extends Record<string, unknown>>
   extends DrizzleConfig<TSchema> {
   /** Options applied to every statement: `timeoutMs`, `maxRows`, `ack`, `consistency`. */
   statement?: StatementOptions
@@ -400,7 +400,7 @@ export interface BunQLDrizzleConfig<TSchema extends Record<string, unknown>>
   transactionWaitMs?: number
 }
 
-export type BunQLDatabase<TSchema extends Record<string, unknown> = Record<string, never>> =
+export type BqlDatabase<TSchema extends Record<string, unknown> = Record<string, never>> =
   LibSQLDatabase<TSchema> & { $client: LibSqlClient }
 
 /**
@@ -426,7 +426,7 @@ function isDb(value: unknown): value is Db {
 }
 
 /**
- * A libsql client, which a BunQL `Db` also resembles — both have `execute`, `batch` and
+ * A libsql client, which a bql.sh `Db` also resembles — both have `execute`, `batch` and
  * `transaction`. Only a `Db` names its database, so that is what tells the two apart, and `isDb`
  * is asked first everywhere this is used.
  */
@@ -442,7 +442,7 @@ function isLibSqlClient(value: unknown): value is LibSqlClient {
 }
 
 /**
- * Drizzle over BunQL.
+ * Drizzle over bql.sh.
  *
  * ```ts
  * const db = drizzle({ url, token, db: "acme" }, { schema })
@@ -450,12 +450,12 @@ function isLibSqlClient(value: unknown): value is LibSqlClient {
  * ```
  */
 export function drizzle<TSchema extends Record<string, unknown> = Record<string, never>>(
-  source: BunQLDrizzleSource,
-  config: BunQLDrizzleConfig<TSchema> = {},
-): BunQLDatabase<TSchema> {
+  source: BqlDrizzleSource,
+  config: BqlDrizzleConfig<TSchema> = {},
+): BqlDatabase<TSchema> {
   if (typeof construct !== "function") {
     throw new Error(
-      "bunql/drizzle: this drizzle-orm no longer exports `construct` from " +
+      "bql/drizzle: this drizzle-orm no longer exports `construct` from " +
         "drizzle-orm/libsql/driver-core; pin drizzle-orm or open an issue",
     )
   }
@@ -472,12 +472,12 @@ export function drizzle<TSchema extends Record<string, unknown> = Record<string,
   } else {
     const { db: name, ...rest } = source
     if (typeof rest.url !== "string" || typeof name !== "string") {
-      throw new TypeError("bunql/drizzle: pass a BunQL Db, a libsql client, or {url, db}")
+      throw new TypeError("bql/drizzle: pass a bql.sh Db, a libsql client, or {url, db}")
     }
     const owned: Client = createClient({ intMode: "bigint", ...rest, db: name })
     client = libsqlClient(owned.db(name), { ...shim, onClose: () => owned.close() })
   }
-  const db = construct<TSchema>(client, drizzleConfig) as BunQLDatabase<TSchema>
+  const db = construct<TSchema>(client, drizzleConfig) as BqlDatabase<TSchema>
   db.$client = client
   return db
 }

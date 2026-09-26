@@ -1,8 +1,8 @@
-# BunQL time-series competitive assessment
+# bql.sh time-series competitive assessment
 
 Assessed 2026-09-13 against the working tree during the monorepo transition to `e268498`. This is an architecture assessment and proposed direction, not an implemented time-series feature set or a competitor performance result. Companion: [competitor research](timeseries-competitors.md).
 
-**BunQL has a useful operational database foundation, but it is not yet a purpose-built time-series database.** Finishing the existing roadmap will not by itself make it competitive on large historical scans. The existing design explicitly targets “SQLite, many of them, replicated, fast,” with one writer per database ([design](../packages/db/docs/design.md)). A time-series product needs a new workload contract and development track.
+**bql.sh has a useful operational database foundation, but it is not yet a purpose-built time-series database.** Finishing the existing roadmap will not by itself make it competitive on large historical scans. The existing design explicitly targets “SQLite, many of them, replicated, fast,” with one writer per database ([design](../packages/db/docs/design.md)). A time-series product needs a new workload contract and development track.
 
 ## What is already valuable
 
@@ -46,7 +46,7 @@ The competitors set different baselines. Timescale combines operational SQL and 
 The original assessment considered two paths. The user's workload selection favors the second:
 
 1. **Keep SQLite as the only data engine and choose a bounded operational time-series market.** Add typed ingest, appropriate series/time indexes, managed rollups and retention. Measure the largest supported tenant and workload. This is the shortest path to a useful product, but does not remove the historical-scan or single-tenant scaling limits.
-2. **For broad historical analytics, retain BunQL's operational foundation and add a native columnar execution/storage path.** Evaluate an existing engine before writing one. [DuckDB](https://duckdb.org/docs/current/internals/vector) provides vectorized execution; [DataFusion](https://datafusion.apache.org/user-guide/introduction.html) provides an extensible Arrow-based query engine with Parquet support. These are prototype candidates, not selected dependencies or evidence of a speed advantage. DuckDB's documented [concurrency model](https://duckdb.org/docs/lts/connect/concurrency) also needs consideration. Neither engine alone supplies BunQL's future distributed coordinator and durability contracts.
+2. **For broad historical analytics, retain bql.sh's operational foundation and add a native columnar execution/storage path.** Evaluate an existing engine before writing one. [DuckDB](https://duckdb.org/docs/current/internals/vector) provides vectorized execution; [DataFusion](https://datafusion.apache.org/user-guide/introduction.html) provides an extensible Arrow-based query engine with Parquet support. These are prototype candidates, not selected dependencies or evidence of a speed advantage. DuckDB's documented [concurrency model](https://duckdb.org/docs/lts/connect/concurrency) also needs consideration. Neither engine alone supplies bql.sh's future distributed coordinator and durability contracts.
 
 For the second path, keep tenant/auth/catalog/routing in Bun, run ingestion and analytical compute in dedicated native workers, and exchange typed batches rather than JavaScript objects per cell. Prototype bounded batch ingestion into a durable partition log and recent-data buffers, followed by immutable columnar segments. The chosen native engine may supply parts of that machinery; a query engine alone does not supply the full ingestion/storage system. Store historical data in time/series-sorted immutable segments, with timestamp ranges, series statistics and column pruning. Add local caching and object storage only with measured query and compaction costs. Use SQLite for metadata and optional transactional tables; do not make every metric sample traverse its single writer without evidence that this meets the target.
 
@@ -58,7 +58,7 @@ The recommended first prototype stack is:
 
 | Responsibility | Starting choice | What must be proven |
 | --- | --- | --- |
-| Server, authentication, tenant routing and SDK | Existing BunQL/Bun modules | Bounded queues and isolation from analytical CPU work |
+| Server, authentication, tenant routing and SDK | Existing bql.sh/Bun modules | Bounded queues and isolation from analytical CPU work |
 | Local metadata and optional transactional tables | SQLite | Atomic manifest/progress changes; cluster metadata ownership must remain consistent with the control plane |
 | Recent sample ingestion | Partitioned, bounded durable batches; evaluate the selected engine's supported ingestion path before writing a custom log | Durable acknowledgements, replay, idempotency, fresh reads and multicore ingest within one tenant |
 | Analytical execution | DuckDB as the first candidate; retain DataFusion as an alternative | Scan/group-by performance, mixed-load concurrency, resource limits and the cost of crossing from Bun to native execution |
@@ -71,7 +71,7 @@ This is a prototype recommendation, not a claim that DuckDB has been integrated 
 
 Do not use the current post-commit in-memory change feed as the sole export/outbox mechanism. A crash after commit and before publication can lose the downstream action. Physical WAL durability does not automatically provide a logical row stream; choose durable logical records, transactional outbox records, or consistent snapshot extraction with a recoverable progress protocol.
 
-`@bunql/bus` currently opens `bun:sqlite` directly ([store.ts](../packages/bus/src/bus/store.ts)). Being in the same repository does not establish shared storage, transactions or recovery. It could eventually schedule compaction, retention and rollup jobs; it is not currently an integrated or proven high-throughput sample-ingestion path.
+`bql.sh/bus` currently opens `bun:sqlite` directly ([store.ts](../packages/bus/src/bus/store.ts)). Being in the same repository does not establish shared storage, transactions or recovery. It could eventually schedule compaction, retention and rollup jobs; it is not currently an integrated or proven high-throughput sample-ingestion path.
 
 ## Work sequence and completion gates
 
@@ -93,7 +93,7 @@ This is a roadmap ordered by dependencies, not a calendar estimate. Broad compet
 - Test ingest and reads together. Run long enough to expose checkpointing, compaction, index maintenance, retention and replica catch-up; report backlog rather than ending a test before deferred work is paid.
 - Align acknowledgement durability and replication expectations. Measure durable points/second and query-visible points/second separately. An accepted HTTP request is not necessarily a durable or queryable point.
 - Report p50/p95/p99, errors, CPU, peak RSS, physical bytes on disk/object storage, WAL/replication/upload traffic, maintenance debt and recovery time. Exercise warm cache, deliberately documented cold-cache conditions and data larger than memory.
-- Separate load generators from database workers, repeat runs, report variance and distinguish driver, server and network timings. Do not infer competitor throughput from BunQL's point-read latency.
+- Separate load generators from database workers, repeat runs, report variance and distinguish driver, server and network timings. Do not infer competitor throughput from bql.sh's point-read latency.
 
 ## Verification performed
 

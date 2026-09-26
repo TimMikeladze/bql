@@ -27,7 +27,7 @@ afterEach(() => {
 
 function registryIn(
   deferAppend: boolean,
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-p5-")),
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-p5-")),
   extra: { checkpointWalBytes?: number } = {},
 ): TenantRegistry {
   if (!dirs.includes(dir)) dirs.push(dir)
@@ -132,7 +132,7 @@ describe("deferred append", () => {
     // `close()` sets `#closed` and *then* captures and checkpoints. A flush refused on `#closed`
     // dropped exactly the records that last capture produced, and the TRUNCATE that follows took
     // their frames with them.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-p5-close-"))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-p5-close-"))
     dirs.push(dir)
     const registry = registryIn(true, dir)
     const tenant = await registry.create("acme", {})
@@ -157,7 +157,7 @@ describe("deferred append", () => {
     // The test this milestone exists to pass. A crash between the commit and the append loses log
     // records for transactions the writer had already returned from; the reconcile re-polls the
     // WAL from the saved position and derives them again.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-p5-kill-"))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-p5-kill-"))
     dirs.push(dir)
     const writer = Bun.spawn(
       [process.execPath, "run", path.join(import.meta.dir, "p5-writer.ts"), dir],

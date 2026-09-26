@@ -1,4 +1,4 @@
-// `bunql/drizzle` against a real server. Everything here is the public Drizzle API — the libsql
+// `bql/drizzle` against a real server. Everything here is the public Drizzle API — the libsql
 // shim underneath it is only ever reached through Drizzle itself.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
@@ -8,8 +8,8 @@ import { blob, integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { BunQLClientError } from "../../src/client/errors.ts"
-import { drizzle, libsqlClient, type BunQLDatabase } from "../../src/drizzle.ts"
+import { BqlClientError } from "../../src/client/errors.ts"
+import { drizzle, libsqlClient, type BqlDatabase } from "../../src/drizzle.ts"
 import { anotherDb, failure, startOrmFixture, stopAll, type OrmFixture } from "./harness.ts"
 import { removeTempDir } from "../tmpdir.ts"
 
@@ -31,7 +31,7 @@ const books = sqliteTable("books", {
 const schema = { authors, books }
 
 let fixture: OrmFixture
-let db: BunQLDatabase<typeof schema>
+let db: BqlDatabase<typeof schema>
 
 beforeAll(async () => {
   fixture = await startOrmFixture("drizzle")
@@ -96,12 +96,12 @@ describe("statements", () => {
   })
 
   test("a constraint violation arrives as an error naming the constraint", async () => {
-    // Drizzle wraps whatever the driver threw in a `DrizzleQueryError`, so BunQL's own error —
+    // Drizzle wraps whatever the driver threw in a `DrizzleQueryError`, so bql.sh's own error —
     // with its `code` — is the `cause`.
     const err = await failure(db.insert(authors).values({ name: "Ted Chiang", born: 1967 }))
     expect(err.message).toContain("Failed query")
-    const cause = err.cause as BunQLClientError
-    expect(cause).toBeInstanceOf(BunQLClientError)
+    const cause = err.cause as BqlClientError
+    expect(cause).toBeInstanceOf(BqlClientError)
     expect(String(cause.code)).toStartWith("SQLITE_CONSTRAINT")
     expect(cause.message).toContain("authors.name")
   })
@@ -252,7 +252,7 @@ describe("values", () => {
 
 describe("migrations", () => {
   test("drizzle-orm/libsql's migrator runs a folder and is a no-op the second time", async () => {
-    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-drizzle-migrations-"))
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "bql-drizzle-migrations-"))
     try {
       fs.mkdirSync(path.join(folder, "meta"))
       fs.writeFileSync(
@@ -283,10 +283,10 @@ describe("migrations", () => {
 })
 
 describe("the client underneath", () => {
-  test("$client is the libsql-shaped shim, and it carries the BunQL Db", async () => {
+  test("$client is the libsql-shaped shim, and it carries the bql.sh Db", async () => {
     const client = db.$client
-    expect(client.protocol).toBe("bunql")
-    expect(client.bunql.name).toBe("drizzle")
+    expect(client.protocol).toBe("bql")
+    expect(client.bql.name).toBe("drizzle")
     const result = await client.execute({ sql: "select name from authors where id = ?", args: [1] })
     expect(result.columns).toEqual(["name"])
     expect(result.rows[0]?.name).toBe("Ursula K. Le Guin")
@@ -301,7 +301,7 @@ describe("the client underneath", () => {
     standalone.$client.close()
   })
 
-  test("libsqlClient batches straight off a BunQL Db", async () => {
+  test("libsqlClient batches straight off a bql.sh Db", async () => {
     const client = libsqlClient(fixture.db)
     const results = await client.batch([
       { sql: "insert into authors(name) values (?)", args: ["from the shim"] },

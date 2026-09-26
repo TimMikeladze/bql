@@ -21,7 +21,7 @@
 //
 // The pipeline is split at the error boundary. `executeOperation` runs an operation and **throws**;
 // `compileOperation` is that plus the `try/catch` that maps the throw onto a `Response`. The split
-// exists for `src/server/app.ts`: its `wrap()` is the one place the `BunQL-*` headers, CORS, the
+// exists for `src/server/app.ts`: its `wrap()` is the one place the `BQL-*` headers, CORS, the
 // metrics tick and C2's same-origin `307` are applied, and the `307` is answered only for a
 // refusal whose code is `NOT_PRIMARY` — which it cannot read off a `Response`. So the server mounts
 // `executeOperation` inside its own wrapper and every other caller keeps `compileOperation`.
@@ -45,7 +45,7 @@
 // value, so development and production cannot put different bytes on the wire.
 
 import { keyword, type Operation, type Problem, type Schema, validate } from "../core/index.ts"
-import { BunQLError, errorResponse } from "../server/errors.ts"
+import { BqlError, errorResponse } from "../server/errors.ts"
 import { encode } from "./encode.ts"
 
 /** What a compiled operation is given about the request it is serving. */
@@ -113,7 +113,7 @@ const DEFAULT_MAX_BODY = 8 * 1024 * 1024
 const JSON_TYPE = "application/json; charset=utf-8"
 
 /** A request core refused, carrying every problem it found rather than only the first. */
-export class RequestInvalid extends BunQLError {
+export class RequestInvalid extends BqlError {
   readonly problems: Problem[]
 
   constructor(problems: Problem[]) {
@@ -226,8 +226,8 @@ async function readBody(request: Request, max: number): Promise<string> {
   return new TextDecoder().decode(joined)
 }
 
-function tooLarge(max: number): BunQLError {
-  return new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
+function tooLarge(max: number): BqlError {
+  return new BqlError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
 }
 
 /**
@@ -347,9 +347,9 @@ export function compileOperation<Ctx>(
       return await execute(invocation, ctx)
     } catch (err) {
       const response = errorResponse(err)
-      // Mirrors `src/server/app.ts`: a `BunQLError` other than `INTERNAL` is a refusal this server
+      // Mirrors `src/server/app.ts`: a `BqlError` other than `INTERNAL` is a refusal this server
       // wrote on purpose, several of which are 5xx. Only the rest is a bug worth reporting.
-      const deliberate = err instanceof BunQLError && err.code !== "INTERNAL"
+      const deliberate = err instanceof BqlError && err.code !== "INTERNAL"
       if (response.status >= 500 && !deliberate) report(err, operation)
       return response
     }

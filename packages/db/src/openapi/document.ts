@@ -299,7 +299,7 @@ function responsesOf(
     const mapped = statusForCode(code)
     if (mapped === undefined) {
       throw new Error(
-        `openapi: operation "${operation.id}": "${code}" is neither a BunQL error code in ` +
+        `openapi: operation "${operation.id}": "${code}" is neither a bql.sh error code in ` +
           `ERROR_STATUS nor a SQLite result code name, so src/server/errors.ts cannot say what ` +
           `status it answers with`,
       )

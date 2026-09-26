@@ -19,7 +19,7 @@ What that gate does **not** do is the part worth building:
   names, and the existing gate has no answer to it.
 - **It has no ceiling on the wait.** A shipper waits indefinitely for a permit, so a saturated
   bucket grows a queue of drains, each holding its encoded batch.
-- **It is not observable.** There was no `bunql_upload_inflight` and no `bunql_upload_waiting`, so
+- **It is not observable.** There was no `bql_upload_inflight` and no `bql_upload_waiting`, so
   "the bucket is the bottleneck" was a guess.
 - **It counts reads too**, because it sits inside `#run`. A burst of `getOrNull` and `list` can
   hold every permit while an upload waits behind them.
@@ -57,7 +57,7 @@ budget is the binding constraint by construction, and raising it means raising `
 | criterion | result |
 |---|---|
 | 200 tenants shipping concurrently show at most `maxConcurrentUploads` in flight | **yes**, sampled *while* they run rather than after. `test/storage/upload-budget.test.ts`: sixty databases against three permits, peak in-flight three. The unit case offers 200 at once against four permits and peaks at four |
-| `bunql_upload_waiting` is non-zero under that load | **yes**, asserted from the same live sampling, and the gauge is wired through `ShipperPool.metrics()` to `/metrics` and summed across worker shards |
+| `bql_upload_waiting` is non-zero under that load | **yes**, asserted from the same live sampling, and the gauge is wired through `ShipperPool.metrics()` to `/metrics` and summed across worker shards |
 | the furthest-behind database's lag is bounded rather than monotonic | **the mechanism is asserted, the emergent property is not.** The ordering test pins that a caller at txid 100 is served before callers at 500 and 900 while one permit is held, which is what bounds the lag. Measuring the lag itself against the in-process fake S3 would measure the fake; against a real bucket it is not a test, it is a benchmark |
 
 ## 5. What it touched
@@ -66,6 +66,6 @@ budget is the binding constraint by construction, and raising it means raising `
 (owns the budget, `maxConcurrentUploads`, the two gauges in `metrics()`), `src/storage/shipper.ts`
 (`budget` and `uploadWaitMs` options, `#upload` around every request),
 `src/server/config.ts` (`[s3] maxConcurrentUploads`, `[s3] uploadWaitMs`), `src/server/runtime.ts`,
-`src/server/routes.ts`, `src/server/metrics.ts` (`bunql_upload_inflight`, `bunql_upload_waiting`),
+`src/server/routes.ts`, `src/server/metrics.ts` (`bql_upload_inflight`, `bql_upload_waiting`),
 `src/server/workers/pool.ts` (both sum across the disjoint shards),
 `test/storage/upload-budget.test.ts`, `docs/api.md`, `docs/design.md` §9.4.

@@ -4,10 +4,10 @@ Plan of record for `client.admin`. Written 2026-09-13, implemented in the same s
 
 ## Why
 
-`@bunql/db/client` covered the data plane and nothing else: statements, batches, transactions,
+`bql.sh/client` covered the data plane and nothing else: statements, batches, transactions,
 change feeds, live queries. Every control-plane route of design §6.5 — create, fork, snapshot,
 restore, checkpoint, promote, backup, tokens — existed only as HTTP a caller hand-rolled, or as
-`bunql` on a terminal. Two consequences, both visible in the tree before this milestone:
+`bql` on a terminal. Two consequences, both visible in the tree before this milestone:
 
 1. **`src/cli.ts` carried a second HTTP client.** Its own `api()` helper, its own error mapping,
    its own body types (`DbStats`, `BackupStatusBody`, `VerifyBody`, `PromoteBody`, `ClusterBody`)
@@ -20,7 +20,7 @@ restore, checkpoint, promote, backup, tokens — existed only as HTTP a caller h
 ## The decision
 
 One namespace, `client.admin`, built lazily, backed by the same `HttpClient` every statement goes
-through — so the bearer token, the `BunQL-*` headers and the `BunQLClientError` mapping of §6.6
+through — so the bearer token, the `BQL-*` headers and the `BqlClientError` mapping of §6.6
 happen in exactly one place, which is `http.ts`'s stated invariant.
 
 ```ts
@@ -44,7 +44,7 @@ Four choices worth writing down:
 - **Methods return the server's own body**, not a `Db`. `create` answers `DatabaseStats`, which is
   what the route answers; `client.db(name)` is how you then query it. The embedded API returns a
   handle instead because in-process it already has one.
-- **Types live in `protocol.ts`**, the module that is "the only description of the BunQL wire
+- **Types live in `protocol.ts`**, the module that is "the only description of the bql.sh wire
   format". The admin bodies are wire format too, and the CLI's five hand-written copies are
   deleted in favour of them.
 
@@ -73,7 +73,7 @@ Four choices worth writing down:
 | `revokeToken(jti)` | `DELETE /v1/tokens/:jti` |
 
 `dump` returns `{txid, bytes, stream}` — a `ReadableStream<Uint8Array>` and the txid the file is
-consistent at, from `BunQL-Txid`. `import` takes a `Blob`, an `ArrayBuffer`, a `Uint8Array` or a
+consistent at, from `BQL-Txid`. `import` takes a `Blob`, an `ArrayBuffer`, a `Uint8Array` or a
 `ReadableStream`, so a browser can hand it a `File` and Bun can hand it `Bun.file(path)`.
 
 `restore` covers both sources: `{at, into}` restores from the local log, `{from: "s3", bucket,
@@ -81,7 +81,7 @@ prefix, generation, at, into}` from the bucket. The result is a union discrimina
 
 ## Parity with the embedded API
 
-`BunQL` (in-process) had `create`, `fork`, `delete`, `list` and `stat` but not the three node-local
+`bql.sh` (in-process) had `create`, `fork`, `delete`, `list` and `stat` but not the three node-local
 operations, which are one call each on the tenant it already holds. Added, same names, same shapes:
 `snapshot(db)`, `restore(db, {at, into})` and `checkpoint(db, mode?)`. The bucket-sourced restore
 stays server-only — it needs the S3 store the route builds, and an embedded caller that wants it
@@ -91,9 +91,9 @@ can `serve()`.
 
 `src/cli.ts` now builds a client and calls `client.admin.*`. Deleted: `api()`, and the five body
 interfaces. Kept: the flag parsing, the human-readable lines, `--json`, and the friendly
-"cannot reach <url>" message, which is now a `NETWORK` `BunQLClientError` recognised in `main`'s
+"cannot reach <url>" message, which is now a `NETWORK` `BqlClientError` recognised in `main`'s
 catch rather than a `CliError` thrown by the fetch wrapper. Exit codes and stderr text are
-unchanged — `DB_NOT_FOUND` still reaches stderr as `bunql: DB_NOT_FOUND: …`.
+unchanged — `DB_NOT_FOUND` still reaches stderr as `bql: DB_NOT_FOUND: …`.
 
 ## Tests
 

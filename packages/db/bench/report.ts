@@ -1,5 +1,5 @@
 // Shared between the four benchmarks and `bench/run.ts`. A benchmark keeps printing its human
-// table; when `BUNQL_BENCH_JSON=1` is set it prints one extra line at the end, which the runner
+// table; when `BQL_BENCH_JSON=1` is set it prints one extra line at the end, which the runner
 // reads and nothing else does. The two are the same numbers printed twice, so they cannot drift.
 
 /** The marker `bench/run.ts` scans stdout for. Nothing else may print a line starting with it. */
@@ -37,7 +37,7 @@ export function distribution(samples: readonly number[]): Sample {
 }
 
 export function wantsJson(env: Record<string, string | undefined> = Bun.env): boolean {
-  return env.BUNQL_BENCH_JSON === "1"
+  return env.BQL_BENCH_JSON === "1"
 }
 
 /** Prints the machine-readable line, if anyone asked for it. */

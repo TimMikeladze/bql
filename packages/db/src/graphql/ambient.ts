@@ -46,7 +46,7 @@ export function currentCall(): GraphQLCall {
   const call = calls.getStore()
   if (!call) {
     throw new Error(
-      "bunql/graphql: no request is in flight. A generated resolver dispatched outside " +
+      "bql/graphql: no request is in flight. A generated resolver dispatched outside " +
         "`runInCall`, so the caller's rights are unknown — refusing rather than running with " +
         "anyone else's.",
     )

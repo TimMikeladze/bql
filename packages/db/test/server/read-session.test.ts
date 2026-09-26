@@ -114,7 +114,7 @@ describe("a read session is a point, not a floor", () => {
     const late = await begin()
     try {
       expect(await readOne(late.read, "select count(*) from t")).toBe(2)
-      // `BunQL-Min-Txid` could not tell these apart: both satisfy any floor the earlier one does.
+      // `BQL-Min-Txid` could not tell these apart: both satisfy any floor the earlier one does.
       expect(await readOne(early.read, "select count(*) from t")).toBe(1)
     } finally {
       await end(early.read)

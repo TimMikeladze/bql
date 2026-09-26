@@ -7,14 +7,14 @@ decisions the design left open, and every deviation.
 
 | file | invariant |
 |---|---|
-| `config.ts` | every knob has a default, a TOML key and a `BUNQL_*` override, in that order; a generated secret is persisted once and printed once |
+| `config.ts` | every knob has a default, a TOML key and a `BQL_*` override, in that order; a generated secret is persisted once and printed once |
 | `metrics.ts` | per-process counters only — nothing keyed by database, so cardinality is bounded |
 | `runtime.ts` | one `AuthorizerHub` per connection and one `TenantRealtime` per open tenant, both created from the tenant's `onConnection` seam and torn down with it |
 | `exec.ts` | no statement steps until a signed policy is on its connection, a deadline is armed, and a row cap is known |
 | `sse.ts` | an SSE response never relies on Bun's idle timeout; it opts out and owns its own ping |
 | `routes.ts` | the principal is resolved before the tenant, and the tenant before the body |
 | `ws.ts` | requests naming one database are answered in order; different databases interleave |
-| `app.ts` | every response leaves through one wrapper, so the four `BunQL-*` headers, CORS, error mapping and the metrics tick happen in exactly one place |
+| `app.ts` | every response leaves through one wrapper, so the four `BQL-*` headers, CORS, error mapping and the metrics tick happen in exactly one place |
 | `main.ts` | config → `startServer` → print the URL |
 
 ## Route table (as implemented)
@@ -40,11 +40,11 @@ decisions the design left open, and every deviation.
 | `GET /v1/db/:db/replication` | `ro` | `{txid, epoch, checksum, lastSnapshot, role, replicas: []}` |
 | `POST /v1/tokens` | admin | `{dbs \| db, scope, tables?, ttl \| ttlMs, sub?}` → `{token, jti, exp}` |
 | `DELETE /v1/tokens/:jti` | admin | revokes through the catalog, which is the authenticator's revocation list |
-| `GET /v1/ws` | any | WebSocket upgrade, sub-protocol `bunql.v1` |
+| `GET /v1/ws` | any | WebSocket upgrade, sub-protocol `bql.v1` |
 | `GET /healthz` · `/readyz` | none | liveness · readiness |
 | `GET /metrics` | admin when an admin key exists | Prometheus text 0.0.4 |
 
-Every response carries `BunQL-Txid`, `BunQL-Node`, `BunQL-Role: primary` and `BunQL-Duration-Us`.
+Every response carries `BQL-Txid`, `BQL-Node`, `BQL-Role: primary` and `BQL-Duration-Us`.
 `OPTIONS` on any route is a CORS preflight while `server.cors` is on. An unknown path is a 404 in
 the error shape of §6.6.
 
@@ -132,8 +132,8 @@ the error shape of §6.6.
     some HTTP clients, including the one `bun test` uses — hold on to instead of delivering the
     headers. The first bytes are what turn it into a live stream.
 
-17. **The default `BunQL-Node` is a hash of the hostname**, not the hostname. That header travels
-    on every response and into whatever a client logs. `[server] node` or `BUNQL_NODE` sets a
+17. **The default `BQL-Node` is a hash of the hostname**, not the hostname. That header travels
+    on every response and into whatever a client logs. `[server] node` or `BQL_NODE` sets a
     readable one.
 
 18. **`wait` is what switches `/changes` between SSE and the long poll**, not `Accept`. A plain
@@ -212,50 +212,50 @@ another core, which belongs to the end-to-end pass in M8.
 ## Environment overrides (updated in M7)
 
 Design §9.4 says every key has an environment override. The canonical name of one is its section
-and its key, upper-cased and underscore-separated, under `BUNQL_`; the short names that predate
+and its key, upper-cased and underscore-separated, under `BQL_`; the short names that predate
 M7 are still accepted, and the canonical one wins when both are set. An empty value counts as
-unset, so `BUNQL_ADMIN_KEY=` leaves the key to be generated rather than setting it to "".
+unset, so `BQL_ADMIN_KEY=` leaves the key to be generated rather than setting it to "".
 
 | key | canonical | alias |
 |---|---|---|
-| `[server] port` | `BUNQL_SERVER_PORT` | `BUNQL_PORT` |
-| `[server] host` | `BUNQL_SERVER_HOST` | `BUNQL_HOST` |
-| `[server] node` | `BUNQL_SERVER_NODE` | `BUNQL_NODE` |
-| `[server] tenantFromHost` | `BUNQL_SERVER_TENANT_FROM_HOST` | `BUNQL_TENANT_FROM_HOST` |
-| `[server] cors` | `BUNQL_SERVER_CORS` | `BUNQL_CORS` |
-| `[data] dir` | `BUNQL_DATA_DIR` | `BUNQL_DIR` |
-| `[data] maxOpen` | `BUNQL_DATA_MAX_OPEN` | `BUNQL_MAX_OPEN` |
-| `[data] readers` | `BUNQL_DATA_READERS` | `BUNQL_READERS` |
-| `[data] pageSize` | `BUNQL_DATA_PAGE_SIZE` | `BUNQL_PAGE_SIZE` |
-| `[data] quotaBytes` | `BUNQL_DATA_QUOTA_BYTES` | `BUNQL_QUOTA_BYTES` |
-| `[durability] defaultAck` | `BUNQL_DURABILITY_DEFAULT_ACK` | `BUNQL_DEFAULT_ACK` |
-| `[durability] checkpointWalBytes` | `BUNQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BUNQL_CHECKPOINT_WAL_BYTES` |
-| `[durability] retention` | `BUNQL_DURABILITY_RETENTION` | `BUNQL_RETENTION` |
-| `[realtime] ringBytes` | `BUNQL_REALTIME_RING_BYTES` | `BUNQL_RING_BYTES` |
-| `[realtime] ringMaxAgeMs` | `BUNQL_REALTIME_RING_MAX_AGE_MS` | `BUNQL_RING_MAX_AGE_MS` |
-| `[realtime] maxLiveQueries` | `BUNQL_REALTIME_MAX_LIVE_QUERIES` | `BUNQL_MAX_LIVE_QUERIES` |
-| `[realtime] maxRowsPerLive` | `BUNQL_REALTIME_MAX_ROWS_PER_LIVE` | `BUNQL_MAX_ROWS_PER_LIVE` |
-| `[realtime] idleRetainMs` | `BUNQL_REALTIME_IDLE_RETAIN_MS` | `BUNQL_IDLE_RETAIN_MS` |
-| `[limits] queryTimeoutMs` | `BUNQL_LIMITS_QUERY_TIMEOUT_MS` | `BUNQL_QUERY_TIMEOUT_MS` |
-| `[limits] writeTimeoutMs` | `BUNQL_LIMITS_WRITE_TIMEOUT_MS` | `BUNQL_WRITE_TIMEOUT_MS` |
-| `[limits] txIdleTimeoutMs` | `BUNQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BUNQL_TX_IDLE_TIMEOUT_MS` |
-| `[limits] maxRows` | `BUNQL_LIMITS_MAX_ROWS` | `BUNQL_MAX_ROWS` |
-| `[limits] maxOpenTx` | `BUNQL_LIMITS_MAX_OPEN_TX` | `BUNQL_MAX_OPEN_TX` |
-| `[limits] maxBodyBytes` | `BUNQL_LIMITS_MAX_BODY_BYTES` | `BUNQL_MAX_BODY_BYTES` |
-| `[limits] maxImportBytes` | `BUNQL_LIMITS_MAX_IMPORT_BYTES` | `BUNQL_MAX_IMPORT_BYTES` |
-| `[auth] adminKey` | `BUNQL_AUTH_ADMIN_KEY` | `BUNQL_ADMIN_KEY` |
-| `[auth] jwtKey` | `BUNQL_AUTH_JWT_KEY` | `BUNQL_JWT_ED25519` |
-| `[auth] jwtPublicKeys` | `BUNQL_AUTH_JWT_PUBLIC_KEYS` (comma-separated) | — |
-| `[auth] keysFile` | `BUNQL_AUTH_KEYS_FILE` | `BUNQL_KEYS_FILE` |
-| `[auth] clockToleranceSec` | `BUNQL_AUTH_CLOCK_TOLERANCE_SEC` | `BUNQL_CLOCK_TOLERANCE_SEC` |
-| `[auth] defaultTokenTtlMs` | `BUNQL_AUTH_DEFAULT_TOKEN_TTL_MS` | `BUNQL_TOKEN_TTL_MS` |
+| `[server] port` | `BQL_SERVER_PORT` | `BQL_PORT` |
+| `[server] host` | `BQL_SERVER_HOST` | `BQL_HOST` |
+| `[server] node` | `BQL_SERVER_NODE` | `BQL_NODE` |
+| `[server] tenantFromHost` | `BQL_SERVER_TENANT_FROM_HOST` | `BQL_TENANT_FROM_HOST` |
+| `[server] cors` | `BQL_SERVER_CORS` | `BQL_CORS` |
+| `[data] dir` | `BQL_DATA_DIR` | `BQL_DIR` |
+| `[data] maxOpen` | `BQL_DATA_MAX_OPEN` | `BQL_MAX_OPEN` |
+| `[data] readers` | `BQL_DATA_READERS` | `BQL_READERS` |
+| `[data] pageSize` | `BQL_DATA_PAGE_SIZE` | `BQL_PAGE_SIZE` |
+| `[data] quotaBytes` | `BQL_DATA_QUOTA_BYTES` | `BQL_QUOTA_BYTES` |
+| `[durability] defaultAck` | `BQL_DURABILITY_DEFAULT_ACK` | `BQL_DEFAULT_ACK` |
+| `[durability] checkpointWalBytes` | `BQL_DURABILITY_CHECKPOINT_WAL_BYTES` | `BQL_CHECKPOINT_WAL_BYTES` |
+| `[durability] retention` | `BQL_DURABILITY_RETENTION` | `BQL_RETENTION` |
+| `[realtime] ringBytes` | `BQL_REALTIME_RING_BYTES` | `BQL_RING_BYTES` |
+| `[realtime] ringMaxAgeMs` | `BQL_REALTIME_RING_MAX_AGE_MS` | `BQL_RING_MAX_AGE_MS` |
+| `[realtime] maxLiveQueries` | `BQL_REALTIME_MAX_LIVE_QUERIES` | `BQL_MAX_LIVE_QUERIES` |
+| `[realtime] maxRowsPerLive` | `BQL_REALTIME_MAX_ROWS_PER_LIVE` | `BQL_MAX_ROWS_PER_LIVE` |
+| `[realtime] idleRetainMs` | `BQL_REALTIME_IDLE_RETAIN_MS` | `BQL_IDLE_RETAIN_MS` |
+| `[limits] queryTimeoutMs` | `BQL_LIMITS_QUERY_TIMEOUT_MS` | `BQL_QUERY_TIMEOUT_MS` |
+| `[limits] writeTimeoutMs` | `BQL_LIMITS_WRITE_TIMEOUT_MS` | `BQL_WRITE_TIMEOUT_MS` |
+| `[limits] txIdleTimeoutMs` | `BQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BQL_TX_IDLE_TIMEOUT_MS` |
+| `[limits] maxRows` | `BQL_LIMITS_MAX_ROWS` | `BQL_MAX_ROWS` |
+| `[limits] maxOpenTx` | `BQL_LIMITS_MAX_OPEN_TX` | `BQL_MAX_OPEN_TX` |
+| `[limits] maxBodyBytes` | `BQL_LIMITS_MAX_BODY_BYTES` | `BQL_MAX_BODY_BYTES` |
+| `[limits] maxImportBytes` | `BQL_LIMITS_MAX_IMPORT_BYTES` | `BQL_MAX_IMPORT_BYTES` |
+| `[auth] adminKey` | `BQL_AUTH_ADMIN_KEY` | `BQL_ADMIN_KEY` |
+| `[auth] jwtKey` | `BQL_AUTH_JWT_KEY` | `BQL_JWT_ED25519` |
+| `[auth] jwtPublicKeys` | `BQL_AUTH_JWT_PUBLIC_KEYS` (comma-separated) | — |
+| `[auth] keysFile` | `BQL_AUTH_KEYS_FILE` | `BQL_KEYS_FILE` |
+| `[auth] clockToleranceSec` | `BQL_AUTH_CLOCK_TOLERANCE_SEC` | `BQL_CLOCK_TOLERANCE_SEC` |
+| `[auth] defaultTokenTtlMs` | `BQL_AUTH_DEFAULT_TOKEN_TTL_MS` | `BQL_TOKEN_TTL_MS` |
 
-`BUNQL_CONFIG` names the TOML file and makes it required. It is read by `main.ts` and by
-`bunql serve`, not by `loadConfig` itself.
+`BQL_CONFIG` names the TOML file and makes it required. It is read by `main.ts` and by
+`bql serve`, not by `loadConfig` itself.
 
-Before M7 the table held only the short names, so `BUNQL_DATA_DIR` — the name the section-plus-key
-rule produces, and the one an operator writes first — was silently ignored while `BUNQL_PORT` and
-`BUNQL_ADMIN_KEY` worked. Both spellings are generated from the defaults now, so a key added to
+Before M7 the table held only the short names, so `BQL_DATA_DIR` — the name the section-plus-key
+rule produces, and the one an operator writes first — was silently ignored while `BQL_PORT` and
+`BQL_ADMIN_KEY` worked. Both spellings are generated from the defaults now, so a key added to
 `ServerConfig` gets its override for free.
 
 ## What M7 changed here

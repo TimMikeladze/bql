@@ -1,4 +1,4 @@
-# Production AgenticBus: the plan
+# Production bql.sh/bus: the plan
 
 Status: **all eight phases landed.** The progress table below says what each one turned into;
 *Not done, on purpose or otherwise* at the bottom says what it did not, and
@@ -35,13 +35,13 @@ with SIGKILL.
 
 | Phase | State | Landed in |
 | --- | --- | --- |
-| 0 — Durability holes | **done** | `blobs.ts` atomic+fsync write, `body_sha256`/`body_bytes` (migration 3), `reconcileBlobs`, `wal_autocheckpoint` + sweep `TRUNCATE`, `capacity()`/507/503, `agenticbus restore`, soak `--fault` and `--sync` |
+| 0 — Durability holes | **done** | `blobs.ts` atomic+fsync write, `body_sha256`/`body_bytes` (migration 3), `reconcileBlobs`, `wal_autocheckpoint` + sweep `TRUNCATE`, `capacity()`/507/503, `bql-bus restore`, soak `--fault` and `--sync` |
 | 1 — Exactly-once, three tiers | **done** | `embedded.ts` (`createBus`, `ackTransactional`), `ack(…, {publish})` and `effects` (migration 4), fence token on the envelope, idempotent ack replay |
 | 3 — Delivery quality | **done** | migration 5: backoff on nack *and* reclaim, priority classes, `delayMs`/`deliverAt`, `onFailure: block` with `blocked_keys`, quarantine, `maxInFlight`, shutdown nack in `BusConsumer` |
-| 2 — Schemas | **done** | `schema.ts` validator, registry and bindings on `BusStore` (migration 6), publish/delivery enforcement, structural compat, `agenticbus schema …` |
+| 2 — Schemas | **done** | `schema.ts` validator, registry and bindings on `BusStore` (migration 6), publish/delivery enforcement, structural compat, `bql-bus schema …` |
 | 4 — Multi-tenant safety | **done** | migration 7: `jti` revocation, `kid` rotation, token-bucket rate limits, workspace quotas, audit log |
 | 5 — Observability | **done** | W3C `traceparent` propagation, zero-dep OTLP/HTTP exporter, age histograms, the missing gauges, per-workspace `/metrics` |
-| 6 — Continuity | **done** | `replication.ts`: `agenticbus follow`, fenced `promote` with an epoch (migration 8), lag gauges, stated RPO, `restore --until-seq/--until-time` |
+| 6 — Continuity | **done** | `replication.ts`: `bql-bus follow`, fenced `promote` with an epoch (migration 8), lag gauges, stated RPO, `restore --until-seq/--until-time` |
 | 7 — Packaging and upgrade | **mostly** | `bun build --compile` matrix + checksums, embedded dashboard assets, `/api/v1` alias with version negotiation, compiled-binary e2e. **Release CI and the old/new binary skew test are not done** — both need a published previous release |
 
 Eight migrations, 3–8 from this work. Every gate in the table further down is green except the
@@ -68,13 +68,13 @@ it to prove something a process kill cannot prove.
   obvious wrong fix.
 - **WAL has no ceiling.** No `wal_autocheckpoint` policy and no checkpoint in the sweep. A
   long-lived reader plus sustained writes grows `-wal` without bound. Add a
-  `wal_checkpoint(TRUNCATE)` on the sweep tick, plus `agenticbus.wal_bytes` and
-  `agenticbus.db_bytes` gauges.
+  `wal_checkpoint(TRUNCATE)` on the sweep tick, plus `bql-bus.wal_bytes` and
+  `bql-bus.db_bytes` gauges.
 - **Disk-full is undefined.** `SQLITE_FULL` currently surfaces as a 500 and the bus keeps
   accepting publishes. Add a free-space watermark: below it, `/api/publish` returns **507** with
   a machine-readable reason, `/ready` goes 503, claims and acks keep working so consumers can
   drain. Losing writes loudly beats a crash loop.
-- **Restore is untested.** `backup` exists; nothing proves a restore. Add `agenticbus restore
+- **Restore is untested.** `backup` exists; nothing proves a restore. Add `bql-bus restore
   <dir> --data <dir>` and a CI drill: publish → backup → wipe → restore → assert log, cursors,
   and blob bytes identical.
 - **Fault injection in the soak.** `--kill-bus` kills at a random moment. Add deterministic kill
@@ -127,7 +127,7 @@ claimed. Three tiers, each precisely bounded:
   rejects any keyword the validator does not implement**, so an unsupported constraint can never
   silently pass. Loud gap beats quiet hole.
 - **Validate at publish.** `enforce` → 422 with the failing JSON Pointer and the schema version.
-  `warn` → publish, stamp `schema-invalid` in headers, bump `agenticbus.schema.violations`. Lets
+  `warn` → publish, stamp `schema-invalid` in headers, bump `bql-bus.schema.violations`. Lets
   a schema be introduced against live traffic before it is enforced.
 - **Validate at delivery, dead-letter on failure.** A message already in the log cannot be
   rejected, so a delivery that fails validation goes to the DLQ with `dlq-reason=schema`. That is
@@ -143,7 +143,7 @@ claimed. Three tiers, each precisely bounded:
   [Standard Schema](https://standardschema.dev) object (`~standard`) for local validation and TS
   inference — it is an interface, not a package, so zero deps holds. The wire contract stays
   JSON Schema; the Standard Schema is a client-side convenience and is never the source of truth.
-- **CLI:** `agenticbus schema register <name> <file> --compat backward`,
+- **CLI:** `bql-bus schema register <name> <file> --compat backward`,
   `schema bind 'orders.>' <name> --mode warn`, `schema check <name> <file>` (dry-run compat),
   `schema list`.
 - **README claim changes from** "no message schemas" **to** the registry, with the supported
@@ -182,7 +182,7 @@ claimed. Three tiers, each precisely bounded:
   first leaked token. Add `revocations(jti, not_after)` checked in-process — still no network, no
   round trip beyond a local index probe. Mint every token with a `jti`.
 - **Key rotation with overlap.** `kid` in the token header, two active keys during rotation,
-  `agenticbus keys rotate` and `keys retire <kid>`. Rotation is currently the only revocation
+  `bql-bus keys rotate` and `keys retire <kid>`. Rotation is currently the only revocation
   mechanism, so it has to not require downtime.
 - **Rate limits.** Token bucket per token on publish and claim; `429` with `Retry-After`. Cap
   concurrent parked long-polls per token so one consumer cannot occupy the server's poll budget.
@@ -213,18 +213,18 @@ so a follower can rebuild from `/api/log?after=N` plus subscription cursors. No 
 parsing, survives schema changes, and it is one file (`src/bus/replication.ts`, ~220 lines)
 instead of a project.
 
-- **Follower:** `agenticbus follow <upstream> --data ./replica` pulls messages and cursors,
+- **Follower:** `bql-bus follow <upstream> --data ./replica` pulls messages and cursors,
   applies them, and serves reads. Delivery and lease rows are deliberately **not** replicated —
   leases are ephemeral, and a promoted follower re-materializes deliveries from cursors, which is
   the same code path a cold start already uses.
-- **Fenced promotion.** `agenticbus promote` must acquire a lease in shared storage (S3
+- **Fenced promotion.** `bql-bus promote` must acquire a lease in shared storage (S3
   conditional put, or a lock object on any backend) and stamps an incrementing **epoch** into the
   database. The old leader refuses to write once its epoch is stale. Split brain is prevented by
   the fence, not by hoping the old one is dead.
 - **PITR.** `VACUUM INTO` snapshot plus shipped log after the snapshot's seq. Restore is snapshot
   + replay to a chosen seq or timestamp.
 - **RPO is explicit.** Replication is asynchronous, so a failover can lose up to the current lag.
-  Publish `agenticbus.replication.lag_seq` and `lag_ms`, alert on them, and **say the number in
+  Publish `bql-bus.replication.lag_seq` and `lag_ms`, alert on them, and **say the number in
   the README** rather than implying continuity is free.
 - Still one writer. This buys continuity and read scale-out, not write scale-out, and the README
   says so in those words.

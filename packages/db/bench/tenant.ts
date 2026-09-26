@@ -21,7 +21,7 @@ const TENANT_TARGET = tenantsFlag
   ? Number(tenantsFlag.includes("=") ? tenantsFlag.split("=")[1] : Bun.argv[Bun.argv.indexOf(tenantsFlag) + 1])
   : 0
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-tenant-bench-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-tenant-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
 const registry = TenantRegistry.open({ dir: root, maxOpen: 16 })
@@ -93,7 +93,7 @@ legs.push(asyncReads)
 
 const stats = tenant.stats()
 console.log(
-  `bunql tenant bench · ${ROUNDS} rounds · txid ${stats.txid} · db ${(stats.sizeBytes / 1e6).toFixed(1)} MB` +
+  `bql tenant bench · ${ROUNDS} rounds · txid ${stats.txid} · db ${(stats.sizeBytes / 1e6).toFixed(1)} MB` +
     ` · wal ${(stats.walBytes / 1e6).toFixed(1)} MB · log ${(stats.logBytes / 1e6).toFixed(1)} MB\n`,
 )
 console.log("leg                                   p50 µs    p90 µs    p99 µs     max µs")
@@ -133,7 +133,7 @@ console.log(
 let openedTenants = 0
 const openFdLimit = fileDescriptorLimit() ?? 0
 if (TENANT_TARGET > 0) {
-  const manyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-tenants-"))
+  const manyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bql-tenants-"))
   process.on("exit", () => fs.rmSync(manyRoot, { recursive: true, force: true }))
   const many = TenantRegistry.open({ dir: manyRoot, maxOpen: TENANT_TARGET + 16, readers: 0 })
   const createdAt = Bun.nanoseconds()

@@ -1,4 +1,4 @@
-// `bunql` as an operator actually runs it: a spawned process against a server this test started.
+// `bql` as an operator actually runs it: a spawned process against a server this test started.
 // The shell is exempt — it needs a terminal — and `serve` is covered by the server's own tests.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
@@ -21,13 +21,13 @@ interface Ran {
   stderr: string
 }
 
-async function bunql(...args: string[]): Promise<Ran> {
+async function bql(...args: string[]): Promise<Ran> {
   const child = Bun.spawn(["bun", CLI, ...args], {
     env: {
       ...process.env,
-      BUNQL_URL: server.url,
-      BUNQL_ADMIN_KEY: server.adminKey,
-      BUNQL_TOKEN: "",
+      BQL_URL: server.url,
+      BQL_ADMIN_KEY: server.adminKey,
+      BQL_TOKEN: "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -42,57 +42,57 @@ async function bunql(...args: string[]): Promise<Ran> {
 
 describe("db", () => {
   test("create, list and stat a database", async () => {
-    const created = await bunql("db", "create", "cli")
+    const created = await bql("db", "create", "cli")
     expect(created.code).toBe(0)
     expect(created.stdout).toContain("created cli")
 
-    const listed = await bunql("db", "list", "--json")
+    const listed = await bql("db", "list", "--json")
     expect(listed.code).toBe(0)
     const databases = (JSON.parse(listed.stdout) as { databases: { name: string }[] }).databases
     expect(databases.map((row) => row.name)).toContain("cli")
 
-    const stat = await bunql("db", "stat", "cli", "--json")
+    const stat = await bql("db", "stat", "cli", "--json")
     expect(stat.code).toBe(0)
     expect((JSON.parse(stat.stdout) as { name: string }).name).toBe("cli")
   })
 
   test("a human-readable list is a table", async () => {
-    const listed = await bunql("db", "list")
+    const listed = await bql("db", "list")
     expect(listed.code).toBe(0)
     expect(listed.stdout).toContain("cli")
     expect(listed.stdout).toContain("txid")
   })
 
   test("fork, checkpoint, snapshot and delete", async () => {
-    await bunql("exec", "cli", "--sql", "create table t(id integer primary key, v text)")
-    await bunql("exec", "cli", "--sql", "insert into t(v) values ('one')")
+    await bql("exec", "cli", "--sql", "create table t(id integer primary key, v text)")
+    await bql("exec", "cli", "--sql", "insert into t(v) values ('one')")
 
-    const forked = await bunql("db", "fork", "cli-copy", "--from", "cli")
+    const forked = await bql("db", "fork", "cli-copy", "--from", "cli")
     expect(forked.code).toBe(0)
     expect(forked.stdout).toContain("forked cli into cli-copy")
 
-    const rows = await bunql("exec", "cli-copy", "--sql", "select v from t", "--json")
+    const rows = await bql("exec", "cli-copy", "--sql", "select v from t", "--json")
     expect(JSON.parse(rows.stdout)).toEqual([{ v: "one" }])
 
-    const snapshot = await bunql("snapshot", "cli", "--json")
+    const snapshot = await bql("snapshot", "cli", "--json")
     expect(snapshot.code).toBe(0)
     expect(JSON.parse(snapshot.stdout).txid).toBeGreaterThan(0)
 
-    const checkpoint = await bunql("checkpoint", "cli", "--mode", "TRUNCATE", "--json")
+    const checkpoint = await bql("checkpoint", "cli", "--mode", "TRUNCATE", "--json")
     expect(checkpoint.code).toBe(0)
     expect(JSON.parse(checkpoint.stdout).walBytes).toBe(0)
 
-    const deleted = await bunql("db", "delete", "cli-copy")
+    const deleted = await bql("db", "delete", "cli-copy")
     expect(deleted.code).toBe(0)
     expect(deleted.stdout).toContain("deleted cli-copy")
   })
 
   test("a failure is a message on stderr and a non-zero exit", async () => {
-    const missing = await bunql("db", "stat", "nope")
+    const missing = await bql("db", "stat", "nope")
     expect(missing.code).toBe(1)
     expect(missing.stderr).toContain("DB_NOT_FOUND")
 
-    const unknown = await bunql("wat")
+    const unknown = await bql("wat")
     expect(unknown.code).toBe(1)
     expect(unknown.stderr).toContain("unknown command")
   })
@@ -100,7 +100,7 @@ describe("db", () => {
 
 describe("token", () => {
   test("mints a token the server then accepts", async () => {
-    const minted = await bunql(
+    const minted = await bql(
       "token",
       "--db",
       "cli",
@@ -134,13 +134,13 @@ describe("token", () => {
 
 describe("help", () => {
   test("no command prints the usage and exits non-zero", async () => {
-    const bare = await bunql()
+    const bare = await bql()
     expect(bare.code).toBe(1)
-    expect(bare.stdout).toContain("bunql serve")
+    expect(bare.stdout).toContain("bql serve")
 
-    const asked = await bunql("--help")
+    const asked = await bql("--help")
     expect(asked.code).toBe(0)
-    expect(asked.stdout).toContain("bunql token")
+    expect(asked.stdout).toContain("bql token")
   })
 })
 

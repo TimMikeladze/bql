@@ -12,7 +12,7 @@
 // there is now one implementation of these routes, and it is the one the tests exercise.
 
 import { createClient, type Client } from "./client/index.ts"
-import { BunQLClientError } from "./client/errors.ts"
+import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
 import type {
   CheckpointMode,
@@ -30,34 +30,34 @@ const VERSION = "0.0.0"
 /** Set by `serve`, which is the one command that is still doing its job when `main` returns. */
 let serving = false
 
-const USAGE = `bunql — SQLite as a multi-tenant database server (design §9.3)
+const USAGE = `bql — SQLite as a multi-tenant database server (design §9.3)
 
-  bunql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bunql.toml] [--admin-key K]
+  bql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bql.toml] [--admin-key K]
               [--workers N]
               [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
               [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
               [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
-  bunql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
-  bunql db list
-  bunql db stat <name>
-  bunql db delete <name>
-  bunql db fork <name> --from <db>[@<txid|time>]
-  bunql snapshot <db>
-  bunql restore <db> --at <txid|time> [--into <name>]
-  bunql restore <db> --from s3://bucket/prefix --at <txid|time> [--into <name>]
-  bunql backup status <db>
-  bunql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
-  bunql backup generations <db>
-  bunql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
-  bunql promote <db> [--force]
-  bunql cluster [--watch]
-  bunql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
-  bunql exec <db> --sql "select 1"
-  bunql shell <db>
+  bql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
+  bql db list
+  bql db stat <name>
+  bql db delete <name>
+  bql db fork <name> --from <db>[@<txid|time>]
+  bql snapshot <db>
+  bql restore <db> --at <txid|time> [--into <name>]
+  bql restore <db> --from s3://bucket/prefix --at <txid|time> [--into <name>]
+  bql backup status <db>
+  bql backup verify <db> [--at <txid|time>] [--from s3://bucket/prefix]
+  bql backup generations <db>
+  bql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
+  bql promote <db> [--force]
+  bql cluster [--watch]
+  bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
+  bql exec <db> --sql "select 1"
+  bql shell <db>
 
 Remote commands talk to a running server:
-  --url   base URL          (default $BUNQL_URL, else http://127.0.0.1:4321)
-  --token bearer token      (default $BUNQL_TOKEN, else $BUNQL_ADMIN_KEY)
+  --url   base URL          (default $BQL_URL, else http://127.0.0.1:4321)
+  --token bearer token      (default $BQL_TOKEN, else $BQL_ADMIN_KEY)
   --json  print the server's JSON instead of a summary line
 `
 
@@ -179,11 +179,11 @@ function set(value: string | undefined): string | undefined {
 }
 
 function remoteOf(args: ParsedArgs, env: Record<string, string | undefined>): Remote {
-  const url = (str(args, "url") ?? set(env.BUNQL_URL) ?? "http://127.0.0.1:4321").replace(
+  const url = (str(args, "url") ?? set(env.BQL_URL) ?? "http://127.0.0.1:4321").replace(
     /\/+$/,
     "",
   )
-  const token = str(args, "token") ?? set(env.BUNQL_TOKEN) ?? set(env.BUNQL_ADMIN_KEY) ?? null
+  const token = str(args, "token") ?? set(env.BQL_TOKEN) ?? set(env.BQL_ADMIN_KEY) ?? null
   // `intMode: "string"` is for `exec`: a terminal prints an integer past 2^53 rather than throwing
   // on it. The admin routes carry no SQLite values, so it changes nothing for them.
   const client = createClient({
@@ -201,7 +201,7 @@ function out(remote: Remote, payload: unknown, line: string): void {
 // ── commands ───────────────────────────────────────────────────────────────────────────────────
 
 async function serve(args: ParsedArgs): Promise<void> {
-  const file = str(args, "config") ?? process.env.BUNQL_CONFIG ?? "bunql.toml"
+  const file = str(args, "config") ?? process.env.BQL_CONFIG ?? "bql.toml"
   const overrides: ServerConfigInput = {}
   const dir = str(args, "dir")
   const port = num(args, "port")
@@ -281,32 +281,32 @@ async function serve(args: ParsedArgs): Promise<void> {
   const handle = await startServer(config)
   serving = true
   const storage = config.s3.enabled
-    ? `\nbunql: shipping to s3://${config.s3.bucket}/${config.s3.prefix}, retention ` +
+    ? `\nbql: shipping to s3://${config.s3.bucket}/${config.s3.prefix}, retention ` +
       `${config.s3.retention}`
     : ""
   const threads =
     handle.workers > 1
-      ? `\nbunql: ${handle.workers} worker threads; databases are sharded across them by name`
+      ? `\nbql: ${handle.workers} worker threads; databases are sharded across them by name`
       : ""
   const cluster = config.cluster.enabled
-    ? `\nbunql: cluster ${config.cluster.id}, peers ${config.cluster.peers.join(", ") || "(none)"}` +
+    ? `\nbql: cluster ${config.cluster.id}, peers ${config.cluster.peers.join(", ") || "(none)"}` +
       `, lease ${config.cluster.leaseTtlMs}ms guard ${config.cluster.leaseGuardMs}ms`
     : ""
   const replication =
     config.replication.role === "replica"
-      ? `\nbunql: replica of ${config.replication.primary}, following ` +
+      ? `\nbql: replica of ${config.replication.primary}, following ` +
         `${config.replication.follow.join(", ")}`
       : config.replication.secret
-        ? "\nbunql: /v1/replication is open to replicas holding the cluster secret"
+        ? "\nbql: /v1/replication is open to replicas holding the cluster secret"
         : ""
   console.log(
-    `bunql ${handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
-      `bunql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
+    `bql ${handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
+      `bql: ${handle.registry.list().length} database(s), maxOpen ${config.data.maxOpen}, ` +
       `ack ${config.durability.defaultAck}${threads}${replication}${cluster}${storage}`,
   )
   if (!walChecksumIsNative()) {
     console.log(
-      "bunql: this libsqlite3 carries no bunql_wal_* helper, so WAL frames are checksummed in " +
+      "bql: this libsqlite3 carries no bql_wal_* helper, so WAL frames are checksummed in " +
         "JavaScript — about 4.5 µs a frame, 16% of a write. `bun run sqlite:build` " +
         "fixes it. docs/p3-wal-checksum.md",
     )
@@ -315,7 +315,7 @@ async function serve(args: ParsedArgs): Promise<void> {
   const stop = (signal: string): void => {
     if (stopping) return
     stopping = true
-    console.log(`bunql: ${signal}, shutting down`)
+    console.log(`bql: ${signal}, shutting down`)
     void handle.close().then(() => process.exit(0))
   }
   process.on("SIGINT", () => stop("SIGINT"))
@@ -329,50 +329,50 @@ async function serve(args: ParsedArgs): Promise<void> {
 function envSuppressions(overrides: ServerConfigInput): Record<string, string | undefined> {
   const cleared: Record<string, string | undefined> = {}
   if (overrides.data?.dir !== undefined) {
-    cleared.BUNQL_DIR = undefined
-    cleared.BUNQL_DATA_DIR = undefined
+    cleared.BQL_DIR = undefined
+    cleared.BQL_DATA_DIR = undefined
   }
   if (overrides.server?.port !== undefined) {
-    cleared.BUNQL_PORT = undefined
-    cleared.BUNQL_SERVER_PORT = undefined
+    cleared.BQL_PORT = undefined
+    cleared.BQL_SERVER_PORT = undefined
   }
   if (overrides.server?.host !== undefined) {
-    cleared.BUNQL_HOST = undefined
-    cleared.BUNQL_SERVER_HOST = undefined
+    cleared.BQL_HOST = undefined
+    cleared.BQL_SERVER_HOST = undefined
   }
   if (overrides.server?.node !== undefined) {
-    cleared.BUNQL_NODE = undefined
-    cleared.BUNQL_SERVER_NODE = undefined
+    cleared.BQL_NODE = undefined
+    cleared.BQL_SERVER_NODE = undefined
   }
   if (overrides.auth?.adminKey !== undefined) {
-    cleared.BUNQL_ADMIN_KEY = undefined
-    cleared.BUNQL_AUTH_ADMIN_KEY = undefined
+    cleared.BQL_ADMIN_KEY = undefined
+    cleared.BQL_AUTH_ADMIN_KEY = undefined
   }
   if (overrides.replication?.primary !== undefined) {
-    cleared.BUNQL_REPLICA_OF = undefined
-    cleared.BUNQL_REPLICATION_PRIMARY = undefined
+    cleared.BQL_REPLICA_OF = undefined
+    cleared.BQL_REPLICATION_PRIMARY = undefined
   }
   if (overrides.replication?.secret !== undefined) {
-    cleared.BUNQL_CLUSTER_SECRET = undefined
-    cleared.BUNQL_REPLICATION_SECRET = undefined
+    cleared.BQL_CLUSTER_SECRET = undefined
+    cleared.BQL_REPLICATION_SECRET = undefined
   }
   if (overrides.replication?.follow !== undefined) {
-    cleared.BUNQL_FOLLOW = undefined
-    cleared.BUNQL_REPLICATION_FOLLOW = undefined
+    cleared.BQL_FOLLOW = undefined
+    cleared.BQL_REPLICATION_FOLLOW = undefined
   }
   if (overrides.s3?.bucket !== undefined) {
-    cleared.BUNQL_S3_URL = undefined
-    cleared.BUNQL_S3_BUCKET = undefined
-    cleared.BUNQL_S3_PREFIX = undefined
+    cleared.BQL_S3_URL = undefined
+    cleared.BQL_S3_BUCKET = undefined
+    cleared.BQL_S3_PREFIX = undefined
   }
   if (overrides.cluster?.peers !== undefined) {
-    cleared.BUNQL_CLUSTER_PEERS = undefined
-    cleared.BUNQL_CLUSTER_ENABLED = undefined
+    cleared.BQL_CLUSTER_PEERS = undefined
+    cleared.BQL_CLUSTER_ENABLED = undefined
   }
-  if (overrides.cluster?.advertise !== undefined) cleared.BUNQL_CLUSTER_ADVERTISE = undefined
-  if (overrides.cluster?.zone !== undefined) cleared.BUNQL_CLUSTER_ZONE = undefined
-  if (overrides.s3?.endpoint !== undefined) cleared.BUNQL_S3_ENDPOINT = undefined
-  if (overrides.s3?.region !== undefined) cleared.BUNQL_S3_REGION = undefined
+  if (overrides.cluster?.advertise !== undefined) cleared.BQL_CLUSTER_ADVERTISE = undefined
+  if (overrides.cluster?.zone !== undefined) cleared.BQL_CLUSTER_ZONE = undefined
+  if (overrides.s3?.endpoint !== undefined) cleared.BQL_S3_ENDPOINT = undefined
+  if (overrides.s3?.region !== undefined) cleared.BQL_S3_REGION = undefined
   return cleared
 }
 
@@ -575,7 +575,7 @@ async function token(args: ParsedArgs, remote: Remote): Promise<void> {
     ...(ttl ? { ttlMs: parseTtlMs(ttl) } : {}),
     ...(tables ? { tables: parseTables(tables) } : {}),
   })
-  // The bare token on stdout is what makes `TOKEN=$(bunql token --db acme)` work.
+  // The bare token on stdout is what makes `TOKEN=$(bql token --db acme)` work.
   out(remote, body, body.token)
 }
 
@@ -594,15 +594,15 @@ async function shell(args: ParsedArgs, remote: Remote): Promise<void> {
     factory,
   })
   await socket.connect()
-  console.log(`bunql shell on ${db} — .exit to leave, .tables for the schema`)
+  console.log(`bql shell on ${db} — .exit to leave, .tables for the schema`)
   let buffer = ""
-  process.stdout.write("bunql> ")
+  process.stdout.write("bql> ")
   for await (const line of console) {
     const text = String(line)
     const trimmed = text.trim()
     if (trimmed === ".exit" || trimmed === ".quit") break
     if (trimmed.length === 0 && buffer.length === 0) {
-      process.stdout.write("bunql> ")
+      process.stdout.write("bql> ")
       continue
     }
     const statement =
@@ -633,10 +633,10 @@ async function shell(args: ParsedArgs, remote: Remote): Promise<void> {
         )
       }
     } catch (err) {
-      const message = err instanceof BunQLClientError ? `${err.code}: ${err.message}` : String(err)
+      const message = err instanceof BqlClientError ? `${err.code}: ${err.message}` : String(err)
       console.error(message)
     }
-    process.stdout.write("bunql> ")
+    process.stdout.write("bql> ")
   }
   socket.close()
 }
@@ -653,7 +653,7 @@ async function exec(args: ParsedArgs, remote: Remote): Promise<void> {
 }
 
 /**
- * `bunql promote <db>` — design §9.3 and `docs/c2-promotion.md`. It addresses the node that should
+ * `bql promote <db>` — design §9.3 and `docs/c2-promotion.md`. It addresses the node that should
  * become the primary, because the promotion is that node's local copy being accepted: `--url` is
  * the candidate, not the cluster.
  */
@@ -668,7 +668,7 @@ async function promote(args: ParsedArgs, remote: Remote): Promise<void> {
   )
 }
 
-/** `bunql cluster` — the observable surface of the control plane (`docs/plan-phase2.md` C1). */
+/** `bql cluster` — the observable surface of the control plane (`docs/plan-phase2.md` C1). */
 async function cluster(args: ParsedArgs, remote: Remote): Promise<void> {
   const body = await remote.client.admin.cluster()
   if (remote.json) {
@@ -761,7 +761,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         await exec(args, remote)
         return 0
       default:
-        console.error(`bunql: unknown command ${JSON.stringify(command)}`)
+        console.error(`bql: unknown command ${JSON.stringify(command)}`)
         console.error(USAGE)
         return 1
     }
@@ -769,7 +769,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     const message =
       err instanceof CliError
         ? err.message
-        : err instanceof BunQLClientError
+        : err instanceof BqlClientError
           ? // A request that never reached the server is an operator's typo or a server that is
             // not running, so it names the URL rather than the route.
             err.code === "NETWORK"
@@ -778,7 +778,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           : err instanceof Error
             ? err.message
             : String(err)
-    console.error(`bunql: ${message}`)
+    console.error(`bql: ${message}`)
     return 1
   } finally {
     // `serve` is the one command still doing its job after `main` returns, and it never used the

@@ -17,7 +17,7 @@
 // renders GraphiQL, which the package draws. CORS is not written here — `src/server/app.ts` owns
 // it for every route on this server, and a second set of headers would fight it.
 //
-// Errors keep BunQL's vocabulary all the way out (`src/graphql/errors.ts`). A protocol refusal —
+// Errors keep bql.sh's vocabulary all the way out (`src/graphql/errors.ts`). A protocol refusal —
 // an unparseable query, a limit — is an HTTP `400` whose body is the GraphQL `{errors: [...]}`
 // shape with `extensions.code` set to `BAD_REQUEST`, because a GraphQL client reads errors from
 // the body and a `{error: {...}}` body would be invisible to it. An operation that *ran* is a
@@ -25,7 +25,7 @@
 
 import type { DataApiContext } from "../dataapi/index.ts"
 import type { DocumentNode, ExecutionResult, GraphQLError, GraphQLSchema } from "graphql"
-import { type FormattedGraphQLError, liftBunQLError } from "./errors.ts"
+import { type FormattedGraphQLError, liftBqlError } from "./errors.ts"
 import { runInCall } from "./ambient.ts"
 import {
   checkLimits,
@@ -102,7 +102,7 @@ export function graphqlHandler(options: GraphQLHandlerOptions): GraphQLHandler {
       return new Response(
         peers.openapi.renderGraphiQL({
           endpoint: url.pathname,
-          title: options.title ?? `${db} — BunQL GraphQL`,
+          title: options.title ?? `${db} — bql.sh GraphQL`,
         }),
         { headers: { "content-type": "text/html; charset=utf-8" } },
       )
@@ -147,7 +147,7 @@ export function graphqlHandler(options: GraphQLHandlerOptions): GraphQLHandler {
     const body = JSON.stringify({
       ...(result.data !== undefined ? { data: result.data } : {}),
       ...(result.errors
-        ? { errors: result.errors.map((error) => liftBunQLError(formatted(error))) }
+        ? { errors: result.errors.map((error) => liftBqlError(formatted(error))) }
         : {}),
     })
     return new Response(body, { headers: JSON_HEADERS })

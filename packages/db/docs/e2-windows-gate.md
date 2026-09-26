@@ -36,7 +36,7 @@ POSIX lets a `pwrite` and a `MAP_SHARED` mapping of the same file coexist and st
 Windows refuses the write outright while a section object exists over the file; libuv reports it
 as `EBUSY`, which is what made it look like a sharing violation on a copy.
 
-So the failure is not portability-of-file-copying. It is that BunQL writes shared memory through
+So the failure is not portability-of-file-copying. It is that bql.sh writes shared memory through
 the file API, which happens to work on two of the three platforms.
 
 ## 2. The fix: write the wal-index through the mapping, everywhere
@@ -71,8 +71,8 @@ nothing to map.
 
 ## 3. The rest of the 150
 
-- **`loadConfig` expects `/tmp/bunql-canonical`.** A POSIX path literal in a test. Windows resolves
-  it to `D:\tmp\bunql-canonical`, which is correct behaviour being asserted against wrongly. The
+- **`loadConfig` expects `/tmp/bql-canonical`.** A POSIX path literal in a test. Windows resolves
+  it to `D:\tmp\bql-canonical`, which is correct behaviour being asserted against wrongly. The
   test asserts on what the config layer *did* with the path — that the canonical key won, that a
   TOML file set it — so the fixture becomes a path the assertion can build the same way the code
   does.
@@ -86,7 +86,7 @@ nothing to map.
 
 **1479 pass, 2 skip, 6 fail**, against E1's 1346 / 150. One fix, 144 failures.
 
-The six that remained were not one cause and not, with one exception, about BunQL at all. Five are
+The six that remained were not one cause and not, with one exception, about bql.sh at all. Five are
 POSIX assumptions in *tests*:
 
 | | |
@@ -123,7 +123,7 @@ Tried:
 ```
 
 which is a remedy naming a file the platform has never had. The rule is now enforced where it is
-stated: on `win32`, `candidatePaths()` returns `BUNQL_SQLITE_LIB` and the vendored artefact, and
+stated: on `win32`, `candidatePaths()` returns `BQL_SQLITE_LIB` and the vendored artefact, and
 stops.
 
 Worth noticing how this surfaced. The test that caught it was one I had just written *to encode

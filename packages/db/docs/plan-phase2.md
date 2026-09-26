@@ -67,7 +67,7 @@ only elapsed time is compared, and only ever the holder's own.
 A primary whose lease has lapsed refuses writes with `NOT_PRIMARY` and stops accepting new ones
 before the leader can possibly grant the lease elsewhere — `leaseGuardMs` is exactly that margin.
 Reads on a lapsed lease are still served (they are snapshot reads of a local file) but carry
-`BunQL-Role: replica`.
+`BQL-Role: replica`.
 
 ## Files
 
@@ -85,7 +85,7 @@ New, and owned by phase 2 alone:
 
 Touched: `src/server/config.ts` (`[cluster]`), `src/server/routes.ts` (`GET /v1/cluster`, promote),
 `src/server/runtime.ts` (hold the node, consult the lease), `src/server/app.ts` (mount the Raft
-socket), `src/cli.ts` (`bunql cluster`, `bunql promote`), `src/client/` (handle `moved`).
+socket), `src/cli.ts` (`bql cluster`, `bql promote`), `src/client/` (handle `moved`).
 
 **The pure state machine is the point.** Phase 0 tested the WAL codec against SQLite's own files
 and phase 1 tested replication with a fault-injecting simulator; Raft gets the same treatment. If
@@ -95,7 +95,7 @@ and phase 1 tested replication with a fault-injecting simulator; Raft gets the s
 
 ```toml
 [cluster]
-enabled = false            # BUNQL_CLUSTER_ENABLED
+enabled = false            # BQL_CLUSTER_ENABLED
 id = ""                    # this node's id; defaults to [server] node
 advertise = ""             # ws://host:port this node is reachable at
 zone = ""                  # rack/AZ label, used by placement
@@ -120,7 +120,7 @@ all three and of each other.
 
 ### C1 — the control plane
 
-`src/cluster/*`, the `[cluster]` config section, `GET /v1/cluster`, `bunql cluster`. A cluster of
+`src/cluster/*`, the `[cluster]` config section, `GET /v1/cluster`, `bql cluster`. A cluster of
 three nodes elects a leader, survives losing one, rejoins a partitioned node, and reports
 membership and term through the route. No database is placed yet and no lease is consulted by the
 write path — C1 is the machinery and its observable surface, nothing more.
@@ -132,13 +132,13 @@ over actual sockets on free ports.
 
 ### C2 — promotion and failover
 
-Leases wired to the write path; `POST /v1/db/{db}/promote` and `bunql promote`; automatic failover
-when a lease expires; `moved` on the client and `BunQL-Primary` following the new primary.
+Leases wired to the write path; `POST /v1/db/{db}/promote` and `bql promote`; automatic failover
+when a lease expires; `moved` on the client and `BQL-Primary` following the new primary.
 
 A replica that is promoted has applied everything it can reach, gets a new epoch from the control
 plane, and takes the lease. The old primary is fenced by the epoch it no longer holds — the
 mechanism already in `src/replication/` — and demotes itself to replica on reconnect rather than
-dying. Clients learn through `307` + `BunQL-Primary` on HTTP and a `moved` frame on WS; the client
+dying. Clients learn through `307` + `BQL-Primary` on HTTP and a `moved` frame on WS; the client
 SDK retries the request against the new primary once, transparently.
 
 Failover picks the replica with the highest acked txid, which the state machine already tracks.
@@ -149,7 +149,7 @@ With `ack: "local"` that can still lose the tail; `docs/api.md` says so plainly.
 Rendezvous hashing with zone awareness picks a database's home node and its `rf-1` replicas — not a
 ring: no virtual nodes, no structure to keep in step, and a pure function of the replicated
 membership, which is what lets a create be gated **without a quorum**. A client that lands on the
-wrong node is told where to go (`307` + `BunQL-Primary`) instead of being answered `404`.
+wrong node is told where to go (`307` + `BQL-Primary`) instead of being answered `404`.
 
 **The two-`acme` hole is closed**: only the node the function names may create a database, and every
 node computes the same answer. **Nothing is recorded** — the intended replica set is computed where
@@ -211,8 +211,8 @@ all eight wal-index slots taken in one `xShmLock` call through the connection's 
 
 ### C6 — Linux packaging and CI
 
-Prebuilt `@bunql/sqlite-{linux-x64,linux-arm64,darwin-arm64}` or the loadable-extension shim in
-`experiments/bunql_native.c`, then a GitHub Actions workflow running `bun install`, `bun test`,
+Prebuilt `@bql/sqlite-{linux-x64,linux-arm64,darwin-arm64}` or the loadable-extension shim in
+`experiments/bql_native.c`, then a GitHub Actions workflow running `bun install`, `bun test`,
 `bun run typecheck` on macOS and Linux. Nothing else in phase 2 can be trusted on Linux until this
 lands, so it is independent but not optional.
 

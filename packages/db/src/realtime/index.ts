@@ -12,7 +12,7 @@ import type {
   RowChange,
   SchemaEvent,
 } from "../client/protocol.ts"
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import type { Database } from "../sqlite/index.ts"
 import { AuthorizerHub } from "./authorizer.ts"
 import {
@@ -474,7 +474,7 @@ export class TenantRealtime {
     // `include: "none"` asks for no rows, so it is served: a live-query client or a "something
     // changed, re-read" consumer works on a replica exactly as it always did.
     if (this.replica && include !== "none" && !this.logicalAvailable) {
-      throw new BunQLError(
+      throw new BqlError(
         "LOGICAL_UNAVAILABLE",
         `${this.name} is a replica whose primary does not record row changes; ` +
           'subscribe with include="none", or set [replication] logicalChanges on the primary',

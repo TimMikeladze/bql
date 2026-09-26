@@ -157,7 +157,7 @@ that arrives.
 ### 3.3 What the router's own `Promoter` does about the cluster — **nothing**
 
 The router's runtime has a `Promoter` and always will: `roleFor`, `nodeRole` and `primaryFor` answer
-`BunQL-Role`, `/healthz` and the `requirePrimary` gate on node-level routes, and none of those
+`BQL-Role`, `/healthz` and the `requirePrimary` gate on node-level routes, and none of those
 touches a tenant. Its **control-plane half is off** in `"routed"` mode: no ack timer, no `claimAll`,
 no `#reconcileClaims`, no `#reportPositions`, and `onClusterChange` returns immediately. A router
 that claimed would be an eighth claimant with no copy of anything.
@@ -370,7 +370,7 @@ one thread: one `Map.get`).
 ## 9. As built — what changed from this plan, and what it measured
 
 Built 2026-09-12. `bun test` → **1410 pass, 2 skip, 0 fail** across 115 files (1400 before), and
-**1408 / 4 / 0** with `BUNQL_WAL_NATIVE=0`. `bun run typecheck`, `bun run bytes` and
+**1408 / 4 / 0** with `BQL_WAL_NATIVE=0`. `bun run typecheck`, `bun run bytes` and
 `bun run routes:check` clean.
 
 **The decision held, and §3.1's measurement is the reason the milestone was cheap.** The clock was
@@ -409,7 +409,7 @@ Within noise at every rung, in both directions. That is what "one `Map.get` and 
   the Raft log can answer. `ClusterNode.socket` became null-returning for the same reason, so an
   upgrade arriving before `start()` reads a 503 with a sentence rather than a 500 with a stack.
 - **A `role` envelope was needed, which the plan did not foresee.** `Promoter.#flip` rewrites a
-  catalog row, and the *router* derives `BunQL-Role` and the `requirePrimary` gate on `POST /v1/db`
+  catalog row, and the *router* derives `BQL-Role` and the `requirePrimary` gate on `POST /v1/db`
   from its own read of that catalog — a read that hears no `onChange` for a row another thread
   wrote. Without it a sharded node promoted by failover keeps calling itself a replica for ever.
   It is C4d's to fix because C4d is what makes an automatic worker-side promotion reachable.

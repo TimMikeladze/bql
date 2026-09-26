@@ -126,7 +126,7 @@ as `sqlite3_snapshot_*` is". This is the first use of it.
   header's `mxFrame` — which `src/wal/shm.ts` can now read, thanks to C5 — says exactly how many
   frames are committed, so frames below it could be trusted without verification. Rejected. The
   frame checksum is the only thing on the live path that would catch a bit that changed between
-  SQLite writing the page and BunQL reading it back, and the rolling database checksum cannot
+  SQLite writing the page and bql.sh reading it back, and the rolling database checksum cannot
   stand in for it: the replica recomputes that checksum *from the same bytes*, agrees, and the
   corruption replicates silently. Trading an integrity check for 4.8 µs is not a trade this
   codebase should make quietly, and it would be invisible until it was not.
@@ -146,12 +146,12 @@ there is one library, one `dlopen` and one capability check:
 
 ```c
 /* out[0] = valid, out[1] = pgno, out[2] = commitSize, out[3] = s0, out[4] = s1 */
-void bunql_wal_check_frame(const uint8_t *frame, uint32_t pageSize,
+void bql_wal_check_frame(const uint8_t *frame, uint32_t pageSize,
                            uint32_t salt1, uint32_t salt2,
                            uint32_t s0, uint32_t s1, int native, uint32_t *out);
 
 /* io[0], io[1] are the chain, in and out. */
-void bunql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io);
+void bql_wal_checksum(const uint8_t *a, uint32_t n, int native, uint32_t *io);
 ```
 
 `native` is 1 when the WAL's checksum word order is the host's, which it always is for a WAL
@@ -195,11 +195,11 @@ optional symbol table and a `features.walsum` flag), `src/wal/tailer.ts` (three 
 ## 6. As built
 
 Built 2026-09-12. `bun test` → **1367 pass, 2 skip, 0 fail** across 110 files (1361 before), and
-**1365 pass, 4 skip, 0 fail** with `BUNQL_WAL_NATIVE=0`, which is the fallback proving itself.
+**1365 pass, 4 skip, 0 fail** with `BQL_WAL_NATIVE=0`, which is the fallback proving itself.
 `bun run typecheck`, `bun run bytes` and `bun run routes:check` clean.
 
 **The result**, on the repo's own benchmarks, each run with the helper and again with
-`BUNQL_WAL_NATIVE=0`:
+`BQL_WAL_NATIVE=0`:
 
 | | JavaScript | C | |
 |---|---|---|---|
@@ -216,12 +216,12 @@ does not touch.
 
 **Three things came out differently from the plan:**
 
-- **`bunql_wal_checksum` is exported but nothing in `src/` calls it.** The plan had `codec.checksum`
+- **`bql_wal_checksum` is exported but nothing in `src/` calls it.** The plan had `codec.checksum`
   keeping the JavaScript everywhere except the tailer, and that is what shipped — so the raw-chain
   entry point exists only for `test/wal/native.test.ts`, which uses it to hold the two
   implementations to each other at every length and alignment. It earns its place as a test
   fixture; it would be dead weight if the test did not exist.
-- **The fallback is announced by `bunql serve`, not by a metric.** One line, printed only when the
+- **The fallback is announced by `bql serve`, not by a metric.** One line, printed only when the
   helper is absent, naming the cost and the remedy — the same shape as C5's mechanism-B fallback
   notice. A `/metrics` gauge was the first idea and is wrong: it is a process-local constant, and
   under `workers > 1` the router would sum it across threads and report a number that means
@@ -234,7 +234,7 @@ does not touch.
 
 - A node on a system libsqlite3 works exactly as before and says so at startup. The suite is green
   in both modes and CI runs the vendored build, so the JavaScript path is exercised by the
-  `BUNQL_WAL_NATIVE=0` tests rather than only by machines that happen to lack the helper.
+  `BQL_WAL_NATIVE=0` tests rather than only by machines that happen to lack the helper.
 - `encodeFrame` and `computeFull` still checksum in JavaScript, deliberately (§3.3).
 - ~~The rest of `poll()` is 1.98 µs, of which 0.75 is two `fstat`s and a header read that could be
   one `pread`.~~ **Done** — the duplicate `fstat` and the per-poll header allocation are gone and

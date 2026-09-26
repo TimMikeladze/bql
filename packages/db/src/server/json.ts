@@ -15,7 +15,7 @@ import type {
   Value,
 } from "../client/protocol.ts"
 import type { BindValue, NamedParams, SqliteValue } from "../sqlite/values.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
 const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER)
@@ -58,7 +58,7 @@ export function fromBase64(text: string): Uint8Array {
     for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 0xff
     return out
   } catch {
-    throw BunQLError.badRequest("value is not valid base64")
+    throw BqlError.badRequest("value is not valid base64")
   }
 }
 
@@ -107,12 +107,12 @@ export function encodeValue(v: SqliteValue): Value {
     default:
       break
   }
-  throw new BunQLError("INTERNAL", "unencodable value from SQLite", 500)
+  throw new BqlError("INTERNAL", "unencodable value from SQLite", 500)
 }
 
 function bigIntFromText(text: string): bigint {
   if (!INTEGER_TEXT.test(text)) {
-    throw BunQLError.badRequest(`"$i" must be an integer in decimal text, got ${JSON.stringify(text)}`)
+    throw BqlError.badRequest(`"$i" must be an integer in decimal text, got ${JSON.stringify(text)}`)
   }
   return BigInt(text)
 }
@@ -126,7 +126,7 @@ function nonFiniteFromTag(tag: string): number {
     case "nan":
       return Number.NaN
     default:
-      throw BunQLError.badRequest(`"$f" must be "inf", "-inf" or "nan", got ${JSON.stringify(tag)}`)
+      throw BqlError.badRequest(`"$f" must be "inf", "-inf" or "nan", got ${JSON.stringify(tag)}`)
   }
 }
 
@@ -160,7 +160,7 @@ function decodeHrana(o: Record<string, unknown>): BindValue {
     default:
       break
   }
-  throw BunQLError.badRequest(`unsupported typed value: ${JSON.stringify(o)}`)
+  throw BqlError.badRequest(`unsupported typed value: ${JSON.stringify(o)}`)
 }
 
 function narrowBigInt(v: bigint): number | bigint {
@@ -190,7 +190,7 @@ export function decodeArg(v: unknown): BindValue {
     default:
       break
   }
-  throw BunQLError.badRequest(`cannot bind ${JSON.stringify(v) ?? typeof v} as a SQLite value`)
+  throw BqlError.badRequest(`cannot bind ${JSON.stringify(v) ?? typeof v} as a SQLite value`)
 }
 
 /**
@@ -205,7 +205,7 @@ export function decodeArgs(args: Args | undefined | null): BindValue[] | [NamedP
     return out
   }
   if (typeof args !== "object") {
-    throw BunQLError.badRequest("args must be an array or an object of named parameters")
+    throw BqlError.badRequest("args must be an array or an object of named parameters")
   }
   const named: NamedParams = {}
   for (const [key, value] of Object.entries(args as Record<string, unknown>)) {

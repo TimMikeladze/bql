@@ -326,9 +326,9 @@ export class ReplicaClient {
   /** C4c: which third of this class is live on this thread. */
   readonly mode: ReplicaMode
 
-  /** Bytes received, for `bunql_replication_bytes_total`. */
+  /** Bytes received, for `bql_replication_bytes_total`. */
   bytesReceived = 0
-  /** Records applied, for `bunql_replication_records_total`. */
+  /** Records applied, for `bql_replication_records_total`. */
   recordsApplied = 0
 
   #follow: string[]
@@ -408,8 +408,8 @@ export class ReplicaClient {
       options.onError ??
       ((err: unknown) =>
         err instanceof ReplicaNotice
-          ? console.error(`bunql: ${err.message}`)
-          : console.error("bunql: replica", err))
+          ? console.error(`bql: ${err.message}`)
+          : console.error("bql: replica", err))
     this.#factory =
       options.factory ??
       ((url: string) => new WebSocket(url) as unknown as ClientSocket)

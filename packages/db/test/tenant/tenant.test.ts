@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import path from "node:path"
-import { BunQLError } from "../../src/server/errors.ts"
+import { BqlError } from "../../src/server/errors.ts"
 import { type CommitEvent, TenantRegistry } from "../../src/tenant/index.ts"
 import { computeFull } from "../../src/wal/index.ts"
 import {
@@ -72,7 +72,7 @@ describe("tenant write and read path", () => {
     reg.close()
     expect(integrityOk(dbPath)).toBe(true)
     expect(dumpFile(dbPath)).toBe('## users\n[1,"ann"]\n[2,"bob"]\n[3,"cy"]')
-    expect(dir).toContain("bunql-tenant-")
+    expect(dir).toContain("bql-tenant-")
   })
 
   test("ack: fsync commits through the same path", async () => {
@@ -120,9 +120,9 @@ describe("tenant write and read path", () => {
         thrown = err
       }
     }
-    expect(thrown).toBeInstanceOf(BunQLError)
-    expect((thrown as BunQLError).code).toBe("QUOTA_EXCEEDED")
-    expect((thrown as BunQLError).status).toBe(507)
+    expect(thrown).toBeInstanceOf(BqlError)
+    expect((thrown as BqlError).code).toBe("QUOTA_EXCEEDED")
+    expect((thrown as BqlError).status).toBe(507)
 
     // The failed transaction rolled back, so the tenant is still usable and still consistent.
     const txid = tenant.txid
@@ -158,8 +158,8 @@ describe("read-your-writes", () => {
       .read((db) => db.prepare("select 1").get(), { minTxid: 99n, waitMs: 30 })
       .then(() => null)
       .catch((err: unknown) => err)
-    const err = (await failure) as BunQLError
-    expect(err).toBeInstanceOf(BunQLError)
+    const err = (await failure) as BqlError
+    expect(err).toBeInstanceOf(BqlError)
     expect(err.code).toBe("TXID_NOT_AVAILABLE")
     expect(err.status).toBe(425)
 

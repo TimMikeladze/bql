@@ -11,7 +11,7 @@ import { Database, sqlite } from "../src/sqlite/index.ts"
 import { emit } from "./report.ts"
 
 const ROWS = 100_000
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-bench-"))
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-bench-"))
 const file = path.join(dir, "bench.db")
 // Registered up front so a benchmark that throws still leaves no database behind.
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }))
@@ -118,11 +118,11 @@ results.push({
 
 // --- report -----------------------------------------------------------------------------------
 const lib = sqlite()
-console.log(`bunql driver bench — ${lib.path} ${lib.version}, Bun ${Bun.version}, ${ROWS} rows`)
+console.log(`bql driver bench — ${lib.path} ${lib.version}, Bun ${Bun.version}, ${ROWS} rows`)
 console.log(`update hook fired ${hookCalls.toLocaleString()} times\n`)
 const width = Math.max(...results.map((r) => r.op.length))
 console.log(
-  `${"op".padEnd(width)}  ${"bunql".padStart(10)}  ${"bun:sqlite".padStart(11)}  ${"speedup".padStart(8)}`,
+  `${"op".padEnd(width)}  ${"bql".padStart(10)}  ${"bun:sqlite".padStart(11)}  ${"speedup".padStart(8)}`,
 )
 console.log("-".repeat(width + 36))
 for (const r of results) {

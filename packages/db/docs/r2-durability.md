@@ -28,7 +28,7 @@ level)` resolves once enough distinct nodes are at or past that txid, bounded by
 - With no replica attached: `503 NO_REPLICAS` by default (`replication.ackWithoutReplicas`), or
   answered locally with `"allow"`. The check runs before the statement executes wherever the
   caller knows the level in advance, so the usual misconfiguration costs no write.
-- The level comes from the body, then `BunQL-Ack`, then `durability.defaultAck`, over HTTP, the
+- The level comes from the body, then `BQL-Ack`, then `durability.defaultAck`, over HTTP, the
   WebSocket and batches; an interactive transaction takes the node default at commit.
 
 ### Deviations
@@ -105,14 +105,14 @@ local path makes — so reads never leave the node.
 
 ## 3. Read-your-writes across nodes
 
-`BunQL-Min-Txid` on a replica waits on the applier and answers `425 TXID_NOT_AVAILABLE` on expiry —
+`BQL-Min-Txid` on a replica waits on the applier and answers `425 TXID_NOT_AVAILABLE` on expiry —
 this worked from R1 and is now proved end to end across two nodes
-(`test/replication/forward.test.ts`). Every response on every node carries `BunQL-Txid`,
-`BunQL-Node` and `BunQL-Role`, and a replica carries `BunQL-Primary` on all of them.
+(`test/replication/forward.test.ts`). Every response on every node carries `BQL-Txid`,
+`BQL-Node` and `BQL-Role`, and a replica carries `BQL-Primary` on all of them.
 
 11. **The WebSocket greeting lied.** `greet()` hard-coded `role: "primary"` on every node. It now
     reports the runtime's real role and adds `primary` on a replica, which is the socket
-    equivalent of the `BunQL-Primary` header.
+    equivalent of the `BQL-Primary` header.
 
 ## 4. A new database is announced at once (plan finding 1)
 

@@ -1,15 +1,15 @@
-// A Kysely dialect over BunQL (plan-phase1.md R5). Kysely owns the SQL, BunQL owns the transport:
+// A Kysely dialect over bql.sh (plan-phase1.md R5). Kysely owns the SQL, Bql owns the transport:
 // the adapter, compiler and introspector are Kysely's own `Sqlite*` ones, so a statement this
 // dialect sends is the same statement the better-sqlite3 dialect would have sent.
 //
-// Invariant: a Kysely transaction is one BunQL transaction, never a `begin`/`commit` pair of
+// Invariant: a Kysely transaction is one bql.sh transaction, never a `begin`/`commit` pair of
 // one-shot statements. `beginTransaction` opens `db.transaction()` and parks its callback on a
 // promise; every statement on that connection then runs through the `Tx` the callback was handed,
 // and commit or rollback is what releases the park. A one-shot `begin` over HTTP would commit
 // nothing, because each statement on the tenant's writer is its own transaction.
 //
 // Second invariant: `kysely` is a peer, not a dependency. Nothing under `src/` imports it except
-// this module, so a BunQL install with no Kysely in it still resolves.
+// this module, so a bql.sh install with no Kysely in it still resolves.
 
 import {
   IdentifierNode,
@@ -40,7 +40,7 @@ import {
 } from "./client/index.ts"
 
 /** A client this dialect builds and owns, rather than a `Db` the caller already has. */
-export interface BunQLDialectClientConfig
+export interface BqlDialectClientConfig
   extends Omit<ClientOptions, "db" | "url" | "intMode"> {
   /** Base URL of the server, `https://sql.example.com`. */
   url: string
@@ -54,8 +54,8 @@ export interface BunQLDialectClientConfig
   intMode?: ClientOptions["intMode"]
 }
 
-export interface BunQLDialectConfig {
-  /** An open database handle: `createClient(…).db(name)` or `(await BunQL.open(…)).db(name)`. */
+export interface BqlDialectConfig {
+  /** An open database handle: `createClient(…).db(name)` or `(await Bql.open(…)).db(name)`. */
   db: Db
   /** Options applied to every statement: `timeoutMs`, `maxRows`, `ack`, `consistency`. */
   statement?: StatementOptions
@@ -63,11 +63,11 @@ export interface BunQLDialectConfig {
   transaction?: TransactionOptions
 }
 
-/** Everything `BunQLDialect` accepts: a `Db`, a `Db` with options, or a client to build. */
-export type BunQLDialectOptions =
+/** Everything `BqlDialect` accepts: a `Db`, a `Db` with options, or a client to build. */
+export type BqlDialectOptions =
   | Db
-  | BunQLDialectConfig
-  | (BunQLDialectClientConfig & {
+  | BqlDialectConfig
+  | (BqlDialectClientConfig & {
       statement?: StatementOptions
       transaction?: TransactionOptions
     })
@@ -91,21 +91,21 @@ function isDb(value: unknown): value is Db {
   )
 }
 
-function resolve(options: BunQLDialectOptions): Resolved {
+function resolve(options: BqlDialectOptions): Resolved {
   if (isDb(options)) {
     return { db: options, statement: undefined, transaction: undefined, owned: null }
   }
-  const { statement, transaction } = options as BunQLDialectConfig
-  if (isDb((options as BunQLDialectConfig).db)) {
-    return { db: (options as BunQLDialectConfig).db, statement, transaction, owned: null }
+  const { statement, transaction } = options as BqlDialectConfig
+  if (isDb((options as BqlDialectConfig).db)) {
+    return { db: (options as BqlDialectConfig).db, statement, transaction, owned: null }
   }
-  const config = options as BunQLDialectClientConfig
+  const config = options as BqlDialectClientConfig
   if (typeof config.url !== "string" || typeof config.db !== "string") {
     throw new TypeError(
-      "bunql/kysely: pass a BunQL Db, {db}, or {url, db} — got " + JSON.stringify(Object.keys(options)),
+      "bql/kysely: pass a bql.sh Db, {db}, or {url, db} — got " + JSON.stringify(Object.keys(options)),
     )
   }
-  const { db: name, statement: _s, transaction: _t, ...rest } = options as BunQLDialectClientConfig & {
+  const { db: name, statement: _s, transaction: _t, ...rest } = options as BqlDialectClientConfig & {
     statement?: StatementOptions
     transaction?: TransactionOptions
   }
@@ -127,7 +127,7 @@ function toInsertId(value: number | bigint | string | null): bigint | undefined 
  * it does hold the open transaction, which is what makes a `Kysely.transaction()` block route its
  * statements through the right place.
  */
-class BunQLConnection implements DatabaseConnection {
+class BqlConnection implements DatabaseConnection {
   readonly #db: Db
   readonly #statement: StatementOptions | undefined
   readonly #transaction: TransactionOptions | undefined
@@ -162,12 +162,12 @@ class BunQLConnection implements DatabaseConnection {
   }
 
   /**
-   * BunQL answers a statement with its whole result set (design §6.1); there is no cursor route to
+   * bql.sh answers a statement with its whole result set (design §6.1); there is no cursor route to
    * back a chunked reader with, so this fails loudly rather than pretending to stream.
    */
   streamQuery<R>(_compiled: CompiledQuery, _chunkSize?: number): AsyncIterableIterator<QueryResult<R>> {
     throw new Error(
-      "bunql/kysely does not support streamQuery: BunQL returns whole result sets. Page with " +
+      "bql/kysely does not support streamQuery: Bql returns whole result sets. Page with " +
         "limit/offset, or cap a statement with maxRows.",
     )
   }
@@ -176,10 +176,10 @@ class BunQLConnection implements DatabaseConnection {
 
   /** Opens `db.transaction()` and keeps its callback alive until commit or rollback. */
   async begin(settings: TransactionSettings): Promise<void> {
-    if (this.#tx) throw new Error("bunql/kysely: this connection already has an open transaction")
+    if (this.#tx) throw new Error("bql/kysely: this connection already has an open transaction")
     if (settings.isolationLevel !== undefined) {
       throw new Error(
-        `bunql/kysely: SQLite has no isolation levels; drop ${JSON.stringify(settings.isolationLevel)}`,
+        `bql/kysely: SQLite has no isolation levels; drop ${JSON.stringify(settings.isolationLevel)}`,
       )
     }
     const options: TransactionOptions = {
@@ -218,7 +218,7 @@ class BunQLConnection implements DatabaseConnection {
   async end(how: "commit" | "rollback"): Promise<void> {
     const release = this.#release
     const done = this.#done
-    if (!release || !done) throw new Error("bunql/kysely: no transaction is open on this connection")
+    if (!release || !done) throw new Error("bql/kysely: no transaction is open on this connection")
     this.#tx = null
     this.#release = null
     this.#done = null
@@ -232,14 +232,14 @@ class BunQLConnection implements DatabaseConnection {
 }
 
 /** Rejecting the parked callback with this is how a rollback is asked for, not an error. */
-const ROLLBACK = Symbol("bunql.kysely.rollback")
+const ROLLBACK = Symbol("bql.kysely.rollback")
 
 /** A savepoint command as Kysely builds it, so the name is an identifier rather than text. */
 function savepoint(command: "savepoint" | "rollback to" | "release", name: string) {
   return RawNode.createWithChildren([RawNode.createWithSql(`${command} `), IdentifierNode.create(name)])
 }
 
-class BunQLDriver implements Driver {
+class BqlDriver implements Driver {
   readonly #resolved: Resolved
 
   constructor(resolved: Resolved) {
@@ -256,7 +256,7 @@ class BunQLDriver implements Driver {
    * other query running beside it.
    */
   async acquireConnection(): Promise<DatabaseConnection> {
-    return new BunQLConnection(
+    return new BqlConnection(
       this.#resolved.db,
       this.#resolved.statement,
       this.#resolved.transaction,
@@ -267,15 +267,15 @@ class BunQLDriver implements Driver {
     connection: DatabaseConnection,
     settings: TransactionSettings,
   ): Promise<void> {
-    await (connection as BunQLConnection).begin(settings)
+    await (connection as BqlConnection).begin(settings)
   }
 
   async commitTransaction(connection: DatabaseConnection): Promise<void> {
-    await (connection as BunQLConnection).end("commit")
+    await (connection as BqlConnection).end("commit")
   }
 
   async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-    await (connection as BunQLConnection).end("rollback")
+    await (connection as BqlConnection).end("rollback")
   }
 
   async savepoint(
@@ -313,26 +313,26 @@ class BunQLDriver implements Driver {
 }
 
 /**
- * Kysely over BunQL.
+ * Kysely over bql.sh.
  *
  * ```ts
- * const kysely = new Kysely<DB>({ dialect: new BunQLDialect({ url, token, db: "acme" }) })
+ * const kysely = new Kysely<DB>({ dialect: new BqlDialect({ url, token, db: "acme" }) })
  * ```
  */
-export class BunQLDialect implements Dialect {
+export class BqlDialect implements Dialect {
   readonly #resolved: Resolved
 
-  constructor(options: BunQLDialectOptions) {
+  constructor(options: BqlDialectOptions) {
     this.#resolved = resolve(options)
   }
 
-  /** The database this dialect talks to, for code that wants the BunQL handle back. */
+  /** The database this dialect talks to, for code that wants the bql.sh handle back. */
   get db(): Db {
     return this.#resolved.db
   }
 
   createDriver(): Driver {
-    return new BunQLDriver(this.#resolved)
+    return new BqlDriver(this.#resolved)
   }
 
   createQueryCompiler(): QueryCompiler {
@@ -350,9 +350,9 @@ export class BunQLDialect implements Dialect {
   }
 }
 
-/** `new BunQLDialect(options)`, for callers who prefer a function. */
-export function bunqlDialect(options: BunQLDialectOptions): BunQLDialect {
-  return new BunQLDialect(options)
+/** `new BqlDialect(options)`, for callers who prefer a function. */
+export function bqlDialect(options: BqlDialectOptions): BqlDialect {
+  return new BqlDialect(options)
 }
 
 export type { Db, StatementOptions, TransactionOptions } from "./client/index.ts"

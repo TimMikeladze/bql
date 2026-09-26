@@ -21,7 +21,7 @@ afterEach(() => {
 })
 
 function registry(): TenantRegistry {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-offline-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-offline-"))
   const reg = TenantRegistry.open({ dir })
   open.push({ registry: reg, dir })
   return reg

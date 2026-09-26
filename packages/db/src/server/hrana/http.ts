@@ -9,7 +9,7 @@
 // baton the client just used is dead the moment the response is written. A stream that was closed
 // answers `baton: null`, which is Hrana's way of saying "do not come back".
 
-import { BunQLError } from "../errors.ts"
+import { BqlError } from "../errors.ts"
 import type { Principal } from "../auth.ts"
 import type { ServerRuntime } from "../runtime.ts"
 import { cursorEntries, runStreamRequest } from "./execute.ts"
@@ -48,17 +48,17 @@ export function namespaceOf(request: Request, url: URL, params: Record<string, s
 async function readJson<T>(request: Request, max: number): Promise<T> {
   const declared = Number(request.headers.get("content-length") ?? "0")
   if (Number.isFinite(declared) && declared > max) {
-    throw new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
+    throw new BqlError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
   }
   const text = await request.text()
   if (text.length > max) {
-    throw new BunQLError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
+    throw new BqlError("PAYLOAD_TOO_LARGE", `body is larger than ${max} bytes`, 413)
   }
-  if (text.length === 0) throw BunQLError.badRequest("the request body is empty")
+  if (text.length === 0) throw BqlError.badRequest("the request body is empty")
   try {
     return JSON.parse(text) as T
   } catch {
-    throw BunQLError.badRequest("request body is not valid JSON")
+    throw BqlError.badRequest("request body is not valid JSON")
   }
 }
 
@@ -76,7 +76,7 @@ function streamFor(
   owner: object,
 ): HranaStream {
   if (typeof baton === "string" && baton.length > 0) return service.resume(baton, db)
-  if (baton !== null && baton !== undefined) throw BunQLError.badRequest("baton must be a string or null")
+  if (baton !== null && baton !== undefined) throw BqlError.badRequest("baton must be a string or null")
   return service.openStream(db, principal, owner)
 }
 
@@ -96,7 +96,7 @@ export async function handlePipeline(
     const db = namespaceOf(request, url, params)
     const body = await readJson<PipelineReqBody>(request, runtime.config.limits.maxBodyBytes)
     if (!Array.isArray(body.requests)) {
-      throw BunQLError.badRequest("a pipeline needs a requests array")
+      throw BqlError.badRequest("a pipeline needs a requests array")
     }
     stream = streamFor(service, body.baton, db, principal, httpOwner())
 

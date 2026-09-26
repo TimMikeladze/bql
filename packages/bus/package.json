@@ -1,62 +1,8 @@
 {
-  "name": "@bunql/bus",
-  "version": "0.1.0",
-  "description": "A durable message bus for agents and ordinary work — Bun, SQLite, subjects, consumer groups, leases",
-  "keywords": [
-    "message-bus",
-    "message-queue",
-    "pubsub",
-    "work-queue",
-    "request-reply",
-    "durable",
-    "at-least-once",
-    "bun",
-    "sqlite",
-    "agents"
-  ],
-  "license": "MIT",
-  "author": "Tim Mikeladze <tim.mikeladze@gmail.com>",
-  "homepage": "https://github.com/TimMikeladze/bunql/tree/main/packages/bus#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/TimMikeladze/bunql.git",
-    "directory": "packages/bus"
-  },
-  "bugs": {
-    "url": "https://github.com/TimMikeladze/bunql/issues"
-  },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
+  "name": "bql-bus",
+  "private": true,
   "type": "module",
-  "bin": {
-    "agenticbus": "./src/cli/index.ts"
-  },
-  "files": [
-    "dist",
-    "!dist/bin"
-  ],
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
-  "exports": {
-    ".": {
-      "import": {
-        "types": "./src/index.ts",
-        "default": "./src/index.ts"
-      }
-    },
-    "./client": {
-      "import": {
-        "types": "./src/client/bus.ts",
-        "default": "./src/client/bus.ts"
-      }
-    },
-    "./package.json": "./package.json"
-  },
-  "engines": {
-    "bun": ">=1.4.0"
-  },
+  "description": "A durable message bus for agents and ordinary work \u2014 Bun, SQLite, subjects, consumer groups, leases Published as part of `bql.sh`; this manifest is for development only.",
   "scripts": {
     "dev": "bun scripts/dev.ts",
     "serve": "bun src/cli/index.ts serve",
@@ -65,13 +11,13 @@
     "test": "bun test tests",
     "test:e2e": "bun scripts/e2e.ts",
     "soak": "bun scripts/soak.ts",
-    "verify-pack": "bun scripts/verify-pack.ts",
-    "prepack": "bun run build && bun scripts/prepack.ts",
-    "postpack": "bun scripts/prepack.ts --restore",
     "build:binary": "bun scripts/build-binary.ts",
     "test:compiled": "bun scripts/compiled-e2e.ts",
     "drill:restore": "bun scripts/restore-drill.ts",
     "drill:failover": "bun scripts/failover-drill.ts"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
   },
   "dependencies": {},
   "devDependencies": {

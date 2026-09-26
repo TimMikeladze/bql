@@ -1,4 +1,4 @@
-// bunql native shim: exposes the connection handle and API function pointers to JS via SQL functions.
+// bql native shim: exposes the connection handle and API function pointers to JS via SQL functions.
 #include <stdint.h>
 #include <string.h>
 #include "sqlite3ext.h"
@@ -15,9 +15,9 @@ static void fn_api(sqlite3_context *ctx, int n, sqlite3_value **v) {
   #undef F
   if (p) sqlite3_result_int64(ctx, (sqlite3_int64)(intptr_t)p); else sqlite3_result_null(ctx);
 }
-int sqlite3_bunqlnative_init(sqlite3 *db, char **err, const sqlite3_api_routines *api) {
+int sqlite3_bqlnative_init(sqlite3 *db, char **err, const sqlite3_api_routines *api) {
   SQLITE_EXTENSION_INIT2(api);
-  sqlite3_create_function(db, "bunql_db", 0, SQLITE_UTF8 | SQLITE_DIRECTONLY, 0, fn_db, 0, 0);
-  sqlite3_create_function(db, "bunql_api", 1, SQLITE_UTF8 | SQLITE_DIRECTONLY, 0, fn_api, 0, 0);
+  sqlite3_create_function(db, "bql_db", 0, SQLITE_UTF8 | SQLITE_DIRECTONLY, 0, fn_db, 0, 0);
+  sqlite3_create_function(db, "bql_api", 1, SQLITE_UTF8 | SQLITE_DIRECTONLY, 0, fn_api, 0, 0);
   return SQLITE_OK;
 }

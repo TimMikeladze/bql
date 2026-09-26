@@ -140,7 +140,7 @@ interface Conn {
 async function connect(onPush?: (message: Record<string, unknown>) => void): Promise<Conn> {
   const socket = new WebSocket(
     `${base.replace(/^http/, "ws")}/v1/ws?token=${encodeURIComponent(token)}`,
-    "bunql.v1",
+    "bql.v1",
   )
   const waiters = new Map<number, (value: unknown) => void>()
   await new Promise<void>((resolve, reject) => {
@@ -311,5 +311,5 @@ emit(
     legs: Object.fromEntries(legs.map((leg) => [leg.name, leg.sample])),
   },
   // The parent always wants the line; it spawned this process to get it.
-  { BUNQL_BENCH_JSON: "1" },
+  { BQL_BENCH_JSON: "1" },
 )

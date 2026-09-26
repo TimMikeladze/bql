@@ -1,6 +1,6 @@
 // Invariant: `src/dataapi/` never runs a statement itself. It builds one, hands it to the
 // `exec` on the context it was instantiated with, and reads the rows back. That `exec` is a
-// closure over `src/server/exec.ts` — the only path in BunQL that steps a statement, and where
+// closure over `src/server/exec.ts` — the only path in bql.sh that steps a statement, and where
 // the token's per-table ACLs, the deadline, the row cap, `vmSteps`, the quota, the txid, the ack
 // level and write forwarding all already live. Going around it would be a second execution
 // engine, which `docs/plan-surfaces.md` says must not exist; inheriting it means the data API

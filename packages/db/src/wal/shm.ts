@@ -52,7 +52,7 @@ export interface WalIndexHeader {
   cksum: readonly [number, number]
 }
 
-/** True everywhere BunQL runs; the header is native-order, so it is asked rather than assumed. */
+/** True everywhere bql.sh runs; the header is native-order, so it is asked rather than assumed. */
 export const NATIVE_LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
 /**

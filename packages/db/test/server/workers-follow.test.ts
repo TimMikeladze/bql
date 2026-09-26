@@ -273,9 +273,9 @@ describe("a sharded replica follows an upstream", () => {
     const value = (name: string): number =>
       Number(new RegExp(`^${name}\\{[^}]*\\} (\\d+)$`, "m").exec(body)?.[1] ?? "-1")
     // The router reads every byte off the one socket, so it counts both itself.
-    expect(value("bunql_replication_connected")).toBe(1)
-    expect(value("bunql_replication_bytes_total")).toBeGreaterThan(0)
+    expect(value("bql_replication_connected")).toBe(1)
+    expect(value("bql_replication_bytes_total")).toBeGreaterThan(0)
     // A record is applied by exactly one worker, so this is a sum across two shards.
-    expect(value("bunql_replication_records_total")).toBeGreaterThanOrEqual(2)
+    expect(value("bql_replication_records_total")).toBeGreaterThanOrEqual(2)
   })
 })

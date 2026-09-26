@@ -15,7 +15,7 @@ document*, with resolvers that call the handler in this process rather than issu
 request. Three surfaces, one truth, nothing to keep in sync. Hand-writing a REST layer, a GraphQL
 schema and an OpenAPI document separately is how they drift apart within a week.
 
-The thing that makes this cheap rather than a rewrite: BunQL already owns the parts that are hard.
+The thing that makes this cheap rather than a rewrite: bql.sh already owns the parts that are hard.
 `src/server/exec.ts` is the only path that runs a statement, and it is where the policy, the
 deadline, the row cap, the txid, the ack level, the forwarding and the quota already live.
 `src/server/auth.ts` already has EdDSA tokens with per-table ACLs. `src/realtime/` already has the
@@ -31,10 +31,10 @@ src/dataapi/   a tenant's SQLite schema -> operations  uses exec.ts, auth.ts, re
 src/graphql/   GraphQL from the OpenAPI document       optional peers; in-process fetch
 ```
 
-Dependency direction is strictly downward. `src/core/` imports nothing from the rest of BunQL —
+Dependency direction is strictly downward. `src/core/` imports nothing from the rest of bql.sh —
 it is the piece another project could take whole, which is what "a bun http" means.
 
-Package exports: `@bunql/db/core`, `@bunql/db/http`, `@bunql/db/openapi`, `@bunql/db/graphql`.
+Package exports: `bql.sh/core`, `bql.sh/http`, `bql.sh/openapi`, `bql.sh/graphql`.
 
 ## `src/core/` — the schema, and why it is a JSON Schema node
 
@@ -42,7 +42,7 @@ A zero-dependency type builder, because the house rule is zero runtime dependenc
 the alternative (Zod, TypeBox, ArkType) is a dependency in every consumer's tree:
 
 ```ts
-import { s, type Infer } from "@bunql/db/core"
+import { s, type Infer } from "bql.sh/core"
 
 const User = s.object({
   id: s.int(),
@@ -61,7 +61,7 @@ and the published document cannot disagree about what the API accepts, because t
 one object. Named schemas (`.id("User")`) become `components/schemas` entries and `$ref`s.
 
 The validator does coercion as well as checking, because a path or query parameter arrives as a
-string and has to become a number, a boolean, a date, or a `bigint` for BunQL's int64 values. It
+string and has to become a number, a boolean, a date, or a `bigint` for bql.sh's int64 values. It
 returns either a typed value or a list of `{ path, message }` problems, which the HTTP layer turns
 into the `400` shape `src/server/errors.ts` already defines. No exceptions on the hot path.
 
@@ -78,7 +78,7 @@ export interface Operation<TIn = unknown, TOut = unknown> {
   params?: { path?: Schema; query?: Schema; headers?: Schema }
   body?: { schema: Schema; contentType?: string; required?: boolean }
   response: { status?: number; schema: Schema; contentType?: string; headers?: Schema }
-  /** Error statuses this operation can produce, by BunQL error code. */
+  /** Error statuses this operation can produce, by bql.sh error code. */
   errors?: ErrorCode[]
   security?: "bearer" | "admin" | "none"
   /** How this renders in GraphQL. `none` keeps it out of the schema entirely. */
@@ -95,7 +95,7 @@ only thing `src/http/`, `src/openapi/` and `src/graphql/` ever consume.
 Compiles a registry into the `routes` table `Bun.serve` already takes, which is what `app.ts` uses
 today; path matching stays Bun's, so nothing is added to the hot path. Around each handler:
 coerce and validate params, parse and validate the body, call the handler, serialise the response.
-`BunQLError` maps to status exactly as it does now — the surfaces reuse `src/server/errors.ts`,
+`BqlError` maps to status exactly as it does now — the surfaces reuse `src/server/errors.ts`,
 they do not define a second error vocabulary.
 
 Response validation runs only when `NODE_ENV !== "production"`: a published document that lies
@@ -142,7 +142,7 @@ Views are read-only. A table with no primary key and no rowid gets the collectio
 
 Everything executes through `src/server/exec.ts`, so the data API inherits, without a line of new
 code: the authorizer and the token's per-table ACLs, deadlines, row caps, `vmSteps` accounting,
-quotas, txid and `BunQL-Txid`, `ack` levels, `minTxid` read-your-writes, write forwarding from a
+quotas, txid and `BQL-Txid`, `ack` levels, `minTxid` read-your-writes, write forwarding from a
 replica, and the change feed firing on every write it does.
 
 The introspection result is cached per tenant, keyed on `PRAGMA schema_version`, and invalidated
@@ -191,7 +191,7 @@ The generator also adds an `_info` field to `Query` describing the source docume
 worth knowing about before someone reports it as a bug.
 
 `graphql` and `openapi-x-graphql` are **optional peer dependencies**, the arrangement `kysely` and
-`drizzle-orm` already have in `package.json`: BunQL keeps zero runtime dependencies, `@bunql/db/graphql`
+`drizzle-orm` already have in `package.json`: bql.sh keeps zero runtime dependencies, `bql.sh/graphql`
 throws a message naming the two packages if they are absent, and the GraphQL route is not mounted
 unless they resolve.
 
@@ -201,7 +201,7 @@ the introspection.
 
 Subscriptions are not something the generator can produce from a REST document, so they are added
 on top: a `changes` subscription field resolved from the existing ring buffer and live-query
-machinery in `src/realtime/`, over the `graphql-ws` protocol on the socket BunQL already runs.
+machinery in `src/realtime/`, over the `graphql-ws` protocol on the socket bql.sh already runs.
 That is the last milestone and the only one that is genuinely new code rather than wiring.
 
 `createOpenApiDocument` — the other direction — earns its keep as a CI gate: `--round-trip` proves
@@ -258,4 +258,4 @@ maxComplexity = 10000
 
 Not a query language of its own. Not an ORM. Not a second execution engine — if a surface ever
 needs to run a statement in a way `exec.ts` cannot, the fix is in `exec.ts`. And not a
-general-purpose GraphQL server: BunQL generates a schema for a database, it does not host yours.
+general-purpose GraphQL server: bql.sh generates a schema for a database, it does not host yours.

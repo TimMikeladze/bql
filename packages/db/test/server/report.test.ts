@@ -20,7 +20,7 @@ afterEach(async () => {
 })
 
 test("a deliberate 503 is answered, not reported as a fault", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-report-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-report-"))
   dirs.push(dir)
   const faults: unknown[] = []
   const config = loadConfig({

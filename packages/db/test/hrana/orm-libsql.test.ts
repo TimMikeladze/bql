@@ -1,4 +1,4 @@
-// The ORMs over their *own* libsql drivers, not over `bunql/drizzle` and `bunql/kysely`. That is
+// The ORMs over their *own* libsql drivers, not over `bql/drizzle` and `bql/kysely`. That is
 // the point of the Hrana layer: a project already on `drizzle-orm/libsql` or `kysely-libsql`
 // changes a URL and nothing else. `test/orm/` covers our own adapters; this file covers the
 // compatibility claim.

@@ -13,7 +13,7 @@ import { removeTempDir } from "../tmpdir.ts"
 const dirs: string[] = []
 
 function tempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-raft-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-raft-"))
   dirs.push(dir)
   return dir
 }

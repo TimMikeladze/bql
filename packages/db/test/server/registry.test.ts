@@ -28,7 +28,7 @@ function servedRoutes(routes: Record<string, unknown>): Set<string> {
   return out
 }
 
-/** Hrana is libsql's wire protocol, not BunQL's API, and is mounted beside the registry. */
+/** Hrana is libsql's wire protocol, not bql.sh's API, and is mounted beside the registry. */
 const HRANA = /^\/v[23](\/|$)|^\/v1\/db\/:db\/(hrana|v[23])(\/|$)/
 
 describe("the registry and the route table", () => {
@@ -92,7 +92,7 @@ describe("the document", () => {
       components: { schemas: Record<string, unknown> }
     }
     expect(document.openapi).toBe("3.1.0")
-    expect(document.info.title).toBe("BunQL")
+    expect(document.info.title).toBe("bql.sh")
     expect(Object.keys(document.paths)).toContain("/v1/db/{db}/query")
     expect(Object.keys(document.paths)).toContain("/v1/openapi.json")
     // `:db` became `{db}`, and only that: the emitter converts one way and nobody converts back.

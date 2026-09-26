@@ -22,11 +22,11 @@ const ROUNDS = Number(positional[0] ?? 2000)
 const CONCURRENT = 2000
 const IN_PROCESS = Bun.argv.includes("--in-process")
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-http-bench-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-http-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
 // The environment is honoured so that a default can be benchmarked against its alternative
-// without editing this file — `BUNQL_DEFAULT_ACK=local bun run bench:http` is how the cost of the
+// without editing this file — `BQL_DEFAULT_ACK=local bun run bench:http` is how the cost of the
 // 2026-09-13 defaults was attributed (`docs/performance.md` §1).
 const config = loadConfig({
   env: process.env as Record<string, string | undefined>,
@@ -80,7 +80,7 @@ if (IN_PROCESS) {
       "--concurrent",
       String(CONCURRENT),
     ]),
-    { stdout: "pipe", stderr: "inherit", env: { ...process.env, BUNQL_BENCH_JSON: "1" } },
+    { stdout: "pipe", stderr: "inherit", env: { ...process.env, BQL_BENCH_JSON: "1" } },
   )
   const output = await new Response(child.stdout).text()
   const code = await child.exited
@@ -94,7 +94,7 @@ if (IN_PROCESS) {
 const stats = (await (await fetch(`${base}/v1/db/bench`, { headers })).json()) as { txid: number }
 
 console.log(
-  `bunql http bench · ${ROUNDS} rounds · txid ${stats.txid} · Bun ${Bun.version} · ` +
+  `bql http bench · ${ROUNDS} rounds · txid ${stats.txid} · Bun ${Bun.version} · ` +
     `${process.platform}/${process.arch} · ${IN_PROCESS ? "client in this process" : "client in its own process"}\n`,
 )
 
@@ -181,7 +181,7 @@ async function runInProcess(): Promise<BenchReport> {
 
   const socket = new WebSocket(
     `ws://127.0.0.1:${handle.server.port}/v1/ws?token=${encodeURIComponent(admin)}`,
-    "bunql.v1",
+    "bql.v1",
   )
   const waiters = new Map<number, (value: unknown) => void>()
   await new Promise<void>((resolve, reject) => {

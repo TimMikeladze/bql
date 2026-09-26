@@ -106,7 +106,7 @@ describe("[sqlite] pragmas", () => {
     expect(seen.writer.trusted_schema).toBe(1)
   })
 
-  test("the settings BunQL has always owned are unchanged by all this", async () => {
+  test("the settings bql.sh has always owned are unchanged by all this", async () => {
     const seen = await pragmasFor({ writerCacheBytes: 8_388_608 }, [
       "journal_mode",
       "synchronous",

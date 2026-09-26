@@ -65,7 +65,7 @@ A snapshot object's plain body is the SQLite file.
   ],
   "snapshots": [
     {
-      "key": "bunql/db/acme/snapshots/00000000000000005000.db.zst",
+      "key": "bql/db/acme/snapshots/00000000000000005000.db.zst",
       "generation": "8f1c2a6b5d4e3f20",
       "txid": "5000", "epoch": 0, "pages": 412, "pageSize": 4096,
       "checksum": "10238471293847", "bytes": 190210, "plainBytes": 1687552,
@@ -74,7 +74,7 @@ A snapshot object's plain body is the SQLite file.
   ],
   "segments": [
     {
-      "key": "bunql/db/acme/segments/00000000000000005001-00000000000000005120.seg.zst",
+      "key": "bql/db/acme/segments/00000000000000005001-00000000000000005120.seg.zst",
       "generation": "8f1c2a6b5d4e3f20",
       "startTxid": "5001", "endTxid": "5120",
       "bytes": 20481, "plainBytes": 98304,
@@ -246,7 +246,7 @@ enabled = true               # implied when `bucket` is set
 bucket = "backups"
 region = "auto"
 endpoint = "https://<account>.r2.cloudflarestorage.com"
-prefix = "bunql/"
+prefix = "bql/"
 accessKeyId = "${AWS_ACCESS_KEY_ID}"
 secretAccessKey = "${AWS_SECRET_ACCESS_KEY}"
 sessionToken = ""
@@ -260,8 +260,8 @@ maxPendingBytes = 67108864
 retries = 4
 ```
 
-Every key takes a `BUNQL_S3_*` override from the section-and-key rule already in
-`src/server/config.ts`: `BUNQL_S3_BUCKET`, `BUNQL_S3_SHIP_INTERVAL_MS`, `BUNQL_S3_ACCESS_KEY_ID`
+Every key takes a `BQL_S3_*` override from the section-and-key rule already in
+`src/server/config.ts`: `BQL_S3_BUCKET`, `BQL_S3_SHIP_INTERVAL_MS`, `BQL_S3_ACCESS_KEY_ID`
 and so on. A `bucket` that is set turns `enabled` on; `enabled = false` turns the shipper off with
 the bucket still configured, which is how you keep a restore target without shipping to it.
 
@@ -274,13 +274,13 @@ the bucket still configured, which is how you keep a restore target without ship
 | `POST /v1/db/:db/restore` `{from:"s3", at, into?, bucket?, prefix?}` | restore from the bucket into a new database |
 
 `GET /v1/db/:db/replication` gains an `s3` block with the same shipper state.
-`/metrics` gains `bunql_s3_shipped_txid`, `bunql_s3_pending_records`, `bunql_s3_errors_total`,
-`bunql_s3_bytes_total`.
+`/metrics` gains `bql_s3_shipped_txid`, `bql_s3_pending_records`, `bql_s3_errors_total`,
+`bql_s3_bytes_total`.
 
 ```
-bunql backup status <db>
-bunql backup verify <db> --at <txid|timestamp>
-bunql restore <db> --from s3://bucket/prefix --at <txid|timestamp> [--into name]
+bql backup status <db>
+bql backup verify <db> --at <txid|timestamp>
+bql restore <db> --from s3://bucket/prefix --at <txid|timestamp> [--into name]
 ```
 
 ## 8. Deviations from the brief
@@ -332,7 +332,7 @@ bunql restore <db> --from s3://bucket/prefix --at <txid|timestamp> [--into name]
 
 - **Nothing logs credentials.** `S3Store` keeps its credentials in a private field, never
   interpolates them into a message, and `GET /v1/db/:db/backup` reports `bucket`, `prefix` and
-  `endpoint` only. `bunql serve` has no credential flag at all, so nothing reaches a shell history
+  `endpoint` only. `bql serve` has no credential flag at all, so nothing reaches a shell history
   or a process listing; `test/storage/s3.test.ts` asserts the message, the stack and
   `JSON.stringify(store)` are all clean.
 - **A shipped snapshot makes the tenant exclusive for the length of the copy**, like any other
@@ -343,8 +343,8 @@ bunql restore <db> --from s3://bucket/prefix --at <txid|timestamp> [--into name]
   already covers — what a crash between an upload and the manifest write leaves behind. It is not
   called automatically, because an object above `shippedTxid` may be another node mid-upload.
 - **A bucket that is down is not an outage.** Commits keep being answered; `behind` goes true and
-  `bunql_s3_errors_total` climbs. Alert on `behind`, on `bunql_s3_shipped_txid` not advancing, and
-  on `bunql_s3_pending_records`.
+  `bql_s3_errors_total` climbs. Alert on `behind`, on `bql_s3_shipped_txid` not advancing, and
+  on `bql_s3_pending_records`.
 - **Local log retention has to outlive the shipper's lag.** A shipper that falls further behind
   than `durability.retention` cannot read the records it is missing and reports `S3_LOG_GAP`; it
   recovers by shipping a fresh snapshot, which is what the `snapshotEveryBytes` policy is for.

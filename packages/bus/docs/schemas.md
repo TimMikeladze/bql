@@ -11,7 +11,7 @@ wrote has never been checked. So an unsupported keyword is a **400 at registrati
 pointer, rather than a constraint that silently does nothing.
 
 ```
-$ agenticbus schema register order ./order.json
+$ bql-bus schema register order ./order.json
 error: keyword 'if' is not supported: conditional subschemas are not implemented at /if
 ```
 
@@ -53,10 +53,10 @@ approximation that errs toward **reporting** a change: anything it cannot decide
 `anyOf`, a changed `pattern` — is reported in both directions and therefore fails a strict mode
 rather than passing one it should not.
 
-`agenticbus schema check <name> <file>` is the dry run:
+`bql-bus schema check <name> <file>` is the dry run:
 
 ```
-$ agenticbus schema check order ./order-v2.json --compat backward
+$ bql-bus schema check order ./order-v2.json --compat backward
 narrowed  /required 'currency' is newly required
 1 change(s) break 'backward' against version 1
 ```
@@ -68,12 +68,12 @@ A binding attaches a schema to a **subject pattern** — the same matcher subscr
 two patterns match, the one with more literal tokens wins.
 
 ```sh
-agenticbus schema bind 'orders.>' order --mode warn
-agenticbus schema bind 'orders.>' order --mode enforce
+bql-bus schema bind 'orders.>' order --mode warn
+bql-bus schema bind 'orders.>' order --mode enforce
 ```
 
 - **`warn`** — publish succeeds, the envelope is stamped `schema-invalid: <pointer> <message>`,
-  and `agenticbus.schema.violations` counts it. This is how a schema is introduced against live
+  and `bql-bus.schema.violations` counts it. This is how a schema is introduced against live
   traffic before anyone depends on it.
 - **`enforce`** — a publish that does not validate is a **422** naming the failing JSON Pointer
   and the schema version.

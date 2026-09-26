@@ -19,7 +19,7 @@ import {
   type ChangeSink,
   type LiveSink,
 } from "./client/feed.ts"
-import { BunQLClientError } from "./client/errors.ts"
+import { BqlClientError } from "./client/errors.ts"
 import type {
   Args,
   ChangeEvent,
@@ -70,7 +70,7 @@ export interface OpenOptions extends ServerConfigInput {
   /** What an integer beyond 2^53 becomes in a result. Default `"number"`, which throws. */
   intMode?: IntMode
   /**
-   * A `bunql.toml` to read first. Embedded callers configure in code by default, so no file and
+   * A `bql.toml` to read first. Embedded callers configure in code by default, so no file and
    * no environment are consulted unless they are asked for here.
    */
   config?: string | null
@@ -143,9 +143,9 @@ export interface EmbeddedDb extends Db {
 /** Every failure crosses this boundary as the error the client SDK would have thrown. */
 function toClientError(err: unknown): unknown {
   const mapped = mapTenantError(err)
-  if (mapped instanceof BunQLClientError) return mapped
+  if (mapped instanceof BqlClientError) return mapped
   const { body } = mapError(mapped)
-  return BunQLClientError.fromInfo(body.error)
+  return BqlClientError.fromInfo(body.error)
 }
 
 function asStatement(item: BatchItem): StatementRequest {
@@ -153,7 +153,7 @@ function asStatement(item: BatchItem): StatementRequest {
   const statement = typeof candidate.toJSON === "function" ? candidate.toJSON() : item
   const sql = (statement as StatementRequest).sql
   if (typeof sql !== "string" || sql.length === 0) {
-    throw BunQLClientError.client("every batch item needs a non-empty sql string")
+    throw BqlClientError.client("every batch item needs a non-empty sql string")
   }
   return statement as StatementRequest
 }
@@ -165,10 +165,10 @@ class LocalDb implements EmbeddedDb {
   readonly live: LiveTag
   readonly sync: SyncDb
 
-  #owner: BunQL
+  #owner: Bql
   #intMode: IntMode
 
-  constructor(owner: BunQL, name: string) {
+  constructor(owner: Bql, name: string) {
     this.#owner = owner
     this.#intMode = owner.intMode
     this.name = name
@@ -288,7 +288,7 @@ class LocalDb implements EmbeddedDb {
   #batchSync(items: BatchItem[], options: BatchOptions): Result<JsRow>[] {
     const statements = items.map(asStatement)
     if (statements.length === 0) {
-      throw BunQLClientError.client("batch needs at least one statement")
+      throw BqlClientError.client("batch needs at least one statement")
     }
     const tenant = this.tenant()
     const resolved = resolveOptions(
@@ -448,8 +448,8 @@ class LocalDb implements EmbeddedDb {
   }
 }
 
-/** In-process BunQL (design §9.2). */
-export class BunQL {
+/** In-process bql.sh (design §9.2). */
+export class Bql {
   readonly config: ServerConfig
   readonly runtime: ServerRuntime
   readonly adminKey: string | null
@@ -474,7 +474,7 @@ export class BunQL {
   }
 
   /** Opens the data directory and builds the engine. Nothing listens until `serve()`. */
-  static async open(options: OpenOptions = {}): Promise<BunQL> {
+  static async open(options: OpenOptions = {}): Promise<Bql> {
     const { dir, intMode, config: file, env, onError, ...sections } = options
     const overrides: ServerConfigInput = {
       ...sections,
@@ -483,16 +483,16 @@ export class BunQL {
     const config = loadConfig({
       file: file ?? null,
       overrides,
-      // An embedded caller configures in code. Reading `BUNQL_*` here would let an unrelated
+      // An embedded caller configures in code. Reading `BQL_*` here would let an unrelated
       // variable in the shell redirect a path the caller wrote out in full.
       env: env ?? {},
     })
-    let self: BunQL | null = null
+    let self: Bql | null = null
     const bundle = await createRuntime(config, {
       ...(onError ? { onError } : {}),
       onTenantOpen: (tenant) => self?.hookCommits(tenant),
     })
-    self = new BunQL({
+    self = new Bql({
       config,
       runtime: bundle.runtime,
       adminKey: bundle.adminKey,
@@ -517,7 +517,7 @@ export class BunQL {
 
   /** The open tenant behind a name, or `DB_NOT_FOUND`. */
   tenantOf(name: string): Tenant {
-    if (this.#closed) throw BunQLClientError.client("this BunQL instance is closed")
+    if (this.#closed) throw BqlClientError.client("this bql.sh instance is closed")
     try {
       return this.runtime.tenant(name)
     } catch (err) {
@@ -593,7 +593,7 @@ export class BunQL {
     } catch (err) {
       throw toClientError(err)
     }
-    if (at <= 0n) throw BunQLClientError.client("restore needs a positive txid in `at`")
+    if (at <= 0n) throw BqlClientError.client("restore needs a positive txid in `at`")
     const into = options.into ?? `${name}-restore-${at}`.slice(0, 64)
     try {
       assertValidName(into)
@@ -652,7 +652,7 @@ export class BunQL {
 
   /** Every durable commit on every database this process opened (design §9.2). */
   on(event: "commit", listener: (event: EmbeddedCommit) => void): () => void {
-    if (event !== "commit") throw BunQLClientError.client(`unknown event ${JSON.stringify(event)}`)
+    if (event !== "commit") throw BqlClientError.client(`unknown event ${JSON.stringify(event)}`)
     this.#commitListeners.add(listener)
     return () => {
       this.#commitListeners.delete(listener)
@@ -713,8 +713,8 @@ export class BunQL {
   }
 }
 
-export default BunQL
-export { BunQLClientError } from "./client/errors.ts"
+export default Bql
+export { BqlClientError } from "./client/errors.ts"
 export { ChangeFeed, LiveQuery } from "./client/feed.ts"
 export { Query, type Result, type ResultMeta } from "./client/sql.ts"
 export type { IntMode, JsRow, JsValue } from "./client/values.ts"

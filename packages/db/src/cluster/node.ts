@@ -1,5 +1,5 @@
 // The cluster node: timers, transport, log and the pure state machine driven together, and the
-// only thing in `src/cluster/` the rest of BunQL ever calls.
+// only thing in `src/cluster/` the rest of bql.sh ever calls.
 //
 // Invariant, and the reason this module exists at all: **the data path never waits on Raft.**
 // `leaseFor(db)` is synchronous, returns a cached object it does not rebuild, and compares nothing

@@ -3,7 +3,7 @@
 // error vocabulary — and core deliberately does not import it, so this is where the two meet.
 //
 // Asking it is not quite a table lookup, because the mapping has two halves. `ERROR_STATUS` covers
-// BunQL's own codes. The `SQLITE_*` names do not appear there at all: `fromSqlite()` maps them by
+// bql.sh's own codes. The `SQLITE_*` names do not appear there at all: `fromSqlite()` maps them by
 // prefix (`SQLITE_CONSTRAINT*` → 409, `SQLITE_BUSY*` → 503, `SQLITE_FULL` → 507) and it is not
 // exported. So rather than restate those rules — the drift this repo exists to avoid — a
 // `SQLITE_*` name is turned back into its numeric result code by inverting `RESULT_CODE_NAMES`,
@@ -31,7 +31,7 @@ const RESULT_CODES: ReadonlyMap<string, number> = (() => {
 })()
 
 /**
- * The HTTP status `src/server/errors.ts` would answer for a BunQL error code, or `undefined` when
+ * The HTTP status `src/server/errors.ts` would answer for a bql.sh error code, or `undefined` when
  * it has never heard of it.
  */
 export function statusForCode(code: string): number | undefined {
@@ -43,7 +43,7 @@ export function statusForCode(code: string): number | undefined {
 }
 
 /**
- * The reason phrase a response description opens with. Only the statuses BunQL can actually
+ * The reason phrase a response description opens with. Only the statuses bql.sh can actually
  * produce are named; anything else falls back to a phrase that is still true.
  */
 const REASON: Readonly<Record<number, string>> = {
@@ -91,7 +91,7 @@ export function errorBodySchema(name: string): Schema {
         .object({
           code: s
             .string()
-            .describe("The BunQL error code, or the SQLite extended result code name.")
+            .describe("The bql.sh error code, or the SQLite extended result code name.")
             .example("SQLITE_CONSTRAINT_UNIQUE"),
           message: s.string().describe("A diagnostic safe to show a caller; never a stack trace."),
           status: s.int().describe("The HTTP status, repeated in the body."),

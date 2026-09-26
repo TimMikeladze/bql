@@ -3,7 +3,7 @@ node_modules/
 .env
 *.log
 
-# @bunql/db
+# bql.sh
 packages/db/experiments/wp/
 packages/db/experiments/*.db
 packages/db/experiments/*.db-wal
@@ -15,7 +15,7 @@ packages/db/data/
 # the vendored libsqlite3 built by `bun run sqlite:build`
 packages/db/vendor/
 
-# @bunql/bus
+# bql.sh/bus
 packages/bus/dist/
-packages/bus/.agenticbus/
+packages/bus/.bql-bus/
 packages/bus/package.json.orig

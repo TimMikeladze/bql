@@ -6,14 +6,14 @@
 //
 // Where the loss would happen: a generated resolver dispatches, gets a non-2xx back and throws a
 // `GraphQLError` of its own — message `"GET /users failed with 403 Forbidden"`, extensions
-// `{code: "OPENAPI_REQUEST_FAILED", status, body}`. The BunQL error is in there, parsed, under
+// `{code: "OPENAPI_REQUEST_FAILED", status, body}`. The bql.sh error is in there, parsed, under
 // `body.error`; left alone it reads to a client as one opaque generic failure whatever went wrong.
 // So the body is unwrapped: its `message` becomes the error's message and every field of
 // `body.error` — `code`, `status`, and the `txid`, `primary`, `problems`, `failedIndex`, `acks`
 // and `needed` that `mapError` attaches — becomes an extension.
 //
 // Nothing else is rewritten. An error the generator did not raise, or one whose body is not a
-// BunQL error body, is passed through exactly as GraphQL formatted it.
+// bql.sh error body, is passed through exactly as GraphQL formatted it.
 //
 // One refusal is not lifted but *unmade*: `NOT_FOUND`. A `/{pk}` route answers `404` when the key
 // matches nothing (`docs/h8-validated-requests.md`), which is right for REST and wrong for
@@ -32,12 +32,12 @@ export interface FormattedGraphQLError {
 /** The extensions key the generator marks a failed REST call with. */
 export const REQUEST_FAILED = "OPENAPI_REQUEST_FAILED"
 
-/** The `{error: {...}}` body every BunQL refusal carries (`src/server/errors.ts`). */
-interface BunQLErrorBody {
+/** The `{error: {...}}` body every bql.sh refusal carries (`src/server/errors.ts`). */
+interface BqlErrorBody {
   error: { code: string; message: string; status?: number } & Record<string, unknown>
 }
 
-function isErrorBody(value: unknown): value is BunQLErrorBody {
+function isErrorBody(value: unknown): value is BqlErrorBody {
   if (typeof value !== "object" || value === null) return false
   const error = (value as { error?: unknown }).error
   if (typeof error !== "object" || error === null) return false
@@ -46,10 +46,10 @@ function isErrorBody(value: unknown): value is BunQLErrorBody {
 }
 
 /**
- * The same error, with a BunQL refusal lifted out of the generator's wrapper. Anything else is
+ * The same error, with a bql.sh refusal lifted out of the generator's wrapper. Anything else is
  * returned unchanged.
  */
-export function liftBunQLError(formatted: FormattedGraphQLError): FormattedGraphQLError {
+export function liftBqlError(formatted: FormattedGraphQLError): FormattedGraphQLError {
   const extensions = formatted.extensions
   if (!extensions || extensions.code !== REQUEST_FAILED) return formatted
   if (!isErrorBody(extensions.body)) return formatted

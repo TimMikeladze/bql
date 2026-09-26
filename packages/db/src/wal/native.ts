@@ -23,11 +23,11 @@ import {
 const NATIVE_LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
 /**
- * `BUNQL_WAL_NATIVE=0` forces the JavaScript, so the fallback is testable without deleting a
+ * `BQL_WAL_NATIVE=0` forces the JavaScript, so the fallback is testable without deleting a
  * library, and CI exercises both paths on a machine that has the helper.
  */
 function wanted(): boolean {
-  return process.env.BUNQL_WAL_NATIVE !== "0"
+  return process.env.BQL_WAL_NATIVE !== "0"
 }
 
 /**
@@ -67,7 +67,7 @@ export class WalChecksum {
   check(bytes: Uint8Array, offset: number, walHeader: WalHeader, previous: Checksum): FrameCheck {
     const frame = offset === 0 ? bytes : bytes.subarray(offset)
     const out = this.#out
-    this.#symbols.bunql_wal_check_frame(
+    this.#symbols.bql_wal_check_frame(
       frame,
       walHeader.pageSize,
       walHeader.salt1,
@@ -99,7 +99,7 @@ export class WalChecksum {
     const out = this.#out
     out[0] = previous[0]
     out[1] = previous[1]
-    this.#symbols.bunql_wal_checksum(
+    this.#symbols.bql_wal_checksum(
       view,
       length,
       littleEndian === NATIVE_LITTLE_ENDIAN ? 1 : 0,
@@ -120,12 +120,12 @@ export function walChecksum(): WalChecksum | null {
   return accelerator
 }
 
-/** Forgets the resolved accelerator, so a test can flip `BUNQL_WAL_NATIVE` and re-resolve. */
+/** Forgets the resolved accelerator, so a test can flip `BQL_WAL_NATIVE` and re-resolve. */
 export function resetWalChecksum(): void {
   accelerator = undefined
 }
 
-/** True when this process is checking frames in C. `bunql serve` says so when it is false. */
+/** True when this process is checking frames in C. `bql serve` says so when it is false. */
 export function walChecksumIsNative(): boolean {
   return walChecksum() !== null
 }

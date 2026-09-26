@@ -137,7 +137,7 @@ describe("a database the primary deletes", () => {
 const scratch: { registry: TenantRegistry; dir: string }[] = []
 
 function tempRegistry(): { registry: TenantRegistry; dir: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-unfollow-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-unfollow-"))
   const registry = TenantRegistry.open({ dir })
   const entry = { registry, dir }
   scratch.push(entry)

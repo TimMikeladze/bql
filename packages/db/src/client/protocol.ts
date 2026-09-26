@@ -1,4 +1,4 @@
-// Invariant: this module is the only description of the BunQL wire format, and it carries no
+// Invariant: this module is the only description of the bql.sh wire format, and it carries no
 // behaviour beyond frozen name tables. Client and server both import it, so a field cannot be
 // renamed on one side without breaking the other at type-check time.
 //
@@ -177,7 +177,7 @@ export interface ResetEvent {
   reason: string
 }
 
-export type BunQLErrorCode =
+export type BqlErrorCode =
   | "BAD_REQUEST"
   | "UNAUTHENTICATED"
   | "NOT_AUTHORIZED"
@@ -214,7 +214,7 @@ export interface ErrorProblem {
 }
 
 export interface ErrorInfo {
-  code: BunQLErrorCode
+  code: BqlErrorCode
   message: string
   status: number
   /** Last txid of the database as the failing request saw it. */
@@ -245,7 +245,7 @@ export interface ErrorBody {
 // One socket, many databases, pipelined. Every client message carries `id` and every reply
 // echoes it; server-initiated messages carry `sub` (or an `event` with no `id`).
 
-export const WS_PROTOCOL = "bunql.v1"
+export const WS_PROTOCOL = "bql.v1"
 
 /** First message when the token cannot travel in a header, as in a browser. */
 export interface WsHelloRequest {
@@ -428,13 +428,13 @@ export type WsServerMessage = WsReply | WsPush | WsHelloEvent | WsMovedEvent | W
 
 /** Response and request headers that carry the same information as the body fields above. */
 export const HEADERS = {
-  txid: "BunQL-Txid",
-  minTxid: "BunQL-Min-Txid",
-  ack: "BunQL-Ack",
-  node: "BunQL-Node",
-  role: "BunQL-Role",
-  durationUs: "BunQL-Duration-Us",
-  primary: "BunQL-Primary",
+  txid: "BQL-Txid",
+  minTxid: "BQL-Min-Txid",
+  ack: "BQL-Ack",
+  node: "BQL-Node",
+  role: "BQL-Role",
+  durationUs: "BQL-Duration-Us",
+  primary: "BQL-Primary",
 } as const
 
 // ── Admin routes (design §6.5) ─────────────────────────────────────────────────────────────────

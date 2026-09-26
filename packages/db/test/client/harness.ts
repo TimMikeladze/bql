@@ -1,7 +1,7 @@
 // A live server plus a client pointed at it. The server is the one `test/server/harness.ts`
 // starts, so the SDK is tested against exactly the routes the route tests cover.
 
-import type { BunQLClientError } from "../../src/client/errors.ts"
+import type { BqlClientError } from "../../src/client/errors.ts"
 import { createClient, type Client, type ClientOptions } from "../../src/client/index.ts"
 import type { FetchLike } from "../../src/client/http.ts"
 import { createDb, startTestServer, type TestServer } from "../server/harness.ts"
@@ -39,11 +39,11 @@ export async function startClientFixture(
 }
 
 /** The error a promise rejected with. Fails the test when it resolved instead. */
-export async function failure(promise: PromiseLike<unknown>): Promise<BunQLClientError> {
+export async function failure(promise: PromiseLike<unknown>): Promise<BqlClientError> {
   try {
     await promise
   } catch (err) {
-    return err as BunQLClientError
+    return err as BqlClientError
   }
   throw new Error("expected the call to fail, and it did not")
 }

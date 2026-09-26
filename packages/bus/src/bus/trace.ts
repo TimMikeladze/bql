@@ -132,7 +132,7 @@ export function otlpExporter(options: OtlpOptions): SpanExporter {
     : `${options.endpoint.replace(/\/$/, "")}/v1/traces`;
   const doFetch = options.fetchImpl ?? fetch;
   const maxBatch = options.maxBatch ?? 256;
-  const serviceName = options.serviceName ?? "agenticbus";
+  const serviceName = options.serviceName ?? "bql-bus";
   let buffer: SpanData[] = [];
   let stopped = false;
 
@@ -146,7 +146,7 @@ export function otlpExporter(options: OtlpOptions): SpanExporter {
           },
           scopeSpans: [
             {
-              scope: { name: "agenticbus" },
+              scope: { name: "bql-bus" },
               spans: spans.map((span) => ({
                 traceId: span.traceId,
                 spanId: span.spanId,

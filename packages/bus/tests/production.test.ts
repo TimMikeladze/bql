@@ -38,7 +38,7 @@ const sub = (
 // ------------------------------------------------------------- durability
 
 test("a blob is written atomically and leaves no temporary behind", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/agenticbus-blobs-`);
+  const directory = await mkdtemp(`${tmpdir()}/bql-bus-blobs-`);
   try {
     const blobs = fileBlobs(directory);
     await blobs.put("abc", JSON.stringify({ hello: "world" }));
@@ -115,7 +115,7 @@ test("a message whose blob vanished is reconciled at startup", async () => {
 });
 
 test("a full disk refuses publishes and still allows draining", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/agenticbus-full-`);
+  const directory = await mkdtemp(`${tmpdir()}/bql-bus-full-`);
   try {
     const store = new BusStore(`${directory}/bus.db`, {
       now,
@@ -143,7 +143,7 @@ test("a full disk refuses publishes and still allows draining", async () => {
 });
 
 test("the WAL is truncated once it passes its ceiling", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/agenticbus-wal-`);
+  const directory = await mkdtemp(`${tmpdir()}/bql-bus-wal-`);
   try {
     const store = new BusStore(`${directory}/bus.db`, {
       now,

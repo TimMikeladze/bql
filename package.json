@@ -1,29 +1,118 @@
 {
-  "name": "bunql",
-  "private": true,
+  "name": "bql.sh",
+  "version": "0.1.0",
   "type": "module",
-  "description": "SQLite as a multi-tenant database server, and a durable message bus on top of it.",
+  "description": "SQLite as a multi-tenant database server for Bun \u2014 WAL shipping, hook-driven realtime, an FFI driver \u2014 and the durable bus that runs work against it.",
   "license": "MIT",
+  "author": "Tim Mikeladze <tim.mikeladze@gmail.com>",
+  "homepage": "https://bql.sh",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TimMikeladze/bunql.git"
+    "url": "git+https://github.com/TimMikeladze/bql.git"
   },
-  "homepage": "https://github.com/TimMikeladze/bunql#readme",
   "bugs": {
-    "url": "https://github.com/TimMikeladze/bunql/issues"
+    "url": "https://github.com/TimMikeladze/bql/issues"
   },
-  "workspaces": [
-    "packages/*"
+  "keywords": [
+    "bun",
+    "sqlite",
+    "database",
+    "multi-tenant",
+    "wal",
+    "replication",
+    "realtime",
+    "libsql",
+    "hrana",
+    "message-bus",
+    "message-queue",
+    "pubsub",
+    "work-queue",
+    "request-reply",
+    "durable",
+    "at-least-once",
+    "agents"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "engines": {
     "bun": ">=1.4.0"
   },
+  "bin": {
+    "bql": "packages/db/src/cli.ts",
+    "bql-bus": "packages/bus/src/cli/index.ts"
+  },
+  "exports": {
+    ".": "./packages/db/src/embedded.ts",
+    "./client": "./packages/db/src/client/index.ts",
+    "./kysely": "./packages/db/src/kysely.ts",
+    "./drizzle": "./packages/db/src/drizzle.ts",
+    "./protocol": "./packages/db/src/client/protocol.ts",
+    "./server": "./packages/db/src/server/index.ts",
+    "./tenant": "./packages/db/src/tenant/index.ts",
+    "./realtime": "./packages/db/src/realtime/index.ts",
+    "./sqlite": "./packages/db/src/sqlite/index.ts",
+    "./wal": "./packages/db/src/wal/index.ts",
+    "./core": "./packages/db/src/core/index.ts",
+    "./http": "./packages/db/src/http/index.ts",
+    "./openapi": "./packages/db/src/openapi/index.ts",
+    "./dataapi": "./packages/db/src/dataapi/index.ts",
+    "./graphql": "./packages/db/src/graphql/index.ts",
+    "./bus": "./packages/bus/src/index.ts",
+    "./bus/client": "./packages/bus/src/client/bus.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "packages/db/src",
+    "packages/db/scripts",
+    "packages/db/README.md",
+    "packages/db/docs/design.md",
+    "packages/db/docs/api.md",
+    "packages/db/docs/c6-packaging.md",
+    "packages/db/docs/l7-tarball.md",
+    "packages/bus/src",
+    "packages/bus/dist/dashboard",
+    "packages/bus/README.md"
+  ],
+  "workspaces": [
+    "packages/*",
+    "site"
+  ],
   "scripts": {
+    "self-link": "bun run scripts/self-link.ts",
     "bytes": "bun run scripts/bytes.ts --check",
     "typecheck": "tsc --noEmit && bun run --filter '*' typecheck",
     "test": "bun run --filter '*' test",
-    "db": "bun run --filter '@bunql/db'",
-    "bus": "bun run --filter '@bunql/bus'"
+    "db": "bun run --filter 'bql-db'",
+    "bus": "bun run --filter 'bql-bus'",
+    "site": "bun run --filter 'bql-site'",
+    "site:build": "bun run --filter 'bql-site' build",
+    "site:og": "bun run --filter 'bql-site' og",
+    "prepack": "bun run --filter 'bql-bus' build",
+    "pack:check": "bun run scripts/pack-check.ts"
+  },
+  "peerDependencies": {
+    "drizzle-orm": ">=0.44",
+    "kysely": ">=0.28",
+    "graphql": ">=16",
+    "openapi-x-graphql": ">=1"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": true
+    },
+    "kysely": {
+      "optional": true
+    },
+    "graphql": {
+      "optional": true
+    },
+    "openapi-x-graphql": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "bun-types": "^1.4.2",

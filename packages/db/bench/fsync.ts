@@ -64,7 +64,7 @@ const SWEEP = flag("sweep", "per-db") as "shared" | "per-db"
 const DEPTH = Number(flag("depth", "1"))
 const ACK = flag("ack", "fsync") as AckLevel
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-fsync-bench-"))
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-fsync-bench-"))
 process.on("exit", () => fs.rmSync(root, { recursive: true, force: true }))
 
 interface Rung {
@@ -146,7 +146,7 @@ const rungs: Rung[] = []
 for (const tenants of LADDER) rungs.push(await rung(tenants))
 
 console.log(
-  `bunql fsync bench · sweep=${SWEEP} · ack=${ACK} · depth=${DEPTH} · ${ROUNDS} rounds/tenant · ` +
+  `bql fsync bench · sweep=${SWEEP} · ack=${ACK} · depth=${DEPTH} · ${ROUNDS} rounds/tenant · ` +
     `Bun ${Bun.version} · ${process.platform}/${process.arch}\n`,
 )
 console.log(

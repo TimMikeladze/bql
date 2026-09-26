@@ -39,8 +39,8 @@ describe("the live role", () => {
     })
     expect(refused.status).toBe(503)
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("NOT_PRIMARY")
-    expect(refused.headers.get("BunQL-Role")).toBe("replica")
-    expect(refused.headers.get("BunQL-Primary")).toBe("http://127.0.0.1:9")
+    expect(refused.headers.get("BQL-Role")).toBe("replica")
+    expect(refused.headers.get("BQL-Primary")).toBe("http://127.0.0.1:9")
 
     // Reads still work: the copy is a copy, and serving it is the whole point of a replica.
     const read = await server.fetch("/v1/db/acme/query", {
@@ -56,8 +56,8 @@ describe("the live role", () => {
       body: JSON.stringify({ sql: "insert into t (v) values ('fine')" }),
     })
     expect(other.status).toBe(200)
-    expect(other.headers.get("BunQL-Role")).toBe("primary")
-    expect(other.headers.get("BunQL-Primary")).toBeNull()
+    expect(other.headers.get("BQL-Role")).toBe("primary")
+    expect(other.headers.get("BQL-Primary")).toBeNull()
   })
 
   // The reason `src/server/app.ts` mounts the registry behind its own wrapper rather than behind
@@ -77,7 +77,7 @@ describe("the live role", () => {
     })
     expect(refused.status).toBe(307)
     expect(refused.headers.get("location")).toBe(`${server.url}/v1/db/acme/query?x=1`)
-    expect(refused.headers.get("BunQL-Primary")).toBe(server.url)
+    expect(refused.headers.get("BQL-Primary")).toBe(server.url)
 
     // A body core refuses is refused first, and that is right: `query` cannot know whether the
     // statement is a write — and so whether this node may take it — until it has read the SQL.

@@ -2,7 +2,7 @@
 // baton (§6.3). The same callback has to behave the same way on either.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import type { BunQLClientError } from "../../src/client/index.ts"
+import type { BqlClientError } from "../../src/client/index.ts"
 import { startClientFixture, stopAll, type ClientFixture } from "./harness.ts"
 
 let fixture: ClientFixture
@@ -50,7 +50,7 @@ for (const via of ["ws", "http"] as const) {
         .transaction(async (tx) => {
           await tx.sql`insert into nope(v) values (1)`
         }, { via })
-        .then(null, (err: unknown) => err as BunQLClientError)
+        .then(null, (err: unknown) => err as BqlClientError)
       expect(failure?.code).toBe("SQLITE_ERROR")
       // The next transaction proves the baton was dropped rather than left holding the writer.
       await db.transaction(async (tx) => {
@@ -90,14 +90,14 @@ describe("transport choice", () => {
   // caller is holding.
   test("a nested transaction on the same database is refused once the queue wait expires", async () => {
     const db = fixture.client.db("acme")
-    let inner: BunQLClientError | null = null
+    let inner: BqlClientError | null = null
     await db.transaction(async () => {
       inner = (await db
         .transaction(async () => undefined, { via: "http" })
-        .then(null, (err: unknown) => err as BunQLClientError)) as BunQLClientError | null
+        .then(null, (err: unknown) => err as BqlClientError)) as BqlClientError | null
     }, { via: "http" })
     expect(inner).not.toBeNull()
-    expect((inner as unknown as BunQLClientError).code).toBe("TX_BUSY")
-    expect((inner as unknown as BunQLClientError).status).toBe(409)
+    expect((inner as unknown as BqlClientError).code).toBe("TX_BUSY")
+    expect((inner as unknown as BqlClientError).status).toBe(409)
   })
 })

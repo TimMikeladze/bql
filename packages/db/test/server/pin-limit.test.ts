@@ -89,7 +89,7 @@ test("a principal past the pin limit is refused, and other principals are not", 
     const other = await subscribe(NAMES[PIN_LIMIT] as string, theirs)
     expect(other.status).toBe(200)
     open.push(other)
-    expect(await metric("bunql_tenants_pinned")).toBe(PIN_LIMIT + 1)
+    expect(await metric("bql_tenants_pinned")).toBe(PIN_LIMIT + 1)
   } finally {
     for (const feed of open) feed.close()
   }
@@ -110,7 +110,7 @@ test("a dropped connection gives its pins back", async () => {
   expect(after.status).toBe(200)
   after.close()
   await settle()
-  expect(await metric("bunql_tenants_pinned")).toBe(0)
+  expect(await metric("bql_tenants_pinned")).toBe(0)
 })
 
 test("a node whose LRU is entirely pinned refuses the open instead of exceeding maxOpen", async () => {
@@ -123,7 +123,7 @@ test("a node whose LRU is entirely pinned refuses the open instead of exceeding 
       expect(feed.status).toBe(200)
       held.push(feed)
     }
-    expect(await metric("bunql_open_tenants")).toBe(MAX_OPEN)
+    expect(await metric("bql_open_tenants")).toBe(MAX_OPEN)
 
     const token = (await server.token({ dbs: NAMES, scope: "ro" })).token
     const refused = await server.fetch(`/v1/db/${NAMES[MAX_OPEN]}/query`, {
@@ -133,9 +133,9 @@ test("a node whose LRU is entirely pinned refuses the open instead of exceeding 
     })
     expect(refused.status).toBe(503)
     expect(((await refused.json()) as ErrorBody).error.code).toBe("TOO_MANY_OPEN")
-    expect(await metric("bunql_open_refused_total")).toBeGreaterThan(0)
+    expect(await metric("bql_open_refused_total")).toBeGreaterThan(0)
     // The ceiling held: at `maxOpen`, not past it. Before L4 this was `maxOpen + 1` and climbing.
-    expect(await metric("bunql_open_tenants")).toBe(MAX_OPEN)
+    expect(await metric("bql_open_tenants")).toBe(MAX_OPEN)
   } finally {
     for (const feed of held) feed.close()
   }

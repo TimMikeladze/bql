@@ -45,7 +45,7 @@ describe("placement", () => {
     expect(refused.status).toBe(503)
     const body = (await refused.json()) as { error: { code: string; primary?: string } }
     expect(body.error.code).toBe("NOT_PRIMARY")
-    expect(refused.headers.get("bunql-primary")).toContain(String(second.port))
+    expect(refused.headers.get("bql-primary")).toContain(String(second.port))
 
     // The home node creates it.
     const created = await second.fetch("/v1/db", { method: "POST", body: JSON.stringify({ name }) })
@@ -90,7 +90,7 @@ describe("placement", () => {
       // Not a 404: the cluster can locate it, so the client is told rather than refused.
       expect(response.status).toBe(503)
       expect(((await response.json()) as { error: { code: string } }).error.code).toBe("NOT_PRIMARY")
-      expect(response.headers.get("bunql-primary")).toContain(String(first.port))
+      expect(response.headers.get("bql-primary")).toContain(String(first.port))
     }
 
     // A name nothing has ever heard of is still a 404: there is nowhere to send the client.

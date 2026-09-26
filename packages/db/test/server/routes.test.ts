@@ -116,15 +116,15 @@ describe("query", () => {
     expect(result.types).toEqual(["INTEGER", "BLOB", "TEXT", "NULL", "REAL"])
   })
 
-  test("every response carries the four BunQL headers", async () => {
+  test("every response carries the four bql.sh headers", async () => {
     const response = await server.fetch("/v1/db/acme/query", {
       method: "POST",
       body: JSON.stringify({ sql: "select 1" }),
     })
-    expect(response.headers.get("BunQL-Node")).toBe("test-node")
-    expect(response.headers.get("BunQL-Role")).toBe("primary")
-    expect(Number(response.headers.get("BunQL-Txid"))).toBeGreaterThan(0)
-    expect(Number(response.headers.get("BunQL-Duration-Us"))).toBeGreaterThanOrEqual(0)
+    expect(response.headers.get("BQL-Node")).toBe("test-node")
+    expect(response.headers.get("BQL-Role")).toBe("primary")
+    expect(Number(response.headers.get("BQL-Txid"))).toBeGreaterThan(0)
+    expect(Number(response.headers.get("BQL-Duration-Us"))).toBeGreaterThanOrEqual(0)
   })
 
   test("more than maxRows fails the request rather than truncating it", async () => {
@@ -151,7 +151,7 @@ describe("query", () => {
   test("a minTxid this node cannot reach waits, then answers 425", async () => {
     const response = await server.fetch("/v1/db/acme/query", {
       method: "POST",
-      headers: { "BunQL-Min-Txid": "999999" },
+      headers: { "BQL-Min-Txid": "999999" },
       body: JSON.stringify({ sql: "select 1" }),
     })
     expect(response.status).toBe(425)
@@ -164,7 +164,7 @@ describe("query", () => {
     const current = await post<QueryResult>("/v1/db/acme/query", { sql: "select 1" })
     const waiting = server.fetch("/v1/db/acme/query", {
       method: "POST",
-      headers: { "BunQL-Min-Txid": String(current.txid + 1) },
+      headers: { "BQL-Min-Txid": String(current.txid + 1) },
       body: JSON.stringify({ sql: "select count(*) from todos" }),
     })
     await post<QueryResult>("/v1/db/acme/query", {

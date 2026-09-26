@@ -1,69 +1,13 @@
 {
-  "name": "@bunql/db",
-  "version": "0.0.0",
+  "name": "bql-db",
+  "private": true,
   "type": "module",
-  "description": "SQLite as a multi-tenant database server for Bun, with WAL shipping and hook-driven realtime.",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/TimMikeladze/bunql.git",
-    "directory": "packages/db"
-  },
-  "homepage": "https://github.com/TimMikeladze/bunql#readme",
-  "bugs": {
-    "url": "https://github.com/TimMikeladze/bunql/issues"
-  },
-  "keywords": [
-    "bun",
-    "sqlite",
-    "database",
-    "multi-tenant",
-    "wal",
-    "replication",
-    "realtime",
-    "libsql",
-    "hrana"
-  ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
-  "bin": {
-    "bunql": "src/cli.ts"
-  },
-  "exports": {
-    ".": "./src/embedded.ts",
-    "./client": "./src/client/index.ts",
-    "./kysely": "./src/kysely.ts",
-    "./drizzle": "./src/drizzle.ts",
-    "./protocol": "./src/client/protocol.ts",
-    "./server": "./src/server/index.ts",
-    "./tenant": "./src/tenant/index.ts",
-    "./realtime": "./src/realtime/index.ts",
-    "./sqlite": "./src/sqlite/index.ts",
-    "./wal": "./src/wal/index.ts",
-    "./core": "./src/core/index.ts",
-    "./http": "./src/http/index.ts",
-    "./openapi": "./src/openapi/index.ts",
-    "./dataapi": "./src/dataapi/index.ts",
-    "./graphql": "./src/graphql/index.ts"
-  },
-  "files": [
-    "LICENSE",
-    "src",
-    "scripts",
-    "docs/design.md",
-    "docs/api.md",
-    "docs/c6-packaging.md",
-    "docs/l7-tarball.md",
-    "README.md"
-  ],
+  "description": "SQLite as a multi-tenant database server for Bun, with WAL shipping and hook-driven realtime. Published as part of `bql.sh`; this manifest is for development only.",
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "sqlite:build": "bun run scripts/sqlite.ts",
     "routes:check": "bun run scripts/routes.ts --check",
-    "pack:check": "bun run scripts/pack-check.ts",
     "start": "bun run src/server/main.ts",
     "dev": "bun run --watch src/server/main.ts",
     "cli": "bun run src/cli.ts",
@@ -79,26 +23,6 @@
   },
   "engines": {
     "bun": ">=1.4.0"
-  },
-  "peerDependencies": {
-    "drizzle-orm": ">=0.44",
-    "kysely": ">=0.28",
-    "graphql": ">=16",
-    "openapi-x-graphql": ">=1"
-  },
-  "peerDependenciesMeta": {
-    "drizzle-orm": {
-      "optional": true
-    },
-    "kysely": {
-      "optional": true
-    },
-    "graphql": {
-      "optional": true
-    },
-    "openapi-x-graphql": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@libsql/client": "^0.18.0",

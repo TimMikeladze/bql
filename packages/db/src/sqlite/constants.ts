@@ -289,7 +289,7 @@ export type FileControlName = keyof typeof FILE_CONTROLS
  * `SQLITE_DBCONFIG_LOOKASIDE` and `SQLITE_DBCONFIG_MAINDBNAME`, whose shapes differ.
  *
  * These have **no pragma**: `sqlite3_db_config` is the only way to reach them, it is variadic, and
- * bun:ffi cannot call a variadic function — so they go through `bunql_db_config_int` in the
+ * bun:ffi cannot call a variadic function — so they go through `bql_db_config_int` in the
  * vendored artefact and are simply unreachable on a system libsqlite3 (`docs/p1-pragmas.md`).
  */
 export const DB_CONFIGS = {

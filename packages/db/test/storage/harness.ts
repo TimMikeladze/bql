@@ -1,7 +1,7 @@
 // Shared fixtures for the storage tests: a bucket to ship to, a tenant to ship from, and scratch
 // directories that are always cleaned up.
 //
-// The bucket is a real S3-compatible server when `BUNQL_TEST_S3_ENDPOINT` names one (a MinIO in
+// The bucket is a real S3-compatible server when `BQL_TEST_S3_ENDPOINT` names one (a MinIO in
 // Docker, say) and the in-process `FakeS3` otherwise — `describeBackend()` says which ran, so a
 // test report never has to guess.
 
@@ -18,7 +18,7 @@ const created: string[] = []
 const registries: TenantRegistry[] = []
 const fakes: FakeS3[] = []
 
-export function tempDir(prefix = "bunql-s3-"): string {
+export function tempDir(prefix = "bql-s3-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   created.push(dir)
   return dir
@@ -67,17 +67,17 @@ let counter = 0
  * its own.
  */
 export async function openBackend(): Promise<Backend> {
-  const endpoint = process.env.BUNQL_TEST_S3_ENDPOINT
-  const bucket = process.env.BUNQL_TEST_S3_BUCKET ?? "bunql-test"
+  const endpoint = process.env.BQL_TEST_S3_ENDPOINT
+  const bucket = process.env.BQL_TEST_S3_BUCKET ?? "bql-test"
   const base = `test-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
 
   if (endpoint) {
     const options = {
       bucket,
       endpoint,
-      region: process.env.BUNQL_TEST_S3_REGION ?? "us-east-1",
-      accessKeyId: process.env.BUNQL_TEST_S3_ACCESS_KEY ?? "minioadmin",
-      secretAccessKey: process.env.BUNQL_TEST_S3_SECRET_KEY ?? "minioadmin",
+      region: process.env.BQL_TEST_S3_REGION ?? "us-east-1",
+      accessKeyId: process.env.BQL_TEST_S3_ACCESS_KEY ?? "minioadmin",
+      secretAccessKey: process.env.BQL_TEST_S3_SECRET_KEY ?? "minioadmin",
     }
     return {
       kind: "minio",

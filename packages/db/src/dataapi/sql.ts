@@ -23,7 +23,7 @@
 // write and the row it produced are one statement, one `exec.ts` call and one txid — never a
 // write followed by a read that another transaction could slip between.
 
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import type { DataStatement, DataValue } from "./context.ts"
 import type { Condition, ListPlan, Operator } from "./filter.ts"
 import type { ColumnInfo, TableInfo } from "./introspect.ts"
@@ -127,12 +127,12 @@ function insertStatement(
   rows: DataValue[][],
   returning: ColumnInfo[],
 ): DataStatement {
-  if (rows.length === 0) throw BunQLError.badRequest("an insert needs at least one row")
+  if (rows.length === 0) throw BqlError.badRequest("an insert needs at least one row")
   const into = qualified(table)
   const back = ` RETURNING ${columnList(returning)}`
   if (columns.length === 0) {
     if (rows.length > 1) {
-      throw BunQLError.badRequest("a bulk insert of empty rows would be one row's defaults, repeated")
+      throw BqlError.badRequest("a bulk insert of empty rows would be one row's defaults, repeated")
     }
     return { sql: `INSERT INTO ${into} DEFAULT VALUES${back}`, args: [] }
   }
@@ -151,7 +151,7 @@ function updateStatement(
   key: Condition[],
   returning: ColumnInfo[],
 ): DataStatement {
-  if (set.length === 0) throw BunQLError.badRequest("an update needs at least one column to set")
+  if (set.length === 0) throw BqlError.badRequest("an update needs at least one column to set")
   const args: DataValue[] = []
   let sql = `UPDATE ${qualified(table)} SET `
   sql += set.map((one) => `${quote(one.column.name)} = ?`).join(", ")

@@ -1,4 +1,4 @@
-# Prompt: finish AgenticBus
+# Prompt: finish bql.sh/bus
 
 Hand this to an agent (or a fresh session) as the task. It assumes no memory of how the code got here.
 
@@ -6,7 +6,7 @@ Hand this to an agent (or a fresh session) as the task. It assumes no memory of 
 
 ## What you are working on
 
-**AgenticBus** (`~/workspace/agenticbus`) is a durable message bus for agents and ordinary background work. Bun, SQLite, zero runtime dependencies. Publish to a subject; durable subscriptions deliver to consumers with leases, retries, per-key ordering and a dead-letter path. It is three things from one set of primitives: a work queue (competing consumers), pub/sub (many subscriptions per subject, each with its own cursor), and durable request/reply (a response recorded against a correlation, collectable after a restart).
+**bql.sh/bus** (`~/workspace/bql-bus`) is a durable message bus for agents and ordinary background work. Bun, SQLite, zero runtime dependencies. Publish to a subject; durable subscriptions deliver to consumers with leases, retries, per-key ordering and a dead-letter path. It is three things from one set of primitives: a work queue (competing consumers), pub/sub (many subscriptions per subject, each with its own cursor), and durable request/reply (a response recorded against a correlation, collectable after a restart).
 
 **dagr-remote** (`~/workspace/dagr/packages/dagr-remote`) is its first real client: it lets [dagr](https://github.com/TimMikeladze/dagr), a single-node workflow engine, run step handlers on other machines over the bus. dagr depends on the bus. **The bus must never depend on dagr** — that dependency was inverted once already and re-introducing it undoes the whole point.
 
@@ -85,7 +85,7 @@ Nobody can run this in anger without these.
 The API has actions the dashboard and CLI cannot reach.
 
 - Dashboard: pause/resume a subscription, replay, purge, and a DLQ view with a requeue button.
-- CLI: `agenticbus dlq <subscription>` to list, `agenticbus dlq requeue` to republish onto the original subject.
+- CLI: `bql-bus dlq <subscription>` to list, `bql-bus dlq requeue` to republish onto the original subject.
 - Verify the dashboard with the browser agent, not by reading the JSX.
 
 **Gate:** a dead letter can be inspected and requeued without touching `curl`.
@@ -94,11 +94,11 @@ The API has actions the dashboard and CLI cannot reach.
 
 Nothing here is usable by anyone else until this is done.
 
-- Publish `agenticbus` to npm: `files`, a build (dagr uses `bunup` — match it), exports verified from a clean install in a temp directory.
-- Then `dagr-remote`, replacing `"agenticbus": "file:../../../agenticbus"` with the published version.
-- README install instructions that work from `bun add agenticbus` rather than from a sibling checkout.
+- Publish `bql-bus` to npm: `files`, a build (dagr uses `bunup` — match it), exports verified from a clean install in a temp directory.
+- Then `dagr-remote`, replacing `"bql-bus": "file:../../../bql-bus"` with the published version.
+- README install instructions that work from `bun add bql-bus` rather than from a sibling checkout.
 
-**Gate:** `bun add agenticbus` in an empty directory, then publish and consume a message.
+**Gate:** `bun add bql-bus` in an empty directory, then publish and consume a message.
 
 ### 7. Deployment
 

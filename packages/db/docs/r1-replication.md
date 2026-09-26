@@ -11,7 +11,7 @@ every place the code deviates from the plan and why, and the seams R2 will need.
 | `src/replication/primary.ts` | `ReplicationServer`: send order per stream is strictly ascending txid with no holes. |
 | `src/replication/replica.ts` | `ReplicaClient`: a record is acked only after it is applied and the position is persisted. |
 | `src/tenant/tenant.ts` | a replica tenant never authors a transaction; every txid it holds came from a record it verified. |
-| `src/server/` | `[replication]` config, `/v1/replication` endpoint, `BunQL-Role`, `503 NOT_PRIMARY` on writes. |
+| `src/server/` | `[replication]` config, `/v1/replication` endpoint, `BQL-Role`, `503 NOT_PRIMARY` on writes. |
 
 ## Wire protocol
 
@@ -114,11 +114,11 @@ reconnectMs = 250
 forwardWrites = true      # R2
 ```
 
-Every key has a `BUNQL_REPLICATION_*` override (`BUNQL_REPLICATION_PRIMARY`,
-`BUNQL_REPLICATION_SECRET`, `BUNQL_REPLICATION_FOLLOW` as a comma-separated list, …) plus the
-short aliases `BUNQL_REPLICA_OF`, `BUNQL_CLUSTER_SECRET` and `BUNQL_FOLLOW`.
+Every key has a `BQL_REPLICATION_*` override (`BQL_REPLICATION_PRIMARY`,
+`BQL_REPLICATION_SECRET`, `BQL_REPLICATION_FOLLOW` as a comma-separated list, …) plus the
+short aliases `BQL_REPLICA_OF`, `BQL_CLUSTER_SECRET` and `BQL_FOLLOW`.
 
-CLI: `bunql serve --replica-of wss://… --cluster-secret <s> --follow a,b`. `--replica-of` alone
+CLI: `bql serve --replica-of wss://… --cluster-secret <s> --follow a,b`. `--replica-of` alone
 sets `role = "replica"`.
 
 ## Seams R2 needs
@@ -131,14 +131,14 @@ sets `role = "replica"`.
   `protocol.ts` with their body interfaces and are *not* handled: the primary answers an
   unexpected `FORWARD` with `ERROR {code:"PROTO"}`. The replica's write path throws
   `TenantError("NOT_PRIMARY")`, which `src/server/runtime.ts` maps to `503 NOT_PRIMARY` with a
-  `BunQL-Primary` header carrying `replication.primary`. R2 replaces that throw with a `FORWARD`
+  `BQL-Primary` header carrying `replication.primary`. R2 replaces that throw with a `FORWARD`
   round-trip; the header and the error code stay as they are so a client that already handles
   them keeps working.
 - **Read-your-writes across nodes.** A replica tenant's `waitFor(txid)` resolves from
-  `applyRecord`, so `BunQL-Min-Txid` already blocks until the stream delivers that txid and then
+  `applyRecord`, so `BQL-Min-Txid` already blocks until the stream delivers that txid and then
   serves the read. Nothing more is needed on the tenant side.
 - **Epoch.** `SUBSCRIBE.epoch` is compared against the tenant's epoch and a higher one is refused
-  `EPOCH_AHEAD`. Promotion (`bunql promote`) is not built; when it is, it increments the tenant
+  `EPOCH_AHEAD`. Promotion (`bql promote`) is not built; when it is, it increments the tenant
   epoch through `Catalog.setEpoch` and the old primary is fenced on its next `SUBSCRIBE`.
 
 ## Observability
@@ -159,5 +159,5 @@ On a replica:
   "lastError": null }
 ```
 
-`/metrics` gains `bunql_replication_lag_txid`, `bunql_replication_connected`,
-`bunql_replication_bytes_total` and `bunql_replication_records_total`.
+`/metrics` gains `bql_replication_lag_txid`, `bql_replication_connected`,
+`bql_replication_bytes_total` and `bql_replication_records_total`.

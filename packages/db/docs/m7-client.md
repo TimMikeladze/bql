@@ -8,9 +8,9 @@ open, and every deviation.
 | file | invariant |
 |---|---|
 | `src/client/values.ts` | the only place wire values become JS values and back; nothing here may touch a Bun or Node global |
-| `src/client/errors.ts` | every failure a caller sees is a `BunQLClientError` carrying the server's `code`, `status` and `txid` |
+| `src/client/errors.ts` | every failure a caller sees is a `BqlClientError` carrying the server's `code`, `status` and `txid` |
 | `src/client/sql.ts` | a tagged template produces parameters, never interpolated SQL |
-| `src/client/http.ts` | one place builds a request, so the token, `BunQL-Min-Txid` and the txid bookkeeping cannot be forgotten by a caller |
+| `src/client/http.ts` | one place builds a request, so the token, `BQL-Min-Txid` and the txid bookkeeping cannot be forgotten by a caller |
 | `src/client/socket.ts` | one socket per client, opened lazily; every subscription is an intent that survives a reconnect |
 | `src/client/stream.ts` | an SSE reader that owns its reconnect and resumes from the last txid it saw |
 | `src/client/feed.ts` | a subscription is an emitter and an async iterable at once, and one delivery point feeds both |
@@ -80,7 +80,7 @@ looking through a leading `WITH …` so a CTE that inserts reports `INSERT`.
    registered before the subscription goes out, and `key` after the start is an error rather than a
    silent no-op.
 
-8. **Embedded mode is the server's own runtime, not a second one.** `BunQL.open` builds a
+8. **Embedded mode is the server's own runtime, not a second one.** `Bql.open` builds a
    `ServerRuntime`; `serve()` hands that runtime to `startServer`. Two runtimes over one registry
    would each install an `AuthorizerHub` on the same connection and fight for SQLite's single
    authorizer slot, which `src/server/runtime.ts` names as its first invariant.
@@ -99,7 +99,7 @@ looking through a leading `WITH …` so a CTE that inserts reports `INSERT`.
     hood"); the async surface wraps the same call in `Promise.resolve`, so the two cannot drift.
 
 12. **The CLI's remote commands are a thin HTTP client, and `serve` is the only one that opens the
-    data directory.** A `bunql db create` against a running server that also holds the directory
+    data directory.** A `bql db create` against a running server that also holds the directory
     open would be a second writer for the catalog.
 
 ## Deviations from design §9
@@ -109,36 +109,36 @@ looking through a leading `WITH …` so a CTE that inserts reports `INSERT`.
   here. Two names for one thing rather than an invented second meaning.
 - **`sql.begin()` is spelled `db.transaction()`.** Design §9.1 names both; the plan's own example
   (§9.1, line 6) uses `transaction`, and `begin` is the libsql spelling of the same thing.
-- **`bunql promote` and `bunql cluster` are not implemented.** They are phase 1 and 2 (design §11),
+- **`bql promote` and `bql cluster` are not implemented.** They are phase 1 and 2 (design §11),
   and the server route they would call does not exist either (docs/m5-server.md).
-- **`--replica-of` is not a flag on `bunql serve`.** Replication is phase 1.
-- **`bunql restore --at` accepts a timestamp as well as a txid.** Design §9.3 asks for
+- **`--replica-of` is not a flag on `bql serve`.** Replication is phase 1.
+- **`bql restore --at` accepts a timestamp as well as a txid.** Design §9.3 asks for
   `<txid|time>`, but `POST /v1/db/{db}/restore` in M5 took a txid only. The route now resolves an
   ISO-8601 or epoch-millisecond `at` against the tenant's transaction log, which carries a
   microsecond timestamp per record; the same resolution applies to `from.at` on `POST /v1/db`, so
-  `bunql db fork x --from y@2026-09-11T10:00:00Z` works too.
-- **`BunQL.open({ s3 })` is not accepted.** S3 shipping is phase 1; the option would be a promise
+  `bql db fork x --from y@2026-09-11T10:00:00Z` works too.
+- **`Bql.open({ s3 })` is not accepted.** S3 shipping is phase 1; the option would be a promise
   the node cannot keep.
 - **Kysely and Drizzle adapters are not shipped.** Design §9.2 puts them in phase 1.
-- **`bunql exec <db> --sql …` is an addition**, not a design §9.3 command. `shell` needs a
+- **`bql exec <db> --sql …` is an addition**, not a design §9.3 command. `shell` needs a
   terminal, and a one-shot statement is what a script and a test actually want.
 
 ## Environment overrides
 
-Every `[section] key` of design §9.4 has a `BUNQL_<SECTION>_<KEY>` override, and the short aliases
+Every `[section] key` of design §9.4 has a `BQL_<SECTION>_<KEY>` override, and the short aliases
 that predate this milestone keep working. The full table is in `src/server/config.ts` and in the
 README.
 
-`BUNQL_DATA_DIR` did not work before this milestone: `data.dir` was reachable only as `BUNQL_DIR`,
+`BQL_DATA_DIR` did not work before this milestone: `data.dir` was reachable only as `BQL_DIR`,
 which is not the name the section-plus-key rule produces. Both names are accepted now, and so are
-`BUNQL_SERVER_PORT` alongside `BUNQL_PORT`, `BUNQL_AUTH_ADMIN_KEY` alongside `BUNQL_ADMIN_KEY`, and
+`BQL_SERVER_PORT` alongside `BQL_PORT`, `BQL_AUTH_ADMIN_KEY` alongside `BQL_ADMIN_KEY`, and
 the same pairing for every other key.
 
 ## Testing
 
 | file | covers |
 |---|---|
-| `test/client/client.test.ts` | every verb over a live server: tagged templates, `values`/`first`/`run`, exotic values under each `intMode`, named and positional arguments, batch atomic and not, errors as `BunQLClientError`, the `BunQL-Min-Txid` header, `client.txid` |
+| `test/client/client.test.ts` | every verb over a live server: tagged templates, `values`/`first`/`run`, exotic values under each `intMode`, named and positional arguments, batch atomic and not, errors as `BqlClientError`, the `BQL-Min-Txid` header, `client.txid` |
 | `test/client/realtime.test.ts` | `changes` as an iterable and as an emitter, resume after a dropped stream, `live` rows and diff over WS and over the SSE fallback |
 | `test/client/tx.test.ts` | `transaction` over the socket and over the baton, rollback on throw |
 | `test/client/admin.test.ts` | `client.admin`: the lifecycle round trip, a fork and a restore at a txid, dump and import, mint and revoke, and the failure codes (`docs/m9-client-admin.md`) |

@@ -76,7 +76,7 @@ test("GET /v1/db and /metrics agree on the total and on the ceiling", async () =
         ?.split(" ")
         .pop(),
     )
-  expect(value("bunql_max_open_tenants")).toBe(MAX_OPEN)
-  expect(value("bunql_open_tenants")).toBe(list.open)
-  expect(value("bunql_tenants")).toBe(list.databases.length)
+  expect(value("bql_max_open_tenants")).toBe(MAX_OPEN)
+  expect(value("bql_open_tenants")).toBe(list.open)
+  expect(value("bql_tenants")).toBe(list.databases.length)
 })

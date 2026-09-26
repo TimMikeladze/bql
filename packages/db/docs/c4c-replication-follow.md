@@ -367,7 +367,7 @@ mode against the replica to measure what the second lever was worth.
 ## 9. As built — what changed from this plan, and what it measured
 
 Built 2026-09-12. `bun test` → **1398 pass, 2 skip, 0 fail** across 114 files (1381 before), and
-**1396 / 4 / 0** with `BUNQL_WAL_NATIVE=0`. `bun run typecheck`, `bun run bytes` and
+**1396 / 4 / 0** with `BQL_WAL_NATIVE=0`. `bun run typecheck`, `bun run bytes` and
 `bun run routes:check` clean.
 
 **The decision held, and one thing about it came out better than the plan.** §5 said `ReplicaClient`

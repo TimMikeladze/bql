@@ -51,15 +51,15 @@ describe("the generated data API", () => {
     })
     expect(created.status).toBe(201)
     expect(await created.json()).toEqual([{ id: 2, name: "bob", email: "bob@example.com" }])
-    // `BunQL-Txid` is the wrapper's, filled in from the statement the generated handler ran —
+    // `BQL-Txid` is the wrapper's, filled in from the statement the generated handler ran —
     // which is the whole proof that the data API went through `exec.ts` rather than around it.
     expect(Number(created.headers.get(HEADERS.txid))).toBeGreaterThan(before)
 
     const patched = await server.fetch(`/v1/db/${DB}/api/users/2`, {
       method: "PATCH",
-      body: JSON.stringify({ email: "bob@bunql.dev" }),
+      body: JSON.stringify({ email: "bob@bql.dev" }),
     })
-    expect(await patched.json()).toMatchObject({ email: "bob@bunql.dev" })
+    expect(await patched.json()).toMatchObject({ email: "bob@bql.dev" })
 
     const deleted = await server.fetch(`/v1/db/${DB}/api/users/2`, { method: "DELETE" })
     expect(await deleted.json()).toMatchObject({ name: "bob" })
@@ -173,7 +173,7 @@ describe.if(peers)("the generated GraphQL surface", () => {
     expect(await server.json<unknown[]>(`/v1/db/${DB}/api/notes`)).toEqual([{ id: 1, body: "hi" }])
   })
 
-  test("a read-only token cannot mutate, and the refusal keeps BunQL's code", async () => {
+  test("a read-only token cannot mutate, and the refusal keeps bql.sh's code", async () => {
     const readonly = await server.token({ dbs: [DB], scope: "ro" })
     const response = await gql('mutation { createNote(input: { body: "no" }) { id } }', readonly.token)
     const body = (await response.json()) as {

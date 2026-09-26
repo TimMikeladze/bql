@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { createClient } from "../../src/client/index.ts"
-import { BunQLClientError } from "../../src/client/errors.ts"
+import { BqlClientError } from "../../src/client/errors.ts"
 
 interface Call {
   url: string
@@ -76,7 +76,7 @@ function client(fetchImpl: typeof fetch) {
 describe("the one-shot replay", () => {
   test("a NOT_PRIMARY naming another node is replayed there, once, with this client's token", async () => {
     const { fetch: impl, calls } = stub([
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "http://b:4321" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "http://b:4321" }),
       ok(),
     ])
     const sdk = client(impl)
@@ -97,7 +97,7 @@ describe("the one-shot replay", () => {
 
   test("a `ws://…/v1/replication` in the header is understood as the node beside it", async () => {
     const { fetch: impl, calls } = stub([
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "ws://b:4321/v1/replication" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "ws://b:4321/v1/replication" }),
       ok(),
     ])
     const sdk = client(impl)
@@ -111,8 +111,8 @@ describe("the one-shot replay", () => {
 
   test("it replays once and no more", async () => {
     const { fetch: impl, calls } = stub([
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "http://b:4321" }),
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "http://c:4321" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "http://b:4321" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "http://c:4321" }),
     ])
     const sdk = client(impl)
     try {
@@ -125,7 +125,7 @@ describe("the one-shot replay", () => {
 
   test("a NOT_PRIMARY naming the node that just answered is not replayed at it", async () => {
     const { fetch: impl, calls } = stub([
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "http://a:4321" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "http://a:4321" }),
     ])
     const sdk = client(impl)
     try {
@@ -149,7 +149,7 @@ describe("the one-shot replay", () => {
 
   test("a batch is replayed too — the server refuses it before running any of it", async () => {
     const { fetch: impl, calls } = stub([
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "http://b:4321" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "http://b:4321" }),
       new Response(JSON.stringify({ results: [], txid: 9 }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -172,7 +172,7 @@ describe("what is never replayed", () => {
     ["FORWARD_TIMEOUT", 504],
     // Committed, and locally durable; only the durability promise failed.
     ["ACK_TIMEOUT", 503],
-    // A different refusal that also carries `BunQL-Primary` from a replica.
+    // A different refusal that also carries `BQL-Primary` from a replica.
     ["BUSY", 503],
     ["QUOTA_EXCEEDED", 507],
     ["SQLITE_CONSTRAINT_UNIQUE", 409],
@@ -181,7 +181,7 @@ describe("what is never replayed", () => {
   for (const [code, status] of cases) {
     test(`${code} reaches the caller from the node that produced it`, async () => {
       const { fetch: impl, calls } = stub([
-        failure(code, status, { "BunQL-Primary": "http://b:4321" }),
+        failure(code, status, { "BQL-Primary": "http://b:4321" }),
       ])
       const sdk = client(impl)
       try {
@@ -199,7 +199,7 @@ describe("what is never replayed", () => {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
-      failure("NOT_PRIMARY", 503, { "BunQL-Primary": "http://b:4321" }),
+      failure("NOT_PRIMARY", 503, { "BQL-Primary": "http://b:4321" }),
       new Response(JSON.stringify({ txid: 0 }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -211,7 +211,7 @@ describe("what is never replayed", () => {
         sdk.db().transaction(async (tx) => {
           await tx.unsafe("insert into t values (1)")
         }, { via: "http" }),
-      ).rejects.toBeInstanceOf(BunQLClientError)
+      ).rejects.toBeInstanceOf(BqlClientError)
     } finally {
       sdk.close()
     }

@@ -13,12 +13,12 @@ import { mint } from "./src/bus/tokens";
  */
 function injectReaderToken(): Plugin {
   return {
-    name: "agenticbus-reader-token",
+    name: "bql-bus-reader-token",
     transformIndexHtml(html) {
       let key: string;
       try {
         key = readFileSync(
-          process.env.BUS_STATE ?? ".agenticbus/signing-key",
+          process.env.BUS_STATE ?? ".bql-bus/signing-key",
           "utf8",
         ).trim();
       } catch {

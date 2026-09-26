@@ -46,7 +46,7 @@ function ok(): any {
 /** The whole server API; `only` narrows it to a tenant's generated data API. */
 function registry(only?: string[]): Registry {
   const r = new Registry({
-    title: "BunQL",
+    title: "bql.sh",
     version: "0.0.0",
     description: "SQLite as a multi-tenant database server.",
     servers: [{ url: "https://sql.example.com" }],
@@ -69,13 +69,13 @@ function registry(only?: string[]): Registry {
         deleted: s.boolean().optional().deprecated(),
       }),
       headers: s.object({
-        "BunQL-Min-Txid": s.int().optional().describe("read-your-writes floor"),
+        "BQL-Min-Txid": s.int().optional().describe("read-your-writes floor"),
         Authorization: s.string().optional(),
       }),
     },
     response: {
       schema: s.array(User).describe("The rows, in order."),
-      headers: s.object({ "BunQL-Txid": s.int().describe("txid as served") }),
+      headers: s.object({ "BQL-Txid": s.int().describe("txid as served") }),
     },
     errors: ["DB_NOT_FOUND", "NOT_AUTHORIZED", "QUERY_TIMEOUT", "TXID_NOT_AVAILABLE"],
     security: "bearer",
@@ -143,7 +143,7 @@ describe("buildDocument", () => {
   test("emits one path entry per operation, with {param} and the id verbatim", () => {
     const document = build()
     expect(document.openapi).toBe("3.1.0")
-    expect(document.info).toMatchObject({ title: "BunQL", version: "0.0.0" })
+    expect(document.info).toMatchObject({ title: "bql.sh", version: "0.0.0" })
     expect(document.servers).toEqual([{ url: "https://sql.example.com" }])
     expect(Object.keys(document.paths)).toEqual(["/v1/db/{db}/api/users", "/v1/db", "/healthz"])
 
@@ -165,13 +165,13 @@ describe("buildDocument", () => {
       "query order",
       "query deleted",
       // `Authorization` is declared in params.headers and deliberately not emitted.
-      "header BunQL-Min-Txid",
+      "header BQL-Min-Txid",
     ])
     expect(parameters[0]).toMatchObject({ required: true, description: "database name" })
     // A default means the value need not be sent, so it is not required.
     expect(parameters[1]).toMatchObject({ required: false, schema: { type: "integer", default: 100 } })
     expect(parameters[3]?.deprecated).toBe(true)
-    expect(get?.responses["200"]?.headers?.["BunQL-Txid"]).toMatchObject({ required: true })
+    expect(get?.responses["200"]?.headers?.["BQL-Txid"]).toMatchObject({ required: true })
   })
 
   test("a body becomes a requestBody with its content type", () => {
@@ -467,7 +467,7 @@ describe("errors", () => {
       errors: ["NOT_PRMARY"],
       handler: ok,
     })
-    expect(() => buildDocument(r)).toThrow(/"NOT_PRMARY" is neither a BunQL error code/)
+    expect(() => buildDocument(r)).toThrow(/"NOT_PRMARY" is neither a bql.sh error code/)
   })
 
   test("a registry with no errors carries no Error component", () => {

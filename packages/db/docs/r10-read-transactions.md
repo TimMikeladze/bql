@@ -109,7 +109,7 @@ the cursor all get it from the one change.
 
 - **The native `/v1/db/{db}/tx` keeps its three writer modes.** Adding a fourth is a route-level
   change with its own baton dispatch, and nothing asks for it: the native surface's consistent-read
-  answer is `BunQL-Min-Txid`, which needs no transaction at all. Recorded in `docs/next.md`.
+  answer is `BQL-Min-Txid`, which needs no transaction at all. Recorded in `docs/next.md`.
 - **It does not forward.** A read transaction on a replica is served by the replica, which is the
   whole point.
 - **It changes no ack level.** A read transaction commits nothing.

@@ -1,6 +1,6 @@
-# AgenticBus: a message bus for agents and ordinary work
+# bql.sh/bus: a message bus for agents and ordinary work
 
-Status: implemented. Supersedes an earlier design in which AgenticBus embedded dagr — the dependency was backwards. AgenticBus is a general-purpose message bus with no dependency on dagr, and dagr is one of its clients through `dagr-remote`.
+Status: implemented. Supersedes an earlier design in which bql.sh/bus embedded dagr — the dependency was backwards. bql.sh/bus is a general-purpose message bus with no dependency on dagr, and dagr is one of its clients through `dagr-remote`.
 
 ## What it is
 
@@ -137,14 +137,14 @@ Transport stays the operator's problem: TLS or a tunnel. A bearer token must not
 
 ## dagr
 
-dagr becomes a client and AgenticBus stops importing it. The two coupled modules move out:
+dagr becomes a client and bql.sh/bus stops importing it. The two coupled modules move out:
 
 | Today | Becomes |
 | --- | --- |
 | `src/worker/runtimes.ts` (hosts dagr's executors) | `dagr-remote` — a consumer that runs dagr steps off the bus |
 | `src/host/serve.ts` (builds dagr's engine) | `dagr-remote` — registers the `remote` runtime |
 
-`src/broker/*` already imports nothing from dagr, and `executor/remote.ts` imports only types, so this is a move rather than a rewrite. A remote step becomes `POST /api/requests` on subject `work.<runtime>`; the adapter package depends on both `dagr` and `agenticbus`, and neither depends on the other.
+`src/broker/*` already imports nothing from dagr, and `executor/remote.ts` imports only types, so this is a move rather than a rewrite. A remote step becomes `POST /api/requests` on subject `work.<runtime>`; the adapter package depends on both `dagr` and `bql-bus`, and neither depends on the other.
 
 ## Not in scope
 

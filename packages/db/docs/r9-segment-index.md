@@ -43,7 +43,7 @@ holds 30 days of them.
 | 2 592 000 (the 30-day retention) | ~650 MB | 56 TB |
 
 That is not a tuning problem. A continuously-written database makes its own backup unaffordable,
-and nothing reports it — `bunql_s3_bytes` counts it, and it looks like traffic.
+and nothing reports it — `bql_s3_bytes` counts it, and it looks like traffic.
 
 ## 3. The decision
 

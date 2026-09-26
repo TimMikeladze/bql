@@ -4,7 +4,7 @@ What `src/server/hrana/` is, what it decides, and where it deviates from libsql-
 to `design.md` §6.7 and the milestone table in `plan-phase1.md`.
 
 The goal is narrow and testable: `@libsql/client`, `drizzle-orm/libsql`, `kysely-libsql` and the
-Turso CLI talk to BunQL with no changes. Everything here is a translation layer over
+Turso CLI talk to bql.sh with no changes. Everything here is a translation layer over
 `src/server/exec.ts` — no statement path is reimplemented, so the authorizer, the deadline, the
 row cap, the single writer and the txid are exactly the ones the native API gets.
 
@@ -165,7 +165,7 @@ import { createClient } from "@libsql/client"
 
 const client = createClient({
   url: "http://127.0.0.1:4321/v1/db/acme/", // the trailing slash matters
-  authToken: process.env.BUNQL_TOKEN,
+  authToken: process.env.BQL_TOKEN,
   intMode: "bigint",
 })
 
@@ -200,7 +200,7 @@ header option:
 ```ts
 const client = createClient({
   url: "http://127.0.0.1:4321",
-  authToken: process.env.BUNQL_TOKEN,
+  authToken: process.env.BQL_TOKEN,
   fetch: (input: Request) =>
     fetch(new Request(input, { headers: { ...Object.fromEntries(input.headers), "x-namespace": "acme" } })),
 })
@@ -208,7 +208,7 @@ const client = createClient({
 
 ## `drizzle-orm/libsql`, as run
 
-No adapter of ours in the path — this is Drizzle's own libsql driver, pointed at BunQL.
+No adapter of ours in the path — this is Drizzle's own libsql driver, pointed at bql.sh.
 `kysely-libsql@0.7.1` works the same way and is covered beside it in
 `test/hrana/orm-libsql.test.ts`.
 
@@ -224,7 +224,7 @@ const people = sqliteTable("people", {
 })
 
 const db = drizzle({
-  connection: { url: "http://127.0.0.1:4321/v1/db/acme/", authToken: process.env.BUNQL_TOKEN },
+  connection: { url: "http://127.0.0.1:4321/v1/db/acme/", authToken: process.env.BQL_TOKEN },
 })
 
 await db.transaction(async (tx) => {
@@ -259,7 +259,7 @@ that throws.
 | `"bigint"` | `bigint` | `bigint`, exact |
 | `"string"` | `string` | `string`, exact |
 
-Use `"bigint"`. Our own adapters already default to it (`test/orm/harness.ts`), a BunQL rowid is
+Use `"bigint"`. Our own adapters already default to it (`test/orm/harness.ts`), a bql.sh rowid is
 an INTEGER and `lastInsertRowid` is a `bigint` whatever `intMode` says, so `"number"` only buys a
 throw the first time a real 64-bit id appears. Note that under `"bigint"` a *column* declared REAL
 still reads as a JS `number`, and an integral value in an expression column reads as a `bigint` —

@@ -46,7 +46,7 @@ loads `bun:sqlite` and `bench/http.ts` binds a port; one process running all fou
 heap and a JIT that four separate runs do not share.
 
 **How a number gets out of a benchmark.** Each benchmark keeps its human table and, when
-`BUNQL_BENCH_JSON=1` is set, prints one extra last line:
+`BQL_BENCH_JSON=1` is set, prints one extra last line:
 
 ```
 ##BENCH## {"bench":"http","legs":{"point read, HTTP keep-alive":{"p50":48.5,"p90":56.2}}}
@@ -112,7 +112,7 @@ adapters; phase 2 = cluster) plus links to `docs/api.md`.
 `package.json` gains `files` and keeps `engines.bun`, and `bench` points at `bench/run.ts` with the
 four individual benchmarks still reachable as `bench:driver`, `bench:wal`, `bench:tenant`,
 `bench:http`. The acceptance check is a fresh clone: `bun install`, then `bun test`,
-`bun run typecheck`, `bun run bench`, `bun run start` and `bunql serve --port 0`.
+`bun run typecheck`, `bun run bench`, `bun run start` and `bql serve --port 0`.
 
 ## As built
 

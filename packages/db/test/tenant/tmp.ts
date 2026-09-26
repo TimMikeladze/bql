@@ -11,7 +11,7 @@ import { removeTempDir } from "../tmpdir.ts"
 
 const created: string[] = []
 
-export function tempDir(prefix = "bunql-tenant-"): string {
+export function tempDir(prefix = "bql-tenant-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   created.push(dir)
   return dir

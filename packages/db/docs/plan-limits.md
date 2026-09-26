@@ -7,7 +7,7 @@ budgets) are the design it implements; `docs/next.md` is the handoff that points
 
 ## The one sentence
 
-Nearly every shared resource in BunQL is bounded **per tenant** and unbounded **per node** — at
+Nearly every shared resource in bql.sh is bounded **per tenant** and unbounded **per node** — at
 one database that is invisible, at a thousand it is the entire failure surface.
 
 Phases 0 through 2 built the parts that are hard: one writer per tenant, a physical log with three
@@ -84,9 +84,9 @@ misbehaving.
 
 ## Metrics
 
-`bunql_result_bytes_max`, `bunql_write_queue_depth`, `bunql_write_queue_rejected_total`,
-`bunql_tenants_pinned`, `bunql_open_refused_total`, `bunql_fsync_total`,
-`bunql_fsync_sweep_duration_us`, `bunql_upload_inflight`, `bunql_upload_waiting`.
+`bql_result_bytes_max`, `bql_write_queue_depth`, `bql_write_queue_rejected_total`,
+`bql_tenants_pinned`, `bql_open_refused_total`, `bql_fsync_total`,
+`bql_fsync_sweep_duration_us`, `bql_upload_inflight`, `bql_upload_waiting`.
 
 Each merges across workers by the rule C4e established: disjoint shards, so counters sum, gauges
 sum, positions max.
@@ -225,7 +225,7 @@ pending record, so the furthest-behind database is not starved by a busy one. A 
 cannot acquire within its interval re-arms rather than queueing a second drain.
 
 **Done when:** 200 tenants shipping concurrently show at most `maxConcurrentUploads` in flight,
-`bunql_upload_waiting` is non-zero under that load, and the furthest-behind database's lag is
+`bql_upload_waiting` is non-zero under that load, and the furthest-behind database's lag is
 bounded rather than monotonic.
 
 ### L7 — ship a tarball that can build its own engine

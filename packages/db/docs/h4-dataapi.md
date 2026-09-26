@@ -6,7 +6,7 @@ registry is a plain one: `src/http/` mounts it, `src/openapi/` describes it and 
 operations were generated rather than written by hand. One introspection, three surfaces.
 
 ```ts
-import { DataApiCache } from "@bunql/db/dataapi"
+import { DataApiCache } from "bql.sh/dataapi"
 
 const cache = new DataApiCache({ defaultLimit: 100, maxLimit: 1000 })
 const { schema, registry } = await cache.for("acme", exec)   // exec closes over src/server/exec.ts
@@ -83,7 +83,7 @@ the declared text, and the core schema follows the affinity:
 
 `DataApiCache` keys an entry on `PRAGMA schema_version`, SQLite's own counter, which every DDL
 statement on the database increments. So a `CREATE TABLE`, an `ALTER TABLE` or a `DROP`
-invalidates the cache by itself and nothing else in BunQL has to remember to. The check is one
+invalidates the cache by itself and nothing else in bql.sh has to remember to. The check is one
 pragma per request against re-reading five pragmas per table. `invalidate(db)` is there for the
 `schema` event `src/realtime/` already emits, but it is an optimisation — the version check is the
 correctness story. Two concurrent cold requests introspect once between them, not once each.
@@ -217,7 +217,7 @@ generated operation needs. It is **not** imported from `src/server/`: the depend
 server's own `RouteContext` is the server's wiring to write.
 
 What that buys, with no code here: the authorizer and the token's per-table ACLs, deadlines, row
-caps, `vmSteps` accounting, quotas, txid and `BunQL-Txid`, `ack` levels, `minTxid`
+caps, `vmSteps` accounting, quotas, txid and `BQL-Txid`, `ack` levels, `minTxid`
 read-your-writes, write forwarding from a replica, and the change feed firing on every write the
 data API does. `test/dataapi/operations.test.ts` proves the first of those did not get lost in the
 wiring: a token scoped to `{users: "rw"}` reads `/api/users` and gets `403 NOT_AUTHORIZED` on
@@ -272,7 +272,7 @@ silently.
   it with `s.union([s.int64(), s.null()])`, which puts the null in a branch the codec node never
   has to answer for. **The fix belongs in `decodeInt64`/`decodeBlob`, which should pass a `null`
   through when the node's type list contains `"null"`.**
-- **Nothing in BunQL turns `PRAGMA foreign_keys` on**, so a generated insert can reference a row
+- **Nothing in bql.sh turns `PRAGMA foreign_keys` on**, so a generated insert can reference a row
   that does not exist. The operations still declare `SQLITE_CONSTRAINT_FOREIGNKEY` among their
   errors, because the document should say what happens on a database where the pragma *is* on;
   `test/dataapi/operations.test.ts` records the current behaviour rather than asserting a

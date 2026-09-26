@@ -4,8 +4,8 @@
 // Invariant: a database's live role is the catalog row, and nothing may change that row without
 // going through `#flip`. `ServerRuntime.role` used to be a `readonly` field copied out of the
 // config, which meant a node promoted at runtime kept refusing its own `POST /v1/db` with
-// `503 NOT_PRIMARY` while handing clients a `BunQL-Primary` pointing at the node it had just
-// replaced (`docs/next.md`). Everything that asks — `requirePrimary`, the forwarder, `BunQL-Role`,
+// `503 NOT_PRIMARY` while handing clients a `BQL-Primary` pointing at the node it had just
+// replaced (`docs/next.md`). Everything that asks — `requirePrimary`, the forwarder, `BQL-Role`,
 // the replication client and the realtime engine — asks here, so they cannot disagree.
 //
 // Second invariant, and the one that matters: **no write is accepted without a live lease.**
@@ -27,7 +27,7 @@ import {
   type PromotionOutcome,
   type PromotionRequest,
 } from "../cluster/index.ts"
-import { BunQLError } from "./errors.ts"
+import { BqlError } from "./errors.ts"
 import type { ServerRuntime } from "./runtime.ts"
 
 export type NodeRole = "primary" | "replica"
@@ -36,7 +36,7 @@ export type NodeRole = "primary" | "replica"
 export interface PrimaryLocation {
   /** The node id, when this node knows one. */
   node: string | null
-  /** What goes in `BunQL-Primary`. */
+  /** What goes in `BQL-Primary`. */
   url: string | null
   /** An HTTP base a request can actually be replayed against, when one is knowable. */
   http: string | null
@@ -113,7 +113,7 @@ export class Promoter {
   }
 
   /**
-   * The node's own role, for `BunQL-Role` on a response that names no database, `/healthz` and the
+   * The node's own role, for `BQL-Role` on a response that names no database, `/healthz` and the
    * `requirePrimary` gate on `POST /v1/db`.
    *
    * A configured replica reports `replica` until it has been promoted for something and follows
@@ -204,7 +204,7 @@ export class Promoter {
     const home = placed ?? homeOf(db, nodes)
     if (home === null || home === cluster.id) return
     const http = httpBase(cluster.advertiseOf(home))
-    throw new BunQLError(
+    throw new BqlError(
       "NOT_PRIMARY",
       `${db}: this cluster places it on ${home}, so it is created there`,
       503,
@@ -218,7 +218,7 @@ export class Promoter {
    * The case this exists for: a node holding **no copy** of a database the cluster **does** know
    * and places elsewhere. It used to fall through `roleFor`'s node-level fallback, run the route,
    * and answer `DB_NOT_FOUND` — while the control plane knew exactly which node had it. Now it is
-   * the `NOT_PRIMARY` + `BunQL-Primary` C2 already built, which `wrap()` turns into a same-origin
+   * the `NOT_PRIMARY` + `BQL-Primary` C2 already built, which `wrap()` turns into a same-origin
    * `307`.
    *
    * A name the cluster has never heard of is still `DB_NOT_FOUND`: there is nowhere to send the
@@ -231,7 +231,7 @@ export class Promoter {
     const holder = cluster.primaryOf(db)
     if (holder === null || holder === cluster.id) return
     const http = httpBase(cluster.advertiseOf(holder))
-    throw new BunQLError("NOT_PRIMARY", `${db}: this cluster places it on ${holder}`, 503, {
+    throw new BqlError("NOT_PRIMARY", `${db}: this cluster places it on ${holder}`, 503, {
       ...(http ? { primary: http } : {}) },
     )
   }
@@ -258,7 +258,7 @@ export class Promoter {
     // and the replica re-snapshotted, silently discarding a write a client had been told was done.
     if (this.roleFor(db) === "replica") {
       const where = this.primaryFor(db)
-      throw new BunQLError(
+      throw new BqlError(
         "NOT_PRIMARY",
         `${db}: this node holds a replica copy and does not write to it`,
         503,
@@ -270,7 +270,7 @@ export class Promoter {
     if (cluster.holdsLease(db)) return
     if (!cluster.knows(db)) return
     const where = this.primaryFor(db)
-    throw new BunQLError(
+    throw new BqlError(
       "NOT_PRIMARY",
       `${db}: this node does not hold a valid lease on it` +
         (where.node ? `; ${where.node} does` : ""),
@@ -404,7 +404,7 @@ export class Promoter {
       this.runtime.replica?.attach(db)
     }
     this.runtime.replication?.announce()
-    // C4d: and so is the router, when this is a worker. It derives `BunQL-Role` and the
+    // C4d: and so is the router, when this is a worker. It derives `BQL-Role` and the
     // `requirePrimary` gate from its own read of the catalog, and this row was rewritten on a
     // thread whose `onChange` it cannot hear.
     this.runtime.roleChanged(db, role)

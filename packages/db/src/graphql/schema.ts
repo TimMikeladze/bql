@@ -7,7 +7,7 @@
 // The version key is `src/dataapi/`'s, not a second one: `DataApiCache.for` already reads
 // `PRAGMA schema_version` and re-introspects when it moved, so this cache asks it for the entry
 // and reuses its schema's version as the key. A `CREATE TABLE`, an `ALTER TABLE` or a `DROP`
-// therefore rebuilds the GraphQL schema by itself, and there is no second idea anywhere in BunQL
+// therefore rebuilds the GraphQL schema by itself, and there is no second idea anywhere in bql.sh
 // of when a tenant's schema changed. Pass the server's own `DataApiCache` and one introspection
 // serves REST, OpenAPI and GraphQL between them.
 //
@@ -188,7 +188,7 @@ function contextFor(db: string): DataApiContext {
   const call = currentCall()
   if (call.db !== db) {
     throw new Error(
-      `bunql/graphql: a resolver for database ${JSON.stringify(db)} dispatched inside a request ` +
+      `bql/graphql: a resolver for database ${JSON.stringify(db)} dispatched inside a request ` +
         `for ${JSON.stringify(call.db)}`,
     )
   }

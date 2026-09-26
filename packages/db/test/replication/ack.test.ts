@@ -76,7 +76,7 @@ describe("ack levels", () => {
     expect(Number(replica.handle.registry.open("acme").txid)).toBeGreaterThanOrEqual(txid)
   })
 
-  test("the BunQL-Ack header and durability.defaultAck mean the same thing", async () => {
+  test("the BQL-Ack header and durability.defaultAck mean the same thing", async () => {
     // `defaultAck: "replica"` applies to every write on the node, the schema included, so the
     // replica has to be attached before there is anything to create.
     const primary = track(await startPrimary({ durability: { defaultAck: "replica" } }))

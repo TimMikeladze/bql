@@ -25,7 +25,7 @@ function op(overrides: Partial<Operation<any, any, Ctx>> = {}): Operation<any, a
 }
 
 function registry(): Registry<Ctx> {
-  return new Registry<Ctx>({ title: "BunQL", version: "0.0.0" })
+  return new Registry<Ctx>({ title: "bql.sh", version: "0.0.0" })
 }
 
 describe("pathParameters", () => {

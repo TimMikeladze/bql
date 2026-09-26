@@ -173,10 +173,10 @@ describe("the generated operations", () => {
 
   test("update, and an update that matches nothing is a 404", async () => {
     const patched = await read<Record<string, unknown>>(
-      await json("PATCH", "/v1/db/ops/api/users/1", { email: "ann@bunql.dev" }),
+      await json("PATCH", "/v1/db/ops/api/users/1", { email: "ann@bql.dev" }),
     )
     expect(patched.status).toBe(200)
-    expect(patched.body).toMatchObject({ id: 1, name: "ann", email: "ann@bunql.dev" })
+    expect(patched.body).toMatchObject({ id: 1, name: "ann", email: "ann@bql.dev" })
     expect(
       (await read(await json("PATCH", "/v1/db/ops/api/users/404", { email: "x" }))).status,
     ).toBe(404)
@@ -216,7 +216,7 @@ describe("the generated operations", () => {
     expect(again.body.error.code).toBe("SQLITE_CONSTRAINT_PRIMARYKEY")
 
     // A NOT NULL a caller cannot satisfy is the other half of the write errors the document
-    // lists. A foreign key is *not* checked here: nothing in BunQL turns `PRAGMA foreign_keys`
+    // lists. A foreign key is *not* checked here: nothing in bql.sh turns `PRAGMA foreign_keys`
     // on, so a reference to a row that does not exist is written — see `docs/h4-dataapi.md`.
     const orphan = await read(await json("POST", "/v1/db/ops/api/orders", { user_id: 987654 }))
     expect(orphan.status).toBe(201)

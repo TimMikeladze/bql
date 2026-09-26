@@ -69,7 +69,7 @@ export interface OpenOptions {
   statementCache?: number
   /**
    * Where this connection reports its cache activity. Supply one object to several connections to
-   * get a total that survives them — which is what a registry does, so `bunql_statement_cache_*`
+   * get a total that survives them — which is what a registry does, so `bql_statement_cache_*`
    * does not go backwards when a tenant is evicted. Omitted, the connection keeps its own.
    */
   cacheCounters?: StatementCacheCounters
@@ -414,7 +414,7 @@ export class Database implements StatementHost {
   }
 
   #runSavepoint<A extends unknown[], R>(fn: (...args: A) => R, args: A): R {
-    const name = `bunql_sp_${this.#txDepth}`
+    const name = `bql_sp_${this.#txDepth}`
     this.exec(`savepoint ${name}`)
     this.#txDepth++
     try {
@@ -735,7 +735,7 @@ export class Database implements StatementHost {
     const opcode = typeof op === "number" ? op : DB_CONFIGS[op]
     if (opcode === undefined) throw new RangeError(`unknown db config ${String(op)}`)
     const out = new Int32Array(1)
-    const rc = shim.bunql_db_config_int(this.#handle, opcode, value, out)
+    const rc = shim.bql_db_config_int(this.#handle, opcode, value, out)
     if (rc !== SQLITE_OK) this.fail(rc)
     return out[0] as number
   }

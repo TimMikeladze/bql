@@ -10,7 +10,7 @@ import { removeTempDir } from "../tmpdir.ts"
 
 const created: string[] = []
 
-export function tempDir(prefix = "bunql-wal-"): string {
+export function tempDir(prefix = "bql-wal-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   created.push(dir)
   return dir

@@ -40,21 +40,21 @@ describe("loadConfig", () => {
   })
 
   test("[replication] apply takes only the two mechanisms design §4.5 names", () => {
-    expect(loadConfig({ env: { BUNQL_REPLICATION_APPLY: "wal" } }).replication.apply).toBe("wal")
-    expect(() => loadConfig({ env: { BUNQL_REPLICATION_APPLY: "frames" } })).toThrow(
+    expect(loadConfig({ env: { BQL_REPLICATION_APPLY: "wal" } }).replication.apply).toBe("wal")
+    expect(() => loadConfig({ env: { BQL_REPLICATION_APPLY: "frames" } })).toThrow(
       /\[replication\] apply must be "pages" or "wal"/,
     )
     expect(
-      loadConfig({ env: { BUNQL_REPLICATION_APPLY_BUSY_MS: "250" } }).replication.applyBusyMs,
+      loadConfig({ env: { BQL_REPLICATION_APPLY_BUSY_MS: "250" } }).replication.applyBusyMs,
     ).toBe(250)
-    expect(() => loadConfig({ env: { BUNQL_REPLICATION_APPLY_BUSY_MS: "-1" } })).toThrow(
+    expect(() => loadConfig({ env: { BQL_REPLICATION_APPLY_BUSY_MS: "-1" } })).toThrow(
       /applyBusyMs must be a non-negative number/,
     )
   })
 
   test("a TOML file sets what it names and leaves the rest alone", () => {
-    const dir = tempDataDir("bunql-config-")
-    const file = path.join(dir, "bunql.toml")
+    const dir = tempDataDir("bql-config-")
+    const file = path.join(dir, "bql.toml")
     fs.writeFileSync(
       file,
       [
@@ -68,10 +68,10 @@ describe("loadConfig", () => {
         "[limits]",
         "maxRows = 42",
         "[auth]",
-        'adminKey = "${BUNQL_ADMIN_KEY}"',
+        'adminKey = "${BQL_ADMIN_KEY}"',
       ].join("\n"),
     )
-    const config = loadConfig({ file, env: { BUNQL_ADMIN_KEY: "from-the-environment" } })
+    const config = loadConfig({ file, env: { BQL_ADMIN_KEY: "from-the-environment" } })
     expect(config.server.port).toBe(5555)
     expect(config.server.tenantFromHost).toBe(true)
     expect(config.data.maxOpen).toBe(8)
@@ -81,61 +81,61 @@ describe("loadConfig", () => {
   })
 
   test("an unset ${VAR} leaves the secret to be generated rather than setting it empty", () => {
-    const dir = tempDataDir("bunql-config-")
-    const file = path.join(dir, "bunql.toml")
+    const dir = tempDataDir("bql-config-")
+    const file = path.join(dir, "bql.toml")
     fs.writeFileSync(file, '[auth]\nadminKey = "${NOT_SET_ANYWHERE}"\n')
     expect(loadConfig({ file, env: {} }).auth.adminKey).toBeNull()
   })
 
   test("the environment wins over the file, and numbers and booleans are coerced", () => {
-    const dir = tempDataDir("bunql-config-")
-    const file = path.join(dir, "bunql.toml")
+    const dir = tempDataDir("bql-config-")
+    const file = path.join(dir, "bql.toml")
     fs.writeFileSync(file, "[server]\nport = 5555\ncors = true\n")
     const config = loadConfig({
       file,
-      env: { BUNQL_PORT: "6100", BUNQL_CORS: "false", BUNQL_MAX_ROWS: "7" },
+      env: { BQL_PORT: "6100", BQL_CORS: "false", BQL_MAX_ROWS: "7" },
     })
     expect(config.server.port).toBe(6100)
     expect(config.server.cors).toBe(false)
     expect(config.limits.maxRows).toBe(7)
   })
 
-  test("every key has a BUNQL_<SECTION>_<KEY> override, and the short aliases still work", () => {
+  test("every key has a BQL_<SECTION>_<KEY> override, and the short aliases still work", () => {
     const config = loadConfig({
       env: {
-        BUNQL_DATA_DIR: "/tmp/bunql-canonical",
-        BUNQL_SERVER_PORT: "4444",
-        BUNQL_LIMITS_QUERY_TIMEOUT_MS: "1234",
-        BUNQL_REALTIME_RING_BYTES: "5000",
-        BUNQL_AUTH_ADMIN_KEY: "canonical-key",
+        BQL_DATA_DIR: "/tmp/bql-canonical",
+        BQL_SERVER_PORT: "4444",
+        BQL_LIMITS_QUERY_TIMEOUT_MS: "1234",
+        BQL_REALTIME_RING_BYTES: "5000",
+        BQL_AUTH_ADMIN_KEY: "canonical-key",
       },
     })
-    expect(config.data.dir).toBe(path.resolve("/tmp/bunql-canonical"))
+    expect(config.data.dir).toBe(path.resolve("/tmp/bql-canonical"))
     expect(config.server.port).toBe(4444)
     expect(config.limits.queryTimeoutMs).toBe(1234)
     expect(config.realtime.ringBytes).toBe(5000)
     expect(config.auth.adminKey).toBe("canonical-key")
 
-    const legacy = loadConfig({ env: { BUNQL_DIR: "/tmp/bunql-legacy", BUNQL_PORT: "4445" } })
-    expect(legacy.data.dir).toBe(path.resolve("/tmp/bunql-legacy"))
+    const legacy = loadConfig({ env: { BQL_DIR: "/tmp/bql-legacy", BQL_PORT: "4445" } })
+    expect(legacy.data.dir).toBe(path.resolve("/tmp/bql-legacy"))
     expect(legacy.server.port).toBe(4445)
   })
 
   test("the canonical name wins over the alias for the same key", () => {
     const config = loadConfig({
-      env: { BUNQL_DIR: "/tmp/bunql-alias", BUNQL_DATA_DIR: "/tmp/bunql-canonical" },
+      env: { BQL_DIR: "/tmp/bql-alias", BQL_DATA_DIR: "/tmp/bql-canonical" },
     })
-    expect(config.data.dir).toBe(path.resolve("/tmp/bunql-canonical"))
+    expect(config.data.dir).toBe(path.resolve("/tmp/bql-canonical"))
   })
 
   test("a list-valued key is comma-separated in the environment", () => {
-    const config = loadConfig({ env: { BUNQL_AUTH_JWT_PUBLIC_KEYS: "aGk=, dGhlcmU=" } })
+    const config = loadConfig({ env: { BQL_AUTH_JWT_PUBLIC_KEYS: "aGk=, dGhlcmU=" } })
     expect(config.auth.jwtPublicKeys).toEqual(["aGk=", "dGhlcmU="])
   })
 
   test("a missing file is fine unless it was required", () => {
-    expect(() => loadConfig({ file: "/nowhere/bunql.toml", env: {} })).not.toThrow()
-    expect(() => loadConfig({ file: "/nowhere/bunql.toml", required: true, env: {} })).toThrow()
+    expect(() => loadConfig({ file: "/nowhere/bql.toml", env: {} })).not.toThrow()
+    expect(() => loadConfig({ file: "/nowhere/bql.toml", required: true, env: {} })).toThrow()
   })
 
   test("the data directory is made absolute and keys.json sits inside it", () => {
@@ -147,7 +147,7 @@ describe("loadConfig", () => {
 
 describe("key material", () => {
   test("a first start generates both secrets, persists them, and says so once", async () => {
-    const dir = tempDataDir("bunql-keys-")
+    const dir = tempDataDir("bql-keys-")
     const config = loadConfig({ env: {}, overrides: { data: { dir } } })
     const first = await resolveAuth(config)
     expect(first.adminKeyGenerated).toBe(true)
@@ -178,7 +178,7 @@ describe("key material", () => {
   })
 
   test("a configured admin key is used as it stands and never written", async () => {
-    const dir = tempDataDir("bunql-keys-")
+    const dir = tempDataDir("bql-keys-")
     const config = loadConfig({
       env: {},
       overrides: { data: { dir }, auth: { adminKey: "configured-in-place" } },
@@ -189,7 +189,7 @@ describe("key material", () => {
   })
 
   test("a token minted by a restarted node still verifies", async () => {
-    const dir = tempDataDir("bunql-keys-")
+    const dir = tempDataDir("bql-keys-")
     const config = loadConfig({ env: {}, overrides: { data: { dir } } })
     const first = await resolveAuth(config)
     const token = await (async () => {
@@ -269,15 +269,15 @@ describe("the [cluster] section (C2)", () => {
     ).toBe("beta")
   })
 
-  test("every key has a BUNQL_CLUSTER_* override", () => {
+  test("every key has a BQL_CLUSTER_* override", () => {
     const config = loadConfig({
       env: {
-        BUNQL_CLUSTER_ENABLED: "true",
-        BUNQL_CLUSTER_PEERS: "n2=ws://b:4321,n3=ws://c:4321",
-        BUNQL_CLUSTER_ZONE: "rack-1",
-        BUNQL_CLUSTER_LEASE_TTL_MS: "5000",
-        BUNQL_CLUSTER_LEASE_GUARD_MS: "800",
-        BUNQL_REPLICATION_SECRET: "s",
+        BQL_CLUSTER_ENABLED: "true",
+        BQL_CLUSTER_PEERS: "n2=ws://b:4321,n3=ws://c:4321",
+        BQL_CLUSTER_ZONE: "rack-1",
+        BQL_CLUSTER_LEASE_TTL_MS: "5000",
+        BQL_CLUSTER_LEASE_GUARD_MS: "800",
+        BQL_REPLICATION_SECRET: "s",
       },
     })
     expect(config.cluster.enabled).toBe(true)
@@ -394,7 +394,7 @@ describe("[server] workers", () => {
   })
 
   test("the count comes from the environment like every other key", () => {
-    expect(loadConfig({ file: null, env: { BUNQL_SERVER_WORKERS: "3" } }).server.workers).toBe(3)
+    expect(loadConfig({ file: null, env: { BQL_SERVER_WORKERS: "3" } }).server.workers).toBe(3)
   })
 
   test("a negative count is refused rather than floored silently", () => {

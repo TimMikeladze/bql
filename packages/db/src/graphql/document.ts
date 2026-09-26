@@ -30,14 +30,14 @@ export const DEFAULT_API_PREFIX = "/v1/db/:db/api"
  * resolves against its own `origin` and hands the `Request` to a function — but `buildRequest`
  * builds `new URL(baseUrl + path)`, which needs an absolute one.
  */
-export const INTERNAL_ORIGIN = "http://bunql.internal"
+export const INTERNAL_ORIGIN = "http://bql.internal"
 
 const METHODS = ["get", "put", "post", "delete", "patch"] as const
 
 export interface TenantDocumentOptions {
   /** Where `src/dataapi/` mounted this tenant's operations. Default `/v1/db/:db/api`. */
   apiPrefix?: string
-  /** Origin of the server URL the document publishes. Default `http://bunql.internal`. */
+  /** Origin of the server URL the document publishes. Default `http://bql.internal`. */
   origin?: string
   /** Merged over the registry's own title, version and description. */
   info?: Partial<InfoObject>

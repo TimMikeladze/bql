@@ -230,7 +230,7 @@ describe("long poll", () => {
     await write("poll", "insert into todos(title) values ('before')")
     const current = Number(
       (await server.fetch("/v1/db/poll/query", { method: "POST", body: '{"sql":"select 1"}' }))
-        .headers.get("BunQL-Txid"),
+        .headers.get("BQL-Txid"),
     )
     const waiting = server.fetch(`/v1/db/poll/changes?since=${current}&wait=3000`)
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -248,7 +248,7 @@ describe("long poll", () => {
     const current = Number(
       (
         await server.fetch("/v1/db/pollempty/query", { method: "POST", body: '{"sql":"select 1"}' })
-      ).headers.get("BunQL-Txid"),
+      ).headers.get("BQL-Txid"),
     )
     const response = await server.fetch(`/v1/db/pollempty/changes?since=${current}&wait=100`)
     expect(response.status).toBe(200)

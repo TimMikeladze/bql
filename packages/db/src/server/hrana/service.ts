@@ -1,4 +1,4 @@
-// Invariant: a Hrana stream is a BunQL principal, a database, and — while one is open — the
+// Invariant: a Hrana stream is a bql.sh principal, a database, and — while one is open — the
 // tenant's single writer. Nothing else. It holds no connection of its own and prepares no
 // statement of its own, so every safety property of `../exec.ts` (the authorizer the token signed
 // for, the deadline, the row cap, the single-writer serialisation) applies to the compat surface
@@ -14,7 +14,7 @@
 // transaction back, so a client that vanished mid-transaction cannot pin the writer.
 
 import { requireScope, type Principal } from "../auth.ts"
-import { BunQLError } from "../errors.ts"
+import { BqlError } from "../errors.ts"
 import { resolveOptions, type ResolvedOptions } from "../exec.ts"
 import type { ReadTxSession, ServerRuntime, TxSession } from "../runtime.ts"
 import type { RemoteTx } from "../forward.ts"
@@ -86,32 +86,32 @@ export class HranaStream {
     const id = stmt.sql_id
     if (typeof inline === "string" && inline.length > 0) {
       if (typeof id === "number") {
-        throw BunQLError.badRequest("a statement may carry sql or sql_id, not both")
+        throw BqlError.badRequest("a statement may carry sql or sql_id, not both")
       }
       return inline
     }
     if (typeof id === "number") {
       const stored = this.sql.get(id)
-      if (stored === undefined) throw BunQLError.badRequest(`no SQL is stored under id ${id}`)
+      if (stored === undefined) throw BqlError.badRequest(`no SQL is stored under id ${id}`)
       return stored
     }
-    throw BunQLError.badRequest("a statement needs sql or sql_id")
+    throw BqlError.badRequest("a statement needs sql or sql_id")
   }
 
   storeSql(id: number, sql: string): void {
     if (typeof id !== "number" || !Number.isInteger(id)) {
-      throw BunQLError.badRequest("store_sql needs an integer sql_id")
+      throw BqlError.badRequest("store_sql needs an integer sql_id")
     }
-    if (typeof sql !== "string") throw BunQLError.badRequest("store_sql needs a sql string")
-    if (this.sql.has(id)) throw BunQLError.badRequest(`sql_id ${id} is already stored`)
+    if (typeof sql !== "string") throw BqlError.badRequest("store_sql needs a sql string")
+    if (this.sql.has(id)) throw BqlError.badRequest(`sql_id ${id} is already stored`)
     if (this.sql.size >= MAX_STORED_SQL) {
-      throw new BunQLError("TOO_MANY_REQUESTS", `a stream may store ${MAX_STORED_SQL} SQL texts`, 429)
+      throw new BqlError("TOO_MANY_REQUESTS", `a stream may store ${MAX_STORED_SQL} SQL texts`, 429)
     }
     this.sql.set(id, sql)
   }
 
   closeSql(id: number): void {
-    if (!this.sql.delete(id)) throw BunQLError.badRequest(`no SQL is stored under id ${id}`)
+    if (!this.sql.delete(id)) throw BqlError.badRequest(`no SQL is stored under id ${id}`)
   }
 }
 
@@ -154,7 +154,7 @@ export class HranaService {
   ): HranaStream {
     this.sweep()
     if (this.#streams.size >= MAX_STREAMS) {
-      throw new BunQLError("TOO_MANY_REQUESTS", "this node holds all the streams it will", 429)
+      throw new BqlError("TOO_MANY_REQUESTS", "this node holds all the streams it will", 429)
     }
     requireScope(principal, db, "ro")
     // Fails with 404 here rather than on the first statement, which is what a client expects from
@@ -179,13 +179,13 @@ export class HranaService {
     const claim = this.batons.verify(baton)
     const stream = this.#streams.get(claim.streamId)
     if (!stream || stream.closed) {
-      throw new BunQLError("BAD_REQUEST", "the stream this baton names has ended", 400)
+      throw new BqlError("BAD_REQUEST", "the stream this baton names has ended", 400)
     }
     if (stream.seq !== claim.seq) {
-      throw new BunQLError("BAD_REQUEST", "this baton has been superseded", 400)
+      throw new BqlError("BAD_REQUEST", "this baton has been superseded", 400)
     }
     if (stream.db !== db) {
-      throw new BunQLError("BAD_REQUEST", "this baton belongs to a different database", 400)
+      throw new BqlError("BAD_REQUEST", "this baton belongs to a different database", 400)
     }
     stream.lastUsedMs = Date.now()
     return stream

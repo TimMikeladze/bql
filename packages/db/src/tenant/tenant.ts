@@ -37,7 +37,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import { SqliteError } from "../sqlite/errors.ts"
 import {
   type CheckpointMode,
@@ -209,7 +209,7 @@ export interface TenantOptions {
   /** `sqlite3_limit` overrides; the defaults below are applied first. */
   limits?: Partial<Record<LimitName, number>>
   /**
-   * Pragmas BunQL states rather than inherits (`docs/p1-pragmas.md`). Left undefined, a connection
+   * Pragmas bql.sh states rather than inherits (`docs/p1-pragmas.md`). Left undefined, a connection
    * carries whatever the loaded libsqlite3 defaults to — which differs between builds: Apple's
    * `cache_size` default is in pages where upstream's is in KiB, four times the cache and a
    * different moment for dirty pages to reach the `-wal`.
@@ -235,7 +235,7 @@ export interface TenantOptions {
  * Per-connection settings, in bytes where SQLite takes a count. `undefined` leaves the library's
  * own default in place, which is what every path that does not come from `[sqlite]` wants.
  *
- * All of these are pragmas but `statementCache`, which bounds BunQL's own prepared-statement cache
+ * All of these are pragmas but `statementCache`, which bounds bql.sh's own prepared-statement cache
  * rather than anything SQLite knows about; it travels here because it is `[sqlite]`'s key and takes
  * the same route to the connection.
  */
@@ -401,7 +401,7 @@ const RESERVED = new Set(["_system", "dbs", "trash"])
 /** Throws unless `name` is a legal database name. Every path below is built from one. */
 export function assertValidName(name: string): void {
   if (!NAME.test(name) || RESERVED.has(name)) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `invalid database name ${JSON.stringify(name)}: expected [a-z0-9][a-z0-9-_]{0,63}`,
     )
   }
@@ -906,11 +906,11 @@ export class Tenant {
    * draining rather than from a constant. With no measurement yet — the first burst — it is one
    * second, which is the honest floor of "come back later".
    */
-  #queueFull(detail: string): BunQLError {
+  #queueFull(detail: string): BqlError {
     const perEntry = this.#msPerQueuedWrite
     const clearMs = perEntry > 0 ? this.#queue.length * perEntry : 0
     const seconds = Math.min(60, Math.max(1, Math.ceil(clearMs / 1000)))
-    return new BunQLError(
+    return new BqlError(
       "WRITE_QUEUE_FULL",
       `${this.name} cannot accept another write: ${detail}`,
       503,
@@ -977,7 +977,7 @@ export class Tenant {
     this.#queue = kept
     for (const entry of expired) {
       entry.reject(
-        new BunQLError(
+        new BqlError(
           "WRITE_QUEUE_TIMEOUT",
           `${this.name} did not reach this write within ${this.queueWaitMs}ms`,
           503,
@@ -1091,7 +1091,7 @@ export class Tenant {
     }
     for (const entry of stale) {
       entry.reject(
-        new BunQLError(
+        new BqlError(
           "WRITE_QUEUE_TIMEOUT",
           `${this.name} did not reach this write within ${this.queueWaitMs}ms`,
           503,
@@ -1183,7 +1183,7 @@ export class Tenant {
       throw new TenantError("WRITE_IN_PROGRESS", `a write is already running on ${this.name}`)
     }
     if (this.#exclusive) {
-      throw BunQLError.busy(`${this.name} is taking a snapshot`)
+      throw BqlError.busy(`${this.name} is taking a snapshot`)
     }
     const ack = options.ack ?? this.defaultAck
     this.#writing = true
@@ -1229,7 +1229,7 @@ export class Tenant {
     this.#assertOpen()
     this.#assertPrimary()
     if (this.#txOpen || this.#writing) throw txBusy(this.name)
-    if (this.#exclusive) throw BunQLError.busy(`${this.name} is taking a snapshot`)
+    if (this.#exclusive) throw BqlError.busy(`${this.name} is taking a snapshot`)
     const mode = options.mode ?? "immediate"
     try {
       this.writer.exec(
@@ -1343,7 +1343,7 @@ export class Tenant {
     this.#assertOpen()
     const minTxid = options.minTxid
     if (minTxid !== undefined && minTxid > this.txid) {
-      throw BunQLError.txidNotAvailable(Number(minTxid), Number(this.txid))
+      throw BqlError.txidNotAvailable(Number(minTxid), Number(this.txid))
     }
     const lease = this.acquireReader()
     try {
@@ -1367,7 +1367,7 @@ export class Tenant {
         reject,
         timer: setTimeout(() => {
           this.#drop(waiter)
-          reject(BunQLError.txidNotAvailable(Number(txid), Number(this.txid)))
+          reject(BqlError.txidNotAvailable(Number(txid), Number(this.txid)))
         }, waitMs),
       }
       this.#waiters.push(waiter)
@@ -1524,13 +1524,13 @@ export class Tenant {
           `${this.name} is a replica; its WAL is checkpointed by the applier`,
         )
       }
-      if (this.#leased > 0) throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
+      if (this.#leased > 0) throw BqlError.busy(`a reader on ${this.name} holds a transaction`)
       const result = (this.applier as WalApplier).checkpoint(mode)
       this.#lastActivityMs = Date.now()
       return result
     }
     if (mode !== "PASSIVE" && this.#leased > 0) {
-      throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
+      throw BqlError.busy(`a reader on ${this.name} holds a transaction`)
     }
     this.drain()
     this.#openWal()
@@ -1597,9 +1597,9 @@ export class Tenant {
     this.flushPending()
     this.#assertOpen()
     if (this.#leased > 0) {
-      throw BunQLError.busy(`a reader on ${this.name} holds a transaction`)
+      throw BqlError.busy(`a reader on ${this.name} holds a transaction`)
     }
-    if (this.#exclusive) throw BunQLError.busy(`${this.name} is already snapshotting`)
+    if (this.#exclusive) throw BqlError.busy(`${this.name} is already snapshotting`)
     this.#exclusive = true
     try {
       this.drain()
@@ -1687,7 +1687,7 @@ export class Tenant {
       throw new TenantError("DB_EXISTS", `database ${newName} already exists`)
     }
     if (at !== undefined && at > this.txid) {
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         `cannot fork ${this.name} at txid ${at}: it is at ${this.txid}`,
       )
     }
@@ -2106,7 +2106,7 @@ export class Tenant {
   #report(err: unknown): void {
     const onError = this.#options.onError
     if (onError) onError(err)
-    else console.error(`bunql: ${this.name}`, err)
+    else console.error(`bql: ${this.name}`, err)
   }
 
   #wake(txid: bigint): void {
@@ -2203,7 +2203,7 @@ export class Tenant {
 // ── opening ────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * `PRAGMA cache_size` takes KiB when negative and pages when positive; BunQL configures bytes and
+ * `PRAGMA cache_size` takes KiB when negative and pages when positive; bql.sh configures bytes and
  * converts here, so an operator never has to know which. Everything else is applied only when it
  * was asked for — an unset key means "whatever the library does", not "the value we think it is".
  */
@@ -2236,7 +2236,7 @@ function applyPragmas(db: Database, pragmas: SqlitePragmas | undefined, writer: 
       // worse than one that will not start.
       throw new Error(
         "[sqlite] defensive needs the vendored libsqlite3 (bun run sqlite:build): " +
-          "SQLITE_DBCONFIG_DEFENSIVE has no pragma and this build has no bunql_db_config_int",
+          "SQLITE_DBCONFIG_DEFENSIVE has no pragma and this build has no bql_db_config_int",
       )
     }
   }
@@ -2354,8 +2354,8 @@ async function copyFile(from: string, to: string): Promise<void> {
 }
 
 /** Design §6.3: the tenant has one writer, so a second interactive transaction has to wait. */
-function txBusy(name: string): BunQLError {
-  return new BunQLError("TX_BUSY", `${name} already has an open transaction`, 409)
+function txBusy(name: string): BqlError {
+  return new BqlError("TX_BUSY", `${name} already has an open transaction`, 409)
 }
 
 /**
@@ -2363,18 +2363,18 @@ function txBusy(name: string): BunQLError {
  * with no 499 in the vocabulary, and nobody is listening for the answer anyway — what matters is
  * that the entry is off the queue and its bytes are back.
  */
-function abandonedWrite(name: string): BunQLError {
-  return new BunQLError("BAD_REQUEST", `the caller of a queued write on ${name} disconnected`, 400)
+function abandonedWrite(name: string): BqlError {
+  return new BqlError("BAD_REQUEST", `the caller of a queued write on ${name} disconnected`, 400)
 }
 
-function noTx(name: string): BunQLError {
-  return new BunQLError("TX_NOT_FOUND", `${name} has no open transaction`, 404)
+function noTx(name: string): BqlError {
+  return new BqlError("TX_NOT_FOUND", `${name} has no open transaction`, 404)
 }
 
 /** SQLite's out-of-space code is the tenant's quota (design §4.7, §6.6). */
 function translateWriteError(err: unknown, name: string): unknown {
   if (err instanceof SqliteError && err.code.startsWith("SQLITE_FULL")) {
-    return BunQLError.quotaExceeded(`database ${name} has reached its storage quota`)
+    return BqlError.quotaExceeded(`database ${name} has reached its storage quota`)
   }
   return err
 }
@@ -2554,7 +2554,7 @@ function openRecorder(options: TenantOptions, dbPath: string, log: TxnLog): Reco
         "LOG_DIVERGED",
         `${options.name}: recovering ${records.length} transaction(s) after txid ${before} produced ` +
           `checksum ${recorder.position.checksum} but the database is at ${full.checksum}. ` +
-          "The database was changed outside BunQL; restore it instead.",
+          "The database was changed outside bql.sh; restore it instead.",
       )
     }
     for (const record of records) log.append(record)

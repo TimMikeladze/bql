@@ -80,7 +80,7 @@ no client logic that counts commits or assumes a txid per write, should turn it 
 
 ```toml
 [limits]
-groupCommit = true      # BUNQL_LIMITS_GROUP_COMMIT
+groupCommit = true      # BQL_LIMITS_GROUP_COMMIT
 groupCommitMax = 64     # most statements in one fold
 ```
 

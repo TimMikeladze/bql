@@ -3,13 +3,13 @@
 `docs/plan-surfaces.md` H7, the last of the surfaces track and the only one of them that is new
 code rather than wiring. Written 2026-09-12 before the code.
 
-The decision is **what a GraphQL subscription on BunQL can honestly be**, and the answer turns on a
+The decision is **what a GraphQL subscription on bql.sh can honestly be**, and the answer turns on a
 constraint the plan names in one line: a REST document cannot describe a subscription, so nothing
 generates one.
 
 ## 1. Why this is not wiring
 
-Every other GraphQL field BunQL serves is generated. `SchemaCache` introspects a tenant, builds an
+Every other GraphQL field bql.sh serves is generated. `SchemaCache` introspects a tenant, builds an
 OpenAPI document for its data API, and hands it to `openapi-x-graphql`, which turns `GET` routes
 into `Query` fields and the rest into `Mutation` fields. One introspection serves REST, OpenAPI and
 GraphQL between them, and nothing in `src/graphql/` writes a type by hand.
@@ -41,7 +41,7 @@ document — a different and much larger piece of work, and one that would need 
 what "the result changed" means across a tree. So:
 
 **H7 is the change feed.** One root field, `changes`, carrying exactly what the SSE feed and the
-`bunql.v1` socket already carry, with the same table filter and the same replay. A client that
+`bql.v1` socket already carry, with the same table filter and the same replay. A client that
 wants a live *result* re-queries on the event, which is what a change feed is for.
 
 ## 3. The shape
@@ -88,7 +88,7 @@ and it is implemented here rather than taken as a dependency: `ConnectionInit`/`
 `Subscribe`, `Next`, `Error`, `Complete`, `Ping`/`Pong`.
 
 **Authentication is `connection_init`'s payload, or the usual header.** A browser cannot set
-`Authorization` on a WebSocket, which is why the protocol has a payload at all; BunQL already
+`Authorization` on a WebSocket, which is why the protocol has a payload at all; bql.sh already
 accepts `?token=` on its own socket for the same reason, and both are accepted here. The principal
 is established **once, at connection_init**, and every operation on that socket runs as it —
 `src/graphql/ambient.ts`'s rule, with the store entered per emitted event rather than per request.
@@ -101,7 +101,7 @@ same handler the HTTP surface runs, so there is one execution path and one set o
 
 **Every rule the HTTP surface has applies unchanged**, because the same code enforces them: the
 depth and complexity limits before anything dispatches, the ambient principal, `nullOnNotFound`,
-and BunQL's error vocabulary in `extensions.code`.
+and bql.sh's error vocabulary in `extensions.code`.
 
 **The gate is `ro` on the database, and that is the whole of it** — corrected from what this
 section first claimed. It said `include: row` would additionally need `ro` on each table named.

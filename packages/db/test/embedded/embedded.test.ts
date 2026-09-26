@@ -6,17 +6,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { BunQL, type EmbeddedDb } from "../../src/embedded.ts"
-import { BunQLClientError } from "../../src/client/errors.ts"
+import { Bql, type EmbeddedDb } from "../../src/embedded.ts"
+import { BqlClientError } from "../../src/client/errors.ts"
 import type { DecodedChangeEvent } from "../../src/client/feed.ts"
 import { removeTempDir } from "../tmpdir.ts"
 
 /** The error a promise rejected with. Fails the test when it resolved instead. */
-async function failure(promise: PromiseLike<unknown>): Promise<BunQLClientError> {
+async function failure(promise: PromiseLike<unknown>): Promise<BqlClientError> {
   try {
     await promise
   } catch (err) {
-    return err as BunQLClientError
+    return err as BqlClientError
   }
   throw new Error("expected the call to fail, and it did not")
 }
@@ -27,12 +27,12 @@ function plain<T>(rows: readonly T[]): T[] {
 }
 
 const dirs: string[] = []
-const open: BunQL[] = []
+const open: Bql[] = []
 
-async function openBunQL(): Promise<BunQL> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-embedded-"))
+async function openBql(): Promise<Bql> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-embedded-"))
   dirs.push(dir)
-  const bq = await BunQL.open({ dir, realtime: { idleRetainMs: 0 } })
+  const bq = await Bql.open({ dir, realtime: { idleRetainMs: 0 } })
   open.push(bq)
   return bq
 }
@@ -45,11 +45,11 @@ async function until(check: () => boolean, timeoutMs = 4000): Promise<void> {
   }
 }
 
-let bq: BunQL
+let bq: Bql
 let db: EmbeddedDb
 
 beforeAll(async () => {
-  bq = await openBunQL()
+  bq = await openBql()
   db = await bq.create("acme")
   await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
 })
@@ -111,7 +111,7 @@ describe("statements", () => {
 
   test("a SQLite failure is the client SDK's error, not a raw throw", async () => {
     const error = await failure(db.sql`select * from nope`)
-    expect(error).toBeInstanceOf(BunQLClientError)
+    expect(error).toBeInstanceOf(BqlClientError)
     expect(error.code).toBe("SQLITE_ERROR")
     expect(error.status).toBe(400)
   })
@@ -221,7 +221,7 @@ describe("realtime in process", () => {
 
 describe("lifecycle", () => {
   test("create, list, stat, fork and delete", async () => {
-    const bq2 = await openBunQL()
+    const bq2 = await openBql()
     const one = await bq2.create("one")
     await one.sql`create table t(id integer primary key, v text)`.run()
     await one.sql`insert into t(v) values (${"kept"})`.run()
@@ -241,7 +241,7 @@ describe("lifecycle", () => {
   })
 
   test("snapshot, restore and checkpoint, the node-local three", async () => {
-    const bq4 = await openBunQL()
+    const bq4 = await openBql()
     const source = await bq4.create("local")
     await source.sql`create table t(id integer primary key, v text)`.run()
     const at = (await source.sql`insert into t(v) values (${"first"})`.run()).txid
@@ -266,7 +266,7 @@ describe("lifecycle", () => {
   })
 
   test("a fork at a txid keeps only what was committed by then", async () => {
-    const bq3 = await openBunQL()
+    const bq3 = await openBql()
     const source = await bq3.create("source")
     await source.sql`create table t(id integer primary key, v text)`.run()
     const at = (await source.sql`insert into t(v) values (${"first"})`.run()).txid
@@ -278,7 +278,7 @@ describe("lifecycle", () => {
 
 describe("serve", () => {
   test("mounts the HTTP surface on the same engine", async () => {
-    const served = await openBunQL()
+    const served = await openBql()
     const local = await served.create("acme")
     await local.sql`create table t(id integer primary key, v text)`.run()
     const handle = await served.serve({ port: 0, host: "127.0.0.1" })
@@ -301,7 +301,7 @@ describe("serve", () => {
     } finally {
       await handle.close()
     }
-    // Closing the listener leaves the engine open, because the runtime belongs to BunQL.
+    // Closing the listener leaves the engine open, because the runtime belongs to bql.sh.
     expect(local.sync.sql`select count(*) as n from t`.get()).toEqual({ n: 1 })
   })
 })

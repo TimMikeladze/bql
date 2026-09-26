@@ -532,7 +532,7 @@ export class WalApplier {
       this.#mechanism = "wal"
       this.#fallback = probe.reason
       this.#warn(
-        `bunql: ${this.dbPath}: this VFS cannot offer xShmLock (${probe.reason}); ` +
+        `bql: ${this.dbPath}: this VFS cannot offer xShmLock (${probe.reason}); ` +
           "replica apply falls back to mechanism B, which rebuilds the wal-index on every read. " +
           "docs/c5-apply-pages.md §4.6",
       )

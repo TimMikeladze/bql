@@ -4,7 +4,7 @@ Milestone H5 of `docs/plan-surfaces.md`. A tenant's OpenAPI document in, an exec
 schema out, with resolvers that dispatch **in this process**.
 
 ```ts
-import { graphqlHandler } from "@bunql/db/graphql"
+import { graphqlHandler } from "bql.sh/graphql"
 
 const handler = graphqlHandler({
   // The server's own rights. Introspection only, and its result is shared by every caller.
@@ -42,7 +42,7 @@ Two edits are made to the document on the way, both in `src/graphql/document.ts`
   the generator would turn it into a required `db: String!` argument on **every** field. A path
   parameter the emitted path key does not mention is therefore dropped. Nothing else is touched.
 
-The internal base URL is `http://bunql.internal/v1/db/<db>/api`. It never reaches a socket — the
+The internal base URL is `http://bql.internal/v1/db/<db>/api`. It never reaches a socket — the
 dispatcher resolves it and calls a function — but `buildRequest` does `new URL(baseUrl + path)`, so
 it has to be absolute.
 
@@ -51,7 +51,7 @@ it has to be absolute.
 `SchemaCache` keys a tenant's schema on `PRAGMA schema_version` — **`src/dataapi/`'s key, not a
 second one**. `DataApiCache.for(db, exec)` already reads that pragma and re-introspects when it
 moved; this cache asks it for the entry and reuses the version it reports. So a `CREATE TABLE`, an
-`ALTER TABLE` or a `DROP` rebuilds the GraphQL schema by itself, and nothing in BunQL holds a
+`ALTER TABLE` or a `DROP` rebuilds the GraphQL schema by itself, and nothing in bql.sh holds a
 second opinion about when a tenant's schema changed. Pass the server's own `DataApiCache` through
 `options.cache` and one introspection serves REST, OpenAPI and GraphQL between them.
 
@@ -122,8 +122,8 @@ safe.
 One vocabulary, all the way out. A generated resolver that gets a non-2xx back throws a
 `GraphQLError` of its own — `"GET /users failed with 403 Forbidden"`, extensions
 `{code: "OPENAPI_REQUEST_FAILED", status, body}` — with the real refusal parsed under `body.error`.
-Left alone that reads to a client as one opaque failure whatever went wrong, so `liftBunQLError`
-unwraps it: the BunQL message becomes the error's message, and `code`, `status` and everything else
+Left alone that reads to a client as one opaque failure whatever went wrong, so `liftBqlError`
+unwraps it: the bql.sh message becomes the error's message, and `code`, `status` and everything else
 `mapError` attached (`txid`, `primary`, `problems`, `failedIndex`, `acks`, `needed`) become
 extensions.
 

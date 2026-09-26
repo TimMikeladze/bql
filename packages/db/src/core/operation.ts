@@ -8,7 +8,7 @@
 // way.
 //
 // The context is a type parameter defaulting to `unknown`, so this module owes nothing to the rest
-// of BunQL: the server instantiates `Registry<RouteContext>` and core stays a piece another
+// of bql.sh: the server instantiates `Registry<RouteContext>` and core stays a piece another
 // project could take whole.
 //
 // `Registry.add` refuses a malformed operation by throwing. These are programmer errors found at
@@ -23,7 +23,7 @@ import { keyword, type Schema } from "./schema.ts"
 export type HttpMethod = "get" | "post" | "put" | "patch" | "delete"
 
 /**
- * A BunQL error code, such as `"NOT_PRIMARY"` or `"SQLITE_CONSTRAINT_UNIQUE"`.
+ * A bql.sh error code, such as `"NOT_PRIMARY"` or `"SQLITE_CONSTRAINT_UNIQUE"`.
  * `src/client/protocol.ts` owns the list; core does not import it, and `src/openapi/` maps a code
  * to a status with the table in `src/server/errors.ts`.
  */
@@ -72,7 +72,7 @@ export interface Operation<TIn = unknown, TOut = unknown, Ctx = unknown> {
   params?: OperationParams
   body?: OperationBody
   response: OperationResponse
-  /** Error statuses this operation can produce, by BunQL error code. */
+  /** Error statuses this operation can produce, by bql.sh error code. */
   errors?: ErrorCode[]
   security?: Security
   graphql?: GraphqlBinding

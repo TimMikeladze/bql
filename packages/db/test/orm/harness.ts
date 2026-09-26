@@ -1,4 +1,4 @@
-// One real BunQL server for both ORM suites, plus an embedded engine for the in-process leg. The
+// One real bql.sh server for both ORM suites, plus an embedded engine for the in-process leg. The
 // server is the one `test/server/harness.ts` starts, so the adapters are exercised against exactly
 // the routes everything else is tested against.
 
@@ -6,12 +6,12 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { createClient, type Client, type Db } from "../../src/client/index.ts"
-import { BunQL } from "../../src/embedded.ts"
+import { Bql } from "../../src/embedded.ts"
 import { createDb, startTestServer, stopAll as stopServers, type TestServer } from "../server/harness.ts"
 import { removeTempDir } from "../tmpdir.ts"
 
 const clients: Client[] = []
-const embedded: BunQL[] = []
+const embedded: Bql[] = []
 const dirs: string[] = []
 
 export interface OrmFixture {
@@ -50,9 +50,9 @@ export async function anotherDb(fixture: OrmFixture, name: string): Promise<Db> 
 
 /** An in-process engine with one database on it, for the embedded leg of the Kysely suite. */
 export async function startEmbedded(name: string): Promise<Db> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-orm-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-orm-"))
   dirs.push(dir)
-  const bq = await BunQL.open({ dir, intMode: "bigint", realtime: { idleRetainMs: 0 } })
+  const bq = await Bql.open({ dir, intMode: "bigint", realtime: { idleRetainMs: 0 } })
   embedded.push(bq)
   return bq.create(name)
 }

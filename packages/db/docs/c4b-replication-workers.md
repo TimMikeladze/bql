@@ -246,10 +246,10 @@ promoting by hand.
 
 | gauge | rule | why it is honest |
 |---|---|---|
-| `bunql_replication_connected` | **the router's** connection count | the router owns every socket; a worker's adopted count is a different quantity |
-| `bunql_replication_lag_txid` | **max** over workers | it is already a max over streams |
-| `bunql_replication_bytes_total` | the router's `bytesSent` | the router is what writes to the socket, so it counts every byte once |
-| `bunql_replication_records_total` | **sum** over workers | a `TXN` is emitted by exactly one worker |
+| `bql_replication_connected` | **the router's** connection count | the router owns every socket; a worker's adopted count is a different quantity |
+| `bql_replication_lag_txid` | **max** over workers | it is already a max over streams |
+| `bql_replication_bytes_total` | the router's `bytesSent` | the router is what writes to the socket, so it counts every byte once |
+| `bql_replication_records_total` | **sum** over workers | a `TXN` is emitted by exactly one worker |
 
 The storage gauges stay omitted: that gap is unchanged and is not this milestone's.
 

@@ -17,7 +17,7 @@ afterAll(cleanupTempDirs)
 
 /** A registry whose log rolls a segment per transaction, so retention has something to choose. */
 function registry() {
-  const dir = tempDir("bunql-retain-")
+  const dir = tempDir("bql-retain-")
   return { dir, registry: TenantRegistry.open({ dir, segmentBytes: 1 }) }
 }
 
@@ -54,7 +54,7 @@ describe("Tenant.retain", () => {
     expect(listSnapshots(tenant.dir).map((s) => s.txid)).toEqual(["5"])
 
     // And the point of all of it: a restore to a point inside the window still works.
-    const into = path.join(tempDir("bunql-restore-"), "pitr")
+    const into = path.join(tempDir("bql-restore-"), "pitr")
     const restored = await restore({ dir: tenant.dir, at: 12n, into })
     expect(restored.txid).toBe(12n)
     expect(restored.fromTxid).toBe(5n)

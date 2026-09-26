@@ -92,10 +92,10 @@ test("a write refused at the ceiling rolls back", async () => {
   expect(after[0]).toBe(0)
 })
 
-test("the largest result built is reported as bunql_result_bytes_max", async () => {
+test("the largest result built is reported as bql_result_bytes_max", async () => {
   await query("select i, randomblob(512) from (" + series(200) + ")", { maxRows: 1000 })
   const metrics = await (await server.fetch("/metrics")).text()
-  const line = metrics.split("\n").find((l) => l.startsWith("bunql_result_bytes_max{"))
+  const line = metrics.split("\n").find((l) => l.startsWith("bql_result_bytes_max{"))
   expect(line).toBeDefined()
   expect(Number(line?.split(" ").pop())).toBeGreaterThan(100_000)
 })

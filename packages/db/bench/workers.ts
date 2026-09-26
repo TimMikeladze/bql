@@ -70,7 +70,7 @@ try {
 
 const base = results[0]?.rate ?? 0
 console.log(
-  `bunql workers bench · ${DBS} databases · ${CONCURRENT} sockets · ${SECONDS}s · ` +
+  `bql workers bench · ${DBS} databases · ${CONCURRENT} sockets · ${SECONDS}s · ` +
     `${FOLLOW ? "replica reads · " : REPLICATION ? "one replica attached · " : "no replication · "}` +
     `over ${TRANSPORT === "http" ? "HTTP" : "one socket"} · ` +
     `Bun ${Bun.version} · ${process.platform}/${process.arch} · ${os.cpus().length} cores\n`,
@@ -106,7 +106,7 @@ emit({
  * databases and one row each, because a point read wants a row to find.
  */
 async function startUpstream(): Promise<{ server: Bun.Subprocess; root: string; url: string }> {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-workers-upstream-"))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bql-workers-upstream-"))
   const port = 4399
   const server = Bun.spawn(
     [
@@ -126,7 +126,7 @@ async function startUpstream(): Promise<{ server: Bun.Subprocess; root: string; 
     {
       stdout: "ignore",
       stderr: "inherit",
-      env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+      env: { ...process.env, BQL_AUTH_ADMIN_KEY: ADMIN, BQL_CONFIG: "" },
     },
   )
   const url = `http://127.0.0.1:${port}`
@@ -143,7 +143,7 @@ async function startUpstream(): Promise<{ server: Bun.Subprocess; root: string; 
 
 /** Starts a node with `workers` threads, seeds it, runs the load client, returns writes/s. */
 async function run(workers: number): Promise<number> {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-workers-${workers}-`))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `bql-workers-${workers}-`))
   const port = 4400 + workers
   const server = Bun.spawn(
     [
@@ -168,15 +168,15 @@ async function run(workers: number): Promise<number> {
       stderr: "inherit",
       env: {
         ...process.env,
-        BUNQL_AUTH_ADMIN_KEY: ADMIN,
-        BUNQL_CONFIG: "",
+        BQL_AUTH_ADMIN_KEY: ADMIN,
+        BQL_CONFIG: "",
         // A cluster of one: it is its own raft leader, so every write goes through a lease this
         // node granted itself and renews on the router, and reads on a worker.
         ...(CLUSTER
           ? {
-              BUNQL_CLUSTER_ENABLED: "1",
-              BUNQL_CLUSTER_BOOTSTRAP: "1",
-              BUNQL_CLUSTER_ADVERTISE: `ws://127.0.0.1:${port}`,
+              BQL_CLUSTER_ENABLED: "1",
+              BQL_CLUSTER_BOOTSTRAP: "1",
+              BQL_CLUSTER_ADVERTISE: `ws://127.0.0.1:${port}`,
             }
           : {}),
       },
@@ -200,7 +200,7 @@ async function run(workers: number): Promise<number> {
       }
     }
     if (REPLICATION) {
-      replicaRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bunql-workers-${workers}-replica-`))
+      replicaRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bql-workers-${workers}-replica-`))
       const replicaPort = port + 100
       replica = Bun.spawn(
         [
@@ -222,7 +222,7 @@ async function run(workers: number): Promise<number> {
         {
           stdout: "ignore",
           stderr: "inherit",
-          env: { ...process.env, BUNQL_AUTH_ADMIN_KEY: ADMIN, BUNQL_CONFIG: "" },
+          env: { ...process.env, BQL_AUTH_ADMIN_KEY: ADMIN, BQL_CONFIG: "" },
         },
       )
       const replicaUrl = `http://127.0.0.1:${replicaPort}`

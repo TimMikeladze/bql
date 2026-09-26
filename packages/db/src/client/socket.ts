@@ -9,7 +9,7 @@
 // Third invariant: a subscription is an intent, not a socket state. A dropped socket re-opens and
 // every intent is replayed, so a live query survives a restart of the server it was talking to.
 
-import { BunQLClientError, asClientError } from "./errors.ts"
+import { BqlClientError, asClientError } from "./errors.ts"
 import { WS_PROTOCOL, type ErrorInfo, type WsPush } from "./protocol.ts"
 
 export type WebSocketLike = {
@@ -66,11 +66,11 @@ export class SocketClient {
 
   /** Opens the socket, or joins the open attempt already running. */
   connect(): Promise<void> {
-    if (this.#closed) return Promise.reject(BunQLClientError.client("the client is closed"))
+    if (this.#closed) return Promise.reject(BqlClientError.client("the client is closed"))
     const factory = this.#config.factory
     if (!factory) {
       return Promise.reject(
-        BunQLClientError.client(
+        BqlClientError.client(
           "this runtime has no WebSocket; pass one as `WebSocket` to createClient",
         ),
       )
@@ -161,7 +161,7 @@ export class SocketClient {
     const socket = this.#socket
     this.#socket = null
     this.#ready = null
-    this.#rejectPending(BunQLClientError.network("the client was closed"))
+    this.#rejectPending(BqlClientError.network("the client was closed"))
     try {
       socket?.close()
     } catch {
@@ -174,7 +174,7 @@ export class SocketClient {
   #send(message: Record<string, unknown>): Promise<Record<string, unknown>> {
     const socket = this.#socket
     if (!socket || socket.readyState > 1) {
-      return Promise.reject(BunQLClientError.network("the socket is not open"))
+      return Promise.reject(BqlClientError.network("the socket is not open"))
     }
     const id = this.#nextId++
     return new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -193,7 +193,7 @@ export class SocketClient {
     try {
       message = JSON.parse(text) as Record<string, unknown>
     } catch {
-      this.#config.onError?.(BunQLClientError.network("the server sent a frame that is not JSON"))
+      this.#config.onError?.(BqlClientError.network("the server sent a frame that is not JSON"))
       return
     }
     const id = message.id
@@ -202,7 +202,7 @@ export class SocketClient {
       if (!pending) return
       this.#pending.delete(id)
       if (message.ok === false) {
-        pending.reject(BunQLClientError.fromInfo(message.error as ErrorInfo))
+        pending.reject(BqlClientError.fromInfo(message.error as ErrorInfo))
       } else {
         pending.resolve(message)
       }
@@ -217,7 +217,7 @@ export class SocketClient {
     // and phase 0 has no failover to produce it.
     if (message.event === "moved") {
       this.#config.onError?.(
-        BunQLClientError.fromInfo({
+        BqlClientError.fromInfo({
           code: "NOT_PRIMARY",
           message: `database ${String(message.db)} moved to ${String(message.primary)}`,
           status: 503,
@@ -231,7 +231,7 @@ export class SocketClient {
     if (this.#socket !== socket) return
     this.#socket = null
     this.#ready = null
-    this.#rejectPending(BunQLClientError.network("the socket closed"))
+    this.#rejectPending(BqlClientError.network("the socket closed"))
     if (this.#closed || this.#intents.size === 0) return
     this.#scheduleReconnect()
   }

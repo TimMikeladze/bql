@@ -23,7 +23,7 @@ const nav = toc
   .map((t) => `<a href="#${t.id}">${t.text.replace(/^(\d+)\.\s*/, '<span class="n">$1</span>')}</a>`)
   .join("\n");
 
-const html = `<title>BunQL Design</title>
+const html = `<title>bql.sh Design</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
@@ -85,7 +85,7 @@ footer{grid-column:1/-1;margin-top:48px;padding-top:16px;border-top:1px solid va
 <div class="page">
   <header class="top">
     <div class="eyebrow">Design proposal · v0 for review</div>
-    <h1 class="title">BunQL</h1>
+    <h1 class="title">bql.sh</h1>
     <p class="dek">Multi-tenant SQLite on Bun: one process, thousands of databases, sub-millisecond queries over HTTP, WebSocket and SSE, physical WAL-shipping replication, realtime change feeds, point-in-time restore, optional HA. Standalone by default.</p>
     <div class="meta">
       <span>date <b>2026-09-11</b></span>
@@ -102,10 +102,10 @@ ${nav}
     <div class="focus"><b>Where I want your eyes:</b> §6–9 are the API surfaces (HTTP, WebSocket, replication wire, TypeScript client, embedded library, CLI, config) and §13 lists the eleven decisions I need from you, with my recommendation first on each. §2 is what was proven on real bits before any of this was written.</div>
 ${body}
   </article>
-  <footer>BunQL design v0 · generated from docs/design.md · numbers measured on this machine, see experiments/README.md</footer>
+  <footer>bql.sh design v0 · generated from docs/design.md · numbers measured on this machine, see experiments/README.md</footer>
 </div>
 `;
 
-const out = process.argv[2] ?? "bunql-design.html";
+const out = process.argv[2] ?? "bql-design.html";
 writeFileSync(out, html);
 console.log(`wrote ${out} (${html.length} bytes, ${toc.length} headings)`);

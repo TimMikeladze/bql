@@ -5,7 +5,7 @@
 // Three invariants, one per module that is not wiring:
 //
 //   1. **No static import of `graphql` or `openapi-x-graphql`.** Both are optional peers and
-//      BunQL's runtime dependency count is zero; they load through `import()` at the first request
+//      bql.sh's runtime dependency count is zero; they load through `import()` at the first request
 //      that needs a schema, and their absence is a named error carrying the install command
 //      (`src/graphql/peers.ts`).
 //   2. **The caller's rights are ambient per request and never captured.** The schema is built
@@ -40,7 +40,7 @@ export {
 } from "./document.ts"
 export {
   type FormattedGraphQLError,
-  liftBunQLError,
+  liftBqlError,
   nullOnNotFound,
   REQUEST_FAILED,
 } from "./errors.ts"

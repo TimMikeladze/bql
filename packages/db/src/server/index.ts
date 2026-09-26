@@ -71,7 +71,7 @@ export {
   type ServerSection,
 } from "./config.ts"
 export {
-  BunQLError,
+  BqlError,
   ERROR_STATUS,
   errorResponse,
   mapError,

@@ -561,7 +561,7 @@ export class BusStore {
       // say — would otherwise leak a handle per attempt.
       this.db.close();
       throw new BusError(
-        `this database is at schema version ${current}, and this build only knows ${SCHEMA_VERSION} — upgrade agenticbus rather than downgrading the data`,
+        `this database is at schema version ${current}, and this build only knows ${SCHEMA_VERSION} — upgrade bql-bus rather than downgrading the data`,
         500,
       );
     }
@@ -707,7 +707,7 @@ export class BusStore {
       this.insert(workspace, prepared, publisher),
     )();
     const ended = this.now();
-    this.metrics.histogram("agenticbus.publish.duration", ended - started, {
+    this.metrics.histogram("bql-bus.publish.duration", ended - started, {
       workspace,
     });
     this.span({
@@ -718,11 +718,11 @@ export class BusStore {
       startMs: started,
       endMs: ended,
       attributes: {
-        "messaging.system": "agenticbus",
+        "messaging.system": "bql-bus",
         "messaging.destination.name": request.subject,
         "messaging.message.id": result.id,
-        "agenticbus.workspace": workspace,
-        "agenticbus.seq": result.seq,
+        "bql-bus.workspace": workspace,
+        "bql-bus.seq": result.seq,
       },
     });
     return result;
@@ -772,7 +772,7 @@ export class BusStore {
       request.body ?? null,
     );
     if (checked && checked.violations.length > 0) {
-      this.metrics.counter("agenticbus.schema.violations", 1, {
+      this.metrics.counter("bql-bus.schema.violations", 1, {
         schema: checked.schema,
         mode: checked.mode,
         workspace,
@@ -853,7 +853,7 @@ export class BusStore {
           | { seq: number; id: string; headers: string }
           | null;
         if (existing) {
-          this.metrics.counter("agenticbus.messages.deduplicated", 1, { workspace });
+          this.metrics.counter("bql-bus.messages.deduplicated", 1, { workspace });
           // The *original* correlation, not the one this call just generated:
           // a caller retrying an idempotent request has to be handed the
           // correlation the answer will actually arrive under, or it waits
@@ -907,7 +907,7 @@ export class BusStore {
           seq: number;
         }).seq,
       );
-      this.metrics.counter("agenticbus.messages.published", 1, { workspace });
+      this.metrics.counter("bql-bus.messages.published", 1, { workspace });
       // Inside the transaction, after the row: a crash here must leave the log
       // exactly as it was, not with a message nobody was told about.
       fault("mid-txn");
@@ -1057,7 +1057,7 @@ export class BusStore {
             [subscription.id, row.key],
           );
       }
-      this.metrics.counter("agenticbus.messages.requeued", 1, { workspace });
+      this.metrics.counter("bql-bus.messages.requeued", 1, { workspace });
       return {
         seq: next,
         id,
@@ -1469,7 +1469,7 @@ export class BusStore {
           );
       }
       if (rows.length > 0)
-        this.metrics.counter("agenticbus.deliveries.reclaimed", rows.length);
+        this.metrics.counter("bql-bus.deliveries.reclaimed", rows.length);
       return rows.length;
     })();
   }
@@ -1481,7 +1481,7 @@ export class BusStore {
     options: { dropBody?: boolean; reasonTag?: string } = {},
   ) {
     const now = this.now();
-    this.metrics.counter("agenticbus.deliveries.dead", 1, {
+    this.metrics.counter("bql-bus.deliveries.dead", 1, {
       subscription: subscription.name,
       workspace: subscription.workspace,
     });
@@ -1548,7 +1548,7 @@ export class BusStore {
           now,
         ],
       );
-      this.metrics.counter("agenticbus.keys.blocked", 1, {
+      this.metrics.counter("bql-bus.keys.blocked", 1, {
         subscription: subscription.name,
         workspace: subscription.workspace,
       });
@@ -1588,7 +1588,7 @@ export class BusStore {
     );
     subscription.paused = 1;
     subscription.quarantined_at = now;
-    this.metrics.counter("agenticbus.subscriptions.quarantined", 1, {
+    this.metrics.counter("bql-bus.subscriptions.quarantined", 1, {
       subscription: subscription.name,
       workspace: subscription.workspace,
     });
@@ -1798,7 +1798,7 @@ export class BusStore {
                   { reasonTag: "schema" },
                 ),
               )();
-              this.metrics.counter("agenticbus.schema.violations", 1, {
+              this.metrics.counter("bql-bus.schema.violations", 1, {
                 schema: checked.schema,
                 mode: "delivery",
                 workspace,
@@ -1825,7 +1825,7 @@ export class BusStore {
           this.db.transaction(() =>
             this.deadLetter(row, subscription, error.message, { dropBody: true }),
           )();
-          this.metrics.counter("agenticbus.blobs.unreadable", 1, {
+          this.metrics.counter("bql-bus.blobs.unreadable", 1, {
             subscription: name,
             workspace,
           });
@@ -1836,12 +1836,12 @@ export class BusStore {
     const envelopes = hydrated.filter((entry): entry is Envelope => entry !== null);
     // Timed around the whole call, hydration included: a claim that spends its
     // time reading a blob is still a slow claim to the consumer waiting on it.
-    this.metrics.histogram("agenticbus.claim.duration", this.now() - started, {
+    this.metrics.histogram("bql-bus.claim.duration", this.now() - started, {
       subscription: name,
       workspace,
     });
     if (envelopes.length > 0)
-      this.metrics.counter("agenticbus.deliveries.claimed", envelopes.length, {
+      this.metrics.counter("bql-bus.deliveries.claimed", envelopes.length, {
         subscription: name,
         workspace,
       });
@@ -1849,7 +1849,7 @@ export class BusStore {
       // Age at claim is the number that actually says the bus is behind: a
       // claim can be fast while every message it hands over is an hour old.
       this.metrics.histogram(
-        "agenticbus.delivery.age",
+        "bql-bus.delivery.age",
         Math.max(0, this.now() - envelope.message.publishedAt),
         { subscription: name, workspace },
       );
@@ -1862,12 +1862,12 @@ export class BusStore {
         startMs: started,
         endMs: this.now(),
         attributes: {
-          "messaging.system": "agenticbus",
+          "messaging.system": "bql-bus",
           "messaging.destination.name": envelope.message.subject,
           "messaging.consumer.group.name": name,
           "messaging.message.id": envelope.message.id,
-          "agenticbus.attempt": envelope.delivery.attempt,
-          "agenticbus.workspace": workspace,
+          "bql-bus.attempt": envelope.delivery.attempt,
+          "bql-bus.workspace": workspace,
         },
       });
     }
@@ -1969,12 +1969,12 @@ export class BusStore {
           row.id,
         ],
       );
-      this.metrics.counter("agenticbus.deliveries.acked", 1, {
+      this.metrics.counter("bql-bus.deliveries.acked", 1, {
         subscription: subscription.name,
         workspace,
       });
       this.metrics.histogram(
-        "agenticbus.ack.duration",
+        "bql-bus.ack.duration",
         Math.max(0, this.now() - started),
         { subscription: subscription.name, workspace },
       );
@@ -1985,13 +1985,13 @@ export class BusStore {
         .get(row.message_seq) as { published_at: number } | null;
       if (publishedAt)
         this.metrics.histogram(
-          "agenticbus.message.age_at_ack",
+          "bql-bus.message.age_at_ack",
           Math.max(0, this.now() - publishedAt.published_at),
           { subscription: subscription.name, workspace },
         );
       if (published.length > 0)
         this.metrics.counter(
-          "agenticbus.deliveries.acked_with_publish",
+          "bql-bus.deliveries.acked_with_publish",
           published.length,
           { subscription: subscription.name },
         );
@@ -2030,7 +2030,7 @@ export class BusStore {
       .query("SELECT * FROM subscriptions WHERE id=?")
       .get(row.subscription_id) as SubscriptionRow;
     if (subscription.workspace !== workspace) return null;
-    this.metrics.counter("agenticbus.deliveries.ack_replayed", 1, {
+    this.metrics.counter("bql-bus.deliveries.ack_replayed", 1, {
       subscription: subscription.name,
       workspace,
     });
@@ -2069,11 +2069,11 @@ export class BusStore {
            VALUES (?,?,?, 'claimed', NULL, ?, ?)`,
           [workspace, key, fence, now, now],
         );
-        this.metrics.counter("agenticbus.effects.claimed", 1);
+        this.metrics.counter("bql-bus.effects.claimed", 1);
         return { fresh: true, result: null, retried: false };
       }
       if (row.status === "recorded") {
-        this.metrics.counter("agenticbus.effects.replayed", 1);
+        this.metrics.counter("bql-bus.effects.replayed", 1);
         return {
           fresh: false,
           result: parse<Json>(row.result, null),
@@ -2085,7 +2085,7 @@ export class BusStore {
         [fence, now, workspace, key],
       );
       const retried = row.fence !== fence;
-      if (retried) this.metrics.counter("agenticbus.effects.retried", 1);
+      if (retried) this.metrics.counter("bql-bus.effects.retried", 1);
       return { fresh: true, result: null, retried };
     })();
   }
@@ -2103,7 +2103,7 @@ export class BusStore {
        WHERE effects.status <> 'recorded'`,
       [workspace, effect.key, JSON.stringify(effect.result ?? null), now, now],
     );
-    this.metrics.counter("agenticbus.effects.recorded", 1);
+    this.metrics.counter("bql-bus.effects.recorded", 1);
   }
 
   effect(workspace: string, key: string): EffectClaim | null {
@@ -2151,11 +2151,11 @@ export class BusStore {
         "UPDATE deliveries SET status='acked', lease_until=NULL, error=NULL, updated_at=? WHERE id=? AND status='leased'",
         [this.now(), row.id],
       );
-      this.metrics.counter("agenticbus.deliveries.acked", 1, {
+      this.metrics.counter("bql-bus.deliveries.acked", 1, {
         subscription: subscription.name,
         workspace,
       });
-      this.metrics.counter("agenticbus.deliveries.acked_transactional", 1, {
+      this.metrics.counter("bql-bus.deliveries.acked_transactional", 1, {
         subscription: subscription.name,
         workspace,
       });
@@ -2187,7 +2187,7 @@ export class BusStore {
       const reason = (options.error ?? "consumer nacked").slice(0, 4000);
       const exhausted =
         options.fatal === true || row.attempt >= subscription.max_attempts;
-      this.metrics.counter("agenticbus.deliveries.nacked", 1, {
+      this.metrics.counter("bql-bus.deliveries.nacked", 1, {
         subscription: subscription.name,
         workspace,
       });
@@ -2319,7 +2319,7 @@ export class BusStore {
          WHERE message_seq=? AND status IN ('pending','leased')`,
         [now, seq],
       );
-      this.metrics.counter("agenticbus.deliveries.cancelled", result.changes, {
+      this.metrics.counter("bql-bus.deliveries.cancelled", result.changes, {
         workspace,
       });
       return {
@@ -2340,7 +2340,7 @@ export class BusStore {
          WHERE id=? AND status IN ('pending','leased')`,
         [this.now(), deliveryId],
       );
-      this.metrics.counter("agenticbus.deliveries.cancelled", result.changes, {
+      this.metrics.counter("bql-bus.deliveries.cancelled", result.changes, {
         workspace,
       });
       return {
@@ -2606,7 +2606,7 @@ export class BusStore {
    *
    * What this is **not**: replay from an archive of shipped log segments. The
    * log after a snapshot lives on whatever was following the leader at the
-   * time, and `agenticbus follow` is how it gets there.
+   * time, and `bql-bus follow` is how it gets there.
    */
   truncateAfter(seq: number): { removed: number; lastSeq: number } {
     this.assertWritable();
@@ -2711,7 +2711,7 @@ export class BusStore {
         deadLettered++;
       }
     }
-    this.metrics.gauge("agenticbus.blobs.missing", missing);
+    this.metrics.gauge("bql-bus.blobs.missing", missing);
     return { missing, deadLettered };
   }
 
@@ -2765,7 +2765,7 @@ export class BusStore {
          VALUES (?,?,?,?,?,?,?)`,
         [workspace, name, version, text, hash, compat, this.now()],
       );
-      this.metrics.counter("agenticbus.schemas.registered", 1, { workspace });
+      this.metrics.counter("bql-bus.schemas.registered", 1, { workspace });
       return { workspace, name, version, source, hash, compat, createdAt: this.now() };
     })();
   }

@@ -5,7 +5,7 @@
 // following the database for good.
 //
 // The refusal is the one statement writes already give when forwarding is off — `503 NOT_PRIMARY`
-// with `BunQL-Primary` — so nothing new reaches a client. The cluster harness is the replication
+// with `BQL-Primary` — so nothing new reaches a client. The cluster harness is the replication
 // one, because a replica that is genuinely following a primary is the only setup in which the
 // "and it is still there on both nodes, still following" half of the claim means anything.
 

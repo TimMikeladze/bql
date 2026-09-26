@@ -35,7 +35,7 @@ async function startShippingServer(overrides: Record<string, unknown> = {}): Pro
     env: {},
     overrides: {
       server: { port: 0, host: "127.0.0.1", node: "s3-node" },
-      data: { dir: tempDir("bunql-s3-server-") },
+      data: { dir: tempDir("bql-s3-server-") },
       s3: {
         ...credentials,
         prefix,
@@ -82,10 +82,10 @@ async function flush(server: TestServer): Promise<void> {
 
 describe("[s3] configuration", () => {
   test("a bucket turns shipping on and `s3://bucket/prefix` splits into both", () => {
-    const config = loadConfig({ env: {}, overrides: { s3: { bucket: "s3://backups/bunql/prod" } } })
+    const config = loadConfig({ env: {}, overrides: { s3: { bucket: "s3://backups/bql/prod" } } })
     expect(config.s3.enabled).toBe(true)
     expect(config.s3.bucket).toBe("backups")
-    expect(config.s3.prefix).toBe("bunql/prod")
+    expect(config.s3.prefix).toBe("bql/prod")
   })
 
   test("no bucket means no shipping, and `enabled = false` keeps the bucket as a restore target", () => {
@@ -98,15 +98,15 @@ describe("[s3] configuration", () => {
     expect(kept.s3.enabled).toBe(false)
   })
 
-  test("every key takes a BUNQL_S3_* override", () => {
+  test("every key takes a BQL_S3_* override", () => {
     const config = loadConfig({
       env: {
-        BUNQL_S3_BUCKET: "from-env",
-        BUNQL_S3_PREFIX: "env/",
-        BUNQL_S3_SHIP_INTERVAL_MS: "250",
-        BUNQL_S3_RETENTION: "7d",
-        BUNQL_S3_CONCURRENCY: "8",
-        BUNQL_S3_ENDPOINT: "https://example.invalid",
+        BQL_S3_BUCKET: "from-env",
+        BQL_S3_PREFIX: "env/",
+        BQL_S3_SHIP_INTERVAL_MS: "250",
+        BQL_S3_RETENTION: "7d",
+        BQL_S3_CONCURRENCY: "8",
+        BQL_S3_ENDPOINT: "https://example.invalid",
       },
     })
     expect(config.s3.bucket).toBe("from-env")
@@ -226,7 +226,7 @@ describe("a server that ships", () => {
     expect(body.s3?.shippedTxid).toBe(1)
   })
 
-  test("`/metrics` exports the four bunql_s3_* series", async () => {
+  test("`/metrics` exports the four bql_s3_* series", async () => {
     const server = await startShippingServer()
     await server.json("/v1/db", { method: "POST", body: JSON.stringify({ name: "met" }) })
     await server.json("/v1/db/met/query", {
@@ -235,11 +235,11 @@ describe("a server that ships", () => {
     })
     await flush(server)
     const text = await (await server.call("/metrics")).text()
-    expect(text).toContain("bunql_s3_shipped_txid{")
-    expect(text).toContain("bunql_s3_pending_records{")
-    expect(text).toContain("bunql_s3_errors_total{")
-    expect(text).toContain("bunql_s3_bytes_total{")
-    expect(text).toMatch(/bunql_s3_shipped_txid\{[^}]*\} 1/)
+    expect(text).toContain("bql_s3_shipped_txid{")
+    expect(text).toContain("bql_s3_pending_records{")
+    expect(text).toContain("bql_s3_errors_total{")
+    expect(text).toContain("bql_s3_bytes_total{")
+    expect(text).toMatch(/bql_s3_shipped_txid\{[^}]*\} 1/)
   })
 
   test("a node with no bucket says so rather than pretending", async () => {
@@ -247,7 +247,7 @@ describe("a server that ships", () => {
       env: {},
       overrides: {
         server: { port: 0, host: "127.0.0.1" },
-        data: { dir: tempDir("bunql-nos3-") },
+        data: { dir: tempDir("bql-nos3-") },
       },
     })
     // The refusal below is a 503, which the wrapper reports; this test expects it, so the report
@@ -276,7 +276,7 @@ describe("a server that ships", () => {
 
     // And `/metrics` omits the series rather than exporting zeroes.
     const text = await (await fetch(`${url}/metrics`, { headers })).text()
-    expect(text).not.toContain("bunql_s3_shipped_txid")
+    expect(text).not.toContain("bql_s3_shipped_txid")
   })
 
   test("verifying a bucket with nothing in it is a 404, not a false success", async () => {

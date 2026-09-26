@@ -1,6 +1,6 @@
 // `graphql-transport-ws`, the protocol every GraphQL client speaks (graphql-ws, Apollo, urql,
 // GraphiQL). Implemented here rather than taken as a dependency: it is a small state machine, and
-// `src/graphql/peers.ts`'s rule is that BunQL's runtime dependency count is zero.
+// `src/graphql/peers.ts`'s rule is that bql.sh's runtime dependency count is zero.
 // `docs/h7-subscriptions.md` §4.
 //
 // Invariant: **the principal is established once, at `connection_init`, and every operation on the
@@ -11,7 +11,7 @@
 //
 // Second invariant: a `query` or a `mutation` sent over this socket runs through **the same
 // executor the HTTP surface runs**, so the depth limit, the complexity limit, `nullOnNotFound` and
-// BunQL's error vocabulary are the same on both. One execution path, one set of limits.
+// bql.sh's error vocabulary are the same on both. One execution path, one set of limits.
 //
 // Third invariant: every subscription this socket opened is closed when it closes. The engine's
 // subscriber count is what a leak shows up in, and `close()` walks the map rather than trusting a

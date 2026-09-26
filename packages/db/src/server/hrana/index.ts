@@ -19,7 +19,7 @@
 //     if (isHranaSocket(ws.data)) return                                    // drain: nothing to do
 //
 // Second invariant: these routes carry their own common headers. `app.ts`'s `wrap` is private to
-// it and takes a `RouteContext`, so the CORS and `BunQL-*` headers are applied here instead —
+// it and takes a `RouteContext`, so the CORS and `BQL-*` headers are applied here instead —
 // which is also why a browser using `@libsql/client/web` works against this surface.
 
 import { HEADERS } from "../../client/protocol.ts"

@@ -10,9 +10,9 @@ const SHAPE = new URL(import.meta.url).searchParams.get("shape") === "empty" ? "
 const BODY = new Uint8Array(200)
 const HEADERS: [string, string][] = [
   ["content-type", "application/json"],
-  ["bunql-node", "bench"],
-  ["bunql-role", "primary"],
-  ["bunql-txid", "2"],
+  ["bql-node", "bench"],
+  ["bql-role", "primary"],
+  ["bql-txid", "2"],
 ]
 
 function reply(id: number): Record<string, unknown> {

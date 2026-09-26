@@ -85,7 +85,7 @@ gave up.
   nothing.
 - **Structured logging.** Levels and a JSON format, on stderr. Verified by running the server
   with `BUS_LOG_FORMAT=json` and reading the lifecycle lines.
-- **Backup.** `agenticbus backup <dir>` via `VACUUM INTO` plus the blob directory, taken from a
+- **Backup.** `bql-bus backup <dir>` via `VACUUM INTO` plus the blob directory, taken from a
   second connection while the bus serves. A test writes, backs up, writes again, then opens the
   backup and asserts it holds the first write and not the second — and that it is a working
   database, not a file, by claiming from it. Restore is documented in
@@ -93,7 +93,7 @@ gave up.
 
 ## 5. Operator surface — done
 
-`agenticbus dlq <subscription>` and `dlq requeue <seq…>`; dashboard pause/resume, replay, purge,
+`bql-bus dlq <subscription>` and `dlq requeue <seq…>`; dashboard pause/resume, replay, purge,
 and a dead-letter view with a requeue button. The injected token stays read-only; operator
 actions ask for an admin token kept in `sessionStorage`.
 
@@ -116,15 +116,15 @@ npm error code E401
 npm error 401 Unauthorized - GET https://registry.npmjs.org/-/whoami
 ```
 
-so this needs a token the session does not have. `agenticbus`, `dagr` and `dagr-remote` are all
+so this needs a token the session does not have. `bql-bus`, `dagr` and `dagr-remote` are all
 unclaimed on the registry. Once logged in:
 
 ```sh
-cd ~/workspace/agenticbus && npm publish          # runs prepack/postpack
+cd ~/workspace/bql-bus && npm publish          # runs prepack/postpack
 cd ~/workspace/dagr       && bun run prepack && cd packages/dagr-remote && npm publish
 ```
 
-`dagr-remote` keeps `"agenticbus": "file:../../../agenticbus"` until there is a published version
+`dagr-remote` keeps `"bql-bus": "file:../../../bql-bus"` until there is a published version
 to point at — swapping it sooner would break every install in between. That is the one-line
 change to make after the first publish.
 
@@ -133,16 +133,16 @@ change to make after the first publish.
 `Dockerfile` and `fly.toml`. The image builds, runs as uid 1000, serves the API, the dashboard
 and `/metrics`, and drains on SIGTERM — all checked locally with `docker run` before deploying.
 
-Deployed to Fly as **`agenticbus-demo`** (`https://agenticbus-demo.fly.dev`), one machine on one
+Deployed to Fly as **`bql-bus-demo`** (`https://bql-bus-demo.fly.dev`), one machine on one
 1 GB volume in `sjc`. A consumer on a laptop registered over TLS and a request round-tripped:
 
 ```
-$ agenticbus request rpc.upper '"hello from a laptop"' --url https://agenticbus-demo.fly.dev
+$ bql-bus request rpc.upper '"hello from a laptop"' --url https://bql-bus-demo.fly.dev
 "HELLO FROM A LAPTOP"
 ```
 
-It is still running and costs money. `fly apps destroy agenticbus-demo` removes it; `fly scale
-count 0 --app agenticbus-demo` just stops the machine.
+It is still running and costs money. `fly apps destroy bql-bus-demo` removes it; `fly scale
+count 0 --app bql-bus-demo` just stops the machine.
 
 ## Found in review, after the first pass
 

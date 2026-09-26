@@ -378,7 +378,7 @@ export class Raft {
         if (!this.#quorumAlive(now)) {
           // Nothing unsafe has happened — a leader with no quorum cannot commit, so it cannot renew
           // a lease either — but a node that says it leads a cluster it cannot reach is a lie the
-          // rest of BunQL would act on.
+          // rest of bql.sh would act on.
           this.#becomeFollower(this.#term, null, now)
           return
         }

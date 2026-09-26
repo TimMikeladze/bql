@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 import { CFunction, FFIType, JSCallback, CString } from "bun:ffi";
 const ext = process.argv[2];
-if (process.platform === "darwin") Database.setCustomSQLite(process.env.BUNQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib");
+if (process.platform === "darwin") Database.setCustomSQLite(process.env.BQL_SQLITE_LIB ?? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib");
 const db = new Database(":memory:");
-db.loadExtension(ext, "sqlite3_bunqlnative_init");
-const dbp = Number((db.query("select bunql_db() p").get() as any).p);
-const api = (name: string, args: FFIType[], returns: FFIType) => new CFunction({ ptr: Number((db.query("select bunql_api(?) p").get(name) as any).p), args, returns });
+db.loadExtension(ext, "sqlite3_bqlnative_init");
+const dbp = Number((db.query("select bql_db() p").get() as any).p);
+const api = (name: string, args: FFIType[], returns: FFIType) => new CFunction({ ptr: Number((db.query("select bql_api(?) p").get(name) as any).p), args, returns });
 console.log("db ptr", dbp, "version via api:", api("libversion", [], FFIType.cstring)());
 const walHook = api("wal_hook", [FFIType.ptr, FFIType.ptr, FFIType.ptr], FFIType.ptr);
 const progress = api("progress_handler", [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.ptr], FFIType.void);

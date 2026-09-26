@@ -73,7 +73,7 @@ describe("wal-index header", () => {
   })
 
   test("SQLite accepts a header this module wrote, and reads the database through it", () => {
-    const dir = tempDir("bunql-shm-")
+    const dir = tempDir("bql-shm-")
     const { db, dbPath } = openPrimary(dir)
     db.exec("create table t(id integer primary key, v text)")
     db.exec("insert into t(v) values ('a'), ('b'), ('c')")
@@ -132,7 +132,7 @@ describe("the wal-index mapping", () => {
   // the VFS gives region 0 without being asked to extend it, and a store into it is the same
   // bytes every other mapping — and the file — sees.
   test("region 0 is the -shm file, seen through SQLite's own mapping", () => {
-    const { db, dbPath } = openPrimary(tempDir("bunql-shmmap-"))
+    const { db, dbPath } = openPrimary(tempDir("bql-shmmap-"))
     db.exec("create table t(a)")
     db.exec("insert into t values (1)")
 
@@ -164,7 +164,7 @@ describe("the wal-index mapping", () => {
 
   test("a connection that never mapped a wal-index has no region to hand back", () => {
     // No WAL, so there is no wal-index at all and nothing for `xShmMap` to return.
-    const db = Database.open(path.join(tempDir("bunql-shmmap-none-"), "main.db"), { wal: false })
+    const db = Database.open(path.join(tempDir("bql-shmmap-none-"), "main.db"), { wal: false })
     db.exec("pragma journal_mode = delete")
     db.exec("create table t(a)")
     expect(WalIndex.open(db)).toBeNull()

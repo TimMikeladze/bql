@@ -32,9 +32,9 @@ const EXTENSION =
   process.platform === "darwin" ? ".dylib" : process.platform === "win32" ? ".dll" : ".so"
 
 describe("the search path", () => {
-  test("the vendored library is tried after BUNQL_SQLITE_LIB and before the system ones", () => {
-    const before = process.env.BUNQL_SQLITE_LIB
-    process.env.BUNQL_SQLITE_LIB = "/explicit/libsqlite3.so"
+  test("the vendored library is tried after BQL_SQLITE_LIB and before the system ones", () => {
+    const before = process.env.BQL_SQLITE_LIB
+    process.env.BQL_SQLITE_LIB = "/explicit/libsqlite3.so"
     try {
       const paths = candidatePaths()
       expect(paths[0]).toBe("/explicit/libsqlite3.so")
@@ -46,8 +46,8 @@ describe("the search path", () => {
       if (process.platform === "win32") expect(system).toBe(-1)
       else expect(system).toBeGreaterThan(vendored)
     } finally {
-      if (before === undefined) delete process.env.BUNQL_SQLITE_LIB
-      else process.env.BUNQL_SQLITE_LIB = before
+      if (before === undefined) delete process.env.BQL_SQLITE_LIB
+      else process.env.BQL_SQLITE_LIB = before
     }
   })
 
@@ -69,7 +69,7 @@ describe("when no library loads", () => {
     }
     expect(message).toContain("could not load a libsqlite3")
     expect(message).toContain("bun run sqlite:build")
-    expect(message).toContain("BUNQL_SQLITE_LIB")
+    expect(message).toContain("BQL_SQLITE_LIB")
     expect(message).toContain("SQLITE_ENABLE_PREUPDATE_HOOK")
     // The candidate that failed, and why, so the reader can see where it looked.
     expect(message).toContain("/nonexistent/libsqlite3.so")
@@ -100,7 +100,7 @@ describe("the remedy", () => {
   test("names the build script and the override, and what a library of your own must have", () => {
     const text = remedy()
     expect(text).toContain("bun run sqlite:build")
-    expect(text).toContain("BUNQL_SQLITE_LIB")
+    expect(text).toContain("BQL_SQLITE_LIB")
     expect(text).toContain("SQLITE_ENABLE_PREUPDATE_HOOK")
     expect(text).toContain("SQLITE_ENABLE_SESSION")
   })

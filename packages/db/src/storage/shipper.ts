@@ -3,7 +3,7 @@
 //
 // Invariant: the bucket can never block a commit. `onCommit` pushes bytes onto a bounded queue,
 // arms a timer, and returns; a single in-flight drain loop does every upload. A bucket that is
-// slow, unreachable or answering 500s makes `behind` true and `bunql_s3_errors_total` climb, and
+// slow, unreachable or answering 500s makes `behind` true and `bql_s3_errors_total` climb, and
 // changes nothing at all about how long a write takes.
 //
 // Second invariant: the local log is the source of truth and the queue is only a fast path. When

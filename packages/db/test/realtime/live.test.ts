@@ -4,7 +4,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { AuthorizerHub } from "../../src/realtime/authorizer.ts"
 import { ChangeCapture } from "../../src/realtime/capture.ts"
 import { LiveQueryRegistry, type LiveEvent, type Scheduler } from "../../src/realtime/live.ts"
-import { BunQLError } from "../../src/server/errors.ts"
+import { BqlError } from "../../src/server/errors.ts"
 import type { Database } from "../../src/sqlite/index.ts"
 import { cleanupTempDirs } from "../sqlite/tmp.ts"
 import { open, runner, tick } from "./harness.ts"
@@ -149,7 +149,7 @@ describe("results", () => {
 describe("subscribe", () => {
   test("a statement that writes is refused", () => {
     const f = setup()
-    expect(() => f.live.subscribe({ sql: "delete from t" })).toThrow(BunQLError)
+    expect(() => f.live.subscribe({ sql: "delete from t" })).toThrow(BqlError)
     expect(() => f.live.subscribe({ sql: "insert into t(v) values ('x')" })).toThrow(
       "a live query must be read-only",
     )
@@ -158,7 +158,7 @@ describe("subscribe", () => {
 
   test("a key that is not a result column is refused", () => {
     const f = setup()
-    expect(() => f.live.subscribe({ sql: "select v from t", key: "id" })).toThrow(BunQLError)
+    expect(() => f.live.subscribe({ sql: "select v from t", key: "id" })).toThrow(BqlError)
     f.close()
   })
 
@@ -167,7 +167,7 @@ describe("subscribe", () => {
     const live = new LiveQueryRegistry({ db: f.db, execute: runner(f.db), maxLiveQueries: 2 })
     live.subscribe({ sql: "select id from t" })
     live.subscribe({ sql: "select id from o" })
-    expect(() => live.subscribe({ sql: "select v from t" })).toThrow(BunQLError)
+    expect(() => live.subscribe({ sql: "select v from t" })).toThrow(BqlError)
     f.close()
   })
 

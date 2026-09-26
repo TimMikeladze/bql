@@ -9,7 +9,7 @@ milestone is one decision and the rest is wiring.
 `POST /v2/pipeline` with a write, on a replica, fails. The native surface has forwarded writes
 since R2 — `routes.query` asks `forwarder.needsPrimary` and sends the statement to the primary —
 but `hrana/execute.ts` goes straight to `executeStatement`, which refuses on a replica. So
-`@libsql/client` against a BunQL replica is read-only, while the same client against the native
+`@libsql/client` against a bql.sh replica is read-only, while the same client against the native
 surface is not.
 
 ## 2. The decision: what a baton opened on a replica means
@@ -57,7 +57,7 @@ replica already serves locally, and a transaction pinning the *primary's* writer
 
 So it is refused, as it was before this milestone. A client that wants a consistent multi-statement
 read on a replica uses what the replica already gives it: every statement is a snapshot read, and
-`BunQL-Min-Txid` pins which snapshot. A real read transaction on a replica wants a transaction on a
+`BQL-Min-Txid` pins which snapshot. A real read transaction on a replica wants a transaction on a
 *pooled reader* rather than on the writer, which is its own piece of work and does not belong here.
 
 ### 2.3 A statement outside a transaction forwards on its own
@@ -80,7 +80,7 @@ that dies mid-remote-transaction is rolled back by the same path that already ha
 ## 4. What this does not do
 
 **It does not make a replica a primary.** Every forwarded write is a round trip, and a client that
-wants write throughput should address the primary — `BunQL-Primary` on every response says where it
+wants write throughput should address the primary — `BQL-Primary` on every response says where it
 is. Forwarding exists so a client does not have to *know*, not so it does not have to care.
 
 **It does not forward when `[replication] forwardWrites` is off.** That switch is what an operator

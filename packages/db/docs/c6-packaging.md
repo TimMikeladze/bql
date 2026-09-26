@@ -1,13 +1,13 @@
 # C6 — Linux packaging and CI
 
-BunQL's driver is `bun:ffi` over an external libsqlite3. This milestone makes that library
+bql.sh's driver is `bun:ffi` over an external libsqlite3. This milestone makes that library
 something the repo produces from a pinned source rather than something it hopes to find, and puts
 both platforms under CI.
 
 ## 1. What is actually true on Linux
 
 The milestone was written on the premise that Debian and Ubuntu ship a libsqlite3 without the
-preupdate hook or the session extension, and that BunQL therefore does not run on Linux at all.
+preupdate hook or the session extension, and that bql.sh therefore does not run on Linux at all.
 **That premise is wrong, and it is worth saying so plainly before anything else.** Measured, not
 assumed:
 
@@ -84,13 +84,13 @@ at the 4 KiB page size — against upstream's `-2000`, which is 2 MiB. Four time
 dirty pages spill into the `-wal` at different moments, and six tests fail on it:
 
 ```
-BUNQL_SQLITE_LIB=/usr/lib/libsqlite3.dylib bun test   → 1243 pass, 2 skip, 6 fail
+BQL_SQLITE_LIB=/usr/lib/libsqlite3.dylib bun test   → 1243 pass, 2 skip, 6 fail
   polling > a page written twice in one transaction appears once, at its last version
   polling > a rolled-back transaction never reaches the stream
   snapshots > records the database at the txid the caller names
   snapshot and fork > a fork at a txid is the database as it was at that txid
   restore > restoring to the snapshot itself replays nothing
-  bunql end to end > a fork at a txid dumps identically to the primary taken at that txid
+  bql end to end > a fork at a txid dumps identically to the primary taken at that txid
 ```
 
 The first one is the tell: a page written twice in one transaction yields two WAL frames upstream
@@ -105,7 +105,7 @@ at 2, because both capability blocks that could flip are satisfied here as well.
 fixed flag list **together with `scripts/native/walsum.c`**, and writes
 `vendor/sqlite/libsqlite3.dylib` (macOS) or `libsqlite3.so` (Linux). `vendor/` is gitignored.
 
-`walsum.c` is BunQL's own C — the WAL frame checksum, which costs 4.5 µs a frame in JavaScript and
+`walsum.c` is bql.sh's own C — the WAL frame checksum, which costs 4.5 µs a frame in JavaScript and
 17% of a write (`docs/p3-wal-checksum.md`). It rides this build rather than a second one so that
 there is one library, one `dlopen` and one capability check; `src/sqlite/lib.ts` resolves its two
 symbols optionally, so a node on a system libsqlite3 simply does not get them.
@@ -129,7 +129,7 @@ symbols optionally, so a node on a system libsqlite3 simply does not get them.
   itself. Shelling out to a tool that may not exist is how a build script becomes
   machine-dependent, which is the thing this script exists to stop. A C compiler is the one
   external requirement, and its absence prints the package to install per platform.
-- Prints the artefact path and a copy-pasteable `BUNQL_SQLITE_LIB=…`.
+- Prints the artefact path and a copy-pasteable `BQL_SQLITE_LIB=…`.
 
 ### The flags, and why each one
 
@@ -167,7 +167,7 @@ design §4.1 lists it, and `DBPAGE_VTAB` because raw page access is the obvious 
 
 **One default**, `SQLITE_DEFAULT_WAL_SYNCHRONOUS=1`: design §4.1 asks for it, and
 `src/tenant/tenant.ts` already runs `pragma synchronous = normal` on every connection. Setting the
-compile default to match means a bare `Database.open()` through `@bunql/db/sqlite` has the same
+compile default to match means a bare `Database.open()` through `bql.sh/sqlite` has the same
 durability as one the server opened, instead of silently differing.
 
 **Dropped from the flag list in the brief**, each for a reason:
@@ -180,7 +180,7 @@ durability as one the server opened, instead of silently differing.
 - `SQLITE_USE_URI` — redundant. `src/sqlite/database.ts:182` passes `SQLITE_OPEN_URI` on every
   open, which is per-connection and overrides the compile default either way.
 - `SQLITE_DQS=0` — the one real disagreement. Rejecting double-quoted string literals is good
-  hygiene, but it changes what a statement *means*, and BunQL runs SQL sent by arbitrary clients.
+  hygiene, but it changes what a statement *means*, and bql.sh runs SQL sent by arbitrary clients.
   With the search path still falling back to Homebrew and to the system library, `DQS=0` in one
   build would make the same query succeed on one machine and fail on another. If the project wants
   DQS off it should be uniform across every library, which SQLite supports at runtime:
@@ -200,7 +200,7 @@ is off until called, and the SQL `load_extension()` function is unavailable unti
 `src/sqlite/lib.ts` changed in two ways. Neither touches the FFI signatures or the
 capability-detection strategy.
 
-**Search order** is now `BUNQL_SQLITE_LIB` → `vendor/sqlite/libsqlite3.{dylib,so}` → Homebrew →
+**Search order** is now `BQL_SQLITE_LIB` → `vendor/sqlite/libsqlite3.{dylib,so}` → Homebrew →
 the system candidates. The vendored build goes ahead of the system one because it is the only one
 whose flags we know; a distribution build is a guess that happens to be right most of the time. A
 developer who has run the build script gets the right library with nothing to configure.
@@ -217,17 +217,17 @@ Homebrew, no matter the platform or the cause. It now distinguishes three cases:
 All three end with the same remedy, defined once in `remedy()` so the wording cannot drift:
 `bun run sqlite:build`, where the artefact will be, and what a library of your own must be built
 with. (From an **installed** package the same build is `bun run
-node_modules/@bunql/db/scripts/sqlite.ts`, because `npm run` cannot reach a dependency's scripts.
+node_modules/bql.sh/packages/db/scripts/sqlite.ts`, because `npm run` cannot reach a dependency's scripts.
 `docs/l7-tarball.md` is the gate that proves that path works.) For example, against a shared library that is not SQLite:
 
 ```
-BunQL found a libsqlite3 but it is too old: … loaded, but has no sqlite3_changes64.
+bql.sh found a libsqlite3 but it is too old: … loaded, but has no sqlite3_changes64.
 The driver's core API needs SQLite 3.37.0 or newer.
 
-Build the library BunQL needs:
+Build the library bql.sh needs:
   bun run sqlite:build
 and it will be found at /…/vendor/sqlite/libsqlite3.dylib.
-Or point BUNQL_SQLITE_LIB at a libsqlite3 of your own — it must be built with
+Or point BQL_SQLITE_LIB at a libsqlite3 of your own — it must be built with
 SQLITE_ENABLE_PREUPDATE_HOOK and SQLITE_ENABLE_SESSION. …
 ```
 
@@ -262,7 +262,7 @@ still what the house rules describe — the vendored build simply wins the searc
 `bun run sqlite:build`. A distribution libsqlite3 also works if it is 3.37.0 or newer — everything
 will run, with `features.snapshot` false.
 
-**Anywhere.** `BUNQL_SQLITE_LIB=/path/to/libsqlite3.so` overrides all of it.
+**Anywhere.** `BQL_SQLITE_LIB=/path/to/libsqlite3.so` overrides all of it.
 
 ## 5. CI
 
@@ -277,11 +277,11 @@ a Bun release cannot turn a green branch red on its own), restore `vendor/sqlite
 features, `bun run typecheck`, `bun test`, `bun run scripts/routes.ts --check`.
 
 The cache key is `sqlite-<os>-<arch>-<hash of scripts/sqlite.ts and scripts/native/walsum.c>`.
-Between them those two files hold the pinned version, the flag list and BunQL's own C, so their
+Between them those two files hold the pinned version, the flag list and bql.sh's own C, so their
 hash *is* the identity of the artefact: change any of it and the cache misses, as it should. The amalgamation compiles once per (OS, arch, pin), not once per run.
 
 **No secrets, and none needed.** The storage tests use the in-process `FakeS3` unless
-`BUNQL_TEST_S3_ENDPOINT` names a real bucket (`test/storage/harness.ts:69`); this workflow never
+`BQL_TEST_S3_ENDPOINT` names a real bucket (`test/storage/harness.ts:69`); this workflow never
 sets it, and the test output says which backend ran, so a green run that had quietly reached a
 real bucket would be visible. Actions are pinned to commit SHAs with the tag in a trailing comment.
 
@@ -291,13 +291,13 @@ counts.
 ## 6. What is still missing
 
 - **This vendors a build; it does not publish packages.** Design §4.1 and `docs/next.md` call for
-  `@bunql/sqlite-{darwin-arm64,linux-x64,linux-arm64}` on npm, so an installed copy of BunQL gets a
+  `@bql/sqlite-{darwin-arm64,linux-x64,linux-arm64}` on npm, so an installed copy of bql.sh gets a
   library without a compiler. What that would take: a release workflow building the artefact on
   each of the three targets (macOS arm64 natively, the two Linux targets against an old glibc — a
   `manylinux`-style container — so the `.so` is not tied to the builder's libc), one npm package
   per target with `os`/`cpu` fields, listed as `optionalDependencies` so npm installs only the
   matching one, a `candidatePaths()` entry resolving
-  `@bunql/sqlite-<platform>-<arch>/libsqlite3.<ext>`, and an npm org plus publish credentials the
+  `@bql/sqlite-<platform>-<arch>/libsqlite3.<ext>`, and an npm org plus publish credentials the
   project does not have yet. The build script here is the input to that work, not a substitute for it.
 - **The three `database.ts` capability messages** are not wired to `capabilityDetail` — §3 above.
   This is the one piece of the milestone left undone, and it is three one-line edits.
@@ -352,14 +352,14 @@ milestone: both jobs `success`, about 80 seconds each.
 ```
 ubuntu-latest  Cache not found for input keys: sqlite-Linux-X64-9f5693067ef9…
 ubuntu-latest  SQLite 3.53.4 · preupdate ✓ session ✓ snapshot ✓ fts5 ✓ rtree ✓ math ✓ dbstat ✓ threadsafe=1
-ubuntu-latest  /home/runner/work/bunql/bunql/vendor/sqlite/libsqlite3.so 3.53.4 {"preupdate":true,"session":true,"snapshot":true,…}
+ubuntu-latest  /home/runner/work/bql/bql/vendor/sqlite/libsqlite3.so 3.53.4 {"preupdate":true,"session":true,"snapshot":true,…}
 ubuntu-latest  934 pass / 2 skip / 0 fail
 ubuntu-latest  docs/api.md covers all 38 routes.
 ubuntu-latest  Cache saved with key: sqlite-Linux-X64-9f5693067ef9…
 
 macos-latest   Cache not found for input keys: sqlite-macOS-ARM64-9f5693067ef9…
 macos-latest   SQLite 3.53.4 · preupdate ✓ session ✓ snapshot ✓ fts5 ✓ rtree ✓ math ✓ dbstat ✓ threadsafe=1
-macos-latest   /Users/runner/work/bunql/bunql/vendor/sqlite/libsqlite3.dylib 3.53.4 {"preupdate":true,"session":true,"snapshot":true,…}
+macos-latest   /Users/runner/work/bql/bql/vendor/sqlite/libsqlite3.dylib 3.53.4 {"preupdate":true,"session":true,"snapshot":true,…}
 macos-latest   934 pass / 2 skip / 0 fail
 macos-latest   docs/api.md covers all 38 routes.
 macos-latest   Cache saved with key: sqlite-macOS-ARM64-9f5693067ef9…

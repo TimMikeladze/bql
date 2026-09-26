@@ -17,7 +17,7 @@
 // with no affinity — an untyped one — would not, so the comparison would silently match nothing.
 // A value that cannot be what its column stores is a `400`, not a query that returns zero rows.
 
-import { BunQLError } from "../server/errors.ts"
+import { BqlError } from "../server/errors.ts"
 import type { DataValue } from "./context.ts"
 import { columnOf, type ColumnInfo, type TableInfo } from "./introspect.ts"
 
@@ -95,7 +95,7 @@ export function parseListQuery(
     const value = query[key]
     if (value === undefined) continue
     if (typeof value !== "string") {
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         `${describe(table, key)} takes one value, written "<operator>.<value>"`,
       )
     }
@@ -127,7 +127,7 @@ function resolveOffset(raw: unknown): number {
 
 export function parseSelect(table: TableInfo, raw: unknown): ColumnInfo[] {
   if (raw === undefined || raw === null || raw === "") return readableColumns(table)
-  if (typeof raw !== "string") throw BunQLError.badRequest("select must be a comma-separated list of columns")
+  if (typeof raw !== "string") throw BqlError.badRequest("select must be a comma-separated list of columns")
   const out: ColumnInfo[] = []
   const seen = new Set<string>()
   for (const part of raw.split(",")) {
@@ -138,13 +138,13 @@ export function parseSelect(table: TableInfo, raw: unknown): ColumnInfo[] {
     seen.add(column.name)
     out.push(column)
   }
-  if (out.length === 0) throw BunQLError.badRequest("select named no columns")
+  if (out.length === 0) throw BqlError.badRequest("select named no columns")
   return out
 }
 
 function parseOrder(table: TableInfo, raw: unknown): OrderTerm[] {
   if (raw === undefined || raw === null || raw === "") return []
-  if (typeof raw !== "string") throw BunQLError.badRequest("order must be a comma-separated list of terms")
+  if (typeof raw !== "string") throw BqlError.badRequest("order must be a comma-separated list of terms")
   const out: OrderTerm[] = []
   for (const part of raw.split(",")) {
     const term = part.trim()
@@ -168,7 +168,7 @@ function parseOrder(table: TableInfo, raw: unknown): OrderTerm[] {
           nulls = "last"
           break
         default:
-          throw BunQLError.badRequest(
+          throw BqlError.badRequest(
             `order term "${term}" has an unknown modifier "${modifier}"; expected asc, desc, ` +
               "nullsfirst or nullslast",
           )
@@ -186,7 +186,7 @@ function parseOrder(table: TableInfo, raw: unknown): OrderTerm[] {
 export function resolveColumn(table: TableInfo, name: string, where: string): ColumnInfo {
   const column = columnOf(table, name)
   if (!column) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `${where}: table ${table.name} has no column ${JSON.stringify(name)}`,
     )
   }
@@ -197,14 +197,14 @@ function parseCondition(table: TableInfo, key: string, raw: string): Condition {
   const column = resolveColumn(table, key, "filter")
   const dot = raw.indexOf(".")
   if (dot < 0) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `filter on "${column.name}" must be written "<operator>.<value>", got ${JSON.stringify(raw)}`,
     )
   }
   const name = raw.slice(0, dot).toLowerCase()
   const rest = raw.slice(dot + 1)
   if (!OPERATORS.includes(name as Operator)) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `filter on "${column.name}": unknown operator ${JSON.stringify(name)}; expected one of ` +
         OPERATORS.join(", "),
     )
@@ -237,7 +237,7 @@ function parseIs(column: ColumnInfo, raw: string): IsLiteral {
     case "false":
       return "FALSE"
     default:
-      throw BunQLError.badRequest(
+      throw BqlError.badRequest(
         `filter on "${column.name}": is.${raw} is not one of is.null, is.not_null, is.true, is.false`,
       )
   }
@@ -252,7 +252,7 @@ function parseIn(column: ColumnInfo, raw: string): DataValue[] {
   const body = raw.startsWith("(") && raw.endsWith(")") ? raw.slice(1, -1) : raw
   const members = splitMembers(column, body)
   if (members.length === 0) {
-    throw BunQLError.badRequest(`filter on "${column.name}": in.() names no values`)
+    throw BqlError.badRequest(`filter on "${column.name}": in.() names no values`)
   }
   return members.map((member) => bindValue(column, member))
 }
@@ -291,7 +291,7 @@ function splitMembers(column: ColumnInfo, body: string): string[] {
     current.text += char
   }
   if (inQuote) {
-    throw BunQLError.badRequest(
+    throw BqlError.badRequest(
       `filter on "${column.name}": an in.() member is missing its closing quote`,
     )
   }
@@ -316,7 +316,7 @@ export function bindValue(column: ColumnInfo, raw: string): DataValue {
   switch (column.affinity) {
     case "INTEGER": {
       if (!INTEGER_TEXT.test(raw)) {
-        throw BunQLError.badRequest(
+        throw BqlError.badRequest(
           `column "${column.name}" holds integers; ${JSON.stringify(raw)} is not one`,
         )
       }
@@ -326,7 +326,7 @@ export function bindValue(column: ColumnInfo, raw: string): DataValue {
     case "REAL": {
       const value = Number(raw)
       if (raw.trim().length === 0 || !Number.isFinite(value)) {
-        throw BunQLError.badRequest(
+        throw BqlError.badRequest(
           `column "${column.name}" holds numbers; ${JSON.stringify(raw)} is not one`,
         )
       }
@@ -339,7 +339,7 @@ export function bindValue(column: ColumnInfo, raw: string): DataValue {
       // with no type at all has BLOB affinity too but converts nothing, so it is the one case
       // where the text has to be read the way JSON would read it or it will match nothing.
       if (column.declaredType.length > 0) {
-        throw BunQLError.badRequest(
+        throw BqlError.badRequest(
           `column "${column.name}" is a BLOB and can only be filtered with is.null or is.not_null`,
         )
       }

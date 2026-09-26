@@ -18,7 +18,7 @@ import {
   verifyToken,
   type TokenPrincipal,
 } from "../../src/server/auth.ts"
-import { BunQLError } from "../../src/server/errors.ts"
+import { BqlError } from "../../src/server/errors.ts"
 import { fromBase64, toBase64Url } from "../../src/server/json.ts"
 
 const keys = await AuthKeys.generate()
@@ -54,12 +54,12 @@ describe("keys", () => {
     const pub = await AuthKeys.fromJwk(await keys.exportJwk("public"))
     expect(pub.kid).toBe(keys.kid)
     expect(pub.canSign).toBe(false)
-    await expect(pub.exportPkcs8()).rejects.toThrow(BunQLError)
+    await expect(pub.exportPkcs8()).rejects.toThrow(BqlError)
   })
 
   test("rejects key material that is not Ed25519", async () => {
-    await expect(AuthKeys.fromRawPublic(new Uint8Array(31))).rejects.toThrow(BunQLError)
-    await expect(AuthKeys.fromJwk({ kty: "EC", crv: "P-256" })).rejects.toThrow(BunQLError)
+    await expect(AuthKeys.fromRawPublic(new Uint8Array(31))).rejects.toThrow(BqlError)
+    await expect(AuthKeys.fromJwk({ kty: "EC", crv: "P-256" })).rejects.toThrow(BqlError)
   })
 
   test("a ring picks the signing key and can be rotated", async () => {
@@ -68,7 +68,7 @@ describe("keys", () => {
     expect(two.signing.kid).toBe(keys.kid)
     two.setSigning(other.kid)
     expect(two.signing.kid).toBe(other.kid)
-    expect(() => two.setSigning("nope")).toThrow(BunQLError)
+    expect(() => two.setSigning("nope")).toThrow(BqlError)
     expect(two.get(keys.kid)?.kid).toBe(keys.kid)
   })
 })
@@ -111,8 +111,8 @@ describe("mint and verify", () => {
     await expect(verifyToken(ring, `${head}.${body}.${toBase64Url(bytes)}`)).rejects.toThrow(
       "signature does not check out",
     )
-    await expect(verifyToken(ring, `${head}.${body}.not-base64!`)).rejects.toThrow(BunQLError)
-    await expect(verifyToken(ring, `${head}.${body}.`)).rejects.toThrow(BunQLError)
+    await expect(verifyToken(ring, `${head}.${body}.not-base64!`)).rejects.toThrow(BqlError)
+    await expect(verifyToken(ring, `${head}.${body}.`)).rejects.toThrow(BqlError)
   })
 
   test("an expired token fails once it is past the clock tolerance", async () => {
@@ -156,7 +156,7 @@ describe("mint and verify", () => {
 
   test("garbage is refused before any crypto happens", async () => {
     for (const bad of ["", "abc", "a.b", "a.b.c.d", "!!!.???.***"]) {
-      await expect(verifyToken(ring, bad)).rejects.toThrow(BunQLError)
+      await expect(verifyToken(ring, bad)).rejects.toThrow(BqlError)
     }
   })
 
@@ -222,7 +222,7 @@ describe("scopes", () => {
     try {
       requireScope(ro, "acme", "rw")
     } catch (err) {
-      expect((err as BunQLError).status).toBe(403)
+      expect((err as BqlError).status).toBe(403)
     }
   })
 })
@@ -257,13 +257,13 @@ describe("Authenticator", () => {
   test("no credential at all is a 401, not a 403", async () => {
     const auth = new Authenticator({ keys: ring })
     await expect(auth.authenticate(new Request("http://x/v1/db/acme/query"))).rejects.toThrow(
-      BunQLError,
+      BqlError,
     )
     try {
       await auth.authenticate(null)
     } catch (err) {
-      expect((err as BunQLError).status).toBe(401)
-      expect((err as BunQLError).code).toBe("UNAUTHENTICATED")
+      expect((err as BqlError).status).toBe(401)
+      expect((err as BqlError).code).toBe("UNAUTHENTICATED")
     }
   })
 
@@ -271,8 +271,8 @@ describe("Authenticator", () => {
     const auth = new Authenticator({ keys: ring, adminKey: "s3cret" })
     expect(auth.hasAdminKey).toBe(true)
     expect((await auth.authenticateToken("s3cret")).kind).toBe("admin")
-    await expect(auth.authenticateToken("s3cre")).rejects.toThrow(BunQLError)
-    await expect(auth.authenticateToken("s3cret ")).rejects.toThrow(BunQLError)
+    await expect(auth.authenticateToken("s3cre")).rejects.toThrow(BqlError)
+    await expect(auth.authenticateToken("s3cret ")).rejects.toThrow(BqlError)
   })
 
   test("secrets are compared without an early exit", () => {
@@ -296,6 +296,6 @@ describe("Authenticator", () => {
 
   test("a node with no keys and no admin key accepts nothing", async () => {
     const auth = new Authenticator()
-    await expect(auth.authenticateToken("whatever")).rejects.toThrow(BunQLError)
+    await expect(auth.authenticateToken("whatever")).rejects.toThrow(BqlError)
   })
 })

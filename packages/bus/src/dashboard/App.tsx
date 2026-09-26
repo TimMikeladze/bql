@@ -55,7 +55,7 @@ async function read<T>(path: string): Promise<T> {
  * dies with the tab. The alternative, a fourth "operator" scope, would add a
  * permission axis to every route to save one paste.
  */
-const OPERATOR_KEY = "agenticbus.operator";
+const OPERATOR_KEY = "bql-bus.operator";
 
 function useOperator() {
   const [operator, setOperator] = useState<string | null>(() => {
@@ -437,7 +437,7 @@ export function App() {
         <div>
           <h1 className="flex items-center gap-2 text-base font-semibold">
             <Radio className="size-4" />
-            AgenticBus
+            bql.sh/bus
           </h1>
           <p className="mt-0.5 text-xs text-[var(--muted-text)]">
             Subjects, durable subscriptions, leases. Agents and ordinary work,

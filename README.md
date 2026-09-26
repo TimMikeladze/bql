@@ -1,35 +1,49 @@
-# BunQL
+# bql.sh
 
-Two packages, one repository: a database server and the durable bus that runs work against it.
+One package: SQLite as a multi-tenant database server for Bun, and the durable bus that runs work
+against it.
 
-| | |
+```sh
+bun add bql.sh
+```
+
+| Import | What it is |
 | --- | --- |
-| **[`@bunql/db`](packages/db)** | SQLite as a multi-tenant database server for Bun — WAL shipping, hook-driven realtime, an FFI driver with commit hooks and killable statements |
-| **[`@bunql/bus`](packages/bus)** | AgenticBus: a durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, and three tiers of exactly-once |
+| **[`bql.sh`](packages/db)** | The embedded database — `Bql.open()`, a whole server in your own process |
+| `bql.sh/client` | The client: `sql`, `live`, transactions, `client.admin` |
+| `bql.sh/sqlite` | The `bun:ffi` driver over a pinned libsqlite3: hooks, the authorizer, killable statements, changesets |
+| `bql.sh/server` | Serve it: WAL shipping, replicas, S3 backup, a Raft control plane |
+| `bql.sh/kysely`, `bql.sh/drizzle` | A Kysely dialect and a Drizzle driver over any of the above |
+| `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
+| **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
+| `bql.sh/bus/client` | Its client and consumer |
 
-They are here together because they were solving the same problems apart: storage, replication,
-tenancy and a change feed. [docs/monorepo.md](docs/monorepo.md) is why, what moved, and what comes
-next.
+Two binaries: `bql` for the database, `bql-bus` for the bus.
 
-Bun 1.4 or newer. Zero runtime dependencies in either package.
+The database and the bus ship together because they were solving the same problems apart: storage,
+replication, tenancy and a change feed. [docs/monorepo.md](docs/monorepo.md) is why, what moved, and
+what comes next.
+
+Bun 1.4 or newer. Zero runtime dependencies.
 
 ```sh
 bun install
 
-bun run typecheck          # the repository's scripts, then both packages
-bun run test               # both packages
+bun run typecheck          # the repository's scripts, then both halves
+bun run test               # both halves
 bun run bytes              # no raw control bytes in any tracked file
 
-bun run db sqlite:build    # build the pinned libsqlite3 @bunql/db needs
+bun run db sqlite:build    # build the pinned libsqlite3 bql.sh needs
 bun run db test
 bun run bus test
 bun run bus dev
 ```
 
-`bun run db <script>` and `bun run bus <script>` forward to that package, so every script each
-package already had still runs by its own name.
+The repository keeps two source trees — `packages/db` and `packages/bus` — behind that one package,
+so `bun run db <script>` and `bun run bus <script>` forward to the tree, and every script either half
+already had still runs by its own name.
 
-## `@bunql/db`
+## The database
 
 Thousands of small SQLite databases in one process, their WAL frames streamed to replicas over a
 socket, backed up continuously to any S3-compatible bucket, with realtime subscriptions driven by
@@ -44,7 +58,7 @@ bun run db start                             # prints an admin key the first tim
 ```
 
 ```ts
-import { createClient } from "@bunql/db/client"
+import { createClient } from "bql.sh/client"
 
 const db = createClient({ url: "http://localhost:4321", token }).db("acme")
 
@@ -59,21 +73,21 @@ restore, and one operation model rendered as REST, OpenAPI 3.1 and GraphQL. The 
 the client too, under `client.admin`. [packages/db/README.md](packages/db/README.md) is the real
 documentation; [packages/db/docs/api.md](packages/db/docs/api.md) is the API as built.
 
-## `@bunql/bus`
+## The bus
 
 Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and
 a dead-letter path. One set of primitives covers a work queue, pub/sub and request/reply. Nothing
 in the core knows what an agent is — agent patterns are conventions over subjects, which is what
-keeps a plain background job queue a first-class use. It ships the library, the `agenticbus` binary
+keeps a plain background job queue a first-class use. It ships the library, the `bql-bus` binary
 and a built dashboard.
 
 ```sh
 bun run bus dev                              # bus, three consumers and the dashboard, on free ports
 
-agenticbus serve &
-agenticbus subscribe work 'work.>'
-agenticbus consume work --exec ./handle.sh &
-agenticbus publish work.resize '{"src":"a.png"}'
+bql-bus serve &
+bql-bus subscribe work 'work.>'
+bql-bus consume work --exec ./handle.sh &
+bql-bus publish work.resize '{"src":"a.png"}'
 ```
 
 At-least-once by default, with three named tiers of exactly-once on top — a transactional ack in
@@ -86,18 +100,20 @@ end, and epoch-fenced promotion over asynchronous log replication.
 
 ## Together
 
-Neither package depends on the other yet. The coupling is the work after the move, in the order the
-value lands: the bus swapping `bun:sqlite` for `@bunql/db/sqlite`, then a commit hook publishing to
+Neither half imports the other yet. The coupling is the work after the move, in the order the
+value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then a commit hook publishing to
 a subject as a transactional outbox with no dual-write window, then the bus's own replication and
 backup giving way to WAL shipping. [docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the
 sequence and why each step is independently revertable.
 
 ## CI and releases
 
-Every push and pull request to `main` runs both packages. `@bunql/db` gates on macOS (arm64), Linux
-(x64) and Windows (x64), all three hard. `@bunql/bus` runs on macOS and Linux; Windows is its own
-piece of work, with its own evidence, the way BunQL's was.
+Every push and pull request to `main` runs both halves. The database gates on macOS (arm64), Linux
+(x64) and Windows (x64), all three hard. The bus runs on macOS and Linux; Windows is its own piece
+of work, with its own evidence, the way the database's was.
 
-Releases are tag-prefixed and independent: `db-v1.2.3` publishes `packages/db`, `bus-v0.1.0`
-publishes `packages/bus`. The tag must match that package's `package.json` version or the release
-refuses. Neither is on npm yet.
+One package, one tag: `v0.1.0` publishes `bql.sh` with both halves in it, and the tag must match the
+root `package.json` version or the release refuses. `bun run pack:check` is the gate the release runs
+first — it packs, installs the tarball somewhere that knows nothing about this repository, builds
+libsqlite3 from it, and then uses both halves and both binaries out of that install. Not on npm
+yet.

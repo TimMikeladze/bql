@@ -79,12 +79,12 @@ export class FsyncSweep {
     this.#now = options.now ?? (() => performance.now())
   }
 
-  /** Barriers this sweep has issued. `bunql_fsync_total`. */
+  /** Barriers this sweep has issued. `bql_fsync_total`. */
   get fsyncs(): number {
     return this.#fsyncs
   }
 
-  /** How long the last tick took, in microseconds. `bunql_fsync_sweep_duration_us`. */
+  /** How long the last tick took, in microseconds. `bql_fsync_sweep_duration_us`. */
   get lastDurationUs(): number {
     return this.#lastDurationUs
   }

@@ -42,13 +42,13 @@ describe("[replication] configuration", () => {
   })
 
   test("canonical and alias environment overrides both work, canonical winning", () => {
-    expect(envNameFor("replication", "slowReplicaMs")).toBe("BUNQL_REPLICATION_SLOW_REPLICA_MS")
+    expect(envNameFor("replication", "slowReplicaMs")).toBe("BQL_REPLICATION_SLOW_REPLICA_MS")
     const config = loadConfig({
       env: {
-        BUNQL_CLUSTER_SECRET: "from-alias",
-        BUNQL_REPLICATION_SECRET: "from-canonical",
-        BUNQL_REPLICA_OF: "wss://p/v1/replication",
-        BUNQL_REPLICATION_HEARTBEAT_MS: "1234",
+        BQL_CLUSTER_SECRET: "from-alias",
+        BQL_REPLICATION_SECRET: "from-canonical",
+        BQL_REPLICA_OF: "wss://p/v1/replication",
+        BQL_REPLICATION_HEARTBEAT_MS: "1234",
       },
     })
     expect(config.replication.secret).toBe("from-canonical")
@@ -58,16 +58,16 @@ describe("[replication] configuration", () => {
   })
 
   test("`follow` is a comma-separated list in the environment and never empty", () => {
-    const listed = loadConfig({ env: { BUNQL_FOLLOW: "acme, beta ,gamma" } })
+    const listed = loadConfig({ env: { BQL_FOLLOW: "acme, beta ,gamma" } })
     expect(listed.replication.follow).toEqual(["acme", "beta", "gamma"])
     const blanked = loadConfig({ env: {}, overrides: { replication: { follow: [] } } })
     expect(blanked.replication.follow).toEqual(["*"])
   })
 
   test("a TOML section expands secrets from the environment", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-repl-config-"))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-repl-config-"))
     try {
-      const file = path.join(dir, "bunql.toml")
+      const file = path.join(dir, "bql.toml")
       fs.writeFileSync(
         file,
         '[replication]\nsecret = "${MY_CLUSTER_SECRET}"\nprimary = "wss://p/v1/replication"\n',
@@ -102,20 +102,20 @@ describe("serve flags", () => {
     // `serve` clears the variables a flag covers before `loadConfig` applies the environment;
     // this is the same resolution, spelled out.
     const config = loadConfig({
-      env: { BUNQL_CLUSTER_SECRET: "from-env" },
+      env: { BQL_CLUSTER_SECRET: "from-env" },
       overrides: { replication: { secret: "from-flag" } },
     })
     // Without the suppression the environment would win, which is what `envSuppressions` fixes.
     expect(config.replication.secret).toBe("from-env")
     const suppressed = loadConfig({
-      env: { BUNQL_CLUSTER_SECRET: undefined },
+      env: { BQL_CLUSTER_SECRET: undefined },
       overrides: { replication: { secret: "from-flag" } },
     })
     expect(suppressed.replication.secret).toBe("from-flag")
   })
 
   test("[replication] logicalChanges is a level, from the file or the environment", () => {
-    // P9. The default's type is a boolean, so the generic `BUNQL_*` coercion would read "row" as
+    // P9. The default's type is a boolean, so the generic `BQL_*` coercion would read "row" as
     // "not true" and turn the feature off without saying so. Each spelling is pinned here because
     // the failure it prevents is silent: a replica answering 501 for a primary that was configured.
     expect(loadConfig({ env: {} }).replication.logicalChanges).toBe(false)
@@ -128,18 +128,18 @@ describe("serve flags", () => {
         .logicalChanges,
     ).toBe("pk")
     expect(
-      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "row+old" } }).replication
+      loadConfig({ env: { BQL_REPLICATION_LOGICAL_CHANGES: "row+old" } }).replication
         .logicalChanges,
     ).toBe("row+old")
     expect(
-      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "true" } }).replication.logicalChanges,
+      loadConfig({ env: { BQL_REPLICATION_LOGICAL_CHANGES: "true" } }).replication.logicalChanges,
     ).toBe("row")
     expect(
-      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "false" } }).replication
+      loadConfig({ env: { BQL_REPLICATION_LOGICAL_CHANGES: "false" } }).replication
         .logicalChanges,
     ).toBe(false)
     expect(() =>
-      loadConfig({ env: { BUNQL_REPLICATION_LOGICAL_CHANGES: "rows" } }),
+      loadConfig({ env: { BQL_REPLICATION_LOGICAL_CHANGES: "rows" } }),
     ).toThrow("[replication] logicalChanges")
   })
 })

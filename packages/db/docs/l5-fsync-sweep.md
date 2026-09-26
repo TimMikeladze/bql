@@ -109,7 +109,7 @@ file. Nothing measured here changes that trade.
 `src/tenant/tenant.ts` (`fsyncSweep` option, passed to both `TxnLog.open` sites),
 `src/tenant/registry.ts` (owns the thread's sweep, `RegistryStats.fsync`),
 `src/server/config.ts` (`[durability] fsyncSweep`), `src/server/runtime.ts`,
-`src/server/metrics.ts` (`bunql_fsync_total`, `bunql_fsync_sweep_duration_us`,
-`bunql_fsync_pending`), `src/server/workers/{protocol,pool,entry}.ts` (one sweep per thread, so the
+`src/server/metrics.ts` (`bql_fsync_total`, `bql_fsync_sweep_duration_us`,
+`bql_fsync_pending`), `src/server/workers/{protocol,pool,entry}.ts` (one sweep per thread, so the
 counters sum and the pass duration takes the worst), `test/durability/`, `docs/performance.md` §9,
 `docs/api.md`, `docs/design.md` §5.4 and §9.4.

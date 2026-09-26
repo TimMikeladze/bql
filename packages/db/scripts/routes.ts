@@ -9,7 +9,7 @@
 // (`docs/h6-mount.md`), so the two cannot disagree about an operation's path — but a hand-written
 // entry added to `createApp` afterwards would be a route no document describes, which is exactly
 // the drift the milestone removed. Only Hrana is allowed to be outside the registry, because it
-// carries libsql's RPC envelope rather than BunQL's API.
+// carries libsql's RPC envelope rather than bql.sh's API.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -18,7 +18,7 @@ import { createApp, createRuntime } from "../src/server/app.ts"
 import { loadConfig } from "../src/server/config.ts"
 import { serverRegistry } from "../src/server/registry.ts"
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-routes-"))
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-routes-"))
 process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }))
 
 const config = loadConfig({ env: {}, overrides: { data: { dir }, server: { port: 0 } } })

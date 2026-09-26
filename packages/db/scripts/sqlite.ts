@@ -83,7 +83,7 @@ const FLAGS: readonly { flag: string; why: string }[] = [
   { flag: "-DSQLITE_THREADSAFE=1", why: "features.threadsafe; bun:ffi calls are not pinned to one thread" },
 
   // A default that matches what the tenant sets on every connection anyway, so a bare
-  // Database.open() through `bunql/sqlite` has the same durability as one the server opened.
+  // Database.open() through `bql/sqlite` has the same durability as one the server opened.
   { flag: "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1", why: "src/tenant/tenant.ts runs `pragma synchronous = normal`" },
 
   { flag: "-O2", why: "" },
@@ -155,7 +155,7 @@ function currentStamp(): string {
   const h = new Bun.CryptoHasher("sha256")
   h.update(`${PIN.version} ${PIN.sha256} ${process.platform} ${process.arch} `)
   h.update(FLAGS.map((f) => f.flag).join(" "))
-  // An edit to BunQL's own C has to force a rebuild exactly as a changed flag does.
+  // An edit to bql.sh's own C has to force a rebuild exactly as a changed flag does.
   h.update(readFileSync(helperSource()))
   return h.digest("hex")
 }
@@ -166,7 +166,7 @@ function libraryName(): string {
   throw new Error(
     `${process.platform} is not a platform this script knows how to build for. ` +
       "Build libsqlite3 by hand with the flags in `bun run sqlite:build --explain` and point " +
-      "BUNQL_SQLITE_LIB at it.",
+      "BQL_SQLITE_LIB at it.",
   )
 }
 
@@ -189,7 +189,7 @@ function verify(zip: string): void {
 }
 
 /**
- * BunQL's own C, compiled into the same artefact as the amalgamation so that there is one library,
+ * bql.sh's own C, compiled into the same artefact as the amalgamation so that there is one library,
  * one `dlopen` and one capability check. `src/sqlite/lib.ts` resolves its symbols optionally, so a
  * node on a system libsqlite3 simply does not get them. `docs/p3-wal-checksum.md`.
  */
@@ -208,11 +208,11 @@ function compile(sources: string[], artefact: string, quiet: boolean): void {
   } else if (process.platform === "win32") {
     // A DLL exports nothing unless it is told to. SQLite routes every public function through
     // `SQLITE_API`, so defining that is the whole of it; `walsum.c` marks its own with
-    // `BUNQL_API`, defined the same way here and to nothing elsewhere.
+    // `BQL_API`, defined the same way here and to nothing elsewhere.
     args.push(
       "-shared",
       "-DSQLITE_API=__declspec(dllexport)",
-      "-DBUNQL_API=__declspec(dllexport)",
+      "-DBQL_API=__declspec(dllexport)",
     )
   } else {
     // -lm for the math functions, -lpthread for THREADSAFE=1, -ldl for load_extension. All three
@@ -295,7 +295,7 @@ function report(artefact: string, what: string, quiet: boolean): void {
     console.log(artefact)
     return
   }
-  console.log(`\n${what}\n  ${artefact}\n\n  BUNQL_SQLITE_LIB=${artefact}\n`)
+  console.log(`\n${what}\n  ${artefact}\n\n  BQL_SQLITE_LIB=${artefact}\n`)
 }
 
 function log(quiet: boolean, message: string): void {

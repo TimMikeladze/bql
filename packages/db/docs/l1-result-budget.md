@@ -81,7 +81,7 @@ NULL or all small integers, where the payload is nearly zero and the arrays hold
 `iterate`, the counting row factory, `#prepareCall` returning the budget), `src/sqlite/errors.ts`
 (`ResultLimitError`), `src/sqlite/index.ts`, `src/server/config.ts` (`[limits] maxResultBytes`),
 `src/server/errors.ts` (`RESULT_TOO_LARGE`, the translation), `src/server/exec.ts`,
-`src/server/metrics.ts` (`bunql_result_bytes_max`, merged across workers as a **max**: the largest
+`src/server/metrics.ts` (`bql_result_bytes_max`, merged across workers as a **max**: the largest
 result any shard built is the largest this node built), `src/server/registry.ts`,
 `src/dataapi/operations.ts`, `src/client/protocol.ts`, `docs/api.md`, `docs/design.md` §4.7 and
 §6.6.

@@ -25,7 +25,7 @@ const GEN = "aaaaaaaaaaaaaaaa"
 
 function snapshot(txid: bigint, at = 1000): SnapshotEntry {
   return {
-    key: snapshotKey("bunql/", "acme", txid),
+    key: snapshotKey("bql/", "acme", txid),
     generation: GEN,
     txid: txid.toString(),
     epoch: 0,
@@ -41,7 +41,7 @@ function snapshot(txid: bigint, at = 1000): SnapshotEntry {
 
 function segment(start: bigint, end: bigint, at = 1000, generation = GEN): SegmentEntry {
   return {
-    key: segmentKey("bunql/", "acme", start, end),
+    key: segmentKey("bql/", "acme", start, end),
     generation,
     startTxid: start.toString(),
     endTxid: end.toString(),
@@ -55,30 +55,30 @@ function segment(start: bigint, end: bigint, at = 1000, generation = GEN): Segme
 
 describe("keys", () => {
   test("are zero-padded to twenty digits and sort in txid order", () => {
-    const keys = [9n, 10n, 100n, 2n, 1n].map((txid) => snapshotKey("bunql/", "acme", txid))
+    const keys = [9n, 10n, 100n, 2n, 1n].map((txid) => snapshotKey("bql/", "acme", txid))
     const sorted = [...keys].sort()
     expect(sorted.map((key) => Number(parseSnapshotKey(key)))).toEqual([1, 2, 9, 10, 100])
-    expect(sorted[0]).toBe("bunql/db/acme/snapshots/00000000000000000001.db.zst")
+    expect(sorted[0]).toBe("bql/db/acme/snapshots/00000000000000000001.db.zst")
   })
 
   test("segment keys carry both ends and round-trip", () => {
-    const key = segmentKey("bunql/", "acme", 101n, 250n)
+    const key = segmentKey("bql/", "acme", 101n, 250n)
     expect(key).toBe(
-      "bunql/db/acme/segments/00000000000000000101-00000000000000000250.seg.zst",
+      "bql/db/acme/segments/00000000000000000101-00000000000000000250.seg.zst",
     )
     expect(parseSegmentKey(key)).toEqual({ startTxid: 101n, endTxid: 250n })
   })
 
   test("the prefix is normalised to exactly one trailing slash and no leading one", () => {
-    for (const prefix of ["bunql", "bunql/", "/bunql", "/bunql///"]) {
-      expect(manifestKey(prefix, "acme")).toBe("bunql/db/acme/manifest.json")
+    for (const prefix of ["bql", "bql/", "/bql", "/bql///"]) {
+      expect(manifestKey(prefix, "acme")).toBe("bql/db/acme/manifest.json")
     }
     expect(manifestKey("", "acme")).toBe("db/acme/manifest.json")
   })
 
   test("a key that is not ours parses as null rather than throwing", () => {
-    expect(parseSnapshotKey("bunql/db/acme/snapshots/readme.txt")).toBeNull()
-    expect(parseSegmentKey("bunql/db/acme/segments/1-2.seg.zst")).toBeNull()
+    expect(parseSnapshotKey("bql/db/acme/snapshots/readme.txt")).toBeNull()
+    expect(parseSegmentKey("bql/db/acme/segments/1-2.seg.zst")).toBeNull()
   })
 })
 

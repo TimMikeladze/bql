@@ -2,7 +2,7 @@
 // baseline C API is proven present before it is offered — either by a symbol that resolved or
 // by a flag reported in PRAGMA compile_options. Nothing here guesses.
 //
-// The search order is deliberate: an explicit `BUNQL_SQLITE_LIB`, then the library
+// The search order is deliberate: an explicit `BQL_SQLITE_LIB`, then the library
 // `bun run sqlite:build` vendors into `vendor/sqlite/`, then whatever the system has. The
 // vendored build sits ahead of the system one because it is the only one we know the flags of;
 // a distribution build is a guess that happens to be right most of the time. When nothing loads,
@@ -39,10 +39,10 @@ function vendoredPath(): string | null {
     : url.pathname
 }
 
-/** Candidate paths tried in order when `BUNQL_SQLITE_LIB` is unset. */
+/** Candidate paths tried in order when `BQL_SQLITE_LIB` is unset. */
 export function candidatePaths(): string[] {
   const out: string[] = []
-  const env = process.env.BUNQL_SQLITE_LIB
+  const env = process.env.BQL_SQLITE_LIB
   if (env) out.push(env)
   const vendored = vendoredPath()
   if (vendored) out.push(vendored)
@@ -202,13 +202,13 @@ const SNAPSHOT = {
  * keeps the JavaScript. `docs/p3-wal-checksum.md`.
  */
 const WALSUM = {
-  bunql_wal_checksum: { args: [T.ptr, T.u32, T.i32, T.ptr], returns: T.void },
-  bunql_wal_check_frame: {
+  bql_wal_checksum: { args: [T.ptr, T.u32, T.i32, T.ptr], returns: T.void },
+  bql_wal_check_frame: {
     args: [T.ptr, T.u32, T.u32, T.u32, T.u32, T.u32, T.i32, T.ptr],
     returns: T.void,
   },
   /** The non-variadic shim over `sqlite3_db_config`; see `scripts/native/walsum.c`. */
-  bunql_db_config_int: { args: [T.ptr, T.i32, T.i32, T.ptr], returns: T.i32 },
+  bql_db_config_int: { args: [T.ptr, T.i32, T.i32, T.ptr], returns: T.i32 },
 } as const
 
 /**
@@ -351,12 +351,12 @@ export interface SnapshotSymbols {
   sqlite3_snapshot_cmp(a: Ptr, b: Ptr): number
 }
 
-/** BunQL's own C, from `scripts/native/walsum.c`. `docs/p3-wal-checksum.md` §3.2. */
+/** bql.sh's own C, from `scripts/native/walsum.c`. `docs/p3-wal-checksum.md` §3.2. */
 export interface WalsumSymbols {
   /** `io[0]`, `io[1]` are the chain, in and out. */
-  bunql_wal_checksum(a: PtrArg, n: number, native: number, io: PtrArg): void
+  bql_wal_checksum(a: PtrArg, n: number, native: number, io: PtrArg): void
   /** `out` is five `u32`: valid, pgno, commitSize, s0, s1. */
-  bunql_wal_check_frame(
+  bql_wal_check_frame(
     frame: PtrArg,
     pageSize: number,
     salt1: number,
@@ -371,7 +371,7 @@ export interface WalsumSymbols {
    * read without changing; `out` is one `i32` receiving the setting as it stands afterwards.
    * Returns an SQLite result code.
    */
-  bunql_db_config_int(db: Ptr, op: number, v: number, out: PtrArg): number
+  bql_db_config_int(db: Ptr, op: number, v: number, out: PtrArg): number
 }
 
 export interface SqliteFeatures {
@@ -381,7 +381,7 @@ export interface SqliteFeatures {
   readonly session: boolean
   /** `sqlite3_snapshot_*` present (built with `SQLITE_ENABLE_SNAPSHOT`). */
   readonly snapshot: boolean
-  /** `bunql_wal_*` present: the artefact `bun run sqlite:build` produced, not a system library. */
+  /** `bql_wal_*` present: the artefact `bun run sqlite:build` produced, not a system library. */
   readonly walsum: boolean
   readonly fts5: boolean
   readonly rtree: boolean
@@ -499,9 +499,9 @@ function describeFailure(path: string, err: Error): Attempt {
 function noLibraryError(tried: readonly Attempt[]): Error {
   const stale = tried.find((a) => a.kind === "stale")
   const lead = stale
-    ? `BunQL found a libsqlite3 but it is too old: ${stale.path} ${stale.detail}. ` +
+    ? `bql.sh found a libsqlite3 but it is too old: ${stale.path} ${stale.detail}. ` +
       `The driver's core API needs SQLite ${MIN_VERSION} or newer.`
-    : "BunQL could not load a libsqlite3 shared library."
+    : "bql.sh could not load a libsqlite3 shared library."
   return new Error(
     `${lead}\n\n${remedy()}\n\nTried:\n  ` +
       tried.map((a) => `${a.path}: ${a.detail}`).join("\n  "),
@@ -515,10 +515,10 @@ function noLibraryError(tried: readonly Attempt[]): Error {
 export function remedy(): string {
   const vendored = vendoredPath()
   return (
-    "Build the library BunQL needs:\n" +
+    "Build the library bql.sh needs:\n" +
     "  bun run sqlite:build\n" +
     (vendored ? `and it will be found at ${vendored}.\n` : "") +
-    "Or point BUNQL_SQLITE_LIB at a libsqlite3 of your own — it must be built with " +
+    "Or point BQL_SQLITE_LIB at a libsqlite3 of your own — it must be built with " +
     "SQLITE_ENABLE_PREUPDATE_HOOK and SQLITE_ENABLE_SESSION. On macOS, Homebrew's " +
     "(brew install sqlite, /opt/homebrew/opt/sqlite/lib/libsqlite3.dylib) qualifies. Apple's " +
     "/usr/lib/libsqlite3.dylib declares both on macOS 26 and still is not the one to use: it " +

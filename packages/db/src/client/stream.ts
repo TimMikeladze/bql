@@ -6,7 +6,7 @@
 // A 4xx is fatal: a bad token or a database that does not exist will not start working because we
 // asked again. Anything else — a dropped connection, a restarted server, a 5xx — is retried.
 
-import { BunQLClientError, asClientError } from "./errors.ts"
+import { BqlClientError, asClientError } from "./errors.ts"
 import type { FetchLike } from "./http.ts"
 import { readJson } from "./http.ts"
 
@@ -114,7 +114,7 @@ export class SseSubscription {
         await this.#once()
       } catch (err) {
         if (this.#closed) return
-        if (err instanceof BunQLClientError && err.status >= 400 && err.status < 500) {
+        if (err instanceof BqlClientError && err.status >= 400 && err.status < 500) {
           this.#closed = true
           this.#options.onError(err)
           return
@@ -138,10 +138,10 @@ export class SseSubscription {
     })
     if (!response.ok) {
       await readJson(response, this.#options.what)
-      throw BunQLClientError.network(`${this.#options.what}: ${response.status}`)
+      throw BqlClientError.network(`${this.#options.what}: ${response.status}`)
     }
     const body = response.body
-    if (!body) throw BunQLClientError.network(`${this.#options.what}: the response had no body`)
+    if (!body) throw BqlClientError.network(`${this.#options.what}: the response had no body`)
     this.#attempts += 1
     this.#options.onOpen?.(response, this.#attempts)
     if (this.#attempts > 1) this.#options.onReconnect?.()

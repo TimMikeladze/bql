@@ -40,7 +40,7 @@ interface Sharded {
 }
 
 async function start(overrides: ServerConfigInput = {}): Promise<Sharded> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-c4e-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-c4e-"))
   dirs.push(dir)
   const handle = await startServer(
     loadConfig({
@@ -109,7 +109,7 @@ describe("what a router reports", () => {
   }, 30_000)
 
   test("the S3 gauges are the node's, merged across the shards", async () => {
-    bucket ??= await FakeS3.start({ bucket: "bunql-c4e" })
+    bucket ??= await FakeS3.start({ bucket: "bql-c4e" })
     const node = await start({
       s3: {
         ...bucket.storeOptions,
@@ -125,12 +125,12 @@ describe("what a router reports", () => {
 
     // Present at all, which they were not: a shipper lives on a worker and `/metrics` is answered
     // by the router.
-    expect(body).toContain("bunql_s3_shipped_txid")
-    expect(body).toContain("bunql_s3_errors_total")
-    expect(body).toContain("bunql_s3_behind")
+    expect(body).toContain("bql_s3_shipped_txid")
+    expect(body).toContain("bql_s3_errors_total")
+    expect(body).toContain("bql_s3_behind")
     // `shippedTxid` is the highest across databases — the same rule one node applies across its
     // own, because the shards hold disjoint databases.
-    const shipped = Number(/bunql_s3_shipped_txid\{[^}]*\} (\d+)/.exec(body)?.[1] ?? "-1")
+    const shipped = Number(/bql_s3_shipped_txid\{[^}]*\} (\d+)/.exec(body)?.[1] ?? "-1")
     expect(shipped).toBeGreaterThan(0)
   }, 30_000)
 

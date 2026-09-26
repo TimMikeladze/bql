@@ -12,7 +12,7 @@ import { removeTempDir } from "../tmpdir.ts"
 const dirs: string[] = []
 const running: ServerHandle[] = []
 
-export function tempDataDir(prefix = "bunql-server-"): string {
+export function tempDataDir(prefix = "bql-server-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   dirs.push(dir)
   return dir
@@ -213,7 +213,7 @@ export interface TestSocket {
   close(): void
 }
 
-export function openSocket(url: string, protocol = "bunql.v1"): Promise<TestSocket> {
+export function openSocket(url: string, protocol = "bql.v1"): Promise<TestSocket> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url, protocol)
     const seen: unknown[] = []

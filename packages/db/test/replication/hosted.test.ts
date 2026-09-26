@@ -40,7 +40,7 @@ afterAll(() => {
 })
 
 async function primaryWith(rows: number): Promise<{ registry: TenantRegistry; tenant: Tenant }> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bunql-hosted-"))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-hosted-"))
   dirs.push(dir)
   const registry = TenantRegistry.open({ dir })
   registries.push(registry)

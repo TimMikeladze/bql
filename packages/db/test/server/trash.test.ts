@@ -18,17 +18,17 @@ describe("trash retention", () => {
     expect(DEFAULT_CONFIG.durability.retention).toBe("7d")
 
     const config = loadConfig({
-      env: { BUNQL_DURABILITY_SWEEP_INTERVAL_MS: "60000", BUNQL_RETENTION: "1h" },
+      env: { BQL_DURABILITY_SWEEP_INTERVAL_MS: "60000", BQL_RETENTION: "1h" },
     })
     expect(config.durability.sweepIntervalMs).toBe(60_000)
     expect(config.durability.retention).toBe("1h")
 
     // A typo in a duration is refused at start rather than quietly keeping everything for ever.
-    expect(() => loadConfig({ env: { BUNQL_RETENTION: "7 days" } })).toThrow()
+    expect(() => loadConfig({ env: { BQL_RETENTION: "7 days" } })).toThrow()
   })
 
   test("a server sweeps the trash it finds at start", async () => {
-    const dir = tempDataDir("bunql-trash-server-")
+    const dir = tempDataDir("bql-trash-server-")
     const stale = path.join(trashDir(dir), `acme-${Date.now() - 3 * 86_400_000}`)
     const fresh = path.join(trashDir(dir), `beta-${Date.now()}`)
     for (const one of [stale, fresh]) fs.mkdirSync(one, { recursive: true })

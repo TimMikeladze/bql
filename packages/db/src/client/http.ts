@@ -1,5 +1,5 @@
 // Invariant: every request this SDK makes over HTTP is built here, so the bearer token, the
-// `BunQL-Min-Txid` header of design §5.4 and the error mapping of §6.6 happen in exactly one
+// `BQL-Min-Txid` header of design §5.4 and the error mapping of §6.6 happen in exactly one
 // place. A caller that forgets one cannot exist.
 //
 // Second invariant (C2): a request is replayed against another node **only** on `NOT_PRIMARY`,
@@ -13,7 +13,7 @@
 // Only `fetch` is used, with a caller-supplied implementation when the runtime has none on the
 // global object.
 
-import { BunQLClientError, asClientError } from "./errors.ts"
+import { BqlClientError, asClientError } from "./errors.ts"
 import { HEADERS, type ErrorBody } from "./protocol.ts"
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
@@ -33,7 +33,7 @@ export interface HttpConfig {
 export interface RequestInitLike {
   method?: string
   body?: unknown
-  /** Sent as `BunQL-Min-Txid`, which is what read-your-writes is (design §5.4). */
+  /** Sent as `BQL-Min-Txid`, which is what read-your-writes is (design §5.4). */
   minTxid?: number
   headers?: Record<string, string>
   signal?: AbortSignal
@@ -55,7 +55,7 @@ export interface RequestInitLike {
 export function normalizeBase(url: string): string {
   const trimmed = url.trim().replace(/\/+$/, "")
   if (!/^https?:\/\//i.test(trimmed) && !/^wss?:\/\//i.test(trimmed)) {
-    throw BunQLClientError.client(`url must be http(s) or ws(s), got ${JSON.stringify(url)}`)
+    throw BqlClientError.client(`url must be http(s) or ws(s), got ${JSON.stringify(url)}`)
   }
   return trimmed.replace(/^ws/i, "http")
 }
@@ -150,7 +150,7 @@ export class HttpClient {
  * names the node that just answered.
  *
  * The status is checked *and* the body's code, because every response from a replica carries
- * `BunQL-Primary` — including a `503 BUSY`, which is a different failure and is not replayed here.
+ * `BQL-Primary` — including a `503 BUSY`, which is a different failure and is not replayed here.
  */
 function movedTo(response: Response, text: string, from: string): string | null {
   if (response.ok) return null
@@ -168,7 +168,7 @@ function movedTo(response: Response, text: string, from: string): string | null 
 }
 
 /**
- * `BunQL-Primary` is a `ws://host/v1/replication` in a static topology and an HTTP base in a
+ * `BQL-Primary` is a `ws://host/v1/replication` in a static topology and an HTTP base in a
  * cluster. Either way what a client needs is the origin, so both collapse to the same thing.
  */
 export function httpBaseOf(value: string): string | null {
@@ -197,7 +197,7 @@ function parseBody<T>(text: string, status: number, ok: boolean, what: string): 
     }
   }
   if (!ok) {
-    throw BunQLClientError.fromBody(
+    throw BqlClientError.fromBody(
       parsed as ErrorBody | null,
       status,
       `${what} failed with ${status}${text ? `: ${text.slice(0, 200)}` : ""}`,

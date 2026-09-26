@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { generateKey, mint } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
 
-const scratch = await mkdtemp(`${tmpdir()}/agenticbus-e2e-`);
+const scratch = await mkdtemp(`${tmpdir()}/bql-bus-e2e-`);
 const signingKey = generateKey();
 const adminToken = generateKey();
 
@@ -39,10 +39,10 @@ const spawn = (
   args: string[],
   extra: Record<string, string> = {},
 ) => {
-  // `AGENTICBUS_BIN` swaps the CLI for a compiled binary, so the same
+  // `BQL_BUS_BIN` swaps the CLI for a compiled binary, so the same
   // end-to-end checks run against the artefact that actually ships. A binary
   // nobody executed in CI is not a release artefact.
-  const binary = process.env.AGENTICBUS_BIN;
+  const binary = process.env.BQL_BUS_BIN;
   const command =
     binary && args[0] === "src/cli/index.ts"
       ? [binary, ...args.slice(1)]

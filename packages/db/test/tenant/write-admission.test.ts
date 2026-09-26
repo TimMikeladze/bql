@@ -7,7 +7,7 @@
 // has gone, and an entry that waits past `queueWaitMs` is refused rather than committed late.
 
 import { afterAll, expect, test } from "bun:test"
-import { BunQLError } from "../../src/server/errors.ts"
+import { BqlError } from "../../src/server/errors.ts"
 import { TenantRegistry } from "../../src/tenant/index.ts"
 import { cleanupTempDirs, tempDir } from "./tmp.ts"
 
@@ -23,7 +23,7 @@ function registry(options: Record<string, unknown> = {}) {
 }
 
 const codeOf = (err: unknown): string =>
-  err instanceof BunQLError ? err.code : `not a BunQLError: ${String(err)}`
+  err instanceof BqlError ? err.code : `not a BqlError: ${String(err)}`
 
 test("a tenant fed faster than it commits refuses at a steady queue depth", async () => {
   const reg = registry({ maxQueuedWrites: 4 })
@@ -52,7 +52,7 @@ test("a tenant fed faster than it commits refuses at a steady queue depth", asyn
     expect(codeOf((one as PromiseRejectedResult).reason)).toBe("WRITE_QUEUE_FULL")
   }
   // The refusal carries a retry hint derived from the drain rate, never a bare 503.
-  const first = (refused[0] as PromiseRejectedResult).reason as BunQLError
+  const first = (refused[0] as PromiseRejectedResult).reason as BqlError
   expect(first.status).toBe(503)
   expect(first.details?.retryAfterSec).toBeGreaterThanOrEqual(1)
 

@@ -1,10 +1,10 @@
-// `bunql/kysely` against a real server, and against the embedded engine. Everything here is the
+// `bql/kysely` against a real server, and against the embedded engine. Everything here is the
 // public Kysely API — the dialect is only ever reached through it.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Kysely, sql, type Generated } from "kysely"
 import { Migrator, type Migration } from "kysely/migration"
-import { BunQLDialect, bunqlDialect } from "../../src/kysely.ts"
+import { BqlDialect, bqlDialect } from "../../src/kysely.ts"
 import {
   anotherDb,
   failure,
@@ -56,7 +56,7 @@ let db: Kysely<DB>
 
 beforeAll(async () => {
   fixture = await startOrmFixture("kysely")
-  db = new Kysely<DB>({ dialect: new BunQLDialect(fixture.db) })
+  db = new Kysely<DB>({ dialect: new BqlDialect(fixture.db) })
   await migrate(db)
 })
 
@@ -185,7 +185,7 @@ describe("transactions", () => {
 
   test("the HTTP baton carries a transaction when the socket is not wanted", async () => {
     const overHttp = new Kysely<DB>({
-      dialect: bunqlDialect({ db: fixture.db, transaction: { via: "http" } }),
+      dialect: bqlDialect({ db: fixture.db, transaction: { via: "http" } }),
     })
     try {
       await overHttp.transaction().execute(async (trx) => {
@@ -265,8 +265,8 @@ describe("introspection", () => {
 })
 
 describe("the embedded engine", () => {
-  test("the same dialect drives BunQL.open()'s Db", async () => {
-    const embedded = new Kysely<DB>({ dialect: bunqlDialect({ db: await startEmbedded("kysely") }) })
+  test("the same dialect drives Bql.open()'s Db", async () => {
+    const embedded = new Kysely<DB>({ dialect: bqlDialect({ db: await startEmbedded("kysely") }) })
     try {
       await migrate(embedded)
       const author = await embedded
@@ -305,7 +305,7 @@ describe("the embedded engine", () => {
 
 describe("migrations", () => {
   test("Kysely's migrator runs migrations and records them", async () => {
-    const migrations = new Kysely<DB>({ dialect: bunqlDialect(await anotherDb(fixture, "kyselymig")) })
+    const migrations = new Kysely<DB>({ dialect: bqlDialect(await anotherDb(fixture, "kyselymig")) })
     try {
       const migrator = new Migrator({
         db: migrations,
@@ -347,7 +347,7 @@ describe("migrations", () => {
 describe("building the client", () => {
   test("{url, token, db} opens a client the dialect owns and closes", async () => {
     const standalone = new Kysely<DB>({
-      dialect: new BunQLDialect({
+      dialect: new BqlDialect({
         url: fixture.server.url,
         token: fixture.server.adminKey,
         db: "kysely",

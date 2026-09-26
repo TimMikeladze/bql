@@ -341,72 +341,72 @@ export class Metrics {
     }
 
     out.push(
-      "# HELP bunql_requests_total HTTP requests answered, by status class.",
-      "# TYPE bunql_requests_total counter",
+      "# HELP bql_requests_total HTTP requests answered, by status class.",
+      "# TYPE bql_requests_total counter",
     )
     for (const klass of ["2xx", "3xx", "4xx", "5xx"]) {
-      out.push(`bunql_requests_total{${labels},status="${klass}"} ${this.#byClass.get(klass) ?? 0}`)
+      out.push(`bql_requests_total{${labels},status="${klass}"} ${this.#byClass.get(klass) ?? 0}`)
     }
 
     out.push(
-      "# HELP bunql_request_duration_us Request latency in microseconds.",
-      "# TYPE bunql_request_duration_us histogram",
+      "# HELP bql_request_duration_us Request latency in microseconds.",
+      "# TYPE bql_request_duration_us histogram",
     )
     let cumulative = 0
     for (let i = 0; i < LATENCY_BUCKETS.length; i++) {
       cumulative += this.#buckets[i] as number
       out.push(
-        `bunql_request_duration_us_bucket{${labels},le="${LATENCY_BUCKETS[i]}"} ${cumulative}`,
+        `bql_request_duration_us_bucket{${labels},le="${LATENCY_BUCKETS[i]}"} ${cumulative}`,
       )
     }
     cumulative += this.#buckets[LATENCY_BUCKETS.length] as number
-    out.push(`bunql_request_duration_us_bucket{${labels},le="+Inf"} ${cumulative}`)
-    out.push(`bunql_request_duration_us_sum{${labels}} ${this.#sumUs}`)
-    out.push(`bunql_request_duration_us_count{${labels}} ${this.#requests}`)
+    out.push(`bql_request_duration_us_bucket{${labels},le="+Inf"} ${cumulative}`)
+    out.push(`bql_request_duration_us_sum{${labels}} ${this.#sumUs}`)
+    out.push(`bql_request_duration_us_count{${labels}} ${this.#requests}`)
 
-    counter("bunql_queries_total", "Read statements executed.", this.#queries)
-    counter("bunql_writes_total", "Write statements executed.", this.#writes)
-    counter("bunql_batches_total", "Batch requests executed.", this.#batches)
-    counter("bunql_transactions_total", "Interactive transactions begun.", this.#transactions)
-    counter("bunql_vm_steps_total", "SQLite virtual-machine steps, the cost unit.", this.#vmSteps)
-    counter("bunql_errors_total", "Requests answered with a 5xx.", this.#errors)
-    counter("bunql_ws_connections_total", "WebSocket connections accepted.", this.#wsConnections)
-    counter("bunql_ws_messages_total", "WebSocket client messages handled.", this.#wsMessages)
-    counter("bunql_sse_streams_total", "SSE streams opened.", this.#sseTotal)
+    counter("bql_queries_total", "Read statements executed.", this.#queries)
+    counter("bql_writes_total", "Write statements executed.", this.#writes)
+    counter("bql_batches_total", "Batch requests executed.", this.#batches)
+    counter("bql_transactions_total", "Interactive transactions begun.", this.#transactions)
+    counter("bql_vm_steps_total", "SQLite virtual-machine steps, the cost unit.", this.#vmSteps)
+    counter("bql_errors_total", "Requests answered with a 5xx.", this.#errors)
+    counter("bql_ws_connections_total", "WebSocket connections accepted.", this.#wsConnections)
+    counter("bql_ws_messages_total", "WebSocket client messages handled.", this.#wsMessages)
+    counter("bql_sse_streams_total", "SSE streams opened.", this.#sseTotal)
     counter(
-      "bunql_live_results_dropped_total",
+      "bql_live_results_dropped_total",
       "Live-query results dropped under socket backpressure.",
       this.#droppedLive,
     )
     counter(
-      "bunql_forwarded_writes_total",
+      "bql_forwarded_writes_total",
       "Writes this replica handed to its primary.",
       this.#forwarded,
     )
     counter(
-      "bunql_ack_timeouts_total",
+      "bql_ack_timeouts_total",
       "Writes committed locally that ran out of patience waiting for replica acks.",
       this.#ackTimeouts,
     )
     counter(
-      "bunql_tx_queued_total",
+      "bql_tx_queued_total",
       "Interactive transactions that waited for the writer instead of failing TX_BUSY.",
       this.#txQueued,
     )
-    counter("bunql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
+    counter("bql_tenant_evictions_total", "Tenants closed by the LRU.", registry.evictions)
     if (registry.fsync) {
       counter(
-        "bunql_fsync_total",
+        "bql_fsync_total",
         "Barriers the shared fsync sweep has issued ([durability] fsyncSweep = \"shared\").",
         registry.fsync.total,
       )
       gauge(
-        "bunql_fsync_sweep_duration_us",
+        "bql_fsync_sweep_duration_us",
         "How long the sweep's last pass took, in microseconds.",
         registry.fsync.lastDurationUs,
       )
       gauge(
-        "bunql_fsync_pending",
+        "bql_fsync_pending",
         "Logs with bytes the disk has not been told about, waiting for the next sweep.",
         registry.fsync.pending,
       )
@@ -417,80 +417,80 @@ export class Metrics {
       // statementCache` entries. A *rising* eviction rate is the thrash: past the ceiling every
       // prepare compiles and finalizes a victim instead of returning a cached statement.
       counter(
-        "bunql_statement_cache_hits_total",
+        "bql_statement_cache_hits_total",
         "prepare() calls answered from a connection's statement cache.",
         registry.statementCache.hits,
       )
       counter(
-        "bunql_statement_cache_misses_total",
+        "bql_statement_cache_misses_total",
         "prepare() calls that compiled, because the text was not cached.",
         registry.statementCache.misses,
       )
       counter(
-        "bunql_statement_cache_evictions_total",
+        "bql_statement_cache_evictions_total",
         "Statements finalized to stay within [sqlite] statementCache. Rising means thrashing.",
         registry.statementCache.evictions,
       )
     }
     counter(
-      "bunql_open_refused_total",
+      "bql_open_refused_total",
       "Opens refused because every open database was pinned by a subscription.",
       registry.openRefused ?? 0,
     )
     counter(
-      "bunql_write_queue_rejected_total",
+      "bql_write_queue_rejected_total",
       "Writes refused admission to a database's write queue, full or timed out.",
       this.#writeQueueRejected,
     )
 
     gauge(
-      "bunql_result_bytes_max",
+      "bql_result_bytes_max",
       "Largest result footprint any statement has built, against [limits] maxResultBytes.",
       this.#resultBytesMax,
     )
     gauge(
-      "bunql_write_queue_depth",
+      "bql_write_queue_depth",
       "Writes queued for a writer across every open database.",
       registry.writeQueueDepth ?? 0,
     )
-    gauge("bunql_open_tenants", "Databases currently open.", registry.open)
+    gauge("bql_open_tenants", "Databases currently open.", registry.open)
     gauge(
-      "bunql_tenants_pinned",
+      "bql_tenants_pinned",
       "Open databases a subscription or transaction is holding out of the LRU.",
       registry.pinned ?? 0,
     )
     if (registry.maxOpen !== undefined) {
       gauge(
-        "bunql_max_open_tenants",
+        "bql_max_open_tenants",
         "[data] maxOpen: the node's ceiling on open databases, across every shard.",
         registry.maxOpen,
       )
     }
-    gauge("bunql_tenants", "Databases in the catalog.", registry.tenants)
-    gauge("bunql_ws_connections", "WebSocket connections open.", this.#wsOpen)
-    gauge("bunql_sse_streams", "SSE streams open.", this.#sseOpen)
-    gauge("bunql_live_subscriptions", "Live queries subscribed.", this.#liveSubs)
-    gauge("bunql_change_subscriptions", "Change feeds subscribed.", this.#changeSubs)
-    gauge("bunql_uptime_seconds", "Seconds since start.", (Date.now() - this.startedAt) / 1000)
+    gauge("bql_tenants", "Databases in the catalog.", registry.tenants)
+    gauge("bql_ws_connections", "WebSocket connections open.", this.#wsOpen)
+    gauge("bql_sse_streams", "SSE streams open.", this.#sseOpen)
+    gauge("bql_live_subscriptions", "Live queries subscribed.", this.#liveSubs)
+    gauge("bql_change_subscriptions", "Change feeds subscribed.", this.#changeSubs)
+    gauge("bql_uptime_seconds", "Seconds since start.", (Date.now() - this.startedAt) / 1000)
 
     if (replication) {
       gauge(
-        "bunql_replication_lag_txid",
+        "bql_replication_lag_txid",
         "Largest number of transactions any replica stream is behind by.",
         replication.lagTxid,
       )
       gauge(
-        "bunql_replication_connected",
+        "bql_replication_connected",
         "Replica sockets attached on a primary, or 1 while a replica is following its primary.",
         replication.connected,
       )
       counter(
-        "bunql_replication_bytes_total",
+        "bql_replication_bytes_total",
         "Replication bytes sent (primary) or received (replica).",
         replication.bytes,
       )
       counter(
-        "bunql_replication_records_total",
+        "bql_replication_records_total",
         "Transaction records streamed (primary) or applied (replica).",
         replication.records,
       )
@@ -498,33 +498,33 @@ export class Metrics {
 
     if (storage) {
       gauge(
-        "bunql_s3_shipped_txid",
+        "bql_s3_shipped_txid",
         "Highest txid any database has shipped to the bucket.",
         storage.shippedTxid,
       )
       gauge(
-        "bunql_s3_pending_records",
+        "bql_s3_pending_records",
         "Committed transactions not yet in the bucket, across every database.",
         storage.pendingRecords,
       )
       gauge(
-        "bunql_s3_behind",
+        "bql_s3_behind",
         "Databases whose bucket is behind their local log right now.",
         storage.behind,
       )
       counter(
-        "bunql_s3_errors_total",
+        "bql_s3_errors_total",
         "Failed bucket operations. A climbing count with a flat shipped txid is an outage.",
         storage.errors,
       )
-      counter("bunql_s3_bytes_total", "Bytes uploaded to the bucket.", storage.bytes)
+      counter("bql_s3_bytes_total", "Bytes uploaded to the bucket.", storage.bytes)
       gauge(
-        "bunql_upload_inflight",
+        "bql_upload_inflight",
         "S3 uploads in flight across every shipper on this node.",
         storage.uploadInflight,
       )
       gauge(
-        "bunql_upload_waiting",
+        "bql_upload_waiting",
         "Shippers queued for an upload permit. Non-zero under load is the budget doing its job.",
         storage.uploadWaiting,
       )

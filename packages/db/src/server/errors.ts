@@ -4,9 +4,9 @@
 // bare 500 with no detail at all.
 
 import { ResultLimitError, SqliteError } from "../sqlite/errors.ts"
-import { HEADERS, type BunQLErrorCode, type ErrorBody, type ErrorInfo } from "../client/protocol.ts"
+import { HEADERS, type BqlErrorCode, type ErrorBody, type ErrorInfo } from "../client/protocol.ts"
 
-/** Default HTTP status for each BunQL error code (design §6.6). */
+/** Default HTTP status for each bql.sh error code (design §6.6). */
 export const ERROR_STATUS: Readonly<Record<string, number>> = {
   BAD_REQUEST: 400,
   UNAUTHENTICATED: 401,
@@ -81,47 +81,47 @@ export interface ErrorDetails {
 }
 
 /** An error the server raises itself, as opposed to one SQLite raised. */
-export class BunQLError extends Error {
-  readonly code: BunQLErrorCode
+export class BqlError extends Error {
+  readonly code: BqlErrorCode
   readonly status: number
   readonly details?: ErrorDetails
 
-  constructor(code: BunQLErrorCode, message: string, status?: number, details?: ErrorDetails) {
+  constructor(code: BqlErrorCode, message: string, status?: number, details?: ErrorDetails) {
     super(message)
-    this.name = "BunQLError"
+    this.name = "BqlError"
     this.code = code
     this.status = status ?? ERROR_STATUS[code] ?? 500
     if (details) this.details = details
   }
 
-  static badRequest(message: string, details?: ErrorDetails): BunQLError {
-    return new BunQLError("BAD_REQUEST", message, 400, details)
+  static badRequest(message: string, details?: ErrorDetails): BqlError {
+    return new BqlError("BAD_REQUEST", message, 400, details)
   }
 
-  static unauthenticated(message = "missing or invalid token"): BunQLError {
-    return new BunQLError("UNAUTHENTICATED", message, 401)
+  static unauthenticated(message = "missing or invalid token"): BqlError {
+    return new BqlError("UNAUTHENTICATED", message, 401)
   }
 
-  static notAuthorized(message = "not authorized"): BunQLError {
-    return new BunQLError("NOT_AUTHORIZED", message, 403)
+  static notAuthorized(message = "not authorized"): BqlError {
+    return new BqlError("NOT_AUTHORIZED", message, 403)
   }
 
-  static dbNotFound(db: string): BunQLError {
-    return new BunQLError("DB_NOT_FOUND", `no such database: ${db}`, 404)
+  static dbNotFound(db: string): BqlError {
+    return new BqlError("DB_NOT_FOUND", `no such database: ${db}`, 404)
   }
 
   /** No such row. Distinct from `DB_NOT_FOUND`, which is about the database itself. */
-  static notFound(message = "no such row"): BunQLError {
-    return new BunQLError("NOT_FOUND", message, 404)
+  static notFound(message = "no such row"): BqlError {
+    return new BqlError("NOT_FOUND", message, 404)
   }
 
-  static queryTimeout(timeoutMs?: number): BunQLError {
+  static queryTimeout(timeoutMs?: number): BqlError {
     const suffix = timeoutMs === undefined ? "" : ` after ${timeoutMs}ms`
-    return new BunQLError("QUERY_TIMEOUT", `query cancelled${suffix}`, 408)
+    return new BqlError("QUERY_TIMEOUT", `query cancelled${suffix}`, 408)
   }
 
-  static txidNotAvailable(minTxid: number, have: number): BunQLError {
-    return new BunQLError(
+  static txidNotAvailable(minTxid: number, have: number): BqlError {
+    return new BqlError(
       "TXID_NOT_AVAILABLE",
       `this node is at txid ${have} and cannot serve minTxid ${minTxid}`,
       425,
@@ -133,35 +133,35 @@ export class BunQLError extends Error {
    * A write that is committed and locally durable, but did not collect the replica acks the
    * request asked for. Never a rollback: the txid in `details` happened.
    */
-  static ackTimeout(message: string, details: ErrorDetails): BunQLError {
-    return new BunQLError("ACK_TIMEOUT", message, 503, details)
+  static ackTimeout(message: string, details: ErrorDetails): BqlError {
+    return new BqlError("ACK_TIMEOUT", message, 503, details)
   }
 
-  static noReplicas(message: string, details?: ErrorDetails): BunQLError {
-    return new BunQLError("NO_REPLICAS", message, 503, details)
+  static noReplicas(message: string, details?: ErrorDetails): BqlError {
+    return new BqlError("NO_REPLICAS", message, 503, details)
   }
 
-  static notPrimary(primary?: string): BunQLError {
-    return new BunQLError("NOT_PRIMARY", "this node is not the primary for this database", 503, {
+  static notPrimary(primary?: string): BqlError {
+    return new BqlError("NOT_PRIMARY", "this node is not the primary for this database", 503, {
       primary,
     })
   }
 
-  static resetRequired(message = "the change ring no longer holds that position"): BunQLError {
-    return new BunQLError("RESET_REQUIRED", message, 409)
+  static resetRequired(message = "the change ring no longer holds that position"): BqlError {
+    return new BqlError("RESET_REQUIRED", message, 409)
   }
 
-  static quotaExceeded(message = "database is full"): BunQLError {
-    return new BunQLError("QUOTA_EXCEEDED", message, 507)
+  static quotaExceeded(message = "database is full"): BqlError {
+    return new BqlError("QUOTA_EXCEEDED", message, 507)
   }
 
-  static busy(message = "database is busy"): BunQLError {
-    return new BunQLError("BUSY", message, 503)
+  static busy(message = "database is busy"): BqlError {
+    return new BqlError("BUSY", message, 503)
   }
 
   /** More rows than the request's `maxRows` allowed (design §6, "common request options"). */
-  static tooManyRows(maxRows: number): BunQLError {
-    return new BunQLError(
+  static tooManyRows(maxRows: number): BqlError {
+    return new BqlError(
       "TOO_MANY_ROWS",
       `the result has more than the ${maxRows} rows this request allowed`,
       400,
@@ -172,8 +172,8 @@ export class BunQLError extends Error {
    * A result reached `[limits] maxResultBytes` while it was being built. A node limit rather than
    * a request one, so it is a 413 and names the ceiling the operator set.
    */
-  static resultTooLarge(maxBytes: number): BunQLError {
-    return new BunQLError(
+  static resultTooLarge(maxBytes: number): BqlError {
+    return new BqlError(
       "RESULT_TOO_LARGE",
       `the result reached the ${maxBytes}-byte ceiling this node allows for one result; ` +
         `add a LIMIT or narrow the columns`,
@@ -184,14 +184,14 @@ export class BunQLError extends Error {
 
 /**
  * A ceiling the step loop refused at (`src/sqlite/statement.ts`). It arrives here as a driver-layer
- * error rather than a `BunQLError` because `src/sqlite/` knows nothing about HTTP; this is the one
+ * error rather than a `BqlError` because `src/sqlite/` knows nothing about HTTP; this is the one
  * place that translation lives, so the embedded API sees the driver's error and the wire sees the
  * code design §6.6 documents.
  */
-function fromResultLimit(err: ResultLimitError): BunQLError {
+function fromResultLimit(err: ResultLimitError): BqlError {
   return err.limit === "rows"
-    ? BunQLError.tooManyRows(err.max)
-    : BunQLError.resultTooLarge(err.max)
+    ? BqlError.tooManyRows(err.max)
+    : BqlError.resultTooLarge(err.max)
 }
 
 /**
@@ -200,12 +200,12 @@ function fromResultLimit(err: ResultLimitError): BunQLError {
  * fixing three of them should be told about three. It lives here rather than there so both the
  * compiled pipeline and `src/server/app.ts`'s wrapper build the same 400.
  *
- * Only a `BunQLError`, which is to say only something this server refused on purpose and whose
+ * Only a `BqlError`, which is to say only something this server refused on purpose and whose
  * message it already hands back. `ResponseInvalid` carries a problem list too and is a 500 the
  * client learns nothing from — the invariant at the top of this file — so it is not one of these.
  */
 function problemsOf(err: unknown): unknown[] | undefined {
-  if (!(err instanceof BunQLError)) return undefined
+  if (!(err instanceof BqlError)) return undefined
   const problems = (err as unknown as { problems?: unknown }).problems
   return Array.isArray(problems) && problems.length > 0 ? problems : undefined
 }
@@ -216,7 +216,7 @@ function isClientInputError(err: unknown): err is Error {
 }
 
 /**
- * Status and BunQL code for a SQLite result code name. Codes §6.6 renames keep the BunQL name;
+ * Status and bql.sh code for a SQLite result code name. Codes §6.6 renames keep the bql.sh name;
  * everything else travels under its own `SQLITE_*` name so clients can switch on the exact cause.
  */
 function fromSqlite(code: string): { status: number; code: string } {
@@ -266,7 +266,7 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
     status = mapped.status
     code = mapped.code
     message = mapped.message
-  } else if (err instanceof BunQLError) {
+  } else if (err instanceof BqlError) {
     status = err.status
     code = err.code
     message = err.message
