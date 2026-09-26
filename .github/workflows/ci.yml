@@ -83,6 +83,9 @@ jobs:
       - name: Vercel adapter and startup tests (mocked)
         run: bun test deploy/vercel/test
 
+      - name: Cloudflare routing and startup tests (mocked)
+        run: bun test deploy/cloudflare/test
+
       - name: docs/api.md covers every route
         run: bun run db routes:check
 

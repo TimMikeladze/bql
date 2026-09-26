@@ -1,0 +1,22 @@
+FROM oven/bun:1.4.0-slim AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json ./
+COPY packages/db/src ./packages/db/src
+COPY packages/db/scripts ./packages/db/scripts
+RUN bun run packages/db/scripts/sqlite.ts
+COPY deploy/vercel/package.json deploy/vercel/bun.lock ./deploy/vercel/
+WORKDIR /app/deploy/vercel
+RUN bun install --frozen-lockfile --production
+
+FROM oven/bun:1.4.0-slim
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/packages/db/src ./packages/db/src
+COPY --from=build /app/packages/db/vendor/sqlite/libsqlite3.so ./packages/db/vendor/sqlite/libsqlite3.so
+COPY --from=build /app/deploy/vercel ./deploy/vercel
+COPY deploy/vercel/server.ts deploy/vercel/blob-store.ts ./deploy/vercel/
+STOPSIGNAL SIGTERM
+CMD ["bun", "run", "deploy/vercel/server.ts"]

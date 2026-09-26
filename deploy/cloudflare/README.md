@@ -1,9 +1,52 @@
-# Cloudflare deployment work in progress
+# Experimental Cloudflare deployment
 
-The S3/R2 conditional object adapter is implemented and locally tested. The Worker,
-Durable Object routing, container runtime, deployment template and CLI integration
-are not implemented yet. This is not a supported deployment target until the
-qualification gates pass.
+The Worker routes every request to one named `DatabaseContainer`, using the
+configured environment and deployment ID. Its Bun process uses disposable SQLite
+files and the shared synchronous R2 publication/recovery protocol. After five
+minutes idle the container may sleep; waking reconstructs committed state from R2.
+No shutdown flush is needed for acknowledged writes. Live sleep/wake and rollout
+qualification are still outstanding, so this target remains experimental.
+
+The isolated package pins `@cloudflare/containers` 0.3.7 and Wrangler 4.135.0.
+Run these from the repository root:
+
+```sh
+bun install --cwd deploy/cloudflare --frozen-lockfile
+bun test deploy/cloudflare/test
+bun run --cwd deploy/cloudflare check
+```
+
+Hosted Containers require the Workers Paid plan. Wrangler login alone does not
+enable that product; check account eligibility before creating deployment
+resources. See [Workers/Containers pricing](https://developers.cloudflare.com/containers/platform/pricing/).
+
+The last command runs `wrangler deploy --dry-run`, including an actual Docker
+build and Worker bundle; it needs Docker but no Cloudflare login. Wrangler sends
+the Dockerfile through stdin, so the repository `.dockerignore` must allow the
+two Cloudflare runtime files as well as the common database source.
+
+For a live deployment, use a separate Worker, R2 bucket, deployment ID and
+bucket-scoped S3 credentials for each preview/production environment. Edit
+`wrangler.jsonc` with the Worker name, environment, deployment ID, bucket and R2
+S3 endpoint. Install these Worker secrets with `wrangler secret put NAME`:
+
+- `BQL_STORAGE_DEPLOYMENT_ID`, matching the deployment ID in Worker vars
+- `BQL_ADMIN_KEY`, a stable randomly generated admin key
+- `BQL_JWT_ED25519`, a stable base64-encoded Ed25519 PKCS8 private signing key
+- `BQL_S3_ACCESS_KEY_ID` and `BQL_S3_SECRET_ACCESS_KEY`, restricted to this bucket
+
+Use the same settings to run `bun deploy/cloudflare/server.ts init` **once**
+before deployment. This explicitly creates an empty root and refuses to replace
+an existing root. Then run `wrangler deploy` from `deploy/cloudflare`. Supply
+initialization secrets via the process environment; do not commit them. Normal
+startup never initializes a missing root. Changing storage credentials without
+the matching storage identity fails closed.
+
+The Worker forwards authorization, idempotency and causal-consistency headers
+unchanged. Container startup allows only the declared settings/secrets. It does
+not accept a caller-selected container name. SQL, atomic batches and the cloud
+catalog/token operations are supported; `/v1/cloud` lists capabilities. Interactive
+transactions, WebSockets and unsupported ordinary-server routes remain rejected.
 
 `S3ObjectStore` uses Bun's SigV4 presigning and an injectable HTTP transport. It
 sends `If-None-Match: *` on create and `If-Match` on replacement directly to the
@@ -26,9 +69,21 @@ object and leaves it there for inspection. It checks create/CAS races, origin
 visibility and stale-version rejection. Each CAS changes the bytes: S3 ETags can
 be equal for equal content. Cloud root revisions must always advance.
 
-Evidence as of 2026-09-26: local contract tests pass; real R2 tests have **not** been
-run. Cross-process and cross-region races, payload and overwrite limits, container
-sleep/wake, overlapping rollout, and empty-disk recovery remain unqualified.
+Evidence as of 2026-09-26: local contract/routing/startup tests and Wrangler's
+Docker/Worker dry run pass. The Linux amd64 image loads pinned SQLite 3.53.4 with
+session, snapshot and WAL checksum features, and round-trips Zstandard data.
+Real R2 atomic-create/CAS races, origin visibility and stale-version rejection
+passed against a separate private bucket. A Linux container initialized the root
+and wrote SQL, catalog/settings changes and a token revocation. After SIGKILL and
+removing that container, a fresh container with empty local disk recovered the
+SQL, saved retry result, catalog, settings and revocation from R2. This validates
+the R2 recovery path from local Docker, not Cloudflare's hosted lifecycle.
+Wrangler uploaded the Worker, but Containers deployment
+returned HTTP 401: this test account needs Workers Paid. Hosted container
+sleep/wake, overlapping rollout, payload/overwrite limits and cross-region
+visibility remain unqualified. The deployment CLI's provisioning orchestration
+is still in development.
 
 References: [R2 consistency](https://developers.cloudflare.com/r2/reference/consistency/),
-[S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/).
+[S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/),
+[container secrets](https://developers.cloudflare.com/containers/examples/env-vars-and-secrets/).

@@ -1,5 +1,4 @@
 **
-!Dockerfile
 !package.json
 !packages/
 !packages/db/

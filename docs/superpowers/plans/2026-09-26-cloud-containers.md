@@ -10,7 +10,7 @@
 
 **Spec:** [Cloud containers design](../specs/2026-09-26-cloud-containers-design.md).
 
-Status: implementation in progress. Storage, recovery, publication, serve/client wiring and lifecycle checks have local tests. A protected Vercel preview and hosted-to-hosted recovery test passed against private Blob. Cloudflare/Fly deployment CLI integration and broader provider qualification remain outstanding. Scope is the database, not the bus. The Fly deployment requested separately uses persistent disk and is independent of this work.
+Status: implementation in progress. Storage, recovery, publication, serve/client wiring and lifecycle checks have local tests. A protected Vercel preview and hosted-to-hosted recovery test passed against private Blob. Cloudflare now has a tested Worker/container package and real R2 storage-contract evidence; hosted container testing needs Workers Paid on the test account. Deployment config, offline plans, native CLI authentication/runner, saved endpoint contexts and packaged templates have tests. CLI provisioning/resume/status and broader provider qualification remain outstanding. Scope is the database, not the bus. Fly uses persistent disk and participates in the requested CLI workflow.
 
 ## Global constraints
 

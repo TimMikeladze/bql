@@ -40,6 +40,7 @@ function run(cmd: string[], cwd: string, label: string): string {
   return out
 }
 
+run([process.execPath, "run", "scripts/deploy-templates.ts", "--check"], ROOT, "deployment template consistency")
 console.log("pack-check: npm pack")
 // `--pack-destination` keeps the tarball out of the working tree, which is the point.
 const stage = mkdtempSync(join(tmpdir(), "bql-pack-"))
@@ -72,6 +73,11 @@ for (const needed of [
   `${DB}/scripts/sqlite.ts`,
   `${DB}/scripts/native/walsum.c`,
   `${DB}/src/sqlite/lib.ts`,
+  `${DB}/deploy-templates/vercel/blob-store.ts`,
+  `${DB}/deploy-templates/vercel/Dockerfile.vercel.dockerignore`,
+  `${DB}/deploy-templates/cloudflare/bun.lock`,
+  `${DB}/deploy-templates/cloudflare/src/index.ts`,
+  `${DB}/deploy-templates/fly/fly.toml`,
   `${BUS}/src/index.ts`,
   // The bus CLI serves `dist/dashboard`; a tarball without it 404s only for whoever installed it.
   `${BUS}/dist/dashboard/index.html`,
@@ -81,6 +87,19 @@ for (const needed of [
     process.exit(1)
   }
 }
+
+console.log("pack-check: stage all three provider templates from the installed package")
+run([process.execPath, "-e", `
+  const { initDeployment } = await import(${JSON.stringify(join(installed, DB, "src/deploy/config.ts"))});
+  const { stageDeployment } = await import(${JSON.stringify(join(installed, DB, "src/deploy/templates.ts"))});
+  const { mkdir } = await import("node:fs/promises");
+  for (const provider of ["vercel", "cloudflare", "fly"]) {
+    const dir = ${JSON.stringify(consumer)} + "/deployment-" + provider;
+    await mkdir(dir);
+    const config = await initDeployment(provider, dir);
+    await stageDeployment(config, dir + "/app");
+  }
+`], consumer, "installed deployment templates")
 
 // The advertised command, run from where a consumer would actually run it. `npm run` cannot reach
 // a dependency's scripts, so the path is the contract and the README says so.

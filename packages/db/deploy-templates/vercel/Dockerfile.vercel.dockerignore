@@ -1,5 +1,4 @@
 **
-!Dockerfile
 !package.json
 !packages/
 !packages/db/
@@ -8,7 +7,8 @@
 !packages/db/scripts/
 !packages/db/scripts/**
 !deploy/
-!deploy/cloudflare/
-!deploy/cloudflare/server.ts
-!deploy/cloudflare/src/
-!deploy/cloudflare/src/routing.ts
+!deploy/vercel/
+!deploy/vercel/package.json
+!deploy/vercel/bun.lock
+!deploy/vercel/server.ts
+!deploy/vercel/blob-store.ts

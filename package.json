@@ -67,6 +67,7 @@
     "README.md",
     "packages/db/src",
     "packages/db/scripts",
+    "packages/db/deploy-templates",
     "packages/db/README.md",
     "packages/db/docs/design.md",
     "packages/db/docs/api.md",
@@ -94,6 +95,8 @@
     "site:og": "bun run --filter 'bql-site' og",
     "prepack": "bun run --filter 'bql-bus' build:dashboard",
     "pack:check": "bun run scripts/pack-check.ts",
+    "deploy:templates": "bun run scripts/deploy-templates.ts",
+    "deploy:templates:check": "bun run scripts/deploy-templates.ts --check",
     "pre:release": "bun install --frozen-lockfile && bun run db sqlite:build && bun run bytes && bun run typecheck && bun run db test && bun run bus test && bun run db routes:check && bun run pack:check",
     "release": "bumpp --execute \"bun run site:build\" --all --commit --push --tag"
   },
