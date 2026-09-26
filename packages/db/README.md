@@ -27,7 +27,8 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | — | one operation model rendered as REST + OpenAPI + GraphQL (`bql.sh/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1496 tests across 125 files, gating on macOS (arm64), Linux (x64) and Windows (x64).
+1566 tests across 138 files, gating on Linux (x64). macOS and Windows legs ran green until
+2026-09-26; `docs/e2-windows-gate.md` and `docs/c6-packaging.md` §1 are what they proved.
 
 ## Install
 

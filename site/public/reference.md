@@ -110,9 +110,10 @@ sequence and why each step is independently revertable.
 
 ## CI and releases
 
-Every push and pull request to `main` runs both halves. The database gates on macOS (arm64), Linux
-(x64) and Windows (x64), all three hard. The bus runs on macOS and Linux; Windows is its own piece
-of work, with its own evidence, the way the database's was.
+Every push and pull request to `main` runs both halves on Linux. macOS and Windows legs ran here
+until 2026-09-26 and both were green — they were dropped for cost and wall-clock, not because they
+stopped passing, and what they proved is written down in `packages/db/docs/e1-windows.md`,
+`e2-windows-gate.md` and `c6-packaging.md` §1.
 
 One package, one tag: `v0.1.0` publishes `bql.sh` with both halves in it, and the tag must match the
 root `package.json` version or the release refuses. `bun run pack:check` is the gate the release runs
@@ -153,7 +154,8 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 | — | one operation model rendered as REST + OpenAPI + GraphQL (`bql.sh/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`) | built and mounted |
 | 3 | WAL-decoded logical CDC on a replica, snapshot reads across requests, per-tenant encryption, plan cache | later |
 
-1496 tests across 125 files, gating on macOS (arm64), Linux (x64) and Windows (x64).
+1566 tests across 138 files, gating on Linux (x64). macOS and Windows legs ran green until
+2026-09-26; `docs/e2-windows-gate.md` and `docs/c6-packaging.md` §1 are what they proved.
 
 ## Install
 

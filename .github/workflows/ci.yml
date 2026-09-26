@@ -1,18 +1,19 @@
-# Invariant: every leg of this workflow proves the same thing on all three platforms — that
-# bql.sh builds the libsqlite3 it needs from a pinned source, that both packages type-check,
-# and that both suites pass. Nothing here needs a secret, and nothing here reaches a network
-# service the tests do not start themselves: the storage tests use the in-process FakeS3 unless
-# BQL_TEST_S3_ENDPOINT names a real bucket, and this workflow never sets it.
+# Invariant: this workflow proves that bql.sh builds the libsqlite3 it needs from a pinned source,
+# that both halves type-check, and that both suites pass. Nothing here needs a secret, and nothing
+# here reaches a network service the tests do not start themselves: the storage tests use the
+# in-process FakeS3 unless BQL_TEST_S3_ENDPOINT names a real bucket, and this workflow never sets it.
 #
-# A fourth leg, added by L7: the `tarball` job proves the published *package* can build its own
-# engine, which nothing above can — every other job runs against the working tree, where files the
-# tarball omits are still present.
+# A second leg, added by L7: the `tarball` job proves the published *package* can build its own
+# engine, which the first cannot — it runs against the working tree, where files the tarball omits
+# are still present.
 #
-# Two packages, one pipeline. bql.sh/bus arrived with the monorepo (docs/monorepo.md) and had
-# never run in CI before, so it is on macOS and Ubuntu and **not** on the Windows gate. That gate
-# was earned over three exploratory runs for bql.sh (packages/db/docs/e2-windows-gate.md);
-# putting an unproven suite behind it on day one would mean either a red main branch or a
-# `continue-on-error` that makes the gate meaningless for the package that did earn it.
+# **Linux only.** macOS and Windows legs ran here until 2026-09-26 and both were green; they were
+# removed for cost and wall-clock, not because they stopped passing. What that gives up is written
+# down rather than forgotten: macOS was the arm64 half of the matrix, and Windows was a gate earned
+# over three exploratory runs (`packages/db/docs/e1-windows.md`, `e2-windows-gate.md`) whose
+# findings — POSIX assumptions in tests, a clock that needs four times the timeout — are still in
+# the code that fixed them. Both are a `runs-on` line away if a release ever needs the evidence
+# again, and `packages/db/docs/c6-packaging.md` §1 keeps the platform notes.
 
 name: ci
 
@@ -31,15 +32,9 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-latest is arm64, ubuntu-latest is x64, so between them the matrix covers both
-        # architectures as well as both platforms.
-        os: [macos-latest, ubuntu-latest]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,20 +86,13 @@ jobs:
   # built `vendor/` hides it completely. This job packs the real tarball, installs it into an empty
   # directory as a dependency, builds SQLite from there and runs a smoke test on what it built.
   #
-  # Not a clone, not a workspace link, and not in the matrix above: it rebuilds SQLite from source
-  # in a directory the cache above does not cover, which is the point — a cached artefact would be
-  # the working tree's, and the thing under test is whether the *package* can build one.
-  #
-  # macOS and Linux only. `packages/db/docs/c6-packaging.md` §1 has the platform evidence, and the
-  # Windows gate is already the longest job here.
+  # Not a clone, not a workspace link, and not in the job above: it rebuilds SQLite from source in
+  # a directory the cache there does not cover, which is the point — a cached artefact would be the
+  # working tree's, and the thing under test is whether the *package* can build one.
   pack:
-    name: tarball (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: tarball
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,57 +105,3 @@ jobs:
 
       - name: pack, install, build the engine, smoke it
         run: bun run pack:check
-
-  # Windows is a gate as of E2 (`packages/db/docs/e2-windows-gate.md`). It was exploratory for
-  # three runs and `continue-on-error` at every level while it answered the question E1 asked; the
-  # answer was 1346 of 1498, then one fix took it to 1479, then five POSIX assumptions in tests
-  # and one that was merely slow took it to the whole suite. The `continue-on-error` lines are
-  # gone, which is what E1 §2 said would happen on the day it passed.
-  #
-  # It keeps its own job rather than joining the matrix because it needs 30 minutes where the
-  # other two need 25: creating a file and opening SQLite on it are both far dearer there, and the
-  # suite runs about three times as long as a result.
-  #
-  # bql.sh only. The bus has its own Windows question to answer, with its own evidence.
-  windows:
-    name: windows-latest
-    runs-on: windows-latest
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.2
-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: packages/db/vendor/sqlite
-          key: sqlite-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/db/scripts/sqlite.ts', 'packages/db/scripts/native/walsum.c') }}
-
-      - run: bun install --frozen-lockfile
-
-      - name: build libsqlite3
-        run: bun run db sqlite:build
-
-      - name: report the library under test
-        working-directory: packages/db
-        run: bun -e 'const{sqlite}=await import("./src/sqlite/lib.ts");const l=sqlite();console.log(l.path,l.version,JSON.stringify(l.features))'
-
-      - run: bun run bytes
-
-      - name: typecheck bql.sh
-        run: bun run db typecheck
-
-      # `--timeout 20000` rather than bun's default 5000, and it is scaling the clock rather than
-      # the assertions. Creating a file and opening SQLite on it are both several times dearer on
-      # Windows: sibling tests in the two files that timed out here take 3.6 s and 0.95 s on the
-      # same runner, so 5 s is a limit the platform crosses doing legitimate work. A hang still
-      # fails, four times slower than it would elsewhere.
-      - name: "bql.sh"
-        working-directory: packages/db
-        run: bun test --timeout 20000
-
-      - name: docs/api.md covers every route
-        run: bun run db routes:check
