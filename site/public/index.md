@@ -1,8 +1,8 @@
 # SQLite as a database server, and a bus
 
-bql.sh is two open source packages: `bql.sh` serves thousands of SQLite databases from one process, and `bql.sh/bus` is a durable message bus with leases, retries and a dead-letter path. Built on [Bun](https://bun.sh) and [SQLite](https://sqlite.org) with zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
+One open source package. `bql.sh` serves thousands of SQLite databases from one process, and `bql.sh/bus` is a durable message bus with leases, retries and a dead-letter path. Built on [Bun](https://bun.sh) and [SQLite](https://sqlite.org) with zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
 
-Currently `bql.sh` v0.1.0 · Neither package is on npm yet.
+Currently `bql.sh` v0.1.0 · Not on npm yet.
 
 ```sh
 git clone https://github.com/TimMikeladze/bql && cd bql
@@ -10,7 +10,7 @@ git clone https://github.com/TimMikeladze/bql && cd bql
 
 ## By the numbers
 
-- **151** test files across both packages
+- **151** test files across both halves
 - **0** runtime dependencies
 - **49k** writes/s at 64 concurrent clients
 - **54 µs** point read over HTTP, one node
@@ -333,7 +333,7 @@ ok   a repeated dedupe key does not publish twice
 
 ### What is not here yet
 
-- Neither package is on npm; the release is blocked on one secret. Use a clone.
+- Not on npm yet; the release is blocked on one secret. Use a clone.
 - The packages do not depend on each other yet; the transactional outbox is next.
 - `bql.sh/bus` is not on the Windows CI gate, and Kysely's `.stream()` is not implemented.
 
@@ -365,4 +365,4 @@ bun run bus dev
 - [The cluster and its leases](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md) — Why two primaries are impossible by the guard margin, not by hope.
 - [WAL shipping, byte by byte](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/m3-wal.md) — Committed pages out of the -wal, as self-verifying records.
 
-Reference: https://bql.dev/reference · Repository: https://github.com/TimMikeladze/bql
+Reference: https://bql.sh/reference · Repository: https://github.com/TimMikeladze/bql

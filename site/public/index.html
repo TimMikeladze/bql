@@ -5,16 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bql.sh — SQLite as a database server, and a durable message bus</title>
 <meta name="description" content="bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.">
-<link rel="canonical" href="https://bql.dev/">
-<link rel="alternate" type="text/markdown" href="https://bql.dev/index.md">
+<link rel="canonical" href="https://bql.sh/">
+<link rel="alternate" type="text/markdown" href="https://bql.sh/index.md">
 <meta name="theme-color" content="#161616" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#fcfcfc" media="(prefers-color-scheme: light)">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="bql.sh">
 <meta property="og:title" content="bql.sh — SQLite as a database server, and a durable message bus">
 <meta property="og:description" content="bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.">
-<meta property="og:url" content="https://bql.dev/">
-<meta property="og:image" content="https://bql.dev/og.png">
+<meta property="og:url" content="https://bql.sh/">
+<meta property="og:image" content="https://bql.sh/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:type" content="image/png">
@@ -22,7 +22,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="bql.sh — SQLite as a database server, and a durable message bus">
 <meta name="twitter:description" content="bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.">
-<meta name="twitter:image" content="https://bql.dev/og.png">
+<meta name="twitter:image" content="https://bql.sh/og.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%231f1f1f%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%23fafafa%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20transform%3D%22translate(3.2%202.4)%20scale(.8)%22%3E%3Cellipse%20cx%3D%2216%22%20cy%3D%229%22%20rx%3D%228%22%20ry%3D%223%22%2F%3E%3Cpath%20d%3D%22M8%209v7c0%201.7%203.6%203%208%203s8-1.3%208-3V9%22%2F%3E%3Cpath%20d%3D%22M8%2016v6c0%201.7%203.6%203%208%203s8-1.3%208-3v-6%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
 <script>(function () {
   var k = "bql-theme", d = document.documentElement;
@@ -296,7 +296,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 #tab-1:checked ~ .tabrow label[for="tab-1"]{background:var(--raise);color:var(--ink)}#tab-1:checked ~ .p-1{display:block}#tab-1:focus-visible ~ .tabrow label[for="tab-1"]{outline:2px solid var(--accent)}#tab-1:checked ~ .pager i:nth-child(2){background:var(--ink)}
 #tab-2:checked ~ .tabrow label[for="tab-2"]{background:var(--raise);color:var(--ink)}#tab-2:checked ~ .p-2{display:block}#tab-2:focus-visible ~ .tabrow label[for="tab-2"]{outline:2px solid var(--accent)}#tab-2:checked ~ .pager i:nth-child(3){background:var(--ink)}
 #tab-3:checked ~ .tabrow label[for="tab-3"]{background:var(--raise);color:var(--ink)}#tab-3:checked ~ .p-3{display:block}#tab-3:focus-visible ~ .tabrow label[for="tab-3"]{outline:2px solid var(--accent)}#tab-3:checked ~ .pager i:nth-child(4){background:var(--ink)}</style>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"bql.sh","description":"bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.","url":"https://bql.dev/","codeRepository":"https://github.com/TimMikeladze/bql","applicationCategory":"DeveloperApplication","programmingLanguage":"TypeScript","runtimePlatform":"Bun","softwareVersion":"0.1.0","license":"https://opensource.org/licenses/MIT","author":{"@type":"Person","name":"linesofcode","url":"https://x.com/linesofcode"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"bql.sh","description":"bql.sh runs thousands of SQLite databases in one Bun process, with replicas, S3 backup and realtime, beside a durable message bus.","url":"https://bql.sh/","codeRepository":"https://github.com/TimMikeladze/bql","applicationCategory":"DeveloperApplication","programmingLanguage":"TypeScript","runtimePlatform":"Bun","softwareVersion":"0.1.0","license":"https://opensource.org/licenses/MIT","author":{"@type":"Person","name":"linesofcode","url":"https://x.com/linesofcode"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -309,15 +309,15 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 <section class="hero shell" aria-labelledby="top-h">
 <span class="mark" style="width:44px;height:44px" aria-hidden="true"><svg width="27" height="27" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="16" cy="9" rx="8" ry="3"/><path d="M8 9v7c0 1.7 3.6 3 8 3s8-1.3 8-3V9"/><path d="M8 16v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span>
 <h1 id="top-h">SQLite as a database server, and a bus</h1>
-<p class="lede">bql.sh is two open source packages: <code>bql.sh</code> serves thousands of SQLite databases from one process, and <code>bql.sh/bus</code> is a durable message bus with leases, retries and a dead-letter path. Built on <a href="https://bun.sh" rel="noopener">Bun</a> and <a href="https://sqlite.org" rel="noopener">SQLite</a> with zero runtime dependencies, by <a href="https://x.com/linesofcode" rel="noopener">linesofcode</a>.</p>
+<p class="lede">One open source package. <code>bql.sh</code> serves thousands of SQLite databases from one process, and <code>bql.sh/bus</code> is a durable message bus with leases, retries and a dead-letter path. Built on <a href="https://bun.sh" rel="noopener">Bun</a> and <a href="https://sqlite.org" rel="noopener">SQLite</a> with zero runtime dependencies, by <a href="https://x.com/linesofcode" rel="noopener">linesofcode</a>.</p>
 <div class="aud">
 <input type="radio" name="aud" id="aud-h" checked><input type="radio" name="aud" id="aud-a">
 <div class="aud-tabs"><label for="aud-h">For humans</label><label for="aud-a">For agents</label></div>
 <div class="aud-panel p-h" data-panel="humans"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>git clone https://github.com/TimMikeladze/bql &amp;&amp; cd bql</code><button type="button" class="copy" data-copy="git clone https://github.com/TimMikeladze/bql &amp;&amp; cd bql" aria-label="Copy install command"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div></div>
-<div class="aud-panel p-a" data-panel="agents"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>curl https://bql.dev/llms.txt</code><button type="button" class="copy" data-copy="curl https://bql.dev/llms.txt" aria-label="Copy agent command"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div>
+<div class="aud-panel p-a" data-panel="agents"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>curl https://bql.sh/llms.txt</code><button type="button" class="copy" data-copy="curl https://bql.sh/llms.txt" aria-label="Copy agent command"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div>
 <div class="agent-links"><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">AGENTS.md</a><button type="button" data-copy-page="/index.md">Copy page as Markdown</button></div></div>
 </div>
-<p class="version">Currently <code>bql.sh</code> v0.1.0 · Neither package is on npm yet</p>
+<p class="version">Currently <code>bql.sh</code> v0.1.0 · Not on npm yet</p>
 <div class="split">
 <div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">terminal</span></div><pre><code><span class="prompt-line">bql-bus serve &amp;</span>
 <span class="prompt-line">bql-bus subscribe work <span class="t-s">'work.&gt;'</span></span>
@@ -340,7 +340,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 }).start();</code></pre></div>
 </div>
 </section>
-<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2><div class="figures"><div class="fig" data-source="repo count: testFiles"><b>151</b><span>test files across both packages</span></div><div class="fig" data-source="repo count: runtimeDependencies"><b>0</b><span>runtime dependencies</span></div><div class="fig" data-source="db README /~(\d+k) writes\/s at 64/"><b>49k</b><span>writes/s at 64 concurrent clients</span></div><div class="fig" data-source="db README /a point read is\s+(\d+ \u00B5s)/"><b>54 µs</b><span>point read over HTTP, one node</span></div></div></div></section>
+<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2><div class="figures"><div class="fig" data-source="repo count: testFiles"><b>151</b><span>test files across both halves</span></div><div class="fig" data-source="repo count: runtimeDependencies"><b>0</b><span>runtime dependencies</span></div><div class="fig" data-source="db README /~(\d+k) writes\/s at 64/"><b>49k</b><span>writes/s at 64 concurrent clients</span></div><div class="fig" data-source="db README /a point read is\s+(\d+ \u00B5s)/"><b>54 µs</b><span>point read over HTTP, one node</span></div></div></div></section>
 <section class="section band eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">Reached by what you already run</h2>
 <p class="explain">Bun and SQLite underneath; Drizzle, Kysely and @libsql/client on top; REST, OpenAPI and GraphQL generated; backups to S3, R2 or MinIO; metrics for Prometheus and traces for OpenTelemetry; a Dockerfile and a fly.toml.</p>
@@ -627,7 +627,7 @@ ok   a repeated dedupe key does not publish twice</code></pre></div></div>
 <section class="section" id="boundaries" aria-labelledby="boundaries-h"><div class="shell">
 <h2 id="boundaries-h">Boundaries</h2>
 <p class="explain">What the repository proves, what it chose, and what it does not do yet. See <a href="/reference#bus-boundaries">the bus's boundaries</a> in full.</p>
-<div class="demo bounds"><div><h3>What holds<span>3</span></h3><ul><li>A restore replays through the replica's verifier: it reproduces the target txid checksum for checksum, or fails loudly.</li><li><code>ack: &quot;replica&quot;</code> makes a failover lossless; the old primary is fenced by epoch.</li><li>The bus survives SIGTERM and SIGKILL mid-flight in <code>bun run soak</code>, with nothing lost.</li></ul></div><div><h3>What is a judgement<span>3</span></h3><ul><li>The default <code>ack: &quot;fsync&quot;</code> costs about 2.7x on a single write against <code>ack: &quot;local&quot;</code>.</li><li>Bus replication is asynchronous; its failover RPO is measured in tens of messages.</li><li>Ordering is off by default, because it costs throughput most work does not need.</li></ul></div><div><h3>What is not here yet<span>3</span></h3><ul><li>Neither package is on npm; the release is blocked on one secret. Use a clone.</li><li>The packages do not depend on each other yet; the transactional outbox is next.</li><li><code>bql.sh/bus</code> is not on the Windows CI gate, and Kysely's <code>.stream()</code> is not implemented.</li></ul></div></div>
+<div class="demo bounds"><div><h3>What holds<span>3</span></h3><ul><li>A restore replays through the replica's verifier: it reproduces the target txid checksum for checksum, or fails loudly.</li><li><code>ack: &quot;replica&quot;</code> makes a failover lossless; the old primary is fenced by epoch.</li><li>The bus survives SIGTERM and SIGKILL mid-flight in <code>bun run soak</code>, with nothing lost.</li></ul></div><div><h3>What is a judgement<span>3</span></h3><ul><li>The default <code>ack: &quot;fsync&quot;</code> costs about 2.7x on a single write against <code>ack: &quot;local&quot;</code>.</li><li>Bus replication is asynchronous; its failover RPO is measured in tens of messages.</li><li>Ordering is off by default, because it costs throughput most work does not need.</li></ul></div><div><h3>What is not here yet<span>3</span></h3><ul><li>Not on npm yet; the release is blocked on one secret. Use a clone.</li><li>The packages do not depend on each other yet; the transactional outbox is next.</li><li><code>bql.sh/bus</code> is not on the Windows CI gate, and Kysely's <code>.stream()</code> is not implemented.</li></ul></div></div>
 </div></section>
 <section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
 <h2 id="start-h">Start from a clone</h2>

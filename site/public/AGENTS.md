@@ -1,6 +1,6 @@
 # Using bql.sh from an agent
 
-bql.sh is two packages in one Bun monorepo: `bql.sh` (SQLite as a multi-tenant database server) and `bql.sh/bus` (a durable message bus, CLI `bql-bus`). Bun 1.4 or newer. Neither package is on npm yet.
+bql.sh is two packages in one Bun monorepo: `bql.sh` (SQLite as a multi-tenant database server) and `bql.sh/bus` (a durable message bus, CLI `bql-bus`). Bun 1.4 or newer. Not on npm yet.
 
 ## Install
 
@@ -80,4 +80,4 @@ await new BusConsumer({
 2. `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.
 3. Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.
 
-Full reference: https://bql.dev/reference (Markdown: https://bql.dev/reference.md).
+Full reference: https://bql.sh/reference (Markdown: https://bql.sh/reference.md).

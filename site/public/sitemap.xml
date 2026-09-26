@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://bql.dev/</loc></url>
-  <url><loc>https://bql.dev/reference</loc></url>
-  <url><loc>https://bql.dev/index.md</loc></url>
-  <url><loc>https://bql.dev/reference.md</loc></url>
-  <url><loc>https://bql.dev/llms.txt</loc></url>
-  <url><loc>https://bql.dev/AGENTS.md</loc></url>
+  <url><loc>https://bql.sh/</loc></url>
+  <url><loc>https://bql.sh/reference</loc></url>
+  <url><loc>https://bql.sh/index.md</loc></url>
+  <url><loc>https://bql.sh/reference.md</loc></url>
+  <url><loc>https://bql.sh/llms.txt</loc></url>
+  <url><loc>https://bql.sh/AGENTS.md</loc></url>
 </urlset>

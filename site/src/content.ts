@@ -42,7 +42,7 @@ export interface Link {
 
 export const site = {
   name: "bql.sh",
-  origin: "https://bql.dev", // placeholder: nothing in the repository names a domain
+  origin: "https://bql.sh", // where it is deployed, and the package name
   repo: "https://github.com/TimMikeladze/bql",
   themeKey: "bql-theme",
   title: "bql.sh — SQLite as a database server, and a durable message bus",
@@ -54,12 +54,12 @@ export const site = {
 
   h1: "SQLite as a database server, and a bus",
   lede:
-    "bql.sh is two open source packages: `bql.sh` serves thousands of SQLite databases from one process, and `bql.sh/bus` is a durable message bus with leases, retries and a dead-letter path. Built on [Bun](https://bun.sh) and [SQLite](https://sqlite.org) with zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).",
+    "One open source package. `bql.sh` serves thousands of SQLite databases from one process, and `bql.sh/bus` is a durable message bus with leases, retries and a dead-letter path. Built on [Bun](https://bun.sh) and [SQLite](https://sqlite.org) with zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).",
 
   install: {
     humans: { cmd: "git clone https://github.com/TimMikeladze/bql && cd bql", where: { doc: "db", section: "Install" } as Where },
-    agents: "curl https://bql.dev/llms.txt",
-    note: "Neither package is on npm yet",
+    agents: "curl https://bql.sh/llms.txt",
+    note: "Not on npm yet",
   },
 
   split: {
@@ -68,7 +68,7 @@ export const site = {
   },
 
   figures: [
-    { label: "test files across both packages", from: { kind: "count", count: "testFiles" } },
+    { label: "test files across both halves", from: { kind: "count", count: "testFiles" } },
     { label: "runtime dependencies", from: { kind: "count", count: "runtimeDependencies" } },
     { label: "writes/s at 64 concurrent clients", from: { kind: "regex", doc: "db", re: /~(\d+k) writes\/s at 64/ } },
     { label: "point read over HTTP, one node", from: { kind: "regex", doc: "db", re: /a point read is\s+(\d+ µs)/, unit: "" } },
@@ -218,7 +218,7 @@ export const site = {
     {
       title: "What is not here yet",
       items: [
-        "Neither package is on npm; the release is blocked on one secret. Use a clone.",
+        "Not on npm yet; the release is blocked on one secret. Use a clone.",
         "The packages do not depend on each other yet; the transactional outbox is next.",
         "`bql.sh/bus` is not on the Windows CI gate, and Kysely's `.stream()` is not implemented.",
       ],

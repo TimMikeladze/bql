@@ -43,7 +43,8 @@ describe("references", () => {
 describe("self-contained and themed", () => {
   for (const [name, html] of [["index", index], ["reference", ref.html]] as const) {
     test(`${name}: no remote assets, two inline scripts at most`, () => {
-      expect(html).not.toMatch(/<link[^>]+href="https?:(?![^"]*bql\.dev)/)
+      // Canonical and alternate links point at the site's own origin; nothing else may be remote.
+      expect(html).not.toMatch(/<link[^>]+href="https?:(?![^"]*bql\.sh)/)
       expect(html).not.toMatch(/src="http/)
       const scripts = [...html.matchAll(/<script(?![^>]*ld\+json)[^>]*>/g)]
       expect(scripts.length).toBe(2)
