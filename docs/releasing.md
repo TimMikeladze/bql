@@ -3,19 +3,20 @@
 Published by hand; there is no release workflow. Run from a clean `main` that CI passed on.
 
 ```sh
-# 1. bump "version" in package.json, commit
 bun install --frozen-lockfile
 bun run db sqlite:build
 bun run bytes && bun run typecheck
 bun run db test && bun run bus test
 bun run db routes:check
-bun run pack:check          # tarball carries the dashboard, installs, runs both halves
+bun run pack:check          # tarball carries the dashboard, installs, runs `bql` and `bql bus`
 
 npm publish --dry-run       # packing errors surface before anything uploads
+bun run release             # bumpp: pick the version, commit, tag v<version>, push both
 npm publish                 # prepack builds the bus dashboard
-
-git tag v$(bun -e 'console.log((await Bun.file("package.json").json()).version)')
-git push origin --tags
 ```
+
+`bun run release` bumps `version` in `package.json` only — the workspace packages are private and
+never published. If `npm publish` then fails, the tag is already pushed; fix and publish the same
+version rather than bumping again.
 
 No provenance: npm only attests publishes from CI with OIDC.

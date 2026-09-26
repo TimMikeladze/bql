@@ -2,7 +2,7 @@
   "name": "bql.sh",
   "version": "0.1.0",
   "type": "module",
-  "description": "SQLite as a multi-tenant database server for Bun \u2014 WAL shipping, hook-driven realtime, an FFI driver \u2014 and the durable bus that runs work against it.",
+  "description": "SQLite as a multi-tenant database server for Bun — WAL shipping, hook-driven realtime, an FFI driver — and the durable bus that runs work against it.",
   "license": "MIT",
   "author": "Tim Mikeladze <tim.mikeladze@gmail.com>",
   "homepage": "https://bql.sh",
@@ -90,7 +90,8 @@
     "site:build": "bun run --filter 'bql-site' build",
     "site:og": "bun run --filter 'bql-site' og",
     "prepack": "bun run --filter 'bql-bus' build:dashboard",
-    "pack:check": "bun run scripts/pack-check.ts"
+    "pack:check": "bun run scripts/pack-check.ts",
+    "release": "bumpp --commit --push --tag"
   },
   "peerDependencies": {
     "drizzle-orm": ">=0.44",
@@ -113,6 +114,7 @@
     }
   },
   "devDependencies": {
+    "bumpp": "^11.1.0",
     "bun-types": "^1.4.2",
     "typescript": "^7.0.2"
   }

@@ -799,7 +799,7 @@ export function renderAgents(m: Model = resolveModel()): string {
   return [
     `# Using ${site.name} from an agent`,
     "",
-    `${site.name} is two packages in one Bun monorepo: \`bql.sh\` (SQLite as a multi-tenant database server) and \`bql.sh/bus\` (a durable message bus, CLI \`bql-bus\`). Bun 1.4 or newer. ${site.install.note}.`,
+    `${site.name} is two packages in one Bun monorepo: \`bql.sh\` (SQLite as a multi-tenant database server) and \`bql.sh/bus\` (a durable message bus, CLI \`bql bus\`). Bun 1.4 or newer. ${site.install.note}.`,
     "",
     "## Install",
     "",
