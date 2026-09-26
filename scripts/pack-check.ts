@@ -104,6 +104,7 @@ writeFileSync(
   smoke,
   `import { sqlite } from "bql.sh/sqlite"
 import { Bql } from "bql.sh"
+import { resolveContext, redactContext } from "bql.sh/context"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -114,6 +115,8 @@ if (missing.length > 0) throw new Error("the built library lacks " + missing.joi
 if (!lib.path.includes("vendor")) throw new Error("not the vendored library: " + lib.path)
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bql-smoke-"))
+const connection = await resolveContext({ cwd: dir, configDir: path.join(dir, "config"), env: {} })
+if (connection.url !== "http://127.0.0.1:4321" || redactContext(connection).authenticated) throw new Error("context export did not resolve clean defaults")
 const bq = await Bql.open({ dir })
 const db = await bq.create("acme")
 await db.sql\`create table todos(id integer primary key, title text)\`.run()

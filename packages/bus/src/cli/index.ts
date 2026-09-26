@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { resolveBusConnection } from "./connection";
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -118,13 +119,14 @@ async function secrets() {
   };
 }
 
-async function client(): Promise<BusClient> {
-  const token = process.env.BUS_TOKEN ?? (await secrets()).adminToken;
-  return new BusClient({
-    url: flag("url", process.env.BUS_URL ?? "http://127.0.0.1:4317") as string,
-    token,
+async function connectionOptions(url?: string) {
+  return {
+    ...await resolveBusConnection({argv, url, legacyToken: async () => (await secrets()).adminToken}),
     workspace,
-  });
+  };
+}
+async function client(): Promise<BusClient> {
+  return new BusClient(await connectionOptions());
 }
 
 function shutdown(stop: () => void | Promise<void>) {
@@ -525,8 +527,9 @@ switch (command) {
    * code path a cold start already uses.
    */
   case "follow": {
-    const upstreamUrl = flag("upstream", argv[1]) as string;
-    if (!upstreamUrl) throw new Error("follow wants an upstream URL");
+    const explicitUpstream = flag("upstream", argv[1]?.startsWith("--") ? undefined : argv[1]);
+    const upstreamOptions = await connectionOptions(explicitUpstream);
+    const upstreamUrl = upstreamOptions.url;
     const db = flag("db", `${stateDir}/bus.db`) as string;
     await mkdir(dirname(resolve(db)), { recursive: true });
     const metrics = prometheusMetrics();
@@ -535,9 +538,7 @@ switch (command) {
       metrics,
     });
     const upstream = new BusClient({
-      url: upstreamUrl,
-      token: process.env.BUS_TOKEN ?? (await secrets()).adminToken,
-      workspace,
+      ...upstreamOptions,
       timeoutMs: 30_000,
     });
     const follower = follow({
@@ -940,6 +941,11 @@ switch (command) {
   stats       subscriptions, consumers, lag
 
 Common flags:
+  --org <org> --project <project> --endpoint <endpoint>   saved bus connection
+  --cwd <dir>         linked project lookup directory
+  --config-dir <dir>  private BQL connection registry
+  --vercel-bypass <secret>  protection bypass override (BUS_VERCEL_BYPASS in direct mode)
+  --token <token>     per-command bus token override
   --url <url>          bus base URL (BUS_URL)
   --state <dir>        signing key and admin token (default .bql-bus)
   --workspace <name>   tenancy (default "default")

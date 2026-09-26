@@ -44,6 +44,7 @@
   "exports": {
     ".": "./packages/db/src/embedded.ts",
     "./client": "./packages/db/src/client/index.ts",
+    "./context": "./packages/db/src/context/index.ts",
     "./kysely": "./packages/db/src/kysely.ts",
     "./drizzle": "./packages/db/src/drizzle.ts",
     "./protocol": "./packages/db/src/client/protocol.ts",
@@ -80,6 +81,8 @@
     "site"
   ],
   "scripts": {
+    "cli": "bun run packages/db/src/cli.ts",
+    "cli:link": "bun link",
     "self-link": "bun run scripts/self-link.ts",
     "bytes": "bun run scripts/bytes.ts --check",
     "typecheck": "tsc --noEmit && bun run --filter '*' typecheck",

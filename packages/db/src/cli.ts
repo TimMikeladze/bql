@@ -11,27 +11,27 @@
 // own fetch wrapper and its own copies of the response types until `docs/m9-client-admin.md`;
 // there is now one implementation of these routes, and it is the one the tests exercise.
 
+import { CONTEXT_HELP, contextOptions, runContextCommand } from "./cli/context.ts"
+import { resolveContext } from "./context/index.ts"
+import { cliFetch, cliSocketFactory, endpointFetch } from "./cli/transport.ts"
 import { createClient, type Client } from "./client/index.ts"
 import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
-import type {
-  CheckpointMode,
-  QueryResult,
-  Revision,
-  TableScope,
-} from "./client/protocol.ts"
-import { SocketClient, defaultWebSocketFactory } from "./client/socket.ts"
+import type { CheckpointMode, QueryResult, Revision, TableScope } from "./client/protocol.ts"
+import { SocketClient } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
 import { initializeObjectServer, serveObjectProcess } from "./cloud/startup.ts"
 import { loadConfig, type ServerConfigInput } from "./server/config.ts"
 import { walChecksumIsNative } from "./wal/native.ts"
 import { VERSION } from "./server/surfaces.ts"
 
-
 /** Set by `serve`, which is the one command that is still doing its job when `main` returns. */
 let serving = false
 
-const USAGE = `bql — SQLite as a multi-tenant database server (design §9.3)
+const USAGE =
+  CONTEXT_HELP +
+  `
+bql — SQLite as a multi-tenant database server (design §9.3)
 
   bql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bql.toml] [--admin-key K]
               [--workers N] [--storage-mode disk|object] [--deployment-id ID]
@@ -86,6 +86,27 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const eq = body.indexOf("=")
     if (eq >= 0) {
       flags[body.slice(0, eq)] = body.slice(eq + 1)
+      continue
+    }
+    if (
+      [
+        "help",
+        "version",
+        "json",
+        "recursive",
+        "default",
+        "prompt-token",
+        "prompt-vercel-bypass",
+        "prompt-bus-token",
+        "prompt-bus-vercel-bypass",
+        "clear-token",
+        "clear-vercel-bypass",
+        "clear-bus-token",
+        "clear-bus-vercel-bypass",
+        "clear-bus",
+      ].includes(body)
+    ) {
+      flags[body] = true
       continue
     }
     const next = argv[i + 1]
@@ -169,6 +190,7 @@ export function parseFrom(text: string): { db: string; at?: number | string } {
 // ── the remote side: one client, and the flags that point it somewhere ─────────────────────────
 
 interface Remote {
+  headers: Record<string, string>
   url: string
   token: string | null
   json: boolean
@@ -181,20 +203,24 @@ function set(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined
 }
 
-function remoteOf(args: ParsedArgs, env: Record<string, string | undefined>): Remote {
-  const url = (str(args, "url") ?? set(env.BQL_URL) ?? "http://127.0.0.1:4321").replace(
-    /\/+$/,
-    "",
-  )
-  const token = str(args, "token") ?? set(env.BQL_TOKEN) ?? set(env.BQL_ADMIN_KEY) ?? null
-  // `intMode: "string"` is for `exec`: a terminal prints an integer past 2^53 rather than throwing
-  // on it. The admin routes carry no SQLite values, so it changes nothing for them.
+async function remoteOf(
+  args: ParsedArgs,
+  env: Record<string, string | undefined>,
+): Promise<Remote> {
+  const context = await resolveContext({
+    ...contextOptions(args, env),
+    service: "database",
+  })
+  const { url, headers } = context,
+    token = context.token ?? null
   const client = createClient({
     url,
     ...(token ? { token } : {}),
+    headers,
+    fetch: context.mode === "named" ? endpointFetch(url) : cliFetch,
     intMode: "string",
   })
-  return { url, token, json: args.flags.json === true, client }
+  return { url, token, headers, json: args.flags.json === true, client }
 }
 
 function out(remote: Remote, payload: unknown, line: string): void {
@@ -220,8 +246,13 @@ function startupConfig(args: ParsedArgs, initialize = false) {
   const zone = str(args, "zone")
   const storageMode = initialize ? "object" : str(args, "storage-mode")
   const deploymentId = str(args, "deployment-id")
-  if (storageMode !== undefined && storageMode !== "disk" && storageMode !== "object") throw new CliError("--storage-mode must be disk or object")
-  overrides.data = { ...(dir !== undefined ? { dir } : {}), ...(storageMode !== undefined ? { storageMode } : {}), ...(deploymentId !== undefined ? { deploymentId } : {}) }
+  if (storageMode !== undefined && storageMode !== "disk" && storageMode !== "object")
+    throw new CliError("--storage-mode must be disk or object")
+  overrides.data = {
+    ...(dir !== undefined ? { dir } : {}),
+    ...(storageMode !== undefined ? { storageMode } : {}),
+    ...(deploymentId !== undefined ? { deploymentId } : {}),
+  }
   if (port !== undefined || host !== undefined || node !== undefined || workers !== undefined) {
     overrides.server = {
       ...(port !== undefined ? { port } : {}),
@@ -551,7 +582,7 @@ async function backup(args: ParsedArgs, remote: Remote): Promise<void> {
         body,
         body.ok
           ? `${name} is restorable to txid ${body.at} (latest ${body.latest}) from ` +
-            `${body.segments} segment(s), ${body.records} record(s), ${body.bytes} B`
+              `${body.segments} segment(s), ${body.records} record(s), ${body.bytes} B`
           : `${name} is NOT restorable to txid ${body.at}: missing ${body.missing.join(", ")}`,
       )
       return
@@ -587,7 +618,10 @@ async function token(args: ParsedArgs, remote: Remote): Promise<void> {
   const ttl = str(args, "ttl")
   const tables = str(args, "tables")
   const body = await remote.client.admin.mintToken({
-    dbs: db.split(",").map((one) => one.trim()).filter((one) => one.length > 0),
+    dbs: db
+      .split(",")
+      .map((one) => one.trim())
+      .filter((one) => one.length > 0),
     scope,
     ...(ttl ? { ttlMs: parseTtlMs(ttl) } : {}),
     ...(tables ? { tables: parseTables(tables) } : {}),
@@ -603,7 +637,7 @@ async function token(args: ParsedArgs, remote: Remote): Promise<void> {
 async function shell(args: ParsedArgs, remote: Remote): Promise<void> {
   const db = args.positional[1]
   if (!db) throw new CliError("shell needs a database")
-  const factory = defaultWebSocketFactory()
+  const factory = cliSocketFactory(remote.headers)
   if (!factory) throw new CliError("this runtime has no WebSocket")
   const socket = new SocketClient({
     url: `${remote.url.replace(/^http/, "ws")}/v1/ws`,
@@ -677,7 +711,9 @@ async function exec(args: ParsedArgs, remote: Remote): Promise<void> {
 async function promote(args: ParsedArgs, remote: Remote): Promise<void> {
   const name = args.positional[1]
   if (!name) throw new CliError("promote needs a database")
-  const body = await remote.client.admin.promote(name, { force: args.flags.force === true })
+  const body = await remote.client.admin.promote(name, {
+    force: args.flags.force === true,
+  })
   out(
     remote,
     body,
@@ -737,8 +773,14 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (argv[0] === "bus") {
     process.argv = [process.argv[0] as string, process.argv[1] as string, ...argv.slice(1)]
     serving = true
-    await import("../../bus/src/cli/index.ts")
-    return 0
+    try {
+      await import("../../bus/src/cli/index.ts")
+      return 0
+    } catch (err) {
+      serving = false
+      console.error(`bql: ${err instanceof Error ? err.message : String(err)}`)
+      return 1
+    }
   }
   const args = parseArgs(argv)
   const command = args.positional[0]
@@ -750,19 +792,23 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.log(USAGE)
     return command || args.flags.help === true ? 0 : 1
   }
-  const remote = remoteOf(args, process.env as Record<string, string | undefined>)
+  let remote: Remote | undefined
   try {
+    if (await runContextCommand(args, { cwd: process.cwd(), env: process.env })) return 0
+    if (command === "cloud") {
+      if (args.positional[1] !== "init")
+        throw new CliError("Usage: bql cloud init --deployment-id ID")
+      const config = startupConfig(args, true)
+      await initializeObjectServer(config)
+      console.log(`bql: initialized object storage for ${config.data.deploymentId}`)
+      return 0
+    }
+    if (command === "serve") {
+      await serve(args)
+      return 0
+    }
+    remote = await remoteOf(args, process.env)
     switch (command) {
-      case "cloud": {
-        if (args.positional[1] !== "init") throw new CliError("Usage: bql cloud init --deployment-id ID")
-        const config = startupConfig(args, true)
-        await initializeObjectServer(config)
-        console.log(`bql: initialized object storage for ${config.data.deploymentId}`)
-        return 0
-      }
-      case "serve":
-        await serve(args)
-        return 0
       case "db":
         await dbCommand(args, remote)
         return 0
@@ -806,7 +852,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           ? // A request that never reached the server is an operator's typo or a server that is
             // not running, so it names the URL rather than the route.
             err.code === "NETWORK"
-            ? `cannot reach ${remote.url}: ${err.message}`
+            ? `cannot reach ${remote?.url ?? "endpoint"}: ${err.message}`
             : `${err.code}: ${err.message}`
           : err instanceof Error
             ? err.message
@@ -816,7 +862,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   } finally {
     // `serve` is the one command still doing its job after `main` returns, and it never used the
     // client; everything else is finished with it here.
-    if (!serving) remote.client.close()
+    if (!serving) remote?.client.close()
   }
 }
 

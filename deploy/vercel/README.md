@@ -84,6 +84,38 @@ overwrite-limit qualification. Local tests are not provider proof.
 Test deployment: [protected preview capabilities](https://bql-cloud-test-20260926-92039a-82ts5hqm5-linesofcode.vercel.app/v1/cloud).
 The first attempt failed; the two subsequent preview deployments are READY.
 
+## Connect with the CLI
+
+From the repository, use `bun run cli` or run `bun run cli:link` once to make `bql`
+available globally. Register the deployment in your local connection registry:
+
+```sh
+bql org add personal
+bql switch personal
+bql project add myapp
+bql project use myapp
+bql endpoint add preview --url https://YOUR-DEPLOYMENT.vercel.app \
+  --prompt-token --prompt-vercel-bypass
+bql link --org personal --project myapp --endpoint preview
+bql context
+bql db list
+bql db create myapp
+bql exec myapp --sql 'SELECT 1'
+```
+
+At the token prompt, enter the deployment's `BQL_AUTH_ADMIN_KEY`. At the bypass prompt,
+enter its Vercel **Protection Bypass for Automation** secret. These are separate secrets;
+the BQL admin key does not bypass Vercel authentication. Omit the bypass prompt for an
+unprotected endpoint. Hidden prompts save credentials in your private BQL config directory,
+not in the checkout. CI can instead use `--token-env MY_BQL_TOKEN` and
+`--vercel-bypass-env MY_VERCEL_BYPASS` to reference its secret environment variables.
+
+Add additional endpoints with `bql endpoint add production --url ... --prompt-token`,
+then use `--endpoint production` on a command or `bql endpoint use production` to change
+the linked checkout. `bql org`, `bql project`, and `bql endpoint` support list/inspect/update/remove.
+These local organization/project records do not create Vercel teams or change server permissions.
+See the root README's saved-endpoint guide for resolution precedence and optional bus connections.
+
 To rerun the non-destructive live storage smoke test, set `BQL_BILLABLE_TESTS=1`,
 `BLOB_READ_WRITE_TOKEN`, `VERCEL_BLOB_RETRIES=0`, and
 `BQL_TEST_PREFIX=bql-qualification/`, then run:
