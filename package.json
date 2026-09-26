@@ -91,7 +91,7 @@
     "site": "bun run --filter 'bql-site'",
     "site:build": "bun run --filter 'bql-site' build",
     "site:og": "bun run --filter 'bql-site' og",
-    "prepack": "bun run --filter 'bql-bus' build",
+    "prepack": "bun run --filter 'bql-bus' build:dashboard",
     "pack:check": "bun run scripts/pack-check.ts"
   },
   "peerDependencies": {
