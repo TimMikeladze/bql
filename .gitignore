@@ -19,3 +19,6 @@ packages/db/vendor/
 packages/bus/dist/
 packages/bus/.bql-bus/
 packages/bus/package.json.orig
+
+# Vercel
+.vercel
