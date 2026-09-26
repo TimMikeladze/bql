@@ -657,9 +657,8 @@ rather than a plan, and the first two items are worth more than the rest of it p
 
 1. **The durable change ring**, below. The last realtime gap and the only one that changes what a
    client can rely on.
-2. **The npm release, which is blocked on Tim and not on the code.** `NPM_TOKEN` in the
-   repository's settings, then set `version` and push a `v` tag. Everything else is built and has
-   never run. **One secret away.**
+2. **The npm release.** Published by hand from Tim's machine; `docs/releasing.md` is the
+   checklist. Everything is built; it has not been published yet.
 
 The first is newly *possible* rather than newly worth doing: **the change ring is still in
 memory**, so a `Last-Event-ID` from before a restart is answered with `reset`. That was
@@ -753,14 +752,10 @@ and §6. **CI is green on macOS, Linux and Windows.**
 - **Change ring is in memory**, so `Last-Event-ID` returns `reset` across a restart. Spill it to
   disk or serve old positions from the log. This is the last of the realtime gaps — schema events
   now reach the SSE feed as well as the socket.
-- **The npm release flow is ready and has never been run.** `.github/workflows/release.yml` runs
-  the full gate on a `v*` tag — refusing to go on if the tag and `package.json` disagree about the
-  version — and publishes with provenance. The package is **`bql.sh`**: unscoped `bql` is
-  somebody else's, and the scope is wanted anyway for the `@bql/sqlite-*` binaries below. **The
-  product is still bql.sh** — `BQL_*`, `bql.toml`, the `bql:` log prefix and the `bql`
-  binary are untouched; only the published name is scoped. **What is left is one secret**,
-  `NPM_TOKEN` in the repository's settings, and then setting `version` and pushing a `v` tag. MIT
-  and the copyright line are a default, not a decision.
+- **The npm release is manual.** `docs/releasing.md` runs the same gate `ci.yml` does, then
+  `npm publish`. The package is **`bql.sh`**: unscoped `bql` is somebody else's. **The product is
+  still bql.sh** — `BQL_*`, `bql.toml`, the `bql:` log prefix and the `bql` binary are untouched.
+  MIT and the copyright line are a default, not a decision.
 - **`@bql/sqlite-*` prebuilt libraries** are still unbuilt and still the right idea;
   `docs/c6-packaging.md` §6 says what it would take. The scope is held, so the names are there.
 
