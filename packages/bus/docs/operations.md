@@ -117,7 +117,7 @@ redelivered once their lease expires — at-least-once, working as designed.
 ## Backup and restore
 
 ```sh
-bql-bus backup /backups/bql-bus-$(date +%F)
+bql bus backup /backups/bql-bus-$(date +%F)
 ```
 
 `VACUUM INTO` plus a copy of the blob directory, taken from a second connection **while the bus
@@ -130,7 +130,7 @@ cannot make a restore under a running process safe.
 
 ```sh
 systemctl stop bql-bus                 # or: fly machine stop
-bql-bus restore /backups/2026-09-13 --data /data
+bql bus restore /backups/2026-09-13 --data /data
 systemctl start bql-bus
 ```
 
@@ -141,7 +141,7 @@ migrated, or a blob directory that did not come along, fails here rather than du
 It refuses to overwrite a database that is already there unless you pass `--force`.
 
 ```
-$ bql-bus restore /backups/2026-09-13 --data /data
+$ bql bus restore /backups/2026-09-13 --data /data
 {"data":"/data","lastSeq":48213,"messages":48213,"subscriptions":4,"blobsMissing":0}
 ```
 
@@ -149,8 +149,8 @@ $ bql-bus restore /backups/2026-09-13 --data /data
 want when the thing to undo is a batch somebody published rather than a disk that died:
 
 ```sh
-bql-bus restore /backups/2026-09-13 --data /data --until-seq 48120
-bql-bus restore /backups/2026-09-13 --data /data --until-time '2026-09-13T09:15:00Z'
+bql bus restore /backups/2026-09-13 --data /data --until-seq 48120
+bql bus restore /backups/2026-09-13 --data /data --until-time '2026-09-13T09:15:00Z'
 ```
 
 Messages past the cut are removed, their unfinished deliveries go with them, and every
@@ -159,7 +159,7 @@ silently skip everything published after the recovery point.
 
 What this is *not*: replay from an archive of shipped log segments. The log written after a
 snapshot lives on whatever was following the leader at the time, which is what
-`bql-bus follow` is for.
+`bql bus follow` is for.
 
 `bun run drill:restore` is the check, and it is the reason any of this is believable: it
 publishes — including a body large enough to go to a blob — backs up, **wipes the data
@@ -211,15 +211,15 @@ A remote consumer needs only the URL and a scoped token:
 
 ```sh
 BUS_URL=https://my-bus.fly.dev \
-BUS_TOKEN=$(bql-bus token --consumer laptop-1 --subscribe rpc) \
-  bql-bus consume rpc --exec ./handle.sh
+BUS_TOKEN=$(bql bus token --consumer laptop-1 --subscribe rpc) \
+  bql bus consume rpc --exec ./handle.sh
 ```
 
 ## Continuity
 
 ```sh
 # on the replica
-bql-bus follow https://bus.internal:4317 --data /replica --port 4317
+bql bus follow https://bus.internal:4317 --data /replica --port 4317
 ```
 
 A follower pulls `/api/log?after=N` and the subscription cursors and applies them, keeping the
@@ -235,8 +235,8 @@ deliveries from the cursors through the same code path a cold start uses.
 **Failover is fenced.** Both nodes must be able to see one lease object:
 
 ```sh
-bql-bus serve  --data /data     --lease /shared/bql-bus.lease   # the leader
-bql-bus promote --data /replica --lease /shared/bql-bus.lease   # the new one
+bql bus serve  --data /data     --lease /shared/bql-bus.lease   # the leader
+bql bus promote --data /replica --lease /shared/bql-bus.lease   # the new one
 ```
 
 `promote` acquires the lease, and the epoch it grants is stamped into the replica's database. The
@@ -287,8 +287,8 @@ All off by default. A limit set without knowing the workload is how a healthy fl
 throttled at 3am.
 
 ```sh
-bql-bus serve --publish-rate 500 --claim-rate 200 --max-polls 8
-bql-bus quota set --messages 1000000 --bytes 10000000000 --subscriptions 50 --workspace acme
+bql bus serve --publish-rate 500 --claim-rate 200 --max-polls 8
+bql bus quota set --messages 1000000 --bytes 10000000000 --subscriptions 50 --workspace acme
 ```
 
 Limits are per **token subject**, in memory, per process. They answer 429 with `Retry-After`.
@@ -299,10 +299,10 @@ quota.
 ## Keys, revocation and the audit trail
 
 ```sh
-bql-bus keys rotate                 # a new active key; the old one still verifies
-bql-bus keys retire k1              # once tokens signed by k1 have expired
-bql-bus revoke <jti>                # withdraw one token
-bql-bus audit --limit 100           # who did what
+bql bus keys rotate                 # a new active key; the old one still verifies
+bql bus keys retire k1              # once tokens signed by k1 have expired
+bql bus revoke <jti>                # withdraw one token
+bql bus audit --limit 100           # who did what
 ```
 
 Rotation has an overlap window on purpose: it used to be the only revocation mechanism, so it had

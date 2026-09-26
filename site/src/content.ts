@@ -63,7 +63,7 @@ export const site = {
   },
 
   split: {
-    left: { cmd: "bql-bus publish work.resize '{\"src\":\"a.png\"}'", where: { doc: "bus", section: "bql.sh/bus" } as Where, label: "terminal" },
+    left: { cmd: "bql bus publish work.resize '{\"src\":\"a.png\"}'", where: { doc: "bus", section: "bql.sh/bus" } as Where, label: "terminal" },
     right: { line: "await new BusConsumer({", where: { doc: "bus" } as Where, label: "consumer.ts" },
   },
 
@@ -174,7 +174,7 @@ export const site = {
       id: "schemas",
       title: "Schemas with computed compatibility",
       body: "Register JSON Schema 2020-12 with `--compat backward`, bind it to a subject pattern in `warn` mode, then `enforce`. A version that breaks the declared mode is a 409 naming the pointer.",
-      demo: { kind: "terminal", cmd: "bql-bus schema register order ./order.json --compat backward", where: { doc: "bus" } },
+      demo: { kind: "terminal", cmd: "bql bus schema register order ./order.json --compat backward", where: { doc: "bus" } },
     },
     {
       id: "proven",

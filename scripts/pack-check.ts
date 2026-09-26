@@ -156,10 +156,10 @@ console.log("bus smoke ok")
 console.log("pack-check: bus smoke")
 console.log(run([process.execPath, "run", busSmoke], consumer, "bus smoke").trim())
 
-// Both binaries, run the way a consumer gets them — through node_modules/.bin.
+// `bql` and `bql bus`, run the way a consumer gets them — through node_modules/.bin.
 for (const [binary, args, expect] of [
   ["bql", ["--help"], "bql"],
-  ["bql-bus", ["help"], "bql-bus"],
+  ["bql", ["bus", "help"], "bql bus"],
 ] as const) {
   const out = run([join(consumer, "node_modules", ".bin", binary), ...args], consumer, binary)
   if (!out.includes(expect)) {

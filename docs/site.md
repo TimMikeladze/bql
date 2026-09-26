@@ -6,7 +6,7 @@ Built by `site/`, a private Bun workspace (`bql-site`), following the landing-pa
 ## What
 
 - **`/`** — the landing page. Claim: *SQLite as a database server, and a bus*. A centred hero with a
-  For humans / For agents switch, a split demo (a `bql-bus publish` on the left, the `BusConsumer`
+  For humans / For agents switch, a split demo (a `bql bus publish` on the left, the `BusConsumer`
   that handles it on the right), repo-counted figures, the ecosystem band, three principles, a tabbed
   showcase of the client APIs, one section per capability, the measured tables, boundaries, build
   today, guides, mega-footer.

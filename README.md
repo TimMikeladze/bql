@@ -18,7 +18,7 @@ bun add bql.sh
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
 
-Two binaries: `bql` for the database, `bql-bus` for the bus.
+Two binaries: `bql` for the database, `bql bus` for the bus.
 
 The database and the bus ship together because they were solving the same problems apart: storage,
 replication, tenancy and a change feed. [docs/monorepo.md](docs/monorepo.md) is why, what moved, and
@@ -78,16 +78,16 @@ documentation; [packages/db/docs/api.md](packages/db/docs/api.md) is the API as 
 Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and
 a dead-letter path. One set of primitives covers a work queue, pub/sub and request/reply. Nothing
 in the core knows what an agent is — agent patterns are conventions over subjects, which is what
-keeps a plain background job queue a first-class use. It ships the library, the `bql-bus` binary
+keeps a plain background job queue a first-class use. It ships the library, the `bql bus` command
 and a built dashboard.
 
 ```sh
 bun run bus dev                              # bus, three consumers and the dashboard, on free ports
 
-bql-bus serve &
-bql-bus subscribe work 'work.>'
-bql-bus consume work --exec ./handle.sh &
-bql-bus publish work.resize '{"src":"a.png"}'
+bql bus serve &
+bql bus subscribe work 'work.>'
+bql bus consume work --exec ./handle.sh &
+bql bus publish work.resize '{"src":"a.png"}'
 ```
 
 At-least-once by default, with three named tiers of exactly-once on top — a transactional ack in

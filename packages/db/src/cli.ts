@@ -54,6 +54,7 @@ const USAGE = `bql — SQLite as a multi-tenant database server (design §9.3)
   bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
   bql exec <db> --sql "select 1"
   bql shell <db>
+  bql bus <command>   the message bus — \`bql bus help\` lists its commands
 
 Remote commands talk to a running server:
   --url   base URL          (default $BQL_URL, else http://127.0.0.1:4321)
@@ -714,6 +715,15 @@ async function cluster(args: ParsedArgs, remote: Remote): Promise<void> {
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
+  // The bus has its own command set and flag parser, and reads \`process.argv\` when it loads; \`bql\`
+  // is the one entry point, so \`bql bus …\` hands it the rest of the line and keeps the process alive
+  // for as long as the bus wants it (\`serve\`, \`consume\`, \`tail\` exit on their own).
+  if (argv[0] === "bus") {
+    process.argv = [process.argv[0] as string, process.argv[1] as string, ...argv.slice(1)]
+    serving = true
+    await import("../../bus/src/cli/index.ts")
+    return 0
+  }
   const args = parseArgs(argv)
   const command = args.positional[0]
   if (args.flags.version === true) {

@@ -23,7 +23,7 @@ primary_region = "sjc"
   source = "bql_bus_data"
   destination = "/data"
   # A single SQLite file with no replication has exactly one backup story
-  # beyond `bql-bus backup`: volume snapshots. See docs/operations.md.
+  # beyond `bql bus backup`: volume snapshots. See docs/operations.md.
   snapshot_retention = 5
 
 [deploy]

@@ -89,14 +89,14 @@ try {
     : [flag("target") ?? `bun-${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`];
 
   for (const target of targets) {
-    const outfile = `${outDir}/bql-bus-${target.replace(/^bun-/, "")}`;
+    const outfile = `${outDir}/bql-${target.replace(/^bun-/, "")}`;
     await run(
       [
         "bun",
         "build",
         "--compile",
         `--target=${target}`,
-        "src/cli/index.ts",
+        "../db/src/cli.ts",
         "--outfile",
         outfile,
       ],

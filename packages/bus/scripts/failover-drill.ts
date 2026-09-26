@@ -48,7 +48,7 @@ const children = new Map<string, ReturnType<typeof Bun.spawn>>();
 const binary = process.env.BQL_BUS_BIN;
 const spawn = (name: string, args: string[]) => {
   const child = Bun.spawn(
-    binary ? [binary, ...args] : [process.execPath, "src/cli/index.ts", ...args],
+    binary ? [binary, "bus", ...args] : [process.execPath, "src/cli/index.ts", ...args],
     {
       cwd: root,
       env: {

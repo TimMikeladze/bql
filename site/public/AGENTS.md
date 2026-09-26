@@ -1,6 +1,6 @@
 # Using bql.sh from an agent
 
-bql.sh is two packages in one Bun monorepo: `bql.sh` (SQLite as a multi-tenant database server) and `bql.sh/bus` (a durable message bus, CLI `bql-bus`). Bun 1.4 or newer. Not on npm yet.
+bql.sh is two packages in one Bun monorepo: `bql.sh` (SQLite as a multi-tenant database server) and `bql.sh/bus` (a durable message bus, CLI `bql bus`). Bun 1.4 or newer. Not on npm yet.
 
 ## Install
 

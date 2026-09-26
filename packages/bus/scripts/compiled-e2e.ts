@@ -27,7 +27,7 @@ async function run(command: string[], env: Record<string, string> = {}) {
 const target = `bun-${process.platform === "darwin" ? "darwin" : "linux"}-${
   process.arch === "arm64" ? "arm64" : "x64"
 }`;
-const binary = `${root}/dist/bin/bql-bus-${target.replace(/^bun-/, "")}`;
+const binary = `${root}/dist/bin/bql-${target.replace(/^bun-/, "")}`;
 
 if (!(await Bun.file(binary).exists())) {
   console.log("building the binary first…");
@@ -46,7 +46,7 @@ if (e2e !== 0) {
 // thing the binary serves that did not come from a TypeScript import.
 const port = 4790 + Math.floor(Math.random() * 100);
 const scratch = `${root}/dist/bin/.e2e-${port}`;
-const bus = Bun.spawn([binary, "serve", "--data", scratch, "--port", String(port)], {
+const bus = Bun.spawn([binary, "bus", "serve", "--data", scratch, "--port", String(port)], {
   cwd: root,
   stdout: "ignore",
   stderr: "ignore",

@@ -46,7 +46,7 @@ async function freePort(start: number): Promise<number> {
 
 const binary = process.env.BQL_BUS_BIN;
 const cli = (args: string[]) =>
-  Bun.spawn(binary ? [binary, ...args] : [process.execPath, "src/cli/index.ts", ...args], {
+  Bun.spawn(binary ? [binary, "bus", ...args] : [process.execPath, "src/cli/index.ts", ...args], {
     cwd: root,
     env: { ...process.env, BUS_SIGNING_KEY: signingKey, BUS_ADMIN_TOKEN: adminToken },
     stdout: "pipe",

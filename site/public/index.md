@@ -276,9 +276,9 @@ At-least-once by default. `ack(id, { publish: [...] })` commits the ack and its 
 Register JSON Schema 2020-12 with `--compat backward`, bind it to a subject pattern in `warn` mode, then `enforce`. A version that breaks the declared mode is a 409 naming the pointer.
 
 ```sh
-bql-bus schema register order ./order.json --compat backward
-bql-bus schema bind 'orders.>' order --mode warn      # then --mode enforce
-bql-bus schema check order ./order-v2.json            # dry-run the compat check
+bql bus schema register order ./order.json --compat backward
+bql bus schema bind 'orders.>' order --mode warn      # then --mode enforce
+bql bus schema check order ./order-v2.json            # dry-run the compat check
 ```
 
 ## Proven with real processes

@@ -239,7 +239,7 @@ switch (command) {
       db,
       adminToken: `${stateDir}/admin-token`,
     });
-    console.log(`bql-bus http://${server.hostname}:${server.port}`);
+    console.log(`bql bus http://${server.hostname}:${server.port}`);
     console.log(`admin token  ${stateDir}/admin-token`);
     shutdown(async () => {
       fence?.stop();
@@ -259,7 +259,7 @@ switch (command) {
   // minutes, because the WAL holds them.
   case "backup": {
     const target = flag("into", argv[1]);
-    if (!target) throw new Error("backup wants a directory: bql-bus backup <dir>");
+    if (!target) throw new Error("backup wants a directory: bql bus backup <dir>");
     const into = resolve(target);
     await mkdir(into, { recursive: true });
     const store = new BusStore(flag("db", `${stateDir}/bus.db`) as string);
@@ -283,7 +283,7 @@ switch (command) {
   case "restore": {
     const source = flag("from", argv[1]);
     if (!source)
-      throw new Error("restore wants a directory: bql-bus restore <dir> --data <dir>");
+      throw new Error("restore wants a directory: bql bus restore <dir> --data <dir>");
     const from = resolve(source);
     if (!(await Bun.file(`${from}/bus.db`).exists()))
       throw new Error(`${from}/bus.db does not exist`);
@@ -830,7 +830,7 @@ switch (command) {
           message.body,
         ).slice(0, 60)}`,
       );
-    console.log(`\nrequeue with: bql-bus dlq requeue <seq>`);
+    console.log(`\nrequeue with: bql bus dlq requeue <seq>`);
     break;
   }
 
@@ -851,7 +851,7 @@ switch (command) {
         `${blocked.key.padEnd(24)} seq=${String(blocked.messageSeq).padEnd(8)} ${blocked.reason.slice(0, 80)}`,
       );
     console.log(
-      `\nrequeue the dead letter to release a key, or: bql-bus unblock ${subscription} <key>`,
+      `\nrequeue the dead letter to release a key, or: bql bus unblock ${subscription} <key>`,
     );
     break;
   }
@@ -908,7 +908,7 @@ switch (command) {
   }
 
   default:
-    console.log(`bql-bus — a durable message bus for agents and ordinary work
+    console.log(`bql bus — a durable message bus for agents and ordinary work
 
   serve       run the bus
   token       mint a scoped token
@@ -959,9 +959,9 @@ Common flags:
   --synchronous <mode> serve: FULL (default) or NORMAL — see the soak note
 
 Examples:
-  bql-bus subscribe work 'work.>' --ordered
-  bql-bus consume work --exec ./handle.sh --prefetch 4
-  bql-bus publish work.resize '{"src":"a.png"}' --key a.png`);
+  bql bus subscribe work 'work.>' --ordered
+  bql bus consume work --exec ./handle.sh --prefetch 4
+  bql bus publish work.resize '{"src":"a.png"}' --key a.png`);
     if (command !== "help" && command !== "--help") process.exit(1);
 }
 

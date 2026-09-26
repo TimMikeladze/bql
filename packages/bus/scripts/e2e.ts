@@ -45,7 +45,7 @@ const spawn = (
   const binary = process.env.BQL_BUS_BIN;
   const command =
     binary && args[0] === "src/cli/index.ts"
-      ? [binary, ...args.slice(1)]
+      ? [binary, "bus", ...args.slice(1)]
       : [process.execPath, ...args];
   const child = Bun.spawn(command, {
     env: {

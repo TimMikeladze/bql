@@ -319,10 +319,10 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 </div>
 <p class="version">Currently <code>bql.sh</code> v0.1.0 · Not on npm yet</p>
 <div class="split">
-<div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">terminal</span></div><pre><code><span class="prompt-line">bql-bus serve &amp;</span>
-<span class="prompt-line">bql-bus subscribe work <span class="t-s">'work.&gt;'</span></span>
-<span class="prompt-line">bql-bus consume work --exec ./handle.sh &amp;</span>
-<span class="prompt-line">bql-bus publish work.resize <span class="t-s">'{&quot;src&quot;:&quot;a.png&quot;}'</span></span></code></pre></div>
+<div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">terminal</span></div><pre><code><span class="prompt-line">bql bus serve &amp;</span>
+<span class="prompt-line">bql bus subscribe work <span class="t-s">'work.&gt;'</span></span>
+<span class="prompt-line">bql bus consume work --exec ./handle.sh &amp;</span>
+<span class="prompt-line">bql bus publish work.resize <span class="t-s">'{&quot;src&quot;:&quot;a.png&quot;}'</span></span></code></pre></div>
 <div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span class="label">consumer.ts</span></div><pre><code><span class="t-k">import</span> { BusClient, BusConsumer, FatalError } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus/client&quot;</span>;
 
 <span class="t-k">const</span> client = <span class="t-k">new</span> BusClient({ url: <span class="t-s">&quot;http://127.0.0.1:4317&quot;</span>, token: process.env.BUS_TOKEN! });
@@ -599,9 +599,9 @@ orders.&gt;                 matches both
 <section class="section" id="schemas" aria-labelledby="schemas-h"><div class="shell">
 <h2 id="schemas-h">Schemas with computed compatibility</h2>
 <p class="explain">Register JSON Schema 2020-12 with <code>--compat backward</code>, bind it to a subject pattern in <code>warn</code> mode, then <code>enforce</code>. A version that breaks the declared mode is a 409 naming the pointer.</p>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql-bus schema register order ./order.json --compat backward</span><span class="chip">captured output</span></div><pre><code>bql-bus schema register order ./order.json --compat backward
-bql-bus schema bind <span class="t-s">'orders.&gt;'</span> order --mode warn      <span class="t-c"># then --mode enforce</span>
-bql-bus schema check order ./order-v2.json            <span class="t-c"># dry-run the compat check</span></code></pre></div></div>
+<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus schema register order ./order.json --compat backward</span><span class="chip">captured output</span></div><pre><code>bql bus schema register order ./order.json --compat backward
+bql bus schema bind <span class="t-s">'orders.&gt;'</span> order --mode warn      <span class="t-c"># then --mode enforce</span>
+bql bus schema check order ./order-v2.json            <span class="t-c"># dry-run the compat check</span></code></pre></div></div>
 </div></section>
 <section class="section band" id="proven" aria-labelledby="proven-h"><div class="shell">
 <h2 id="proven-h">Proven with real processes</h2>

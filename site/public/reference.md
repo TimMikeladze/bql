@@ -20,7 +20,7 @@ bun add bql.sh
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
 
-Two binaries: `bql` for the database, `bql-bus` for the bus.
+Two binaries: `bql` for the database, `bql bus` for the bus.
 
 The database and the bus ship together because they were solving the same problems apart: storage,
 replication, tenancy and a change feed. [docs/monorepo.md](docs/monorepo.md) is why, what moved, and
@@ -80,16 +80,16 @@ documentation; [packages/db/docs/api.md](packages/db/docs/api.md) is the API as 
 Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and
 a dead-letter path. One set of primitives covers a work queue, pub/sub and request/reply. Nothing
 in the core knows what an agent is — agent patterns are conventions over subjects, which is what
-keeps a plain background job queue a first-class use. It ships the library, the `bql-bus` binary
+keeps a plain background job queue a first-class use. It ships the library, the `bql bus` command
 and a built dashboard.
 
 ```sh
 bun run bus dev                              # bus, three consumers and the dashboard, on free ports
 
-bql-bus serve &
-bql-bus subscribe work 'work.>'
-bql-bus consume work --exec ./handle.sh &
-bql-bus publish work.resize '{"src":"a.png"}'
+bql bus serve &
+bql bus subscribe work 'work.>'
+bql bus consume work --exec ./handle.sh &
+bql bus publish work.resize '{"src":"a.png"}'
 ```
 
 At-least-once by default, with three named tiers of exactly-once on top — a transactional ack in
@@ -726,10 +726,10 @@ A durable message bus for agents and ordinary work. Bun, SQLite, no runtime depe
 Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and a dead-letter path. Nothing in the core knows what an agent is — agent patterns are conventions over subjects, which is what keeps a plain background job queue a first-class use rather than an afterthought.
 
 ```sh
-bql-bus serve &
-bql-bus subscribe work 'work.>'
-bql-bus consume work --exec ./handle.sh &
-bql-bus publish work.resize '{"src":"a.png"}'
+bql bus serve &
+bql bus subscribe work 'work.>'
+bql bus consume work --exec ./handle.sh &
+bql bus publish work.resize '{"src":"a.png"}'
 ```
 
 Three things at once, from one set of primitives:
@@ -744,17 +744,17 @@ Three things at once, from one set of primitives:
 
 Bun 1.4 or newer.
 
-The bus is a subpath of one package, `bql.sh`, and its binary is `bql-bus`. Installing the package
+The bus is a subpath of one package, `bql.sh`, and its binary is `bql bus`. Installing the package
 installs both halves; nothing here requires the database.
 
 ```sh
 bun add bql.sh
-bunx bql-bus serve &
-bunx bql-bus subscribe work 'work.>'
-bunx bql-bus publish work.resize '{"src":"a.png"}'
+bunx bql bus serve &
+bunx bql bus subscribe work 'work.>'
+bunx bql bus publish work.resize '{"src":"a.png"}'
 ```
 
-The package ships the library, the `bql-bus` binary and the built dashboard, so `serve` has a
+The package ships the library, the `bql bus` command and the built dashboard, so `serve` has a
 UI with nothing else to install.
 
 **Working on the bus itself** runs it from source instead. It lives in the bql.sh monorepo
@@ -815,7 +815,7 @@ At-least-once by default, with **three named tiers of exactly-once** available o
 
 - A delivery is leased to one consumer for the subscription's `ackWaitMs`, with a monotonic `generation`. An ack or nack from a stale generation is rejected.
 - An expired lease returns the delivery to the queue for another consumer, up to `maxAttempts`.
-- Exhausting attempts **dead-letters onto an ordinary subject** (`dlq.<subscription>` by default) with the reason in the headers — so a DLQ is just another subscription, and a replay is just another publish. `bql-bus dlq <subscription>` lists them and `dlq requeue <seq>` republishes one onto the subject it failed on, with the `dlq-*` headers stripped and `requeued-from` added. A requeued message is an ordinary new message with its own sequence number: if it fails again it dead-letters again, which is the honest outcome.
+- Exhausting attempts **dead-letters onto an ordinary subject** (`dlq.<subscription>` by default) with the reason in the headers — so a DLQ is just another subscription, and a replay is just another publish. `bql bus dlq <subscription>` lists them and `dlq requeue <seq>` republishes one onto the subject it failed on, with the `dlq-*` headers stripped and `requeued-from` added. A requeued message is an ordinary new message with its own sequence number: if it fails again it dead-letters again, which is the honest outcome.
 - `dedupeKey` is unique per workspace: publishing the same key twice returns the first message, and a deduplicated *request* is handed back the original correlation, so it waits on the answer that will actually arrive.
 - Every envelope carries `idempotencyKey` (`<subscription>:<seq>`), stable across redeliveries, and `fence` (`<deliveryId>:<generation>`), which identifies *this attempt* — so a destination with a conditional write can reject a writer whose lease has moved on.
 - **Retries are paced.** Per-subscription `backoff` with full jitter, applied on a nack *and* on a reclaimed lease. Full jitter rather than equal jitter, because the failure mode is a fleet retrying in lockstep.
@@ -847,10 +847,10 @@ ordering costs throughput and most work does not need it.
 
 When an ordered key's message dead-letters, `onFailure: 'block'` (the default) **stalls that key
 and only that key** until an operator requeues or skips it. Letting the next message through is
-exactly the reordering `ordered: true` was bought to prevent. `bql-bus blocked <subscription>`
+exactly the reordering `ordered: true` was bought to prevent. `bql bus blocked <subscription>`
 lists them; `unblock` or `dlq requeue` releases one.
 
-**Cancellation.** `bql-bus cancel <seq>` stops a message: every unfinished delivery of it moves to a fourth terminal status, `cancelled`, and no subscription will create a new one — including a subscription whose cursor has not reached it yet.
+**Cancellation.** `bql bus cancel <seq>` stops a message: every unfinished delivery of it moves to a fourth terminal status, `cancelled`, and no subscription will create a new one — including a subscription whose cursor has not reached it yet.
 
 A consumer already running the work learns on its **next lease renewal**, which answers `{cancelled: true}` rather than failing. `BusConsumer` aborts the handler's `signal`, and `--exec` passes that signal to the child process, so the work actually stops rather than a row merely changing colour. Cancelled deliveries are neither acked nor nacked and are never retried.
 
@@ -862,9 +862,9 @@ A registry of JSON Schema 2020-12 documents, bound to subject *patterns*, with a
 no `ajv`, because the bus ships as one binary with no runtime dependencies.
 
 ```sh
-bql-bus schema register order ./order.json --compat backward
-bql-bus schema bind 'orders.>' order --mode warn      # then --mode enforce
-bql-bus schema check order ./order-v2.json            # dry-run the compat check
+bql bus schema register order ./order.json --compat backward
+bql bus schema bind 'orders.>' order --mode warn      # then --mode enforce
+bql bus schema check order ./order-v2.json            # dry-run the compat check
 ```
 
 Two decisions carry the feature:
@@ -897,7 +897,7 @@ Full details, including the keyword list: [docs/schemas.md](docs/schemas.md).
 - **A nearly full disk is a policy, not undefined behaviour.** Below the watermark `/api/publish`
   answers **507** with a machine-readable reason and `/ready` goes 503 — while claims and acks keep
   working, because a full disk is exactly when consumers need to drain.
-- **A backup is not a backup until it has been restored.** `bql-bus restore <dir> --data <dir>`
+- **A backup is not a backup until it has been restored.** `bql bus restore <dir> --data <dir>`
   restores and then *opens* the result; `bun run drill:restore` does the whole round trip and
   compares the log, the cursors and the blob bytes. `--until-seq` / `--until-time` stop the
   restore short of the end, for when the thing to undo is a batch somebody published rather than
@@ -992,28 +992,28 @@ bus.consumeTransactional({
 **In any other language**, `--exec` is the whole integration: the message arrives on stdin, and stdout becomes the reply.
 
 ```sh
-bql-bus consume work --exec ./resize.sh --prefetch 4
+bql bus consume work --exec ./resize.sh --prefetch 4
 ```
 
 ## CLI
 
 | | |
 | --- | --- |
-| `bql-bus serve` | run the bus |
-| `bql-bus token --consumer id --publish 'a.>' --subscribe work` | mint a scoped token |
-| `bql-bus publish <subject> <json>` | publish |
-| `bql-bus request <subject> <json>` | publish and wait for a reply |
-| `bql-bus subscribe <name> <pattern>` | create a durable subscription |
-| `bql-bus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
-| `bql-bus cancel <seq>` | stop a message; in-flight handlers abort |
-| `bql-bus dlq <subscription>` · `dlq requeue <seq…>` | inspect and requeue dead letters |
-| `bql-bus blocked <subscription>` · `unblock <sub> <key>` | ordered keys stalled behind a dead letter |
-| `bql-bus schema register <name> <file>` · `check` · `bind` · `list` | the registry |
-| `bql-bus keys rotate` · `keys retire <kid>` | signing keys, with an overlap window |
-| `bql-bus revoke <jti>` · `quota [set]` · `audit` | tenant safety |
-| `bql-bus follow <upstream>` · `promote --lease <path>` · `cluster` | continuity |
-| `bql-bus backup <dir>` · `restore <dir> --data <dir>` | a consistent copy, and the proof it restores |
-| `bql-bus tail` · `stats` | follow the log; subscriptions, consumers, lag |
+| `bql bus serve` | run the bus |
+| `bql bus token --consumer id --publish 'a.>' --subscribe work` | mint a scoped token |
+| `bql bus publish <subject> <json>` | publish |
+| `bql bus request <subject> <json>` | publish and wait for a reply |
+| `bql bus subscribe <name> <pattern>` | create a durable subscription |
+| `bql bus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
+| `bql bus cancel <seq>` | stop a message; in-flight handlers abort |
+| `bql bus dlq <subscription>` · `dlq requeue <seq…>` | inspect and requeue dead letters |
+| `bql bus blocked <subscription>` · `unblock <sub> <key>` | ordered keys stalled behind a dead letter |
+| `bql bus schema register <name> <file>` · `check` · `bind` · `list` | the registry |
+| `bql bus keys rotate` · `keys retire <kid>` | signing keys, with an overlap window |
+| `bql bus revoke <jti>` · `quota [set]` · `audit` | tenant safety |
+| `bql bus follow <upstream>` · `promote --lease <path>` · `cluster` | continuity |
+| `bql bus backup <dir>` · `restore <dir> --data <dir>` | a consistent copy, and the proof it restores |
+| `bql bus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
 ## HTTP API
 
@@ -1048,9 +1048,9 @@ rather than moving in lockstep. A client asking for a version this broker does n
 how a backup is taken and restored, and what the fleet does afterwards. The short version:
 
 ```sh
-bql-bus serve --log-level info --log-format json
+bql bus serve --log-level info --log-format json
 curl -H "Authorization: Bearer $ADMIN" localhost:4317/metrics
-bql-bus backup /backups/$(date +%F)
+bql bus backup /backups/$(date +%F)
 ```
 
 **SIGTERM drains.** The bus stops handing out work first — a claim answers empty rather than
@@ -1066,11 +1066,11 @@ deliveries would keep reporting whatever it last reported.
 
 **Scoped tokens.** A token names its workspace, the subject patterns it may publish to, and the subscriptions it may claim from. Grants are patterns, so `orders.>` licenses everything beneath it. Verification is a signature check plus one **local index probe** — no network, no round trip — which is what makes revocation affordable without giving up what stateless tokens were worth.
 
-**Revocation and rotation.** Every token carries a `jti`; `bql-bus revoke <jti>` withdraws one, and the entry is dropped once the token would have expired anyway. Keys carry a `kid` and rotate with an overlap window — `bql-bus keys rotate`, then `keys retire <kid>` once the old tokens have expired — so rotating does not invalidate the whole fleet at one instant.
+**Revocation and rotation.** Every token carries a `jti`; `bql bus revoke <jti>` withdraws one, and the entry is dropped once the token would have expired anyway. Keys carry a `kid` and rotate with an overlap window — `bql bus keys rotate`, then `keys retire <kid>` once the old tokens have expired — so rotating does not invalidate the whole fleet at one instant.
 
-**Rate limits and quotas.** Token-bucket limits on publish and claim (`--publish-rate`, `--claim-rate`) answer **429 with `Retry-After`**, and `--max-polls` caps how many long polls one token may park so a single consumer cannot occupy the server's poll budget. Per-workspace quotas (`bql-bus quota set --messages --bytes --subscriptions`) exist because one tenant must not be able to fill the disk every other tenant's durability depends on. All off by default: a limit set without knowing the workload is how a healthy fleet gets throttled at 3am.
+**Rate limits and quotas.** Token-bucket limits on publish and claim (`--publish-rate`, `--claim-rate`) answer **429 with `Retry-After`**, and `--max-polls` caps how many long polls one token may park so a single consumer cannot occupy the server's poll budget. Per-workspace quotas (`bql bus quota set --messages --bytes --subscriptions`) exist because one tenant must not be able to fill the disk every other tenant's durability depends on. All off by default: a limit set without knowing the workload is how a healthy fleet gets throttled at 3am.
 
-**Audit trail.** Append-only. Who published, cancelled, purged, replayed, paused, minted, revoked, bound a schema — with the token subject and a timestamp. `bql-bus audit`. Operator actions without a trail are not operable, they are just powerful.
+**Audit trail.** Append-only. Who published, cancelled, purged, replayed, paused, minted, revoked, bound a schema — with the token subject and a timestamp. `bql bus audit`. Operator actions without a trail are not operable, they are just powerful.
 
 **Three scopes.** `admin` publishes anywhere, manages subscriptions and mints tokens. `consumer` publishes and claims within its grants. `reader` observes, and is what the dashboard is given — a page that can be opened is not a page that can dispatch work.
 
@@ -1158,14 +1158,14 @@ That package lives in dagr's repository and depends on this one. **The bus has n
 
 One process owns one SQLite file in WAL mode. Consumers never open it; they hold leases over HTTP, and every claim is a conditional `UPDATE` that only transitions *out of* `pending`, so two consumers racing for one delivery is safe rather than merely unlikely.
 
-**Continuity, and what it is not.** `bql-bus follow <upstream> --data ./replica` replicates the
+**Continuity, and what it is not.** `bql bus follow <upstream> --data ./replica` replicates the
 **bus log** — not the SQLite WAL — so a follower rebuilds from `/api/log?after=N` plus the
 subscription cursors. It survives a schema change, needs no frame parsing, and is one ~220-line
 file rather than a project. Leases are deliberately *not* replicated: they are ephemeral, and a
 promoted follower re-materializes deliveries from cursors through the same code path a cold start
 already uses.
 
-`bql-bus promote --lease <path>` acquires a lease in storage both nodes can see and stamps an
+`bql bus promote --lease <path>` acquires a lease in storage both nodes can see and stamps an
 incrementing **epoch**. The old leader, running with the same `--lease`, sees the epoch move and
 **stops accepting writes**. Split brain is prevented by the fence, not by hoping the old node is
 dead.
