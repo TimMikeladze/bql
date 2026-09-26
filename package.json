@@ -92,7 +92,7 @@
     "prepack": "bun run --filter 'bql-bus' build:dashboard",
     "pack:check": "bun run scripts/pack-check.ts",
     "pre:release": "bun install --frozen-lockfile && bun run db sqlite:build && bun run bytes && bun run typecheck && bun run db test && bun run bus test && bun run db routes:check && bun run pack:check",
-    "release": "bumpp --commit --push --tag"
+    "release": "bumpp --execute \"bun run site:build\" --all --commit --push --tag"
   },
   "peerDependencies": {
     "drizzle-orm": ">=0.44",

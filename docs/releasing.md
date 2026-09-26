@@ -7,11 +7,11 @@ bun run pre:release         # frozen install, sqlite build, bytes, typecheck, db
                             # routes:check, pack:check (packs, installs, runs `bql` and `bql bus`)
 
 npm publish --dry-run       # packing errors surface before anything uploads
-bun run release             # bumpp: pick the version, commit, tag v<version>, push both
+bun run release             # bumpp: pick the version, rebuild the site, commit, tag v<version>, push
 npm publish                 # prepack builds the bus dashboard
 ```
 
-`bun run release` bumps `version` in `package.json` only — the workspace packages are private and
+`bun run release` bumps `version` in `package.json` only (the site and `VERSION` read it from there) — the workspace packages are private and
 never published. If `npm publish` then fails, the tag is already pushed; fix and publish the same
 version rather than bumping again.
 

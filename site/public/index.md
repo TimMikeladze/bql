@@ -2,7 +2,7 @@
 
 One open source package. `bql.sh` serves thousands of SQLite databases from one process, and `bql.sh/bus` is a durable message bus with leases, retries and a dead-letter path. Built on [Bun](https://bun.sh) and [SQLite](https://sqlite.org) with zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
 
-Currently `bql.sh` v0.1.0 · Not on npm yet.
+Currently `bql.sh` v0.1.1 · Not on npm yet.
 
 ```sh
 git clone https://github.com/TimMikeladze/bql && cd bql
