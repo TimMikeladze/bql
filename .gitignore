@@ -22,3 +22,4 @@ packages/bus/package.json.orig
 
 # Vercel
 .vercel
+.env*

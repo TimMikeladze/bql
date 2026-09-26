@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "bun run site:build",
+  "outputDirectory": "site/public",
+  "installCommand": "bun install --frozen-lockfile",
+  "framework": null,
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "github": { "silent": true }
+}
