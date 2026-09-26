@@ -22,6 +22,7 @@ import type {
 } from "./client/protocol.ts"
 import { SocketClient, defaultWebSocketFactory } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
+import { initializeObjectServer, serveObjectProcess } from "./cloud/startup.ts"
 import { loadConfig, type ServerConfigInput } from "./server/config.ts"
 import { walChecksumIsNative } from "./wal/native.ts"
 import { VERSION } from "./server/surfaces.ts"
@@ -33,10 +34,11 @@ let serving = false
 const USAGE = `bql — SQLite as a multi-tenant database server (design §9.3)
 
   bql serve [--dir ./data] [--port 4321] [--host 0.0.0.0] [--config bql.toml] [--admin-key K]
-              [--workers N]
+              [--workers N] [--storage-mode disk|object] [--deployment-id ID]
               [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
               [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
               [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
+  bql cloud init --deployment-id ID [--config bql.toml] [--s3 s3://bucket]
   bql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
   bql db list
   bql db stat <name>
@@ -201,7 +203,7 @@ function out(remote: Remote, payload: unknown, line: string): void {
 
 // ── commands ───────────────────────────────────────────────────────────────────────────────────
 
-async function serve(args: ParsedArgs): Promise<void> {
+function startupConfig(args: ParsedArgs, initialize = false) {
   const file = str(args, "config") ?? process.env.BQL_CONFIG ?? "bql.toml"
   const overrides: ServerConfigInput = {}
   const dir = str(args, "dir")
@@ -216,7 +218,10 @@ async function serve(args: ParsedArgs): Promise<void> {
   const peers = str(args, "cluster-peers")
   const advertise = str(args, "advertise")
   const zone = str(args, "zone")
-  if (dir !== undefined) overrides.data = { dir }
+  const storageMode = initialize ? "object" : str(args, "storage-mode")
+  const deploymentId = str(args, "deployment-id")
+  if (storageMode !== undefined && storageMode !== "disk" && storageMode !== "object") throw new CliError("--storage-mode must be disk or object")
+  overrides.data = { ...(dir !== undefined ? { dir } : {}), ...(storageMode !== undefined ? { storageMode } : {}), ...(deploymentId !== undefined ? { deploymentId } : {}) }
   if (port !== undefined || host !== undefined || node !== undefined || workers !== undefined) {
     overrides.server = {
       ...(port !== undefined ? { port } : {}),
@@ -272,13 +277,22 @@ async function serve(args: ParsedArgs): Promise<void> {
     }
   }
 
-  const config = loadConfig({
+  return loadConfig({
     file,
     required: Boolean(str(args, "config")),
     overrides,
     // A flag the operator typed beats a variable the shell happened to carry.
     env: { ...process.env, ...envSuppressions(overrides) },
   })
+}
+
+async function serve(args: ParsedArgs): Promise<void> {
+  const config = startupConfig(args)
+  if (config.data.storageMode === "object") {
+    await serveObjectProcess(config)
+    serving = true
+    return
+  }
   const handle = await startServer(config)
   serving = true
   const storage = config.s3.enabled
@@ -329,6 +343,8 @@ async function serve(args: ParsedArgs): Promise<void> {
  */
 function envSuppressions(overrides: ServerConfigInput): Record<string, string | undefined> {
   const cleared: Record<string, string | undefined> = {}
+  if (overrides.data?.storageMode !== undefined) cleared.BQL_DATA_STORAGE_MODE = undefined
+  if (overrides.data?.deploymentId !== undefined) cleared.BQL_DATA_DEPLOYMENT_ID = undefined
   if (overrides.data?.dir !== undefined) {
     cleared.BQL_DIR = undefined
     cleared.BQL_DATA_DIR = undefined
@@ -737,6 +753,13 @@ export async function main(argv: readonly string[]): Promise<number> {
   const remote = remoteOf(args, process.env as Record<string, string | undefined>)
   try {
     switch (command) {
+      case "cloud": {
+        if (args.positional[1] !== "init") throw new CliError("Usage: bql cloud init --deployment-id ID")
+        const config = startupConfig(args, true)
+        await initializeObjectServer(config)
+        console.log(`bql: initialized object storage for ${config.data.deploymentId}`)
+        return 0
+      }
       case "serve":
         await serve(args)
         return 0

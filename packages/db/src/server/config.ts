@@ -38,6 +38,9 @@ export interface ServerSection {
 }
 
 export interface DataSection {
+  storageMode: "disk" | "object"
+  /** Object-mode namespace, unique for each deployment and environment. */
+  deploymentId: string
   dir: string
   maxOpen: number
   readers: number
@@ -545,7 +548,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     cors: true,
     workers: 1,
   },
-  data: { dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },
+  data: { storageMode: "disk", deploymentId: "", dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },
   sqlite: {
     statementCache: 64,
     writerCacheBytes: 8_388_608,
@@ -871,6 +874,8 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   if (config.server.node === DEFAULT_CONFIG.server.node) {
     config.server.node = env.BQL_NODE || defaultNodeId()
   }
+  if (config.data.storageMode !== "disk" && config.data.storageMode !== "object") throw BqlError.badRequest("[data] storageMode must be disk or object")
+  if (config.data.storageMode === "object" && !/^[a-zA-Z0-9_-]{1,128}$/.test(config.data.deploymentId)) throw BqlError.badRequest("Object mode needs a valid [data] deploymentId")
   config.data.dir = path.resolve(config.data.dir)
   if (config.auth.keysFile === null) config.auth.keysFile = path.join(config.data.dir, "keys.json")
 
@@ -965,7 +970,10 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   // A bucket is the whole decision, the same way `--replica-of` is: a node told where its bucket
   // is, ships to it. `enabled = false` in the file is still honoured, so a configured bucket can
   // be kept as a restore target without shipping.
-  if (config.s3.bucket && patchSetsEnabled(fromFile, options.overrides, env) === false) {
+  if (config.data.storageMode === "object") {
+    if (patchSetsEnabled(fromFile, options.overrides, env) === true) throw BqlError.badRequest("Object mode cannot enable the asynchronous backup shipper")
+    config.s3.enabled = false
+  } else if (config.s3.bucket && patchSetsEnabled(fromFile, options.overrides, env) === false) {
     config.s3.enabled = false
   } else if (config.s3.bucket) {
     config.s3.enabled = true

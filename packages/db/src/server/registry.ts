@@ -806,6 +806,9 @@ export interface SurfaceSwitches {
  * `GET /v1/openapi.json` is added last and emitted from the finished registry, so the document
  * describes itself as well as everything above it.
  */
+/** Base server operations shared by the persistent and cloud HTTP adapters. */
+export function serverOperations(): ServerOperation[] { return SPECS.map(define) }
+
 export function serverRegistry(
   surfaces: Surfaces,
   switches: SurfaceSwitches,
@@ -817,7 +820,7 @@ export function serverRegistry(
       "SQLite as a multi-tenant database server for Bun. This document describes the node's " +
       "own API; a database's generated data API is at `GET /v1/db/{db}/openapi.json`.",
   })
-  for (const spec of SPECS) registry.add(define(spec))
+  for (const operation of serverOperations()) registry.add(operation)
 
   // The generated surfaces. The data API is one wildcard route because its real paths carry table
   // names that differ per database, and a row route carries one segment per key column — so the

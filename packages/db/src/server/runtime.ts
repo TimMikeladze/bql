@@ -121,7 +121,11 @@ interface TxWaiter {
   timer: ReturnType<typeof setTimeout>
 }
 
+export type StatementBoundary = <T>(db: Database, hub: AuthorizerHub, execute: () => T) => T
+
 export interface RuntimeOptions {
+  /** Internal execution boundary for provider-specific SQL restrictions. */
+  statementBoundary?: StatementBoundary
   config: ServerConfig
   auth: Authenticator
   registry?: TenantRegistry
@@ -162,6 +166,7 @@ export interface RuntimeOptions {
 }
 
 export class ServerRuntime {
+  readonly #statementBoundary: StatementBoundary | undefined
   readonly config: ServerConfig
   readonly auth: Authenticator
   readonly registry: TenantRegistry
@@ -252,6 +257,7 @@ export class ServerRuntime {
   readonly #retentionMs: number
 
   constructor(options: RuntimeOptions) {
+    this.#statementBoundary = options.statementBoundary
     this.config = options.config
     this.#retentionMs = parseRetentionMs(options.config.durability.retention)
     this.auth = options.auth
@@ -905,6 +911,10 @@ export class ServerRuntime {
   }
 
   /** The authorizer hub for a connection this runtime opened. */
+  withStatementBoundary<T>(db: Database, execute: () => T): T {
+    return this.#statementBoundary ? this.#statementBoundary(db, this.hubFor(db), execute) : execute()
+  }
+
   hubFor(db: Database): AuthorizerHub {
     let hub = this.#hubs.get(db)
     if (!hub) {

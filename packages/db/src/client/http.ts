@@ -31,6 +31,9 @@ export interface HttpConfig {
 }
 
 export interface RequestInitLike {
+  idempotencyKey?: string
+  minGeneration?: string
+  onResponse?: (headers: Headers) => void
   method?: string
   body?: unknown
   /** Sent as `BQL-Min-Txid`, which is what read-your-writes is (design §5.4). */
@@ -91,6 +94,8 @@ export class HttpClient {
     if (init.minTxid !== undefined && init.minTxid > 0) {
       headers.set(HEADERS.minTxid, String(init.minTxid))
     }
+    if (init.idempotencyKey !== undefined) headers.set("Idempotency-Key", init.idempotencyKey)
+    if (init.minGeneration !== undefined) headers.set("BQL-Min-Generation", init.minGeneration)
     for (const [name, value] of Object.entries(init.headers ?? {})) headers.set(name, value)
     return headers
   }
@@ -138,9 +143,11 @@ export class HttpClient {
       const elsewhere = movedTo(response, text, this.base)
       if (elsewhere) {
         const retried = await this.#sendTo(elsewhere, path, init)
+        init.onResponse?.(retried.headers)
         return parseBody<T>(await retried.text().catch(() => ""), retried.status, retried.ok, path)
       }
     }
+    init.onResponse?.(response.headers)
     return parseBody<T>(text, response.status, response.ok, path)
   }
 }

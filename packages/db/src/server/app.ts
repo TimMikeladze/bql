@@ -33,7 +33,7 @@ import type { Operation } from "../core/index.ts"
 import { bodyReader, executeOperation, type HttpOptions } from "../http/index.ts"
 import { serverRegistry } from "./registry.ts"
 import type { Handler, RouteContext } from "./routes.ts"
-import { ServerRuntime } from "./runtime.ts"
+import { ServerRuntime, type StatementBoundary } from "./runtime.ts"
 import { Surfaces } from "./surfaces.ts"
 import {
   createDbTarget,
@@ -811,8 +811,10 @@ export async function createRuntime(
     clusterLink?: ClusterLink | null
     /** C4d: the shard this runtime is, when it is a worker. */
     shard?: { index: number; workers: number }
+    statementBoundary?: StatementBoundary
   } = {},
 ): Promise<RuntimeBundle> {
+  if (config.data.storageMode === "object") throw BqlError.badRequest("Use the object-mode startup boundary; an embedded local runtime cannot serve object storage")
   const resolved = await resolveAuth(config)
   // The runtime opens the registry, and the catalog inside it is the revocation list, so the
   // authenticator reaches it through this indirection rather than through a second open.
@@ -829,6 +831,7 @@ export async function createRuntime(
     config,
     auth,
     metrics: new Metrics(),
+    ...(options.statementBoundary ? { statementBoundary: options.statementBoundary } : {}),
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(options.onTenantOpen ? { onTenantOpen: options.onTenantOpen } : {}),
@@ -863,6 +866,7 @@ export async function startServer(
   config: ServerConfig,
   options: StartOptions = {},
 ): Promise<ServerHandle> {
+  if (config.data.storageMode === "object") throw BqlError.badRequest("Use the object-mode startup boundary")
   const owned = options.runtime === undefined
   // `docs/c4-workers.md`: more than one worker turns this process into a router — it keeps the
   // listener, the sockets, the catalog and the authenticator, and owns no tenant. Resolved before

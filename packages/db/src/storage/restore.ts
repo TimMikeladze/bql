@@ -335,6 +335,25 @@ export async function restoreFromBucket(
 
   const dir = options.dir ?? options.into
   if (!dir) throw new RestoreError("BAD_REQUEST", "a bucket restore needs a destination directory")
+  return restoreFromInventory({
+    db, dir, plan, pageSize: manifest.pageSize,
+    loadSnapshot: (snapshot) => download(store, snapshot.key, snapshot.hash),
+    loadSegment: (segment) => downloadSegment(store, segment),
+  })
+}
+
+/** Replay an explicitly supplied inventory. Does not list or discover objects;
+ * callers own validation of inventory provenance, loading and staging. */
+export async function restoreFromInventory(options: {
+  db: string
+  dir: string
+  plan: RestorePlan
+  pageSize: number
+  loadSnapshot: (snapshot: NonNullable<RestorePlan["snapshot"]>) => Promise<Uint8Array>
+  loadSegment: (segment: SegmentEntry) => Promise<TxnRecord[]>
+}): Promise<BucketRestoreResult> {
+  const { db, dir, plan, loadSnapshot, loadSegment } = options
+  const at = plan.reaches
   const targetPath = path.join(dir, "main.db")
   fs.mkdirSync(dir, { recursive: true })
   for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(`${targetPath}${suffix}`, { force: true })
@@ -343,10 +362,10 @@ export async function restoreFromBucket(
 
   let objects = 0
   let bytes = 0
-  const pageSize = plan.snapshot?.pageSize || manifest.pageSize || 4096
+  const pageSize = plan.snapshot?.pageSize || options.pageSize || 4096
 
   if (plan.snapshot) {
-    const body = await download(store, plan.snapshot.key, plan.snapshot.hash)
+    const body = await loadSnapshot(plan.snapshot)
     fs.writeFileSync(targetPath, body)
     objects += 1
     bytes += body.byteLength
@@ -378,7 +397,7 @@ export async function restoreFromBucket(
     })
 
     for (const segment of plan.segments) {
-      const records = await downloadSegment(store, segment)
+      const records = await loadSegment(segment)
       objects += 1
       bytes += segment.plainBytes
       for (const record of records) {

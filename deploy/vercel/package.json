@@ -1,0 +1,7 @@
+{
+  "name": "bql-deploy-vercel",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test", "storage:smoke": "bun run test/storage-smoke.ts" },
+  "dependencies": { "@vercel/blob": "2.7.0" }
+}

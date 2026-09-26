@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!package.json
+!packages/
+!packages/db/
+!packages/db/src/
+!packages/db/src/**
+!packages/db/scripts/
+!packages/db/scripts/**

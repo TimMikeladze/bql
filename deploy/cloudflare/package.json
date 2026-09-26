@@ -1,0 +1,6 @@
+{
+  "name": "bql-deploy-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": { "storage:smoke": "bun run test/storage-smoke.ts" }
+}

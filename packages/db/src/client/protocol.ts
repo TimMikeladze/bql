@@ -46,6 +46,8 @@ export type TxMode = "deferred" | "immediate" | "exclusive"
 
 /** Options every statement-bearing request accepts, as body fields or headers (design §6). */
 export interface RequestOptions {
+  /** Persisted cloud request identity; reuse only with the identical operation. */
+  idempotencyKey?: string
   ack?: Ack
   /** Refuse to serve from a replica that has not reached this txid. */
   minTxid?: number
@@ -214,6 +216,8 @@ export interface ErrorProblem {
 }
 
 export interface ErrorInfo {
+  /** Resolve an uncertain cloud commit by repeating this request identity. */
+  requestId?: string
   code: BqlErrorCode
   message: string
   status: number

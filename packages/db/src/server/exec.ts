@@ -186,7 +186,11 @@ function valueWeight(value: unknown): number {
  * still reads it. A statement that calls `last_insert_rowid()` itself takes the counter as an
  * input and is never zeroed under it; there the older "did the number move" test is all there is.
  */
-function step(
+function step(runtime: ServerRuntime, db: Database, request: StatementRequest, timeoutMs: number, options: ResolvedOptions): Stepped {
+  return runtime.withStatementBoundary(db, () => stepUnchecked(db, request, timeoutMs, options))
+}
+
+function stepUnchecked(
   db: Database,
   request: StatementRequest,
   timeoutMs: number,
@@ -283,8 +287,8 @@ export function executeStatement(
 ): Executed {
   const startedNs = Bun.nanoseconds()
   const read = runtime.withReader(tenant, principal, (db) => {
-    if (!db.prepare(request.sql).readonly) return null
-    return step(db, request, options.readTimeoutMs, options)
+    if (!runtime.withStatementBoundary(db, () => db.prepare(request.sql).readonly)) return null
+    return step(runtime, db, request, options.readTimeoutMs, options)
   })
   if (read) {
     const result = toResult(read, options.rows, tenant.txid, startedNs)
@@ -305,7 +309,7 @@ export function executeStatement(
     (db) => {
       const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
       try {
-        return step(db, request, options.writeTimeoutMs, options)
+        return step(runtime, db, request, options.writeTimeoutMs, options)
       } finally {
         handle.release()
         // L8: the statement boundary, recorded where it is known. See `runtime.markStatement`.
@@ -343,8 +347,8 @@ export async function executeStatementQueued(
   }
   const startedNs = Bun.nanoseconds()
   const read = runtime.withReader(tenant, principal, (db) => {
-    if (!db.prepare(request.sql).readonly) return null
-    return step(db, request, options.readTimeoutMs, options)
+    if (!runtime.withStatementBoundary(db, () => db.prepare(request.sql).readonly)) return null
+    return step(runtime, db, request, options.readTimeoutMs, options)
   })
   if (read) {
     const result = toResult(read, options.rows, tenant.txid, startedNs)
@@ -363,7 +367,7 @@ export async function executeStatementQueued(
         // caller, so two principals in one transaction never borrow each other's rights.
         const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
         try {
-          return step(db, request, options.writeTimeoutMs, options)
+          return step(runtime, db, request, options.writeTimeoutMs, options)
         } finally {
           handle.release()
           // L8: this is *the* statement boundary the milestone exists for — a fold of fifty
@@ -449,7 +453,7 @@ export function executeBatch(
         for (let i = 0; i < statements.length; i++) {
           try {
             stepped.push(
-              step(db, statements[i] as StatementRequest, options.writeTimeoutMs, options),
+              step(runtime, db, statements[i] as StatementRequest, options.writeTimeoutMs, options),
             )
           } catch (err) {
             throw markFailedIndex(err, i)
@@ -489,7 +493,7 @@ export function executeInTx(
       const timeoutMs = db.prepare(request.sql).readonly
         ? options.readTimeoutMs
         : options.writeTimeoutMs
-      return step(db, request, timeoutMs, options)
+      return step(runtime, db, request, timeoutMs, options)
     } finally {
       handle.release()
       // L8: a baton transaction is statements arriving one request at a time, and each of them is
@@ -521,7 +525,7 @@ export function executeInReadTx(
   const stepped = tenant.readTxExec(tx, (db) => {
     const handle = applyPolicy(db, runtime.hubFor(db), principal, tenant.name)
     try {
-      return step(db, request, options.readTimeoutMs, options)
+      return step(runtime, db, request, options.readTimeoutMs, options)
     } finally {
       handle.release()
     }

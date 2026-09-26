@@ -1,0 +1,14 @@
+**
+!package.json
+!packages/
+!packages/db/
+!packages/db/src/
+!packages/db/src/**
+!packages/db/scripts/
+!packages/db/scripts/**
+!deploy/
+!deploy/vercel/
+!deploy/vercel/package.json
+!deploy/vercel/bun.lock
+!deploy/vercel/server.ts
+!deploy/vercel/blob-store.ts

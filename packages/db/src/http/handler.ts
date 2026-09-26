@@ -203,17 +203,23 @@ async function readBody(request: Request, max: number): Promise<string> {
   const stream = request.body
   if (!stream) return ""
   const reader = stream.getReader()
+  const abort = () => { void reader.cancel(request.signal.reason).catch(() => {}) }
+  request.signal.addEventListener("abort", abort, { once: true })
   const chunks: Uint8Array[] = []
   let total = 0
   try {
+    request.signal.throwIfAborted()
     for (;;) {
       const { done, value } = await reader.read()
+      request.signal.throwIfAborted()
       if (done) break
       total += value.byteLength
       if (total > max) throw tooLarge(max)
       chunks.push(value)
     }
   } finally {
+    request.signal.removeEventListener("abort", abort)
+    if (request.signal.aborted) abort()
     reader.releaseLock()
   }
   if (chunks.length === 1) return new TextDecoder().decode(chunks[0])

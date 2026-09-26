@@ -6,6 +6,7 @@
 import type { BqlErrorCode, ErrorBody, ErrorInfo, ErrorProblem } from "./protocol.ts"
 
 export interface ClientErrorInit {
+  requestId?: string
   code: BqlErrorCode
   message: string
   /** HTTP status, or 0 for a failure that never reached the server. */
@@ -19,6 +20,7 @@ export interface ClientErrorInit {
 }
 
 export class BqlClientError extends Error {
+  readonly requestId?: string
   readonly code: BqlErrorCode
   readonly status: number
   readonly txid?: number
@@ -36,6 +38,7 @@ export class BqlClientError extends Error {
     super(init.message, init.cause === undefined ? undefined : { cause: init.cause })
     this.name = "BqlClientError"
     this.code = init.code
+    if (init.requestId !== undefined) this.requestId = init.requestId
     this.status = init.status ?? 0
     if (init.txid !== undefined) this.txid = init.txid
     if (init.failedIndex !== undefined) this.failedIndex = init.failedIndex
@@ -47,6 +50,7 @@ export class BqlClientError extends Error {
   static fromInfo(info: ErrorInfo, status?: number): BqlClientError {
     return new BqlClientError({
       code: info.code,
+      ...(info.requestId !== undefined ? { requestId: info.requestId } : {}),
       message: info.message,
       status: status ?? info.status ?? 0,
       ...(info.txid !== undefined ? { txid: info.txid } : {}),

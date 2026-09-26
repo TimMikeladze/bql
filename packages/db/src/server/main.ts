@@ -5,6 +5,7 @@
 // `app.ts`, so the embedded API and the tests take exactly the same path as the CLI does.
 
 import { walChecksumIsNative } from "../wal/native.ts"
+import { serveObjectProcess } from "../cloud/startup.ts"
 import { startServer } from "./app.ts"
 import { loadConfig } from "./config.ts"
 
@@ -12,6 +13,7 @@ const CONFIG_FILE = process.env.BQL_CONFIG ?? "bql.toml"
 
 async function main(): Promise<void> {
   const config = loadConfig({ file: CONFIG_FILE, required: Boolean(process.env.BQL_CONFIG) })
+  if (config.data.storageMode === "object") return serveObjectProcess(config)
   const handle = await startServer(config)
 
   console.log(

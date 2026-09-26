@@ -77,6 +77,12 @@ jobs:
       - name: "bql.sh/bus"
         run: bun run bus test
 
+      - name: install isolated Vercel adapter dependencies
+        run: bun install --cwd deploy/vercel --frozen-lockfile
+
+      - name: Vercel adapter and startup tests (mocked)
+        run: bun test deploy/vercel/test
+
       - name: docs/api.md covers every route
         run: bun run db routes:check
 

@@ -95,6 +95,8 @@ export interface LiveTag {
 
 /** Options a single statement may carry (design §6, "common request options"). */
 export interface StatementOptions {
+  /** Retry identity in cloud mode, retained for 24 hours. No automatic SQL replay. */
+  idempotencyKey?: string
   ack?: Ack
   timeoutMs?: number
   maxRows?: number
@@ -168,7 +170,8 @@ interface Core {
   socket: SocketClient
   options: Required<Pick<ClientOptions, "consistency" | "intMode" | "retryMs">> & ClientOptions
   txids: Map<string, number>
-  observe(db: string, txid: number | undefined): void
+  generations: Map<string, { generation: string; revision: bigint }>
+  observe(db: string, txid: number | undefined, headers?: Headers): void
   minTxidFor(db: string, options?: StatementOptions): number | undefined
   headers(): Record<string, string>
   report(err: unknown): void
@@ -250,15 +253,19 @@ class RemoteDb implements Db {
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(options.maxRows !== undefined ? { maxRows: options.maxRows } : {}),
     }
+    let responseHeaders: Headers | undefined
     const result = await this.#core.http.json<BatchResult>(`/v1/db/${this.name}/batch`, {
       method: "POST",
       body,
+      idempotencyKey: options.idempotencyKey,
+      minGeneration: this.#minTxid(options) !== undefined ? this.#core.generations.get(this.name)?.generation : undefined,
+      onResponse: headers => { responseHeaders = headers },
       // A batch is one shot: the server refuses `NOT_PRIMARY` before running any of it, so a
       // replay against the node it names cannot apply anything twice (C2).
       retryOnMoved: true,
       ...(this.#minTxid(options) !== undefined ? { minTxid: this.#minTxid(options) } : {}),
     })
-    this.#core.observe(this.name, result.txid)
+    this.#core.observe(this.name, result.txid, responseHeaders)
     return result.results.map((wire, index) =>
       toResult<JsRow>(wire, statements[index]?.sql ?? "", this.#core.options.intMode),
     )
@@ -352,15 +359,19 @@ class RemoteDb implements Db {
     return async (request, rows, options) => {
       const statement = options as StatementOptions | undefined
       const minTxid = this.#minTxid(statement)
+      let responseHeaders: Headers | undefined
       const wire = await this.#core.http.json<QueryResult>(`/v1/db/${this.name}/query`, {
         method: "POST",
         body: statementBody(request, rows, statement),
+        idempotencyKey: statement?.idempotencyKey,
+        minGeneration: minTxid !== undefined ? this.#core.generations.get(this.name)?.generation : undefined,
+        onResponse: headers => { responseHeaders = headers },
         // One shot, so one transparent replay against the node a `NOT_PRIMARY` names (C2). The
         // interactive-transaction paths below deliberately do not set it: a baton is node-local.
         retryOnMoved: true,
         ...(minTxid !== undefined ? { minTxid } : {}),
       })
-      this.#core.observe(this.name, wire.txid)
+      this.#core.observe(this.name, wire.txid, responseHeaders)
       return wire
     }
   }
@@ -558,7 +569,17 @@ export function createClient(options: ClientOptions): Client {
     }),
     options: { ...options, consistency, intMode, retryMs, fetch: fetchImpl },
     txids: new Map(),
-    observe(db, txid) {
+    generations: new Map(),
+    observe(db, txid, responseHeaders) {
+      const generation = responseHeaders?.get("BQL-Generation")
+      const revisionText = responseHeaders?.get("BQL-Revision")
+      if (generation && revisionText && /^\d+$/.test(revisionText)) {
+        const revision = BigInt(revisionText)
+        const previous = this.generations.get(db)
+        if (previous && previous.revision > revision) return
+        if (previous?.generation !== generation) this.txids.delete(db)
+        this.generations.set(db, { generation, revision })
+      }
       if (txid === undefined || !Number.isFinite(txid)) return
       const seen = this.txids.get(db) ?? 0
       if (txid > seen) this.txids.set(db, txid)
