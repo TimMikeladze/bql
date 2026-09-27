@@ -50,7 +50,7 @@ export async function deployFly(context: DriverContext): Promise<string> {
   await journal.step("secrets", async () => {
     await call(["secrets", "import", ...appArgs, "--stage"], ["BQL_ADMIN_KEY", "BQL_JWT_ED25519"].map(key => `${key}=${journal.secrets[key]}`).join("\n") + "\n")
   })
-  await journal.step(`release_${release}`, async () => {
+  await journal.publishRelease(release, async () => {
     await call(["deploy", ...appArgs, "--config", "fly.toml", "--remote-only", "--ha=false", "--yes"])
   })
   const endpoint = `https://${config.name}.fly.dev`

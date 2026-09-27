@@ -94,5 +94,5 @@ export async function statusDeployment(config: DeploymentConfig, options: { conf
     const secrets = await readJson(join(journalDirectory(config, directory), "secrets.json")) as Record<string, string> | undefined
     ready = await (options.probe ?? probeDeployment)({ url: state.endpoint, token: "", bypass: secrets?.VERCEL_AUTOMATION_BYPASS_SECRET })
   }
-  return { provider: config.provider, deploymentId: config.deploymentId, endpoint: state?.endpoint, profile: state?.profile, resources: state?.resources ?? {}, steps: state?.steps ?? {}, ready }
+  return { provider: config.provider, deploymentId: config.deploymentId, endpoint: state?.endpoint, profile: state?.profile, resources: state?.resources ?? {}, steps: state?.steps ?? {}, currentRelease: state?.currentRelease, pendingRelease: state?.pendingRelease, ready }
 }

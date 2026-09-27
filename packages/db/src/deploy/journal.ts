@@ -15,11 +15,16 @@ export interface DeploymentState {
   endpoint?: string
   profile?: DeploymentProfile
   scope?: string
+  currentRelease?: string
+  pendingRelease?: string
 }
 
 const fingerprint = (config: DeploymentConfig) => JSON.stringify([config.version, config.provider, config.name, config.deploymentId, config.environment, config.region, config.scope ?? null])
 const ownName = (name: string) => {
   if (!/^[a-z][a-zA-Z0-9_-]{0,63}$/.test(name) || ["constructor", "prototype", "__proto__"].includes(name)) throw new Error("Invalid deployment checkpoint name")
+}
+const releaseName = (value: string) => {
+  if (!/^[a-zA-Z0-9_-]{1,48}$/.test(value)) throw new Error("Invalid deployment release identity")
 }
 
 export class DeploymentJournal {
@@ -54,6 +59,21 @@ export class DeploymentJournal {
     this.state.steps[name] = { status: "complete" }
     await this.save()
   }
+  /** Historical success is not the current remote release. A pending publish
+   * can have succeeded remotely even if its local acknowledgement was lost. */
+  async publishRelease(release: string, action: () => Promise<void>) {
+    releaseName(release)
+    if (this.state.currentRelease === release && !this.state.pendingRelease) return
+    const name = `release_${release}`
+    this.state.pendingRelease = release
+    this.state.steps[name] = { status: "started" }
+    await this.save()
+    await action()
+    this.state.currentRelease = release
+    delete this.state.pendingRelease
+    this.state.steps[name] = { status: "complete" }
+    await this.save()
+  }
 }
 
 function stateFrom(value: unknown, config: DeploymentConfig): DeploymentState {
@@ -65,6 +85,10 @@ function stateFrom(value: unknown, config: DeploymentConfig): DeploymentState {
   for (const [name, id] of Object.entries(state.resources)) { ownName(name); if (typeof id !== "string" || !id) throw new Error("Invalid deployment resource") }
   for (const [name, step] of Object.entries(state.steps)) { ownName(name); if (!step || !["started", "complete"].includes(step.status)) throw new Error("Invalid deployment checkpoint") }
   if (state.endpoint) serviceUrl(state.endpoint)
+  for (const release of [state.currentRelease, state.pendingRelease]) if (release !== undefined) {
+    if (typeof release !== "string") throw new Error("Invalid deployment release identity")
+    releaseName(release)
+  }
   return state
 }
 

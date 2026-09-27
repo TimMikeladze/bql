@@ -91,7 +91,7 @@ export async function deployVercel(context: DriverContext): Promise<string> {
   const bypass = Object.keys(bypasses ?? {}).find(key => bypasses![key]?.scope === "automation-bypass")
   if (!bypass) throw new Error("Create a Vercel Protection Bypass for Automation secret for this project, then retry")
   await journal.setSecrets({ VERCEL_AUTOMATION_BYPASS_SECRET: bypass })
-  await journal.step(`release_${release}`, async () => {
+  await journal.publishRelease(release, async () => {
     const result = await call(["deploy", "--yes", "--json", "--target", config.environment])
     type Release = { url: string; target: string | null; readyState: string }
     const output = parseNativeJson<Release | { deployment: Release }>(result.stdout, "vercel deploy")

@@ -36,7 +36,8 @@ test("Cloudflare checks eligibility before resources and resumes after bucket cr
     expect(command.args.join(" ")).not.toContain("private-secret")
     return { stdout: "", stderr: "", exitCode: 0 }
   }
-  const apply = (credentials?: { accessKeyId: string; secretAccessKey: string }) => withDeploymentJournal(config, dir, journal => deployCloudflare({ config, journal, appDir, runner, release: "test" }, { api, credentials }))
+  let release = "test"
+  const apply = (credentials?: { accessKeyId: string; secretAccessKey: string }) => withDeploymentJournal(config, dir, journal => deployCloudflare({ config, journal, appDir, runner, release }, { api, credentials }))
   await expect(apply()).rejects.toThrow("Workers Paid")
   expect(calls).toHaveLength(0)
   paid = true
@@ -49,6 +50,9 @@ test("Cloudflare checks eligibility before resources and resumes after bucket cr
   expect(calls.filter(c => c.args.slice(0, 3).join(" ") === "r2 bucket create")).toHaveLength(1)
   expect(calls.filter(c => c.args.slice(0, 2).join(" ") === "secret bulk")).toHaveLength(1)
   expect(calls.some(c => c.executable === "docker" && c.args.includes("--existing"))).toBe(true)
+  release = "new-release"; await apply()
+  release = "test"; await apply()
+  expect(calls.filter(command => command.args[0] === "deploy")).toHaveLength(3)
   bucket = false
   await expect(apply()).rejects.toThrow("bucket is missing")
   expect(calls.filter(c => c.args.slice(0, 3).join(" ") === "r2 bucket create")).toHaveLength(1)

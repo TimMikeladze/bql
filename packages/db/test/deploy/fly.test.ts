@@ -34,7 +34,8 @@ test("Fly resumes after a deploy failure without duplicating its app, volume, or
     else throw new Error(`Unexpected command ${action}`)
     return { stdout: JSON.stringify(result), stderr: "", exitCode: 0 }
   }
-  const apply = () => withDeploymentJournal(config, dir, journal => deployFly({ config, journal, runner, appDir: dir, release: "test-release" }))
+  let release = "test-release"
+  const apply = () => withDeploymentJournal(config, dir, journal => deployFly({ config, journal, runner, appDir: dir, release }))
   await expect(apply()).rejects.toThrow("interruption")
   expect(await apply()).toBe(`https://${config.name}.fly.dev`)
   expect(await apply()).toBe(`https://${config.name}.fly.dev`)
@@ -42,6 +43,15 @@ test("Fly resumes after a deploy failure without duplicating its app, volume, or
     expect(calls.filter(command => command.args.slice(0, 2).join(" ") === action).length).toBe(1)
   }
   expect(calls.some(command => command.args.includes("delete") || command.args.includes("destroy"))).toBe(false)
+  release = "new-release"; await apply()
+  release = "test-release"; await apply()
+  expect(calls.filter(command => command.args[0] === "deploy")).toHaveLength(4)
+  // An interrupted newer publish might have reached the provider. Returning to
+  // the last confirmed release must publish it again, not trust that old marker.
+  release = "new-release"; fail = true
+  await expect(apply()).rejects.toThrow("interruption")
+  release = "test-release"; await apply()
+  expect(calls.filter(command => command.args[0] === "deploy")).toHaveLength(6)
   volume = false
   await expect(apply()).rejects.toThrow("recorded Fly volume is missing")
   expect(calls.filter(command => command.args.slice(0, 2).join(" ") === "volumes create").length).toBe(1)

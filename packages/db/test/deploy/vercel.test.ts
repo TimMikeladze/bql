@@ -49,7 +49,8 @@ test("Vercel provisions isolated private storage, keeps credentials off argv, an
     }
     return { stdout: JSON.stringify(result), stderr: "", exitCode: 0 }
   }
-  const apply = () => withDeploymentJournal(config, dir, journal => deployVercel({ config, journal, runner, appDir: dir, release: "test" }))
+  let release = "test"
+  const apply = () => withDeploymentJournal(config, dir, journal => deployVercel({ config, journal, runner, appDir: dir, release }))
   await expect(apply()).rejects.toThrow("interrupted release")
   expect(await apply()).toBe("https://bql-preview.vercel.app")
   expect(await apply()).toBe("https://bql-preview.vercel.app")
@@ -61,6 +62,9 @@ test("Vercel provisions isolated private storage, keeps credentials off argv, an
     expect(journal.secrets.VERCEL_AUTOMATION_BYPASS_SECRET).toBe("bypass-secret")
     expect(JSON.stringify(journal.state)).not.toContain("secret-token")
   })
+  release = "new-release"; await apply()
+  release = "test"; await apply()
+  expect(calls.filter(command => command.args[0] === "deploy")).toHaveLength(4)
   store = undefined
   await expect(apply()).rejects.toThrow("Blob store is missing")
   expect(calls.filter(c => c.args[1] === "/v1/storage/stores/blob")).toHaveLength(1)

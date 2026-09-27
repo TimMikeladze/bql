@@ -62,7 +62,7 @@ export async function deployCloudflare(context: DriverContext, options: { api?: 
     }) })
     await journal.recordResource("worker", config.name)
   })
-  await journal.step(`release_${release}`, async () => {
+  await journal.publishRelease(release, async () => {
     await runner({ executable: "bun", args: ["install", "--cwd", "deploy/cloudflare", "--frozen-lockfile", "--production"], cwd: appDir })
     await runner({ executable: "wrangler", args: ["deploy", "--tag", config.deploymentId], cwd: appDir, env: { CLOUDFLARE_ACCOUNT_ID: account } })
   })
