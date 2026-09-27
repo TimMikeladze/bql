@@ -80,7 +80,11 @@ if (import.meta.main) {
     store = new S3ObjectStore({ bucket: process.env.S3_BUCKET!, endpoint: process.env.S3_ENDPOINT!, accessKeyId: process.env.S3_ACCESS_KEY_ID!, secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!, region: process.env.S3_REGION ?? "auto" })
   } else {
     if (!process.env.BLOB_READ_WRITE_TOKEN || process.env.VERCEL_BLOB_RETRIES !== "0") throw new Error("Set BLOB_READ_WRITE_TOKEN and VERCEL_BLOB_RETRIES=0")
-    const { BlobObjectStore } = await import("../../../deploy/vercel/blob-store.ts")
+    // Keep provider SDKs outside the core's compile-time dependency graph, just
+    // like the deployment initializer's injected adapter. Only this opt-in path
+    // requires installing deploy/vercel dependencies.
+    const adapterPath = join(import.meta.dir, "../../../deploy/vercel/blob-store.ts")
+    const { BlobObjectStore } = await import(adapterPath) as { BlobObjectStore: new (token: string) => ObjectStore }
     store = new BlobObjectStore(process.env.BLOB_READ_WRITE_TOKEN)
   }
   console.log(JSON.stringify(await benchmarkCloud(store, selected), null, 2))
