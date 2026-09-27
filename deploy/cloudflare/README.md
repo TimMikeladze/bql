@@ -4,8 +4,9 @@ The Worker routes every request to one named `DatabaseContainer`, using the
 configured environment and deployment ID. Its Bun process uses disposable SQLite
 files and the shared synchronous R2 publication/recovery protocol. After five
 minutes idle the container may sleep; waking reconstructs committed state from R2.
-No shutdown flush is needed for acknowledged writes. Live sleep/wake and rollout
-qualification are still outstanding, so this target remains experimental.
+No shutdown flush is needed for acknowledged writes. Live sleep/wake and image replacement checks passed. Cross-region behavior,
+larger databases, sustained load, and exhaustive provider limits remain
+unqualified, so this target remains experimental.
 
 The isolated package pins `@cloudflare/containers` 0.3.7 and Wrangler 4.135.0.
 Run these from the repository root:
