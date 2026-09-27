@@ -10,7 +10,7 @@
 
 **Spec:** [Cloud containers design](../specs/2026-09-26-cloud-containers-design.md).
 
-Status: implementation in progress. Storage, recovery, publication, serve/client wiring and lifecycle checks have local tests. A protected Vercel preview and hosted-to-hosted recovery test passed against private Blob. Cloudflare now has a tested Worker/container package and real R2 storage-contract evidence; hosted container testing needs Workers Paid on the test account. Deployment config, offline plans, native CLI authentication/runner, saved endpoint contexts and packaged templates have tests. CLI provisioning/resume/status and broader provider qualification remain outstanding. Scope is the database, not the bus. Fly uses persistent disk and participates in the requested CLI workflow.
+Status: the experimental database workflow is implemented for Vercel, Cloudflare and Fly. Native CLI init/plan/apply/status, private resumable journals, packaged templates and saved connection profiles have mocked and live tests. Cloudflare passed hosted sleep/wake and image replacement recovery; Vercel passed protected preview replacement recovery; Fly retained a test row across machine restart. Real R2/private Blob passed conditional races, lost-root-response recovery and empty/100 KiB/8 MiB measurements. See [measured results and remaining gates](../../../packages/db/docs/cloud-deployments.md). Cross-region, sustained load, larger databases and exhaustive provider limits remain unqualified, so object-mode providers are explicitly experimental. Scope is the database, not the bus.
 
 ## Global constraints
 

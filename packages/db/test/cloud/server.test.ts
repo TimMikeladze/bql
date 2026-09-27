@@ -15,7 +15,7 @@ async function start() {
   await initializeCloud(store, "test", config)
   const handle = await startCloudServer({ store, deploymentId: "test", config })
   handles.push(handle)
-  return { store, handle, url: `http://127.0.0.1:${handle.server.port}` }
+  return { store, handle, config, url: `http://127.0.0.1:${handle.server.port}` }
 }
 
 test("the existing client can create, write, query and delete through the cloud HTTP boundary", async () => {
@@ -103,6 +103,28 @@ test("shared provider smoke checks SQL, saved results, catalog, settings and rev
   const options = { url, token: "test-admin" }
   const receipt = await seedSmoke(options)
   expect((await verifySmoke(options, receipt)).checks).toHaveLength(5)
+  // The final revoked-token request discards the local cache. A provider only
+  // sends more user traffic after /readyz succeeds, so the probe must recover it.
+  expect((await fetch(`${url}/readyz`)).status).toBe(200)
+})
+
+test("readiness recovers a discarded cache only from valid available storage", async () => {
+  const { url, store } = await start()
+  expect((await fetch(`${url}/v1/db`)).status).toBe(401)
+  const writes = () => store.operations.filter(op => op.op !== "get").length
+  const before = writes()
+  store.unavailable = true
+  expect((await fetch(`${url}/readyz`)).status).toBe(503)
+  expect((await fetch(`${url}/healthz`)).status).toBe(200)
+  store.unavailable = false
+  const key = "cloud/v1/test/root.json", root = store.objects.get(key)!
+  store.objects.delete(key)
+  expect((await fetch(`${url}/readyz`)).status).toBe(503)
+  store.objects.set(key, { ...root, body: new TextEncoder().encode("corrupt") })
+  expect((await fetch(`${url}/readyz`)).status).toBe(503)
+  store.objects.set(key, root)
+  expect((await fetch(`${url}/readyz`)).status).toBe(200)
+  expect(writes()).toBe(before)
 })
 
 test("a keyed no-op mutation remains a no-op when retried after later writes", async () => {
@@ -134,4 +156,17 @@ test("unchanged keyed settings keep their saved response after intervening chang
     expect(await configure(false, "same")).toEqual(saved)
     expect((await client.admin.stat("acme")).foreignKeys).toBe(true)
   } finally { client.close() }
+})
+
+test("deployment CLI smoke can resume and verify committed data after a fresh runtime", async () => {
+  const { verifyDeployment } = await import("../../src/deploy/smoke.ts")
+  const { url, handle, store, config: config2 } = await start()
+  const config = { version: 1 as const, provider: "cloudflare" as const, name: "bql-smoke-test", deploymentId: "preview-smoke", environment: "preview" as const, region: "wnam" }
+  await verifyDeployment(config, { url, token: "test-admin" })
+  await verifyDeployment(config, { url, token: "test-admin" })
+  await handle.close()
+  handles.splice(handles.indexOf(handle), 1)
+  const recovered = await startCloudServer({ store, deploymentId: "test", config: { ...config2, data: { ...config2.data, dir: tempDir() } } })
+  handles.push(recovered)
+  await verifyDeployment(config, { url: `http://127.0.0.1:${recovered.server.port}`, token: "test-admin" })
 })

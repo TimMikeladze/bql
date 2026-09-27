@@ -84,6 +84,29 @@ export class CloudRuntime {
   get phase() { return this.#phase }
   get capabilities() { return CLOUD_CAPABILITIES }
 
+  /** A failed request invalidates its local cache. Health probes must be able to
+   * restore committed metadata without waiting for traffic a load balancer has
+   * stopped sending. Recovery uses the same gate and never initializes a root. */
+  async ready(requestSignal?: AbortSignal): Promise<boolean> {
+    if (this.#closing) return false
+    if (this.#phase === "ready") return true
+    if (this.#pending !== 0) return false
+    this.#pending++
+    const previous = this.#tail
+    let release!: () => void
+    this.#tail = new Promise<void>(resolve => { release = resolve })
+    const signal = AbortSignal.any([this.#shutdown.signal, AbortSignal.timeout(Math.min(this.#options.requestTimeoutMs ?? 30000, 5000)), ...(requestSignal ? [requestSignal] : [])])
+    try {
+      await previous
+      signal.throwIfAborted()
+      await this.#refresh(signal)
+      return !this.#closing && this.phase === "ready"
+    } catch {
+      this.#discard()
+      return false
+    } finally { this.#pending--; release() }
+  }
+
   async run(context: CloudRequestContext, operation: CloudOperation): Promise<Response> {
     if (this.#closing) throw new CloudError("CLOUD_DRAINING", "Cloud runtime is draining")
     if (!CLOUD_OPERATIONS.includes(operation.kind)) throw new CloudError("CLOUD_UNSUPPORTED", "Operation is not supported in cloud mode")

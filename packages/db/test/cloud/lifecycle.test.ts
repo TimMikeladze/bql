@@ -22,6 +22,44 @@ function run(runtime: CloudRuntime, operation: CloudOperation, headers = {}) {
 }
 const insert: CloudOperation = { kind: "query", db: "db", body: { sql: "insert into items values (1)" } }
 const select: CloudOperation = { kind: "query", db: "db", body: { sql: "select count(*) from items" } }
+
+test("readiness recovery shares admission with user traffic and shutdown cancels it", async () => {
+  const f = await setup()
+  await expect(f.runtime.run({ request: new Request("http://localhost", { headers: { authorization: "Bearer invalid" } }) }, select)).rejects.toThrow()
+  const original = f.store.get.bind(f.store)
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  let blocked = true
+  f.store.get = async (key, signal) => {
+    if (blocked) { entered.resolve(); await release.promise }
+    return original(key, signal)
+  }
+  const recovering = f.runtime.ready()
+  await entered.promise
+  expect(await f.runtime.ready()).toBe(false)
+  let finished = false
+  const write = run(f.runtime, insert).then(response => { finished = true; return response })
+  await Bun.sleep(1)
+  expect(finished).toBe(false)
+  blocked = false; release.resolve()
+  expect(await recovering).toBe(true)
+  expect((await write).status).toBe(200)
+  expect((await (await run(f.runtime, select)).json() as { rows: number[][] }).rows).toEqual([[1]])
+
+  await expect(f.runtime.run({ request: new Request("http://localhost") }, select)).rejects.toThrow()
+  const stopping = Promise.withResolvers<void>()
+  f.store.get = async (_key, signal) => {
+    stopping.resolve()
+    return new Promise((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true })
+    })
+  }
+  const lastProbe = f.runtime.ready()
+  await stopping.promise
+  await f.runtime.close(Date.now() + 10)
+  expect(await lastProbe).toBe(false)
+  expect(f.runtime.phase).toBe("stopped")
+})
+
 function blockPublication(store: FakeObjectStore) {
   const reached = Promise.withResolvers<void>()
   const released = Promise.withResolvers<void>()

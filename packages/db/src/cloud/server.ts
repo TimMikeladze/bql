@@ -32,7 +32,10 @@ export async function startCloudServer(options: CloudRuntimeOptions) {
   for (const operation of serverOperations()) {
     const entry = routes[operation.path] ??= { OPTIONS: preflight }
     if (operation.id === "healthz" || operation.id === "readyz") {
-      entry[operation.method.toUpperCase()] = () => Response.json({ ok: operation.id === "healthz" || runtime.phase === "ready", phase: runtime.phase }, { status: operation.id === "readyz" && runtime.phase !== "ready" ? 503 : 200 })
+      entry[operation.method.toUpperCase()] = async request => {
+        const ready = operation.id === "healthz" || await runtime.ready(request.signal)
+        return Response.json({ ok: ready, phase: runtime.phase }, { status: ready ? 200 : 503 })
+      }
       continue
     }
     if (!CLOUD_OPERATIONS.includes(operation.id as CloudOperationKind)) { entry[operation.method.toUpperCase()] = unsupported; continue }

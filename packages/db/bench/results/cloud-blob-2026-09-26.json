@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "provider": "blob",
+  "measuredAt": "2026-09-27T00:02:08.383Z",
+  "platform": "darwin/arm64",
+  "bun": "1.4.0",
+  "location": "local process; remote object store when selected",
+  "requestBudgetMs": 120000,
+  "results": [
+    {
+      "deploymentId": "bench-abd83b29-afa9-4951-9966-7b377fe94c0f",
+      "rows": 0,
+      "payloadBytes": 0,
+      "writeMs": 0.05,
+      "coldMs": 1328.12,
+      "restoreBytes": 9435,
+      "restoreGets": 10,
+      "warmMs": [
+        374.41,
+        385.12,
+        396.01,
+        399.8,
+        1169.33
+      ],
+      "contention": {
+        "writers": 2,
+        "successes": 1,
+        "rejected": [
+          "CLOUD_CONFLICT"
+        ],
+        "elapsedMs": 3169.14
+      },
+      "operations": {
+        "get": 87,
+        "create": 29,
+        "replace": 4,
+        "downloadedBytes": 62188,
+        "uploadedBytes": 22397
+      },
+      "retained": {
+        "objects": 29,
+        "bytes": 19187
+      }
+    },
+    {
+      "deploymentId": "bench-e39edb4e-bbbb-4003-b47e-6bff9f8835fe",
+      "rows": 100,
+      "payloadBytes": 102400,
+      "writeMs": 2620.31,
+      "coldMs": 1487.97,
+      "restoreBytes": 113765,
+      "restoreGets": 11,
+      "warmMs": [
+        362.7,
+        376.9,
+        410.21,
+        540.9,
+        366.93
+      ],
+      "contention": {
+        "writers": 2,
+        "successes": 1,
+        "rejected": [
+          "CLOUD_CONFLICT"
+        ],
+        "elapsedMs": 3603.95
+      },
+      "operations": {
+        "get": 100,
+        "create": 35,
+        "replace": 5,
+        "downloadedBytes": 397905,
+        "uploadedBytes": 154973
+      },
+      "retained": {
+        "objects": 35,
+        "bytes": 150959
+      }
+    },
+    {
+      "deploymentId": "bench-d128e435-1839-46d7-9b4f-d5928253f2a3",
+      "rows": 8192,
+      "payloadBytes": 8388608,
+      "writeMs": 3926.87,
+      "coldMs": 3434.43,
+      "restoreBytes": 8509732,
+      "restoreGets": 11,
+      "warmMs": [
+        390.03,
+        374.81,
+        390.42,
+        375.76,
+        388.41
+      ],
+      "contention": {
+        "writers": 2,
+        "successes": 1,
+        "rejected": [
+          "CLOUD_CONFLICT"
+        ],
+        "elapsedMs": 7639.83
+      },
+      "operations": {
+        "get": 97,
+        "create": 37,
+        "replace": 5,
+        "downloadedBytes": 28289177,
+        "uploadedBytes": 30970200
+      },
+      "retained": {
+        "objects": 37,
+        "bytes": 30966186
+      }
+    }
+  ]
+}

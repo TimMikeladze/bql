@@ -152,6 +152,42 @@ console.log("smoke ok on " + lib.path)
 console.log("pack-check: smoke")
 console.log(run([process.execPath, "run", smoke], consumer, "smoke").trim())
 
+// Offline native boundaries plus a real server: the installed deploy workflow must
+// create its profile and use it through the installed CLI, without provider billing.
+const deploySmoke = join(consumer, "deploy-smoke.ts")
+writeFileSync(deploySmoke, `
+import { readDeployment, planDeployment } from ${JSON.stringify(join(installed, DB, "src/deploy/config.ts"))}
+import { applyDeployment } from ${JSON.stringify(join(installed, DB, "src/deploy/apply.ts"))}
+import { loadConfig } from ${JSON.stringify(join(installed, DB, "src/server/config.ts"))}
+import { startServer } from ${JSON.stringify(join(installed, DB, "src/server/app.ts"))}
+const cwd = ${JSON.stringify(join(consumer, "deployment-fly"))}
+const configDir = cwd + "/private-config"
+let server
+try {
+  const config = await readDeployment(cwd)
+  const result = await applyDeployment(planDeployment(config), {
+    configDir,
+    runner: async () => ({ stdout: '{"email":"pack@example.test"}', stderr: '', exitCode: 0 }),
+    driver: async ({ journal }) => {
+      server = await startServer(loadConfig({ env: {}, overrides: {
+        server: { host: "127.0.0.1", port: 0, workers: 1 }, data: { dir: cwd + "/data" },
+        auth: { adminKey: journal.secrets.BQL_ADMIN_KEY, jwtKey: journal.secrets.BQL_JWT_ED25519 },
+      } }))
+      await journal.recordResource("app", config.name)
+      return server.url
+    },
+  })
+  for (const args of [["deploy", "plan"], ["db", "create", "packed"], ["exec", "packed", "--sql", "select 42 as answer"]]) {
+    const flags = args[0] === "deploy" ? [] : ["--org", result.profile.org, "--project", result.profile.project, "--endpoint", result.profile.endpoint, "--config-dir", configDir]
+    const child = Bun.spawn([process.execPath, ${JSON.stringify(join(installed, DB, "src/cli.ts"))}, ...args, ...flags], { cwd, stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    if (code || (args[0] === "exec" && !stdout.includes("42"))) throw new Error("Installed deployment CLI smoke failed: " + stderr)
+  }
+  console.log("installed deployment profile and SQL smoke passed")
+} finally { await server?.close() }
+`)
+console.log(run([process.execPath, "run", deploySmoke], consumer, "deployment workflow smoke").trim())
+
 // The other half of the package. Same install, same tarball: a bus that publishes, claims and
 // acks a message from the installed copy alone.
 const busSmoke = join(consumer, "bus-smoke.ts")

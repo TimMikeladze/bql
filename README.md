@@ -246,3 +246,18 @@ root `package.json` version or the release refuses. `bun run pack:check` is the 
 first — it packs, installs the tarball somewhere that knows nothing about this repository, builds
 libsqlite3 from it, and then uses both halves and both binaries out of that install. Not on npm
 yet.
+
+### Deploy with your provider CLI
+
+```sh
+bql deploy init --provider vercel  # or cloudflare / fly
+bql deploy plan
+bql deploy apply
+bql deploy status
+```
+
+Sign in with the provider's native CLI first. Apply creates billable resources;
+Vercel and Cloudflare also require Docker and use experimental durable object
+storage. Cloudflare needs Workers Paid and bucket-scoped R2 credentials.
+See the [deployment guide](packages/db/docs/cloud-deployments.md) for setup,
+private connection profiles, recovery, and provider limits.

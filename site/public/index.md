@@ -10,7 +10,7 @@ git clone https://github.com/TimMikeladze/bql && cd bql
 
 ## By the numbers
 
-- **170** test files across both halves
+- **186** test files across both halves
 - **0** runtime dependencies
 - **49k** writes/s at 64 concurrent clients
 - **54 µs** point read over HTTP, one node

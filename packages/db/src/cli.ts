@@ -12,6 +12,7 @@
 // there is now one implementation of these routes, and it is the one the tests exercise.
 
 import { CONTEXT_HELP, contextOptions, runContextCommand } from "./cli/context.ts"
+import { DEPLOY_HELP, runDeployCommand } from "./deploy/cli.ts"
 import { resolveContext } from "./context/index.ts"
 import { cliFetch, cliSocketFactory, endpointFetch } from "./cli/transport.ts"
 import { createClient, type Client } from "./client/index.ts"
@@ -30,6 +31,7 @@ let serving = false
 
 const USAGE =
   CONTEXT_HELP +
+  "\n" + DEPLOY_HELP + "\n" +
   `
 bql — SQLite as a multi-tenant database server (design §9.3)
 
@@ -789,11 +791,13 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0
   }
   if (!command || args.flags.help === true || command === "help") {
+    if (command === "deploy") { console.log(DEPLOY_HELP); return 0 }
     console.log(USAGE)
     return command || args.flags.help === true ? 0 : 1
   }
   let remote: Remote | undefined
   try {
+    if (await runDeployCommand(args, { cwd: process.cwd(), env: process.env })) return 0
     if (await runContextCommand(args, { cwd: process.cwd(), env: process.env })) return 0
     if (command === "cloud") {
       if (args.positional[1] !== "init")

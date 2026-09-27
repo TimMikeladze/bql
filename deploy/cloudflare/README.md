@@ -76,13 +76,17 @@ Real R2 atomic-create/CAS races, origin visibility and stale-version rejection
 passed against a separate private bucket. A Linux container initialized the root
 and wrote SQL, catalog/settings changes and a token revocation. After SIGKILL and
 removing that container, a fresh container with empty local disk recovered the
-SQL, saved retry result, catalog, settings and revocation from R2. This validates
-the R2 recovery path from local Docker, not Cloudflare's hosted lifecycle.
-Wrangler uploaded the Worker, but Containers deployment
-returned HTTP 401: this test account needs Workers Paid. Hosted container
-sleep/wake, overlapping rollout, payload/overwrite limits and cross-region
-visibility remain unqualified. The deployment CLI's provisioning orchestration
-is still in development.
+SQL, saved retry result, catalog, settings and revocation from R2. After the
+account's authorized Workers Paid upgrade, the hosted container recovered that
+same state. Hosted writes then survived confirmed idle sleep/wake and a new image
+rollout (container version 3); all five checks passed after each event. A readiness
+bug found during this test is covered by regression tests: probes restore an
+invalidated cache without requiring a user request first, but never initialize a
+missing root.
+
+Cross-region visibility, large databases, load capacity and exhaustive provider
+payload/overwrite limits remain unqualified. See the [deployment CLI guide](../../packages/db/docs/cloud-deployments.md)
+for repeatable provisioning, credentials and operational limits.
 
 References: [R2 consistency](https://developers.cloudflare.com/r2/reference/consistency/),
 [S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/),
