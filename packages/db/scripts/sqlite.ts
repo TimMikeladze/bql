@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { inflateRawSync } from "node:zlib"
 import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { loadFrom, vendoredName } from "../src/sqlite/lib.ts"
+import { cbuf, cstr, loadFrom, vendoredName, type SqliteLibrary } from "../src/sqlite/lib.ts"
 
 // ── the pins ─────────────────────────────────────────────────────────────────────────────────
 
@@ -40,6 +40,21 @@ const PIN = {
 
 const ARCHIVE = `sqlite-amalgamation-${PIN.id}.zip`
 const URL_ = `https://sqlite.org/${PIN.year}/${ARCHIVE}`
+
+/**
+ * sqlite-vec, compiled into the same artefact and registered on every connection by
+ * `scripts/native/ext.c`. `sha256` is the digest GitHub publishes for the release asset, and was
+ * recomputed from the download before it was written here. To move to a new release, take the
+ * `…-amalgamation.zip` asset of a non-prerelease tag, and both fields from it.
+ */
+const VEC_PIN = {
+  version: "0.1.9",
+  bytes: 54_035,
+  sha256: "b87cdda12112657ba5ab8842f0088a4090982eaf41f22b2bd6d495b81765a8c9",
+} as const
+
+const VEC_ARCHIVE = `sqlite-vec-${VEC_PIN.version}-amalgamation.zip`
+const VEC_URL = `https://github.com/asg017/sqlite-vec/releases/download/v${VEC_PIN.version}/${VEC_ARCHIVE}`
 
 /**
  * Every flag, with the reason it is here. `docs/c6-packaging.md` explains the four groups; the
@@ -86,6 +101,14 @@ const FLAGS: readonly { flag: string; why: string }[] = [
   // Database.open() through `bql/sqlite` has the same durability as one the server opened.
   { flag: "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1", why: "src/tenant/tenant.ts runs `pragma synchronous = normal`" },
 
+  // sqlite-vec, compiled in rather than loaded (docs/x1-search.md).
+  { flag: "-DSQLITE_CORE", why: "sqlite-vec.c binds SQLite's API directly, not through a load_extension thunk" },
+  { flag: "-DSQLITE_VEC_STATIC", why: "sqlite3_vec_init stays internal; ext.c registers it for every connection" },
+  {
+    flag: "-DSQLITE_VEC_OMIT_FS",
+    why: "no vec_npy_each: a server running client SQL must not read files named in it",
+  },
+
   { flag: "-O2", why: "" },
   // PE code is position-independent by construction, and clang refuses the flag outright on a
   // Windows target rather than ignoring it. Observed: `docs/e1-windows.md` §3.
@@ -125,13 +148,11 @@ async function main(argv: string[]): Promise<number> {
   mkdirSync(cache, { recursive: true })
 
   const zip = join(cache, ARCHIVE)
-  if (!existsSync(zip)) {
-    log(quiet, `fetching ${URL_}`)
-    const res = await fetch(URL_)
-    if (!res.ok) throw new Error(`${URL_} answered ${res.status} ${res.statusText}`)
-    writeFileSync(zip, new Uint8Array(await res.arrayBuffer()))
-  }
+  if (!existsSync(zip)) await download(URL_, zip, quiet)
   verify(zip)
+  const vecZip = join(cache, VEC_ARCHIVE)
+  if (!existsSync(vecZip)) await download(VEC_URL, vecZip, quiet)
+  verifyVec(vecZip)
 
   const src = join(outDir, "src")
   mkdirSync(src, { recursive: true })
@@ -141,9 +162,20 @@ async function main(argv: string[]): Promise<number> {
     if (!body) throw new Error(`${ARCHIVE} does not contain ${name}`)
     writeFileSync(join(src, name), body)
   }
-  log(quiet, `extracted the amalgamation to ${src}`)
+  const vecFiles = extract(readFileSync(vecZip))
+  for (const name of ["sqlite-vec.c", "sqlite-vec.h"]) {
+    const body = vecFiles.get(name)
+    if (!body) throw new Error(`${VEC_ARCHIVE} does not contain ${name}`)
+    writeFileSync(join(src, name), body)
+  }
+  log(quiet, `extracted the amalgamation and sqlite-vec to ${src}`)
 
-  compile([join(src, "sqlite3.c"), helperSource()], artefact, quiet)
+  compile(
+    [join(src, "sqlite3.c"), join(src, "sqlite-vec.c"), ...helperSources()],
+    src,
+    artefact,
+    quiet,
+  )
   check(artefact)
   writeFileSync(stampPath, `${stamp}\n`)
   report(artefact, `built SQLite ${PIN.version}`, quiet)
@@ -154,9 +186,10 @@ async function main(argv: string[]): Promise<number> {
 function currentStamp(): string {
   const h = new Bun.CryptoHasher("sha256")
   h.update(`${PIN.version} ${PIN.sha256} ${process.platform} ${process.arch} `)
+  h.update(`sqlite-vec ${VEC_PIN.version} ${VEC_PIN.sha256} `)
   h.update(FLAGS.map((f) => f.flag).join(" "))
   // An edit to bql.sh's own C has to force a rebuild exactly as a changed flag does.
-  h.update(readFileSync(helperSource()))
+  for (const source of helperSources()) h.update(readFileSync(source))
   return h.digest("hex")
 }
 
@@ -168,6 +201,14 @@ function libraryName(): string {
       "Build libsqlite3 by hand with the flags in `bun run sqlite:build --explain` and point " +
       "BQL_SQLITE_LIB at it.",
   )
+}
+
+/** A plain `fetch`: no headers beyond the runtime's own, nothing that identifies who is building. */
+async function download(url: string, to: string, quiet: boolean): Promise<void> {
+  log(quiet, `fetching ${url}`)
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`${url} answered ${res.status} ${res.statusText}`)
+  writeFileSync(to, new Uint8Array(await res.arrayBuffer()))
 }
 
 /** Both digests, because one is upstream's word for it and the other is the one we can recompute. */
@@ -188,21 +229,42 @@ function verify(zip: string): void {
   if (sha256 !== PIN.sha256) fail("sha256", sha256, PIN.sha256)
 }
 
+/** sqlite-vec has no sha3 published beside it, so one digest: GitHub's, recomputed here. */
+function verifyVec(zip: string): void {
+  const bytes = readFileSync(zip)
+  const fail = (what: string, got: string, want: string) => {
+    rmSync(zip, { force: true })
+    throw new Error(
+      `${VEC_ARCHIVE} does not match its pin (${what}: got ${got}, expected ${want}). The download ` +
+        "has been deleted. This is either a corrupted transfer or a tampered archive — do not " +
+        "work around it by relaxing the pin.",
+    )
+  }
+  if (bytes.length !== VEC_PIN.bytes) fail("size", String(bytes.length), String(VEC_PIN.bytes))
+  const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
+  if (sha256 !== VEC_PIN.sha256) fail("sha256", sha256, VEC_PIN.sha256)
+}
+
 /**
  * bql.sh's own C, compiled into the same artefact as the amalgamation so that there is one library,
  * one `dlopen` and one capability check. `src/sqlite/lib.ts` resolves its symbols optionally, so a
- * node on a system libsqlite3 simply does not get them. `docs/p3-wal-checksum.md`.
+ * node on a system libsqlite3 simply does not get them. `walsum.c` is the WAL checksum
+ * (`docs/p3-wal-checksum.md`); `ext.c` registers sqlite-vec and the geo functions on every
+ * connection (`docs/x1-search.md`).
  */
-function helperSource(): string {
+function helperSources(): string[] {
   // `fileURLToPath`, not `.pathname`: on Windows the latter is `/D:/a/…`, which no file API takes.
   // Observed rather than reasoned about — it is what stopped the first Windows CI run dead
   // (`docs/e1-windows.md` §3).
-  return fileURLToPath(new URL("./native/walsum.c", import.meta.url))
+  return ["walsum.c", "ext.c"].map((name) =>
+    fileURLToPath(new URL(`./native/${name}`, import.meta.url)),
+  )
 }
 
-function compile(sources: string[], artefact: string, quiet: boolean): void {
+function compile(sources: string[], include: string, artefact: string, quiet: boolean): void {
   const cc = compiler()
-  const args = [cc, ...FLAGS.map((f) => f.flag)]
+  // `-I`: sqlite-vec.c and ext.c include "sqlite3.h", which is extracted beside the amalgamation.
+  const args = [cc, ...FLAGS.map((f) => f.flag), `-I${include}`]
   if (process.platform === "darwin") {
     args.push("-dynamiclib", "-install_name", `@rpath/${libraryName()}`)
   } else if (process.platform === "win32") {
@@ -256,18 +318,25 @@ function compiler(): string {
  */
 function check(artefact: string): void {
   const lib = loadFrom([artefact])
-  const missing = (["preupdate", "session", "snapshot", "walsum"] as const).filter(
+  const missing = (["preupdate", "session", "snapshot", "walsum", "vec", "geo"] as const).filter(
     (f) => !lib.features[f],
   )
   if (missing.length > 0) {
     throw new Error(
       `${artefact} built but reports no ${missing.join(", ")}. The flag list, the amalgamation ` +
-        "and scripts/native/walsum.c disagree, which should not be possible — do not ship this " +
+        "and scripts/native/{walsum,ext}.c disagree, which should not be possible — do not ship this " +
         "artefact.",
     )
   }
+  // `features` says the symbols resolved; this says a fresh connection really has what they
+  // register, which is the claim the helpers in `bql.sh/search` rely on.
+  const probe = "select vec_version(), bql_haversine(0, 0, 0, 1), bql_bbox_min_lat(0, 0, 1000)"
+  const failed = probeConnection(lib, probe)
+  if (failed) {
+    throw new Error(`${artefact} built, but a new connection cannot run \`${probe}\`: ${failed}`)
+  }
   console.log(
-    `  SQLite ${lib.version} · preupdate ✓ session ✓ snapshot ✓ walsum ✓ ` +
+    `  SQLite ${lib.version} · preupdate ✓ session ✓ snapshot ✓ walsum ✓ vec ✓ geo ✓ ` +
       `fts5 ${mark(lib.features.fts5)} ` +
       `rtree ${mark(lib.features.rtree)} math ${mark(lib.features.math)} ` +
       `dbstat ${mark(lib.features.dbstat)} threadsafe=${lib.features.threadsafe}`,
@@ -276,8 +345,25 @@ function check(artefact: string): void {
 
 const mark = (b: boolean) => (b ? "✓" : "✗")
 
+/** Opens `:memory:` through the raw symbols and runs `sql`. Null on success, else the message. */
+function probeConnection(lib: SqliteLibrary, sql: string): string | null {
+  const s = lib.symbols
+  const out = new BigUint64Array(1)
+  // SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+  const rc = s.sqlite3_open_v2(cbuf(":memory:"), out, 0x02 | 0x04, null)
+  const db = Number(out[0])
+  try {
+    if (rc !== 0) return `open failed (${rc})`
+    if (s.sqlite3_exec(db, cbuf(sql), null, null, null) !== 0) return cstr(s.sqlite3_errmsg(db))
+    return null
+  } finally {
+    if (db) s.sqlite3_close_v2(db)
+  }
+}
+
 function explain(): void {
-  console.log(`SQLite ${PIN.version} (${URL_})\n`)
+  console.log(`SQLite ${PIN.version} (${URL_})`)
+  console.log(`sqlite-vec ${VEC_PIN.version} (${VEC_URL})\n`)
   const width = Math.max(...FLAGS.map((f) => f.flag.length))
   for (const { flag, why } of FLAGS) {
     console.log(why ? `  ${flag.padEnd(width)}  ${why}` : `  ${flag}`)
@@ -286,7 +372,9 @@ function explain(): void {
     "\nDeliberately not set: SQLITE_ENABLE_JSON1 (a no-op since 3.38, JSON is in core), " +
       "\nSQLITE_ENABLE_STMT_SCANSTATUS (costs per-statement work for an API nothing binds), " +
       "\nSQLITE_DQS=0 and SQLITE_USE_URI (see docs/c6-packaging.md), " +
-      "\nSQLITE_ENABLE_FTS3_TOKENIZER (fts3_tokenizer() takes a function pointer from SQL).",
+      "\nSQLITE_ENABLE_FTS3_TOKENIZER (fts3_tokenizer() takes a function pointer from SQL), " +
+      "\nSQLITE_VEC_ENABLE_NEON/AVX (per-CPU code paths; an artefact is copied between machines, " +
+      "\nand the speed-up has not been measured here — docs/x1-search.md).",
   )
 }
 

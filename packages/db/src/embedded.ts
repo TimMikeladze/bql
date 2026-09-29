@@ -60,7 +60,7 @@ import { ADMIN } from "./server/auth.ts"
 import { loadConfig, type ServerConfig, type ServerConfigInput } from "./server/config.ts"
 import { mapError } from "./server/errors.ts"
 import { executeBatch, executeInTx, executeStatement, resolveOptions } from "./server/exec.ts"
-import { resolveAt, statsOf } from "./server/routes.ts"
+import { lineageOf, resolveAt, statsOf } from "./server/routes.ts"
 import { mapTenantError, type ServerRuntime, type TxSession } from "./server/runtime.ts"
 import { assertValidName, type CommitEvent, type Tenant, type TenantRow } from "./tenant/index.ts"
 
@@ -100,6 +100,12 @@ export interface DatabaseInfo {
   quotaBytes: number
   createdAtMs: number
   open: boolean
+  /** X2: the database this one was forked from, or null. */
+  parent: string | null
+  /** The parent's txid the fork was taken at, or null. */
+  forkedAt: number | null
+  /** True when `parent` names a database that no longer exists. */
+  parentDeleted: boolean
 }
 
 /** What `bq.on("commit", …)` is handed (design §9.2). */
@@ -632,9 +638,28 @@ export class Bql {
     }
   }
 
+  /** X2: a branch back to its parent's head, same name, as `POST /v1/db/{db}/reset` does. */
+  async reset(name: string): Promise<EmbeddedDb> {
+    try {
+      await this.runtime.registry.reset(name, {
+        beforeSwap: () => {
+          this.runtime.evict(name)
+          // The old tenant's commit hook goes with it; the reopened one is hooked afresh.
+          this.#unhook.get(name)?.()
+          this.#unhook.delete(name)
+        },
+      })
+    } catch (err) {
+      throw toClientError(err)
+    }
+    return this.db(name)
+  }
+
   list(): DatabaseInfo[] {
     const open = new Set(this.runtime.registry.openNames)
-    return this.runtime.registry.list().map((row: TenantRow) => ({
+    const rows = this.runtime.registry.list()
+    const names = new Set(rows.map((row) => row.name))
+    return rows.map((row: TenantRow) => ({
       name: row.name,
       txid: open.has(row.name) ? Number(this.runtime.tenant(row.name).txid) : Number(row.txid),
       epoch: row.epoch,
@@ -642,6 +667,7 @@ export class Bql {
       quotaBytes: row.quotaBytes,
       createdAtMs: row.createdAtMs,
       open: open.has(row.name),
+      ...lineageOf(row, (name) => names.has(name)),
     }))
   }
 

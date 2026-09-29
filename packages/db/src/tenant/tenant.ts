@@ -1686,14 +1686,38 @@ export class Tenant {
     if (this.catalog.getTenant(newName)) {
       throw new TenantError("DB_EXISTS", `database ${newName} already exists`)
     }
+    const target = tenantDir(this.dataDir, newName)
+    if (fs.existsSync(path.join(target, "main.db"))) {
+      throw new TenantError("DB_EXISTS", `${target} already holds a database`)
+    }
+    const copy = await this.forkInto(target, at)
+    this.catalog.createTenant({
+      name: newName,
+      pageSize: copy.pageSize,
+      quotaBytes: this.quotaBytes,
+      epoch: this.epoch,
+      position: copy.position,
+      // X2: every fork records where it came from, which is what `bql db branches` reads.
+      lineage: { parent: this.name, forkedAt: copy.position.txid },
+    })
+    return { name: newName, dir: target, txid: copy.position.txid }
+  }
+
+  /**
+   * The file half of `fork`: this database — as it stands, or as of `at` — written into `target`
+   * as a flat `main.db`, with the position a fresh recorder over it starts from. Touches no
+   * catalog row, so `reset` can build the replacement beside a branch before it touches the
+   * branch at all.
+   */
+  async forkInto(
+    target: string,
+    at?: bigint,
+  ): Promise<{ pageSize: number; position: Omit<RecorderPosition, "epoch"> }> {
+    this.#assertOpen()
     if (at !== undefined && at > this.txid) {
       throw BqlError.badRequest(
         `cannot fork ${this.name} at txid ${at}: it is at ${this.txid}`,
       )
-    }
-    const target = tenantDir(this.dataDir, newName)
-    if (fs.existsSync(path.join(target, "main.db"))) {
-      throw new TenantError("DB_EXISTS", `${target} already holds a database`)
     }
     // Without `at` the fork is this database as it stands, which is exactly what a snapshot is.
     const source = at === undefined ? await this.snapshot() : null
@@ -1715,19 +1739,15 @@ export class Tenant {
       fs.rmSync(path.join(target, "meta.json"), { force: true })
 
       const full = computeFull(targetPath, { includeWal: false })
-      this.catalog.createTenant({
-        name: newName,
+      return {
         pageSize: full.pageSize || this.pageSize,
-        quotaBytes: this.quotaBytes,
-        epoch: this.epoch,
         position: {
           txid,
           checksum: full.checksum,
           dbSizePages: full.pages,
           wal: { salt1: 0, salt2: 0, frame: 0 },
         },
-      })
-      return { name: newName, dir: target, txid }
+      }
     } finally {
       this.#exclusive = false
       // Same as `snapshot()`: a write that queued behind the fork is waiting on a drain nothing

@@ -744,6 +744,7 @@ self.onmessage = (event: MessageEvent): void => {
         // A shipper is per database and a database is one worker's, so these merge across the
         // shards by exactly the rule one node already merges them across its own databases.
         storage: current.runtime.storage?.metrics() ?? null,
+        outbox: current.runtime.outbox?.metrics() ?? null,
       })
       return
     }

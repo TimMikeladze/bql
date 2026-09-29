@@ -58,6 +58,7 @@
     "./openapi": "./packages/db/src/openapi/index.ts",
     "./dataapi": "./packages/db/src/dataapi/index.ts",
     "./graphql": "./packages/db/src/graphql/index.ts",
+    "./search": "./packages/db/src/search/index.ts",
     "./bus": "./packages/bus/src/index.ts",
     "./bus/client": "./packages/bus/src/client/bus.ts",
     "./package.json": "./package.json"

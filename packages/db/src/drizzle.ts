@@ -18,6 +18,7 @@
 import type { DrizzleConfig } from "drizzle-orm"
 import type { LibSQLDatabase } from "drizzle-orm/libsql/driver-core"
 import * as libsqlCore from "drizzle-orm/libsql/driver-core"
+import { customType } from "drizzle-orm/sqlite-core"
 import {
   createClient,
   type Client,
@@ -27,6 +28,7 @@ import {
   type Tx,
 } from "./client/index.ts"
 import type { JsValue } from "./client/values.ts"
+import { fromVector, toVector } from "./search/vector.ts"
 
 // ── the libsql shapes we answer with ───────────────────────────────────────────────────────────
 //
@@ -480,6 +482,50 @@ export function drizzle<TSchema extends Record<string, unknown> = Record<string,
   const db = construct<TSchema>(client, drizzleConfig) as BqlDatabase<TSchema>
   db.$client = client
   return db
+}
+
+// ── vector columns ─────────────────────────────────────────────────────────────────────────────
+
+export interface VectorConfig {
+  dimensions: number
+}
+
+/**
+ * A float32 vector column, stored as the vec0 wire format `bql.sh/search`'s `toVector` writes.
+ * Reads back as `number[]`; a write of the wrong length throws before it is sent. The column is a
+ * plain `blob` to Drizzle — declare a `vec0` table with `vectorIndex` and map it with
+ * `sqliteTable` to query it, or use `vec_distance_cosine(col, ?)` over an ordinary table.
+ *
+ * ```ts
+ * const docs = sqliteTable("docs_vec", { id: integer("id").primaryKey(), embedding: vector({ dimensions: 384 }) })
+ * ```
+ */
+export function vector(config: VectorConfig): ReturnType<typeof vectorType>
+export function vector<TName extends string>(name: TName, config: VectorConfig): ReturnType<typeof vectorType<TName>>
+export function vector(a: string | VectorConfig, b?: VectorConfig) {
+  return typeof a === "string" ? vectorType(a, b as VectorConfig) : vectorType("", a)
+}
+
+function vectorType<TName extends string>(name: TName, config: VectorConfig) {
+  const { dimensions } = config
+  if (!Number.isInteger(dimensions) || dimensions < 1) {
+    throw new TypeError(`bql/drizzle: vector dimensions must be a positive integer, got ${dimensions}`)
+  }
+  return customType<{
+    data: number[]
+    driverData: Uint8Array
+    config: VectorConfig
+    configRequired: true
+  }>({
+    dataType: () => "blob",
+    toDriver(value) {
+      if (value.length !== dimensions) {
+        throw new TypeError(`bql/drizzle: expected a ${dimensions}-dimensional vector, got ${value.length}`)
+      }
+      return toVector(value)
+    },
+    fromDriver: (value) => Array.from(fromVector(value)),
+  })(name, config)
 }
 
 export default drizzle

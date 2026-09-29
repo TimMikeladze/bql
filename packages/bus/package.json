@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "bun scripts/dev.ts",
     "serve": "bun src/cli/index.ts serve",
-    "build": "bunup && vite build",
-    "build:dashboard": "vite build",
+    "build": "bunup && bun --bun vite build",
+    "build:dashboard": "bun --bun vite build",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
     "test:e2e": "bun scripts/e2e.ts",

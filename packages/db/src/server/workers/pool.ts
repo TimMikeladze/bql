@@ -17,7 +17,7 @@
 
 import type { Command, PromotionOutcome, PromotionRequest } from "../../cluster/index.ts"
 import type { ServerConfig } from "../config.ts"
-import { Metrics, type MetricsState, type StorageMetrics } from "../metrics.ts"
+import { Metrics, type MetricsState, type OutboxMetrics, type StorageMetrics } from "../metrics.ts"
 import {
   type ClusterViewPush,
   flattenHeaders,
@@ -509,6 +509,7 @@ export class WorkerPool {
     registry: RegistryShare
     replication: { lagTxid: number; records: number } | null
     storage: StorageMetrics | null
+    outbox: OutboxMetrics | null
   }> {
     const merged = new Metrics()
     const registry: RegistryShare = {
@@ -523,6 +524,7 @@ export class WorkerPool {
     }
     let replication: { lagTxid: number; records: number } | null = null
     let storage: StorageMetrics | null = null
+    let outbox: OutboxMetrics | null = null
     await Promise.all(
       this.#workers.map(
         (_, index) =>
@@ -582,13 +584,33 @@ export class WorkerPool {
                 merged.uploadInflight += seen.uploadInflight
                 merged.uploadWaiting += seen.uploadWaiting
               }
+              // X6: disjoint databases again — counts sum, the lag is the worst.
+              if (reply.outbox) {
+                const seen = reply.outbox
+                const merged = (outbox ??= {
+                  published: 0,
+                  skipped: 0,
+                  gaps: 0,
+                  truncated: 0,
+                  errors: 0,
+                  behind: 0,
+                  lagMax: 0,
+                })
+                merged.published += seen.published
+                merged.skipped += seen.skipped
+                merged.gaps += seen.gaps
+                merged.truncated += seen.truncated
+                merged.errors += seen.errors
+                merged.behind += seen.behind
+                merged.lagMax = Math.max(merged.lagMax, seen.lagMax)
+              }
               resolve()
             })
             this.#post(index, { kind: "metrics", id })
           }),
       ),
     )
-    return { metrics: merged, registry, replication, storage }
+    return { metrics: merged, registry, replication, storage, outbox }
   }
 
   /**
@@ -807,6 +829,7 @@ export class WorkerPool {
           registry: message.registry,
           replication: message.replication ?? null,
           storage: message.storage ?? null,
+          outbox: message.outbox ?? null,
         })
         return
       }
@@ -894,6 +917,7 @@ interface WorkerMetrics {
   registry: RegistryShare
   replication: { lagTxid: number; records: number } | null
   storage: StorageMetrics | null
+  outbox: OutboxMetrics | null
 }
 
 /**

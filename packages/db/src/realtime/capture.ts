@@ -42,6 +42,7 @@ import {
 } from "../sqlite/constants.ts"
 import type { Authorizer, Database, PreupdateAccessor } from "../sqlite/index.ts"
 import type { SqliteValue } from "../sqlite/values.ts"
+import { VIRTUAL_TABLES_SQL, shadowOwner, virtualTables } from "../sqlite/shadow.ts"
 import { AuthorizerHub } from "./authorizer.ts"
 
 /**
@@ -226,6 +227,8 @@ export class ChangeCapture {
   #pending: PendingTxn | null = null
   #committed: PendingTxn[] = []
   #meta = new Map<string, TableMeta | null>()
+  /** Shadow table → the virtual table it stores, or null until read. Cleared with `#meta`. */
+  #shadows: Map<string, string> | null = null
   #schemaCookie: number | null = null
   #removeLayer: (() => void) | null = null
   #hooksOn = false
@@ -309,6 +312,8 @@ export class ChangeCapture {
     const txn = this.#committed.shift()
     if (!txn) return null
     const schemaChanged = this.#schemaMoved()
+    const shadows = this.#shadowMap()
+    if (shadows.size > 0) this.#hideShadows(txn, shadows)
     const tables = new Map<string, TableChange>()
     for (const [name, raw] of txn.tables) {
       const change: TableChange = {
@@ -344,6 +349,8 @@ export class ChangeCapture {
   /** Forgets cached table metadata, as after DDL this capture did not see. */
   invalidateMetadata(): void {
     this.#meta.clear()
+    this.#shadows = null
+    if (this.#hooksOn) this.#shadowMap()
   }
 
   /** Uninstalls everything. The connection is left as it was before the capture attached. */
@@ -366,6 +373,8 @@ export class ChangeCapture {
     if (this.#hooksOn) return
     this.#hooksOn = true
     if (this.#schemaCookie === null) this.#schemaMoved()
+    // The hooks read this map and may not build it: no SQL inside a hook.
+    this.#shadowMap()
     if (this.engine === "preupdate") this.db.onPreupdate(this.#preupdate)
     else this.db.onUpdate(this.#update)
     this.db.onCommit(this.#commit)
@@ -439,6 +448,7 @@ export class ChangeCapture {
     if (level === "off") return
     const kind: ChangeOp = op === SQLITE_INSERT ? "insert" : op === SQLITE_DELETE ? "delete" : "update"
     const txn = this.#ensure()
+    if (this.#hideShadow(txn, table, kind)) return
     const meta = this.#meta.get(table) ?? null
     const entry = this.#touch(txn, table, kind)
 
@@ -511,6 +521,7 @@ export class ChangeCapture {
 
     const kind: ChangeOp = op === SQLITE_INSERT ? "insert" : op === SQLITE_DELETE ? "delete" : "update"
     const txn = this.#ensure()
+    if (this.#hideShadow(txn, table, kind)) return
     const entry = this.#touch(txn, table, kind)
     // Without the preupdate hook there are no values, so every column is suspect.
     entry.all = true
@@ -553,6 +564,93 @@ export class ChangeCapture {
       this.#pending = txn
     }
     return txn
+  }
+
+  // ── shadow tables (src/sqlite/shadow.ts) ────────────────────────────────────────────────────
+
+  /**
+   * In the hook, before the row cap and before a single value is read: a write to a virtual
+   * table's storage becomes "the virtual table changed, any column", and nothing else. Counting
+   * those rows against `maxRowsPerTxn` truncated a transaction after ~1,300 FTS-indexed rows (and
+   * copied every shadow blob only to drop it). The map is whatever `#shadowMap` last built — at
+   * install, and after every commit whose schema moved — so the one case it can miss is a
+   * transaction that creates a virtual table and writes it; `#hideShadows` catches that one.
+   */
+  #hideShadow(txn: PendingTxn, table: string, kind: ChangeOp): boolean {
+    const shadows = this.#shadows
+    if (shadows === null || shadows.size === 0) return false
+    const owner = shadows.get(table.toLowerCase())
+    if (owner === undefined) return false
+    this.#touch(txn, owner, kind).all = true
+    return true
+  }
+
+  /**
+   * The backstop for `#hideShadow`: storage rows the hook's map did not know about yet (a
+   * transaction that created the virtual table), taken out of what this transaction reports. The
+   * rows are dropped — they are the module's internals, and a change-feed consumer never created
+   * those tables — and the statement marks are re-based onto the rows that remain. The table
+   * entry is folded into the virtual table's, as "any column may have changed", because that is
+   * what a live query over `docs_fts MATCH …` reads and must be invalidated by.
+   */
+  #hideShadows(txn: PendingTxn, shadows: Map<string, string>): void {
+    let hidden = false
+    const folded = new Map<string, RawTable>()
+    for (const [name, raw] of txn.tables) {
+      const owner = shadows.get(name.toLowerCase())
+      if (owner !== undefined) hidden = true
+      const key = owner ?? name
+      const into = folded.get(key)
+      if (!into) {
+        folded.set(key, owner === undefined ? raw : { ...raw, all: true, cols: null })
+        continue
+      }
+      // The hook may already have folded some of this transaction's storage writes into the
+      // owner, so the owner can meet itself here; either way the merge is "any column".
+      into.insert += raw.insert
+      into.update += raw.update
+      into.delete += raw.delete
+      into.all = true
+    }
+    if (!hidden) return
+    txn.tables = folded
+    const kept: RawRow[] = []
+    // `before[i]` is how many rows were kept before original offset i, which is what a mark
+    // recorded at offset i becomes.
+    const before: number[] = new Array(txn.rows.length + 1)
+    for (let i = 0; i < txn.rows.length; i++) {
+      before[i] = kept.length
+      const row = txn.rows[i] as RawRow
+      if (!shadows.has(row.table.toLowerCase())) kept.push(row)
+    }
+    before[txn.rows.length] = kept.length
+    txn.marks = txn.marks.map((at) => before[Math.min(at, txn.rows.length)] as number)
+    txn.rows = kept
+  }
+
+  #shadowMap(): Map<string, string> {
+    if (this.#shadows) return this.#shadows
+    const shadows = new Map<string, string>()
+    try {
+      this.hub.bypass(() => {
+        const vtabs = virtualTables(
+          this.db.prepare(VIRTUAL_TABLES_SQL).all() as { name: unknown; sql: unknown }[],
+        )
+        if (vtabs.size === 0) return
+        const names = this.db
+          .prepare("select name from sqlite_schema where type = 'table'")
+          .all() as { name: unknown }[]
+        for (const { name } of names) {
+          if (typeof name !== "string") continue
+          const owner = shadowOwner(name, vtabs)
+          if (owner !== null) shadows.set(name.toLowerCase(), owner)
+        }
+      })
+    } catch {
+      // Reporting a shadow table is the lesser failure than dropping a real one.
+    }
+    this.#shadows = shadows
+    return shadows
   }
 
   #touch(txn: PendingTxn, table: string, op: ChangeOp): RawTable {
@@ -726,6 +824,7 @@ export class ChangeCapture {
     this.#schemaCookie = cookie
     if (before === null || before === cookie) return false
     this.#meta.clear()
+    this.#shadows = null
     return true
   }
 }

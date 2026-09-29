@@ -12,7 +12,8 @@ import { fenceWatcher, fileLease, follow, promote } from "../bus/replication";
 import { generateKey, type Keyring, keyring, mint, singleKey } from "../bus/tokens";
 import { otlpExporter } from "../bus/trace";
 import { BusClient, BusConsumer } from "../client/bus";
-import type { Json, TokenClaims } from "../shared/protocol";
+import { clickhouseSink, s3Sink, SinkRunner, webhookSink } from "../sinks";
+import type { Json, Schedule, TokenClaims } from "../shared/protocol";
 import { DEFAULT_WORKSPACE } from "../shared/protocol";
 
 const argv = process.argv.slice(2);
@@ -32,6 +33,10 @@ function list(name: string): string[] {
   return value
     ? value.split(",").map((entry) => entry.trim()).filter(Boolean)
     : [];
+}
+function required(value: string | undefined, what: string): string {
+  if (!value) throw new Error(`${command} needs ${what}`);
+  return value;
 }
 function pairs(name: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -788,6 +793,76 @@ switch (command) {
     break;
   }
 
+  // A batching consumer that writes to somewhere else. `--to` and not `--url`
+  // for the destination, because `--url` already means the bus.
+  case "sink": {
+    const kind = argv[1];
+    if (kind !== "webhook" && kind !== "s3" && kind !== "clickhouse")
+      throw new Error("sink wants webhook, s3 or clickhouse; `bql bus help` lists the flags");
+    const bus = await client();
+    const subscription = flag("subscription") as string;
+    if (!subscription) throw new Error("sink needs --subscription <name>");
+    const subject = flag("subject");
+    // `--subject` creates the subscription (or confirms it), so one command is
+    // the whole setup; without it the subscription must already exist.
+    if (subject) {
+      const from = flag("from");
+      await bus.subscribe({
+        name: subscription,
+        pattern: subject,
+        ...(from
+          ? { deliverFrom: from === "beginning" || from === "new" ? from : Number(from) }
+          : {}),
+      });
+    }
+    const to = flag("to");
+    const writer =
+      kind === "webhook"
+        ? webhookSink({
+            url: required(to, "--to <url>"),
+            ...(flag("secret", process.env.BUS_SINK_SECRET)
+              ? { secret: flag("secret", process.env.BUS_SINK_SECRET) as string }
+              : {}),
+            headers: pairs("header"),
+          })
+        : kind === "s3"
+          ? s3Sink({
+              bucket: required(flag("bucket"), "--bucket <name>"),
+              prefix: flag("prefix", "") as string,
+              ...(flag("endpoint-url") ? { endpoint: flag("endpoint-url") as string } : {}),
+              ...(flag("region") ? { region: flag("region") as string } : {}),
+            })
+          : clickhouseSink({
+              url: required(to, "--to <url>"),
+              table: required(flag("table"), "--table <name>"),
+              ...(flag("database") ? { database: flag("database") as string } : {}),
+              ...(flag("user", process.env.CLICKHOUSE_USER)
+                ? { user: flag("user", process.env.CLICKHOUSE_USER) as string }
+                : {}),
+              ...(process.env.CLICKHOUSE_PASSWORD
+                ? { password: process.env.CLICKHOUSE_PASSWORD }
+                : {}),
+              shape:
+                flag("shape") === "record"
+                  ? "record"
+                  : flag("shape") === "row"
+                    ? "row"
+                    : "body",
+            });
+    const runner = new SinkRunner({
+      client: bus,
+      id: flag("id", `${hostname()}-${kind}-${subscription}`) as string,
+      subscription,
+      writer,
+      batchSize: Number(flag("batch", "500")),
+      flushMs: Number(flag("flush-ms", kind === "s3" ? "10000" : "1000")),
+      log: (message) => console.error(message),
+    });
+    shutdown(() => runner.stop());
+    await runner.start();
+    break;
+  }
+
   case "cancel": {
     const bus = await client();
     const seq = Number(flag("seq", argv[1]));
@@ -885,6 +960,83 @@ switch (command) {
     }
   }
 
+  // -------------------------------------------------------- schedules
+  case "schedule": {
+    const bus = await client();
+    const action = argv[1] ?? "list";
+    const positional = (index: number) =>
+      argv[index] && !argv[index]!.startsWith("--") ? argv[index] : undefined;
+    const when = (at: number | null) =>
+      at === null ? "-" : new Date(at).toISOString().replace(/\.000Z$/, "Z");
+    const line = (schedule: Schedule) =>
+      `${schedule.name.padEnd(20)} ${schedule.cron.padEnd(16)} ${schedule.tz.padEnd(18)} ${schedule.subject.padEnd(24)} next ${when(schedule.nextAt)}${
+        schedule.paused ? " (paused)" : ""
+      }${schedule.lastError ? `  error: ${schedule.lastError}` : ""}`;
+    const print = (value: unknown, human: () => string) =>
+      console.log(has("json") ? JSON.stringify(value, null, 2) : human());
+    if (action === "add") {
+      const name = flag("name", positional(2));
+      const cron = flag("cron", positional(3));
+      const subject = flag("subject", positional(4));
+      if (!name || !cron || !subject)
+        throw new Error(
+          "schedule add wants <name> <cron> <subject> [json body]; quote the cron expression",
+        );
+      const catchUp = flag("catch-up", "latest");
+      if (catchUp !== "latest" && catchUp !== "none")
+        throw new Error("--catch-up wants latest or none");
+      const schedule = await bus.putSchedule({
+        name,
+        cron,
+        subject,
+        tz: flag("tz", "UTC") as string,
+        body: JSON.parse(flag("body", positional(5) ?? "null") as string) as Json,
+        headers: pairs("headers"),
+        catchUp,
+        paused: has("paused"),
+      });
+      print(schedule, () => line(schedule));
+      break;
+    }
+    if (action === "list") {
+      const schedules = await bus.schedules();
+      print(schedules, () =>
+        schedules.length === 0
+          ? "no schedules"
+          : schedules.map(line).join("\n"),
+      );
+      break;
+    }
+    const name = flag("name", positional(2));
+    if (!name) throw new Error(`schedule ${action} wants a schedule name`);
+    if (action === "remove" || action === "rm") {
+      const removed = await bus.deleteSchedule(name);
+      print(removed, () => `removed ${name}`);
+      break;
+    }
+    if (action === "pause" || action === "resume") {
+      const schedule =
+        action === "pause"
+          ? await bus.pauseSchedule(name)
+          : await bus.resumeSchedule(name);
+      print(schedule, () => line(schedule));
+      break;
+    }
+    if (action === "run") {
+      const result = await bus.runSchedule(name);
+      print(result, () => `published seq ${result.seq}`);
+      break;
+    }
+    if (action === "show") {
+      const schedule = await bus.schedule(name);
+      print(schedule, () => line(schedule));
+      break;
+    }
+    throw new Error(
+      `unknown schedule action '${action}'; expected add, list, show, remove, pause, resume or run`,
+    );
+  }
+
   case "stats": {
     const bus = await client();
     const stats = await bus.stats();
@@ -918,6 +1070,15 @@ switch (command) {
   subscribe   <name> <pattern>            create a durable subscription
   consume     <subscription> --exec CMD   consume; message is stdin, stdout is the reply
               --exec-timeout <ms>          abort and nack a handler that hangs
+  sink        webhook|s3|clickhouse       batch a subscription into another system
+              --subscription <name>        the subscription to drain (required)
+              --subject <pattern>          create it first, if it does not exist
+              --batch <n> --flush-ms <ms>  write at n messages or after ms (default 500, 1000; s3 10000)
+              webhook: --to <url> [--secret s] [--header k=v]   POST a JSON array; HMAC in x-bql-signature
+              s3: --bucket <b> [--prefix p] [--endpoint-url u] [--region r]   gzipped NDJSON; S3_*/AWS_* creds
+              clickhouse: --to <url> --table <t> [--database d] [--user u] [--shape body|row|record]
+                          --shape row for db outbox changes: the row's columns plus _op, _txid, …
+                          INSERT … FORMAT JSONEachRow; CLICKHOUSE_PASSWORD
   cancel      <seq>                       stop a message: in-flight handlers abort
   dlq         <subscription>              list dead letters
   dlq requeue <seq...>                    republish onto the original subject
@@ -937,6 +1098,9 @@ switch (command) {
   backup      <dir>                       consistent copy of the database and blobs
   restore     <dir> --data <dir>          restore that copy, and prove it opens
               --until-seq N | --until-time  point-in-time: cut the log off there
+  schedule    add <name> <cron> <subject> [json]   publish on a cron schedule
+              --tz <iana> --catch-up latest|none --headers k=v --paused
+              list · show · remove · pause · resume · run <name>   (--json)
   tail        follow the log
   stats       subscriptions, consumers, lag
 
@@ -967,7 +1131,8 @@ Common flags:
 Examples:
   bql bus subscribe work 'work.>' --ordered
   bql bus consume work --exec ./handle.sh --prefetch 4
-  bql bus publish work.resize '{"src":"a.png"}' --key a.png`);
+  bql bus publish work.resize '{"src":"a.png"}' --key a.png
+  bql bus schedule add nightly '30 2 * * *' reports.nightly --tz America/New_York`);
     if (command !== "help" && command !== "--help") process.exit(1);
 }
 

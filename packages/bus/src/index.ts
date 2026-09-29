@@ -7,6 +7,7 @@ export {
   type StoreOptions,
 } from "./bus/store";
 export { createServer, type BusServer, type ServerOptions } from "./bus/server";
+export { CronError, nextFire, parseCron, type Cron } from "./bus/cron";
 export {
   createBus,
   consumeTransactional,
@@ -64,3 +65,13 @@ export {
   type StandardSchemaV1,
 } from "./client/bus";
 export type * from "./shared/protocol";
+export {
+  SinkRunner,
+  webhookSink,
+  s3Sink,
+  clickhouseSink,
+  verifyWebhookSignature,
+  type SinkOptions,
+  type SinkRecord,
+  type SinkWriter,
+} from "./sinks";

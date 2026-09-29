@@ -139,7 +139,9 @@ In the order the value lands, each independently revertable:
    statement deadline for a query that will not end.
 2. **The change feed as an outbox.** A bql.sh commit hook publishing to a bus subject is a
    transactional outbox with no dual-write window, because the feed is post-commit and carries the
-   txid.
+   txid. **Landed as X6** (`packages/db/docs/x6-outbox.md`), reading the durable
+   log rather than the in-memory feed: a post-commit hook still loses the event if the process dies
+   before it publishes, and the log does not.
 3. **Delete `packages/bus/src/bus/replication.ts`** in favour of WAL shipping, and the bus's
    bespoke backup/restore with it.
 4. **The bus as bql.sh's own job layer** — backup shipping, retention, compaction and replication

@@ -24,7 +24,12 @@ import type {
   PromotionOutcome,
   PromotionRequest,
 } from "../../cluster/index.ts"
-import type { MetricsState, ReplicationMetrics, StorageMetrics } from "../metrics.ts"
+import type {
+  MetricsState,
+  OutboxMetrics,
+  ReplicationMetrics,
+  StorageMetrics,
+} from "../metrics.ts"
 
 /**
  * One HTTP request, on its way to the worker that owns the database its path names.
@@ -590,6 +595,8 @@ export interface MetricsReply {
    * `pendingRecords`, `errors` and `bytes` sum, `behind` counts.
    */
   storage?: StorageMetrics | null
+  /** X6: this shard's outbox relay; the shards hold disjoint databases, so the totals sum. */
+  outbox?: OutboxMetrics | null
 }
 
 /**

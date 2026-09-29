@@ -43,6 +43,20 @@ export interface StorageMetrics {
   uploadWaiting: number
 }
 
+/**
+ * X6: what `/metrics` reports about the outbox relay. Absent on a node with no `[outbox]` rules,
+ * for the same reason the storage block is.
+ */
+export interface OutboxMetrics {
+  published: number
+  skipped: number
+  gaps: number
+  truncated: number
+  errors: number
+  behind: number
+  lagMax: number
+}
+
 export interface MetricsSnapshot {
   requests: number
   requestsByClass: Record<string, number>
@@ -328,6 +342,7 @@ export class Metrics {
     node: string,
     replication?: ReplicationMetrics | null,
     storage?: StorageMetrics | null,
+    outbox?: OutboxMetrics | null,
   ): string {
     const labels = `node="${node.replaceAll('"', "")}"`
     const out: string[] = []
@@ -527,6 +542,40 @@ export class Metrics {
         "bql_upload_waiting",
         "Shippers queued for an upload permit. Non-zero under load is the budget doing its job.",
         storage.uploadWaiting,
+      )
+    }
+
+    if (outbox) {
+      counter(
+        "bql_outbox_published_total",
+        "Row changes the outbox relay published and the bus acknowledged.",
+        outbox.published,
+      )
+      counter(
+        "bql_outbox_gaps_total",
+        "Times a relay cursor fell behind log retention and jumped (OUTBOX_GAP). Anything but 0 is lost changes.",
+        outbox.gaps,
+      )
+      counter(
+        "bql_outbox_skipped_total",
+        "Transaction records the relay skipped because they carry no rows (version 1).",
+        outbox.skipped,
+      )
+      counter(
+        "bql_outbox_truncated_total",
+        "Transactions whose recorded rows were cut short by maxRowsPerTxn.",
+        outbox.truncated,
+      )
+      counter("bql_outbox_errors_total", "Failed publishes to the bus.", outbox.errors)
+      gauge(
+        "bql_outbox_behind",
+        "Databases, per rule, with committed changes the relay has not published yet.",
+        outbox.behind,
+      )
+      gauge(
+        "bql_outbox_lag_max",
+        "The largest relay lag, in transactions, across every database and rule.",
+        outbox.lagMax,
       )
     }
 

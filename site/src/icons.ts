@@ -3,7 +3,7 @@
 // mark, the one decorative element on the page.
 
 import {
-  siBun, siCloudflare, siDiscord, siDocker, siDrizzle, siFlydotio, siGithub, siGraphql, siMinio,
+  siBun, siClickhouse, siCloudflare, siDiscord, siDocker, siDrizzle, siFlydotio, siGithub, siGithubactions, siGraphql, siMinio,
   siOpenapiinitiative, siOpentelemetry, siPrometheus, siSqlite, siTurso, siX,
 } from "simple-icons"
 // LinkedIn and Amazon S3 were dropped from later simple-icons releases; v9 still carries them.
@@ -15,6 +15,7 @@ const BRANDS: Record<IconName, { path: string }> = {
   bun: siBun, sqlite: siSqlite, drizzle: siDrizzle, turso: siTurso, graphql: siGraphql,
   openapi: siOpenapiinitiative, s3: siAmazons3, cloudflare: siCloudflare, minio: siMinio,
   prometheus: siPrometheus, opentelemetry: siOpentelemetry, docker: siDocker, fly: siFlydotio,
+  clickhouse: siClickhouse, githubactions: siGithubactions,
 }
 
 export function brand(name: IconName, size = 18): string {

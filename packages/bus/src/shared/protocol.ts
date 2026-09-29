@@ -303,6 +303,11 @@ export interface SubscriptionStats extends Subscription {
 }
 
 export interface Stats {
+  /**
+   * The workspace these numbers are for — the one the token resolved to.
+   * Optional because a bus from before it was added does not send it.
+   */
+  workspace?: string;
   subscriptions: SubscriptionStats[];
   consumers: Consumer[];
   messages: number;
@@ -417,4 +422,49 @@ export interface ClusterState {
   /** Highest upstream sequence number this replica has applied. */
   appliedSeq: number;
   readOnly: boolean;
+}
+
+// ------------------------------------------------------------- schedules
+
+/**
+ * What a schedule does about fires it missed while the bus was down.
+ * `latest` fires once for the most recent one; `none` skips them all.
+ */
+export type CatchUp = "none" | "latest";
+
+export interface ScheduleRequest {
+  /** Unique per workspace. `[A-Za-z0-9][\w.-]{0,99}`. */
+  name: string;
+  /** Five-field cron, or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. */
+  cron: string;
+  /** IANA time zone the expression is read in. Default `UTC`. */
+  tz?: string;
+  subject: string;
+  body?: Json;
+  headers?: Headers;
+  /** Default `latest`. */
+  catchUp?: CatchUp;
+  paused?: boolean;
+}
+
+export interface Schedule {
+  workspace: string;
+  name: string;
+  cron: string;
+  tz: string;
+  subject: string;
+  body: Json;
+  headers: Headers;
+  catchUp: CatchUp;
+  paused: boolean;
+  /** Epoch ms of the next fire; null while paused. */
+  nextAt: number | null;
+  /** The scheduled time (not the wall clock) of the last fire. */
+  lastAt: number | null;
+  /** Why the last fire failed to publish, until one succeeds. */
+  lastError: string | null;
+  /** When a failed fire is next retried (2 s doubling to 5 min); null otherwise. */
+  retryAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 }

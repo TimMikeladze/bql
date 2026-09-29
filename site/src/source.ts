@@ -115,12 +115,13 @@ export interface Where {
   section?: string
 }
 
-/** Strip a `$ ` prompt and a trailing `   # comment` from a command line. */
+/** Strip a `$ ` prompt, a trailing `   # comment` and a trailing ` &` from a command line. */
 export const commandOf = (line: string) =>
   line
     .trim()
     .replace(/^\$\s+/, "")
     .replace(/\s{2,}#.*$/, "")
+    .replace(/\s+&$/, "")
     .trim()
 
 function only<T>(found: T[], what: string): T {

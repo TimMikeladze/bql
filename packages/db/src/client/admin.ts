@@ -97,6 +97,14 @@ export class Admin {
     return this.create(name, { from: { db: from, ...(at !== undefined ? { at } : {}) } })
   }
 
+  /**
+   * Puts a branch back to its parent's head, under the same name (`docs/x2-branching.md`).
+   * Refused for a database that was created rather than forked, or whose parent was deleted.
+   */
+  reset(db: string): Promise<DatabaseStats> {
+    return this.#http.json<DatabaseStats>(`/v1/db/${seg(db)}/reset`, { method: "POST" })
+  }
+
   /** Size, position, subscribers and replicas. A read token can see this one. */
   stat(db: string): Promise<DatabaseStats> {
     return this.#http.json<DatabaseStats>(`/v1/db/${seg(db)}`)

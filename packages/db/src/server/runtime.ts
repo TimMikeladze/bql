@@ -45,6 +45,7 @@ import type { Publisher } from "../realtime/index.ts"
 import type { Database } from "../sqlite/index.ts"
 import { RECORD_VERSION_LOGICAL } from "../wal/index.ts"
 import { parseRetentionMs, S3Store, ShipperPool } from "../storage/index.ts"
+import { OutboxRelay } from "../outbox/index.ts"
 import {
   type AckLevel,
   type ReaderLease,
@@ -231,6 +232,11 @@ export class ServerRuntime {
    * a request path knowing it exists.
    */
   readonly storage: ShipperPool | null
+  /**
+   * X6: the outbox relay, or null when `[outbox]` has no rules — and always null on the router of
+   * a `workers > 1` node, which owns no tenant. Attached like the shipper, through `onOpen`.
+   */
+  readonly outbox: OutboxRelay | null
 
   #hubs = new WeakMap<Database, AuthorizerHub>()
   #realtime = new Map<string, TenantRealtime>()
@@ -307,6 +313,27 @@ export class ServerRuntime {
     this.#onTenantOpen = options.onTenantOpen ?? null
     this.storage = buildShipperPool(options.config, this.registry, this.#onError)
     this.replicationMode = options.replicationMode ?? "own"
+    this.outbox =
+      options.config.outbox.rules.length > 0 && this.replicationMode !== "none"
+        ? new OutboxRelay(
+            {
+              registry: this.registry,
+              owns: (db) => this.owns(db),
+              authors: (tenant) => !tenant.isReplica && this.roleFor(tenant.name) === "primary",
+              generationOf: (db) => this.generationOf(db),
+              // X2 records a fork's (and a reset's) parent head; a created database starts at 0.
+              startOf: (db) => this.registry.catalog.getTenant(db)?.forkedAt ?? 0n,
+              onError: this.#onError,
+              warn: (message) => console.error(message),
+            },
+            {
+              rules: options.config.outbox.rules,
+              batchSize: options.config.outbox.batchSize,
+              intervalMs: options.config.outbox.intervalMs,
+              maxBackoffMs: options.config.outbox.maxBackoffMs,
+            },
+          )
+        : null
     this.replication =
       options.config.replication.secret && this.replicationMode !== "none"
         ? new ReplicationServer({
@@ -583,6 +610,7 @@ export class ServerRuntime {
     }
     if (event.kind === "delete") {
       this.acks.forget(event.name)
+      void this.outbox?.forget(event.name).catch((err) => this.#onError(err))
       // A deleted database keeps whatever is already in the bucket — design §6.5 says the log and
       // the snapshots are retained per `retention` — but nothing more is shipped for it.
       void this.storage?.forget(event.name).catch((err) => this.#onError(err))
@@ -620,14 +648,22 @@ export class ServerRuntime {
     } catch (err) {
       this.#onError(err)
     }
+    try {
+      this.outbox?.attach(tenant)
+    } catch (err) {
+      this.#onError(err)
+    }
     // One pass at open, after the shipper is attached so its position counts. Without it a
     // database that was written to and then evicted from the LRU would keep its log until
     // something opened it again, which on a node with ten thousand tenants may be never.
     if (this.#retentionMs > 0) this.retainTenant(tenant, this.#retentionMs)
   }
 
-  /** Starts the shipper sweep. Called by `startServer`, beside `startReplication`. */
+  /** Starts the shipper sweep and the outbox relay. Called by `startServer`, beside `startReplication`. */
   startStorage(): void {
+    // X6: the relay's sweep adopts whatever is already open, and owes a pass to every matching
+    // database that may have unpublished records from before this process started.
+    this.outbox?.start()
     if (!this.storage) return
     this.storage.start()
     // The registry may already hold tenants — a runtime the embedded API built, or a registry
@@ -643,6 +679,9 @@ export class ServerRuntime {
 
   /** Ships everything outstanding and stops the shippers. Awaited by the server handle's close. */
   async closeStorage(): Promise<void> {
+    // Before the registry closes the logs the relay reads. Cursors are on disk, so a drain that
+    // does not finish here is finished by the next start.
+    await this.outbox?.close().catch((err) => this.#onError(err))
     if (!this.storage) return
     try {
       await this.storage.close()
@@ -1475,6 +1514,7 @@ export class ServerRuntime {
     // The awaitable form is `closeStorage()`, which `startServer`'s handle calls first; this is
     // the backstop for a caller that closes the runtime directly.
     void this.storage?.close().catch(() => {})
+    void this.outbox?.close().catch(() => {})
     for (const name of [...this.#realtime.keys()]) this.closeRealtime(name)
     this.#subscribers.clear()
     this.promoter.close()
@@ -1652,6 +1692,7 @@ export function mapTenantError(err: unknown, primary?: string | null): unknown {
     case "CLOSED":
       return new BqlError("BUSY", err.message, 503)
     case "NO_SNAPSHOT":
+    case "NO_PARENT":
       return BqlError.badRequest(err.message)
     default:
       return new BqlError(err.code, err.message, 500)

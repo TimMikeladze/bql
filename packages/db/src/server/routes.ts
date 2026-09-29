@@ -41,7 +41,7 @@ import {
   type ShipperState,
   verifyBucket,
 } from "../storage/index.ts"
-import { assertValidName, type Tenant } from "../tenant/index.ts"
+import { assertValidName, type Tenant, type TenantRow } from "../tenant/index.ts"
 import { listSnapshots } from "../wal/index.ts"
 import {
   applyPolicy,
@@ -846,6 +846,7 @@ export const listDbs: Handler = async (ctx) => {
   // own tenants, which is every node but a sharded one's router — so this costs nothing there.
   const live = await ctx.runtime.openStates()
   const openNames = live ?? new Set(ctx.runtime.registry.openNames)
+  const names = new Set(rows.map((row) => row.name))
   return json({
     // L3: the node's ceiling and what it is holding against it. This registry is the router's on a
     // sharded node, so `maxOpen` here is `[data] maxOpen` as configured rather than any worker's
@@ -870,9 +871,26 @@ export const listDbs: Handler = async (ctx) => {
         role: row.role,
         txid: Number(txid),
         open: isOpen,
+        ...lineageOf(row, names.has.bind(names)),
       }
     }),
   })
+}
+
+/**
+ * X2 lineage as list and stat report it. `parentDeleted` is the dangling edge: the child still
+ * names its parent after the parent is deleted, and says so rather than hiding it.
+ */
+export function lineageOf(
+  row: TenantRow | undefined,
+  live: (name: string) => boolean,
+): { parent: string | null; forkedAt: number | null; parentDeleted: boolean } {
+  const parent = row?.parent ?? null
+  return {
+    parent,
+    forkedAt: row?.forkedAt === null || row?.forkedAt === undefined ? null : Number(row.forkedAt),
+    parentDeleted: parent !== null && !live(parent),
+  }
 }
 
 /** The stats body of design §6.5, also what the embedded API's `stat` returns. */
@@ -886,6 +904,7 @@ export function statsOf(runtime: ServerRuntime, tenant: Tenant): Record<string, 
     // null means "follows the node's setting", which is what almost every database does.
     foreignKeys: row?.foreignKeys ?? null,
     ackWithoutReplicas: row?.ackWithoutReplicas ?? null,
+    ...lineageOf(row, (name) => runtime.registry.has(name)),
     sizeBytes: stats.sizeBytes,
     walBytes: stats.walBytes,
     logBytes: stats.logBytes,
@@ -969,6 +988,26 @@ export const deleteDb: Handler = async (ctx) => {
   try {
     const trash = ctx.runtime.registry.delete(name)
     return json({ name, deleted: true, trash })
+  } catch (err) {
+    throw mapTenantError(err, primaryOf(ctx))
+  }
+}
+
+/**
+ * X2: a branch back to its parent's head, same name (`docs/x2-branching.md`). The copy is built
+ * before the branch is touched; its subscriptions and transactions end at the swap, as a delete
+ * would end them.
+ */
+export const resetDb: Handler = async (ctx) => {
+  requireAdmin(await principalOf(ctx))
+  const name = dbName(ctx)
+  requirePrimaryFor(ctx, name)
+  try {
+    const tenant = await ctx.runtime.registry.reset(name, {
+      beforeSwap: () => ctx.runtime.evict(name),
+    })
+    ctx.txid = Number(tenant.txid)
+    return json(statsOf(ctx.runtime, tenant))
   } catch (err) {
     throw mapTenantError(err, primaryOf(ctx))
   }
@@ -1333,6 +1372,9 @@ export const replication: Handler = async (ctx) => {
     // Design §6.5 lists "S3 position" beside the replica positions: the bucket is another
     // follower, and how far behind it is belongs in the same place.
     s3: s3StateOf(ctx.runtime, tenant.name),
+    // X6: each outbox rule's cursor and lag, beside the other followers of this log. Null on a node
+    // with no `[outbox]` rules; an empty list when none matches this database.
+    outbox: ctx.runtime.outbox ? ctx.runtime.outbox.state(tenant.name) : null,
   }
 
   if (tenant.isReplica) {
@@ -1576,6 +1618,7 @@ export const metrics: Handler = async (ctx) => {
     ctx.runtime.node,
     replicationMetrics(ctx.runtime),
     storageMetrics(ctx.runtime),
+    ctx.runtime.outbox?.metrics() ?? null,
   )
   return new Response(body, {
     headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },

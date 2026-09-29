@@ -135,6 +135,48 @@ A consumer already running the work learns on its **next lease renewal**, which 
 
 Cancelling is the **publisher's** call, or an admin's — the bus records which token published each message. A consumer cannot cancel its own work, because a consumer that could make a message it disliked disappear is a very quiet way to lose work.
 
+## Schedules
+
+Cron on the bus: a schedule is a standing publish that the existing one-second sweep fires on the
+leader. No second scheduler, no second store — a fire is an ordinary message on an ordinary subject.
+
+```sh
+bql bus schedule add nightly '30 2 * * *' reports.nightly '{"kind":"daily"}' --tz America/New_York
+bql bus schedule list            # --json for machines
+bql bus schedule run nightly     # fire once now; does not move the next fire
+bql bus schedule pause nightly · resume nightly · remove nightly
+```
+
+```ts
+await bus.putSchedule({ name: "nightly", cron: "30 2 * * *", tz: "America/New_York",
+  subject: "reports.nightly", body: { kind: "daily" }, catchUp: "latest" });
+```
+
+- **Five fields** — `*`, lists, ranges, steps (`*/15`, `5/15`), month and day names, `7` as Sunday —
+  plus `@hourly` `@daily` `@weekly` `@monthly` `@yearly`. Day of month and day of week follow Vixie
+  cron: both restricted means *either* matches, and a `*`-led field turns that back into *and*.
+  A bad expression, an unknown zone or one that can never fire (`0 0 31 2 *`) is a 400 that says why.
+- **Time zones are IANA names** (`tz`, default `UTC`) and DST follows Vixie cron. A job whose
+  minute or hour starts with `*` (`*/15 * * * *`, `@hourly`) runs on real time: it fires in both
+  passes of a repeated hour and has no fires in skipped minutes. A fixed time (`30 1 * * *`) the
+  clocks skip fires once at the first valid minute after the gap, and one that happens twice fires
+  once, the first time.
+- **Exactly one message per slot.** Each fire publishes with `dedupeKey = schedule:<name>:<fireAtMs>`
+  in the same transaction that moves `nextAt`, so a double sweep finds nothing due, and a promoted
+  follower whose schedule row lags the log re-derives the same key and gets the existing message
+  back. Every fire carries `schedule-name` and `schedule-at` (the scheduled instant, ISO) headers.
+- **`catchUp`** decides what a bus that was down does about the slots it missed: `latest` (the
+  default) fires once for the most recent one — never a burst — and `none` skips them. A fire more
+  than a minute late counts as missed under `none`.
+- **Pausing** clears `nextAt`; resuming computes it from now, so paused slots are not caught up.
+  A fire that cannot publish (quota, disk, an enforced schema) stays due, is retried with backoff
+  (`retryAt`: 2 s doubling to 5 min), and puts the reason in `lastError`.
+- **Scopes.** Defining, pausing and removing a schedule is admin, like a subscription. Reading is a
+  reader. `run` is a publish: admin, or any token allowed to publish to the schedule's subject, and it
+  counts against the publish rate limit.
+- **Replication.** A follower mirrors the schedule rows alongside the cursors and never fires; the
+  leader only fires while it holds the write fence.
+
 ## Schemas
 
 A registry of JSON Schema 2020-12 documents, bound to subject *patterns*, with an own validator —
@@ -274,6 +316,45 @@ bus.consumeTransactional({
 bql bus consume work --exec ./resize.sh --prefetch 4
 ```
 
+## Sinks
+
+A sink is a consumer that writes **batches** somewhere else — a webhook, a bucket, ClickHouse — and
+acks only once the destination accepted the batch. A destination that is down turns into nacks,
+so the subscription's own retry, backoff and dead letter apply; nothing is acked into nowhere.
+
+```sh
+bql bus sink webhook    --subscription cdc --subject 'db.>' --to https://example.com/hook --secret "$SECRET"
+bql bus sink s3         --subscription lake --bucket events --prefix cdc/ --endpoint-url https://…
+bql bus sink clickhouse --subscription olap --to http://clickhouse:8123 --table analytics.users --shape row
+```
+
+`--subject` creates the subscription first (or confirms it). A batch is written at `--batch`
+messages (default 500) or once its oldest message has waited `--flush-ms` (1000; 10000 for s3),
+and every lease it holds is renewed while it waits.
+
+| Sink | Writes | Notes |
+| --- | --- | --- |
+| `webhook` | `POST` a JSON array of `{seq, subject, key, publishedAt, idempotencyKey, body}` | `--secret` signs it: `x-bql-signature: t=<ms>,sha256=<hex>` over `<t>.<body>`; `verifyWebhookSignature` checks it. Non-2xx nacks |
+| `s3` | one gzipped NDJSON object per batch, same records, via `Bun.S3Client` | key `<prefix><yyyy>/<mm>/<dd>/<hh>/<time>-<firstSeq>.ndjson.gz`; credentials from `S3_*` / `AWS_*` |
+| `clickhouse` | `INSERT INTO <table> FORMAT JSONEachRow`, one line per message | `--shape body` (default) the body as is; `--shape row` for db outbox changes — unwraps `row` (`old`/`pk` for a delete) and adds `_op`, `_db`, `_table`, `_txid`, `_seq`, `_i`, `_committed_at`; `--shape record` the whole record. `input_format_skip_unknown_fields=1`, so a shape that does not fit the table inserts defaults — pick the one that does. `CLICKHOUSE_PASSWORD` |
+
+At-least-once, like every consumer: a crash between the write and the acks writes the batch again.
+Every record carries `idempotencyKey` for a destination that dedupes. Paired with the database's
+outbox (`[outbox]` in [bql.sh](../db/README.md)), this is committed rows to a webhook or a
+warehouse with no code. In a program, `SinkRunner` with `webhookSink`, `s3Sink` or `clickhouseSink`
+is the same loop:
+
+```ts
+import { BusClient, SinkRunner, webhookSink } from "bql.sh/bus";
+
+await new SinkRunner({
+  client: new BusClient({ url: "http://127.0.0.1:4317", token: process.env.BUS_TOKEN! }),
+  id: "hook-1",
+  subscription: "cdc",
+  writer: webhookSink({ url: "https://example.com/hook", secret: process.env.HOOK_SECRET }),
+}).start();
+```
+
 ## CLI
 
 | | |
@@ -284,9 +365,11 @@ bql bus consume work --exec ./resize.sh --prefetch 4
 | `bql bus request <subject> <json>` | publish and wait for a reply |
 | `bql bus subscribe <name> <pattern>` | create a durable subscription |
 | `bql bus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
+| `bql bus sink webhook\|s3\|clickhouse --subscription name [--subject pattern]` | batch a subscription into another system |
 | `bql bus cancel <seq>` | stop a message; in-flight handlers abort |
 | `bql bus dlq <subscription>` · `dlq requeue <seq…>` | inspect and requeue dead letters |
 | `bql bus blocked <subscription>` · `unblock <sub> <key>` | ordered keys stalled behind a dead letter |
+| `bql bus schedule add <name> <cron> <subject> [json]` · `list` · `show` · `remove` · `pause` · `resume` · `run` | cron schedules (`--tz`, `--catch-up`, `--json`) |
 | `bql bus schema register <name> <file>` · `check` · `bind` · `list` | the registry |
 | `bql bus keys rotate` · `keys retire <kid>` | signing keys, with an overlap window |
 | `bql bus revoke <jti>` · `quota [set]` · `audit` | tenant safety |
@@ -304,6 +387,7 @@ rather than moving in lockstep. A client asking for a version this broker does n
 | Method | Path | |
 | --- | --- | --- |
 | `POST` | `/api/publish` | `{subject, key?, headers?, body, dedupeKey?, replyTo?, ttlMs?}` |
+| `POST` | `/api/publish/batch` | `{messages: [...]}`, up to 1000, one transaction — all or none; dedupe per message. Costs one `--publish-rate` token per message; a batch larger than the burst is `413` |
 | `POST` `GET` | `/api/subscriptions` | create; list |
 | `POST` | `/api/subscriptions/:name/claim` | `{consumer, max, waitMs}` — long-polls |
 | `POST` | `/api/subscriptions/:name/replay` `/purge` `/pause` | operator actions |
@@ -315,6 +399,8 @@ rather than moving in lockstep. A client asking for a version this broker does n
 | `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
 | `POST` | `/api/subscriptions/:name/unblock` · `GET /blocked` | ordered keys stalled behind a dead letter |
 | `POST` `GET` | `/api/effects/claim` · `/api/effects/record` | the effect ledger (Tier 3) |
+| `PUT` `GET` `DELETE` | `/api/schedules/:name` · `GET /api/schedules` | `{cron, tz?, subject, body?, headers?, catchUp?, paused?}`; define is admin |
+| `POST` | `/api/schedules/:name/pause` `/resume` `/run` | `run` needs publish on the subject |
 | `POST` `GET` | `/api/schemas` · `/check` · `/bindings` · `GET /keywords` | the registry |
 | `POST` | `/api/tokens` · `/api/tokens/revoke` | mint; revoke by `jti` (admin) |
 | `POST` `GET` | `/api/quota` · `GET /api/audit` | per-workspace ceilings; the audit trail |

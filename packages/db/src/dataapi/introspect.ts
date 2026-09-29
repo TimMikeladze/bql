@@ -29,6 +29,7 @@
 
 import { codecOf, type Schema, s } from "../core/index.ts"
 import { type DataStatement, type DataValue, type Execute, rowObjects } from "./context.ts"
+import { VIRTUAL_TABLES_SQL, shadowVerdict, virtualTables } from "../sqlite/shadow.ts"
 
 /** SQLite's five type affinities. */
 export type Affinity = "INTEGER" | "TEXT" | "BLOB" | "REAL" | "NUMERIC"
@@ -233,16 +234,23 @@ export async function introspect(
   const schemaVersion = integer(version[0]?.schema_version)
 
   const listed = await run("PRAGMA table_list")
+  // `table_list` already calls most shadow tables `shadow`, but only as far as each module's
+  // `xShadowName` goes — sqlite-vec's misses `_vector_chunksNN` (src/sqlite/shadow.ts).
+  const vtabs = virtualTables(await run(VIRTUAL_TABLES_SQL))
   const tables: TableInfo[] = []
   for (const entry of listed) {
     const name = text(entry.name)
     const kindText = text(entry.type)
     if (text(entry.schema) !== "main") continue
     // Shadow and virtual tables are a module's own interface, not a set of rows: an INSERT into
-    // an FTS5 table means something this API has no way to describe.
-    if (kindText !== "table" && kindText !== "view") continue
+    // an FTS5 table means something this API has no way to describe. `table_list`'s `shadow` is
+    // name-based, though, so for the modules `shadow.ts` understands its verdict wins — both ways.
     if (name.toLowerCase().startsWith("sqlite_")) continue
-    const kind = kindText as "table" | "view"
+    const verdict = vtabs.size > 0 && kindText !== "view" ? shadowVerdict(name, vtabs) : null
+    if (verdict === true) continue
+    const listed = kindText === "table" || kindText === "view" || (kindText === "shadow" && verdict === false)
+    if (!listed) continue
+    const kind = (kindText === "view" ? "view" : "table") as "table" | "view"
     if (options.skip?.(name, kind)) continue
     tables.push(await readTable(run, name, kind, flag(entry.wr), flag(entry.strict)))
   }

@@ -44,6 +44,7 @@ import {
   SQLITE_UPDATE,
 } from "../sqlite/constants.ts"
 import type { Authorizer, Database } from "../sqlite/index.ts"
+import { VIRTUAL_TABLES_SQL, shadowOwner, virtualTables } from "../sqlite/shadow.ts"
 import { BqlError } from "./errors.ts"
 import { fromBase64, toBase64Url } from "./json.ts"
 
@@ -829,6 +830,21 @@ export interface AuthorizerRules {
    * update-hook fallback mode; a registered preupdate hook does this by itself.
    */
   reportEveryDelete?: boolean
+  /**
+   * The virtual table a storage (shadow) table belongs to, lower-cased, or undefined. With a
+   * per-table ACL, a shadow table is allowed exactly when its owner is, for the same action class:
+   * FTS5, vec0 and R*Tree read and write their own storage through statements on this connection,
+   * which this authorizer sees, so without it a token granted `docs_fts` could not search it.
+   * Must not touch the connection — it runs inside the authorizer. `shadowLookup` builds it.
+   */
+  shadowOf?: (name: string) => string | undefined
+  /**
+   * Let `shadowOf` grant writes, not only reads. Only safe on a connection with
+   * `SQLITE_DBCONFIG_DEFENSIVE` on, where SQLite itself refuses a write to a shadow table from
+   * anything but the module — so the grant covers the index maintaining itself (a trigger's insert
+   * into `docs_fts`) and never a token writing `docs_fts_data` by hand. `applyPolicy` sets both.
+   */
+  shadowWrites?: boolean
 }
 
 /** Lower-cases the ACL keys once, so lookups can be case-insensitive like SQLite identifiers. */
@@ -857,6 +873,14 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
   const readOnly = rules.scope === "ro"
   const tables = normalizeTables(rules.tables)
   const ignoreDeletes = rules.reportEveryDelete === true
+  const shadowOf = rules.shadowOf
+  /** The ACL entry that governs `name`: its own, or its owning virtual table's. */
+  const aclOf = (name: string, write: boolean): TableScope | undefined => {
+    const own = tables?.get(name)
+    if (own !== undefined || !shadowOf || (write && rules.shadowWrites !== true)) return own
+    const owner = shadowOf(name)
+    return owner === undefined ? undefined : tables?.get(owner)
+  }
 
   return (action, arg1, arg2) => {
     switch (action) {
@@ -881,11 +905,11 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
         // The schema and SQLite's own bookkeeping tables stay readable: the query planner and
         // AUTOINCREMENT need them, and they expose nothing the token cannot already see.
         if (name.startsWith("sqlite_")) return SQLITE_OK
-        return tables.has(name) ? SQLITE_OK : SQLITE_DENY
+        return aclOf(name, false) !== undefined ? SQLITE_OK : SQLITE_DENY
       }
       if (action === SQLITE_INSERT || action === SQLITE_UPDATE || action === SQLITE_DELETE) {
         if (name.startsWith("sqlite_")) return name === "sqlite_sequence" ? SQLITE_OK : SQLITE_DENY
-        if (tables.get(name) !== "rw") return SQLITE_DENY
+        if (aclOf(name, true) !== "rw") return SQLITE_DENY
       }
     }
 
@@ -979,8 +1003,16 @@ export function applyPolicy(
     appliedPolicy.delete(db)
     hub.setBase(null)
     if (queryOnlyState.get(db) !== before) hub.bypass(() => setQueryOnly(db, before))
+    defend(db, false)
   }
   const key = policyKey(principal, dbName, options)
+  const tableAcl = principal.kind !== "admin" && principal.tables !== undefined
+  // Refreshed even when the policy itself is unchanged: the closure below reads the map by
+  // connection, so a virtual table created since the last request is seen without re-scoping.
+  const shadowOf = tableAcl ? shadowLookup(db, hub) : undefined
+  // A table ACL runs defensive, so a grant on `docs_fts` reaches its storage only through the
+  // module. Everyone else gets the connection's own setting back.
+  const hardened = defend(db, tableAcl)
   if (appliedPolicy.get(db) === key) {
     return { scope: principal.kind === "admin" ? "rw" : (principal.scopeFor(dbName) as Scope), release: restore }
   }
@@ -997,11 +1029,73 @@ export function applyPolicy(
     buildAuthorizer({
       scope,
       ...(principal.tables ? { tables: principal.tables } : {}),
+      ...(shadowOf ? { shadowOf, shadowWrites: hardened } : {}),
       ...(options.reportEveryDelete ? { reportEveryDelete: true } : {}),
     }),
   )
   appliedPolicy.set(db, key)
   return { scope, release: restore }
+}
+
+/** `SQLITE_DBCONFIG_DEFENSIVE` as the connection had it before any policy (null: no shim). */
+const defensiveBase = new WeakMap<Database, number | null>()
+/** …and as this module last set it, so an unchanged request costs no FFI call. */
+const defensiveNow = new WeakMap<Database, number>()
+
+/**
+ * Turns `SQLITE_DBCONFIG_DEFENSIVE` on for a table-ACL request, or back to the connection's own
+ * setting (`[sqlite] defensive`) for anyone else. Returns whether it is now on. On a system
+ * libsqlite3 there is no shim to reach it with, and the answer is false: the ACL then grants
+ * shadow tables for reads only, so writing through an index needs a database-wide token there.
+ */
+function defend(db: Database, want: boolean): boolean {
+  let base = defensiveBase.get(db)
+  if (base === undefined) {
+    base = db.dbConfig("SQLITE_DBCONFIG_DEFENSIVE", -1)
+    defensiveBase.set(db, base)
+    if (base !== null) defensiveNow.set(db, base)
+  }
+  if (base === null) return false
+  const target = want ? 1 : base
+  if (defensiveNow.get(db) !== target) {
+    db.dbConfig("SQLITE_DBCONFIG_DEFENSIVE", target)
+    defensiveNow.set(db, target)
+  }
+  return target === 1
+}
+
+/** Shadow table → owning virtual table (both lower-cased), per connection, as of `cookie`. */
+const shadowMaps = new WeakMap<Database, { cookie: number; map: Map<string, string> }>()
+
+/**
+ * Brings this connection's shadow map up to date with its schema and returns the lookup the
+ * authorizer uses. The authorizer runs inside `sqlite3_prepare` and may not run SQL itself, so
+ * the map is built here, before the policy goes on: one `pragma schema_version` per request for
+ * a token with a table ACL (nobody else pays anything here), and a rebuild only when the cookie moved.
+ *
+ * Only a real virtual table in `sqlite_schema` can own a shadow table, and only one its module
+ * created for that table's options (`src/sqlite/shadow.ts`): `todos_data` beside an ordinary
+ * `todos`, or `docs_fts_content` beside an external-content `docs_fts`, is nobody's storage and
+ * stays governed by its own ACL entry.
+ */
+export function shadowLookup(db: Database, hub: PolicySlot): (name: string) => string | undefined {
+  hub.bypass(() => {
+    const cookie = Number(db.prepare("pragma schema_version").get()?.schema_version ?? 0)
+    const cached = shadowMaps.get(db)
+    if (cached && cached.cookie === cookie) return
+    const map = new Map<string, string>()
+    const vtabs = virtualTables(db.prepare(VIRTUAL_TABLES_SQL).all() as { name: unknown; sql: unknown }[])
+    if (vtabs.size > 0) {
+      for (const row of db.prepare("select name from sqlite_schema where type = 'table'").all()) {
+        const name = row.name
+        if (typeof name !== "string") continue
+        const owner = shadowOwner(name, vtabs)
+        if (owner !== null) map.set(name.toLowerCase(), owner.toLowerCase())
+      }
+    }
+    shadowMaps.set(db, { cookie, map })
+  })
+  return (name) => shadowMaps.get(db)?.map.get(name)
 }
 
 function setQueryOnly(db: Database, on: boolean): void {

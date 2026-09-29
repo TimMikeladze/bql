@@ -633,6 +633,25 @@ export function createClient(options: ClientOptions): Client {
 export { Admin, type FileBody } from "./admin.ts"
 export { BqlClientError } from "./errors.ts"
 export {
+  compareSchemas,
+  diffSchema,
+  formatSchemaDiff,
+  readSchema,
+  type ColumnChange,
+  type ColumnInfo,
+  type DiffOptions,
+  type IndexInfo,
+  type ObjectDiff,
+  type RowCount,
+  type SchemaDiff,
+  type SchemaSnapshot,
+  type SchemaSource,
+  type TableChange,
+  type TableInfo,
+  type TriggerInfo,
+  type ViewInfo,
+} from "./diff.ts"
+export {
   ChangeFeed,
   LiveQuery,
   type DecodedChangeEvent,

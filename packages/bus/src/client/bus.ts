@@ -16,6 +16,8 @@ import type {
   Quota,
   RegisterConsumer,
   Response as BusResponse,
+  Schedule,
+  ScheduleRequest,
   SchemaBinding,
   SchemaCheck,
   SchemaVersion,
@@ -24,6 +26,7 @@ import type {
   Subscription,
   Usage,
 } from "../shared/protocol";
+import { DEFAULT_WORKSPACE } from "../shared/protocol";
 
 /**
  * The client half of the bus: a typed wrapper over the HTTP API, plus a
@@ -98,6 +101,11 @@ export class BusClient {
   private readonly doFetch: typeof fetch;
   private readonly timeoutMs: number;
 
+  /** The workspace this client asks for; the token may pin another. */
+  get workspace(): string {
+    return this.options.workspace ?? DEFAULT_WORKSPACE;
+  }
+
   constructor(private readonly options: ClientOptions) {
     this.base = options.url.replace(/\/$/, "");
     this.doFetch = options.fetchImpl ?? fetch;
@@ -157,6 +165,18 @@ export class BusClient {
       if (result.issues) throw new LocalValidationError(result.issues);
     }
     return this.call<PublishResult>("/api/publish", rest);
+  }
+
+  /**
+   * Publish up to 1000 messages in one request and one bus transaction — all
+   * of them or none. Dedupe applies per message.
+   */
+  async publishBatch(messages: PublishRequest[]): Promise<PublishResult[]> {
+    const { results } = await this.call<{ results: PublishResult[] }>(
+      "/api/publish/batch",
+      { messages },
+    );
+    return results;
   }
 
   /** Publish and wait for a reply, up to `waitMs`. */
@@ -341,6 +361,49 @@ export class BusClient {
       `/api/schemas/bindings?pattern=${encodeURIComponent(pattern)}`,
       undefined,
       { method: "DELETE" },
+    );
+  }
+
+  // ---------------------------------------------------------- schedules
+  /** Create or replace a cron schedule. Admin. */
+  putSchedule(request: ScheduleRequest): Promise<Schedule> {
+    const { name, ...rest } = request;
+    return this.call<Schedule>(
+      `/api/schedules/${encodeURIComponent(name)}`,
+      rest,
+      { method: "PUT" },
+    );
+  }
+  schedules(): Promise<Schedule[]> {
+    return this.call<Schedule[]>("/api/schedules");
+  }
+  schedule(name: string): Promise<Schedule> {
+    return this.call<Schedule>(`/api/schedules/${encodeURIComponent(name)}`);
+  }
+  deleteSchedule(name: string): Promise<{ deleted: string }> {
+    return this.call<{ deleted: string }>(
+      `/api/schedules/${encodeURIComponent(name)}`,
+      undefined,
+      { method: "DELETE" },
+    );
+  }
+  pauseSchedule(name: string): Promise<Schedule> {
+    return this.call<Schedule>(
+      `/api/schedules/${encodeURIComponent(name)}/pause`,
+      {},
+    );
+  }
+  resumeSchedule(name: string): Promise<Schedule> {
+    return this.call<Schedule>(
+      `/api/schedules/${encodeURIComponent(name)}/resume`,
+      {},
+    );
+  }
+  /** Fire once now, outside the cadence. Does not move `nextAt`. */
+  runSchedule(name: string): Promise<PublishResult> {
+    return this.call<PublishResult>(
+      `/api/schedules/${encodeURIComponent(name)}/run`,
+      {},
     );
   }
 

@@ -254,6 +254,10 @@ export class TenantRealtime {
       },
       ...(options.onError ? { onError: options.onError } : {}),
     })
+    // P9's floor applies from the first write, not from the first subscription: without this a
+    // primary with `logicalChanges = "row"` and nobody subscribed recorded `pk` only, until a
+    // subscriber happened to come and go. Found by the outbox relay (`docs/x6-outbox.md`).
+    this.#refreshLevel()
   }
 
   get txid(): number {

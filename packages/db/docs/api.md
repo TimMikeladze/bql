@@ -224,6 +224,10 @@ that were once refused and is gone with the last of them.
 
 Any other `SQLITE_*` extended result code travels under its own name.
 
+`FEATURE_UNAVAILABLE` (status 0) is raised on the client side by `bql.sh/search`, never by the
+server: the database's SQLite lacks sqlite-vec, the geo functions, FTS5 or R*Tree. See
+[Search helpers](#search-helpers).
+
 ---
 
 ## HTTP API
@@ -260,6 +264,7 @@ Any other `SQLITE_*` extended result code travels under its own name.
 | `POST /v1/db/:db/promote` | make this node the primary for it | admin |
 | `GET /v1/db/:db/replication` | txid, epoch, checksum, snapshot, replicas | `ro` |
 | `POST /v1/db/:db/restore` | point-in-time restore | admin |
+| `POST /v1/db/:db/reset` | reset a branch to its parent's head | admin |
 | `POST /v1/db/:db/snapshot` | force a snapshot | admin |
 | `POST /v1/db/:db/tx` | open a baton transaction | `rw` |
 | `POST /v1/db/:db/tx/:tx` | one statement in it | `rw` |
@@ -579,15 +584,39 @@ log still holds.
 ```http
 GET /v1/db     → { "open": 3, "maxOpen": 1024,
                    "databases": [ { "name": "acme", "txid": 4812, "epoch": 0, "pageSize": 4096,
-                                    "quotaBytes": 0, "createdAtMs": 1789…, "open": true } ] }
+                                    "quotaBytes": 0, "createdAtMs": 1789…, "open": true,
+                                    "parent": null, "forkedAt": null, "parentDeleted": false } ] }
 
 GET /v1/db/acme
 → { "name": "acme", "role": "primary", "sizeBytes": 81920, "walBytes": 0, "logBytes": 12043,
     "txid": 4812, "epoch": 0, "checksum": "1734…", "openConns": 2,
-    "liveQueries": 2, "subscribers": 5, "lastSnapshotTxid": 4800, "replicas": [] }
+    "liveQueries": 2, "subscribers": 5, "lastSnapshotTxid": 4800, "replicas": [],
+    "parent": null, "forkedAt": null, "parentDeleted": false }
 
 DELETE /v1/db/acme  → { "name": "acme", "deleted": true, "trash": "<dataDir>/trash/acme-1789…" }
 ```
+
+**Lineage.** Every fork — `POST /v1/db` with `from`, and a local `restore`, which forks into a new
+name — records `parent` (the source's name) and `forkedAt` (the source txid it was taken at) in the
+catalog; a created or imported database has nulls. Deleting a parent leaves its children whole:
+they keep naming it, and `parentDeleted: true` marks the dangling edge. Lineage is by name, so a
+database later created under the parent's name re-links. Cloud mode refuses forks, so there every
+database reports nulls.
+
+```http
+POST /v1/db/pr-42/reset  → 200 stats   (with "forkedAt" = the parent's head)
+```
+
+`reset` puts a branch back to its parent's current head under the same name, keeping its settings,
+epoch and creation time. The copy is built beside the branch first, so a failure leaves the branch
+untouched; then, with nothing awaited, the branch's subscriptions and transactions end (as a delete
+ends them), its directory moves to `trash/<name>-reset-<ms>` and the copy takes its place. The swap is recorded in
+the catalog before the first rename, so a crash part-way through is finished (or, if nothing had
+moved yet, undone) the next time the database is opened. A
+database that was created rather than forked is a `400`; one whose parent was deleted is a
+`404 DB_NOT_FOUND` naming the parent. The branch's txid moves to the parent's, which may be lower
+than where it was: a change-feed cursor from before a reset is from a different history.
+`docs/x2-branching.md`.
 
 On a **replica** the same body carries one more field, `"apply"`: which of design §4.5's two
 apply mechanisms is actually running, `"pages"` or `"wal"`. It is normally `[replication] apply`,
@@ -762,6 +791,71 @@ that survives — never one a surviving snapshot would need to replay from.
 with a `Content-Disposition` naming `<db>-<txid>.db`. `POST /v1/db/{db}/import` takes a raw SQLite
 file as the body and files it as a new database called `{db}`; a body that does not begin with the
 SQLite header is a `400`, a name that exists is a `409`.
+
+### Outbox
+
+`[outbox]` publishes every row change a matching database commits to a subject on a
+[bql.sh/bus](../../bus/README.md), from the durable log (`docs/x6-outbox.md`). It needs
+`[replication] logicalChanges` — the relay publishes the rows a version-2 record carries — and a
+node with rules and no `logicalChanges` **refuses to start**, naming both keys.
+
+```toml
+[replication]
+logicalChanges = "row"
+
+[outbox]
+batchSize = 256
+
+[[outbox.rules]]
+db = "app-*"                  # database-name glob, `*` and `?`
+busUrl = "http://bus:4317"
+token = "${BUS_TOKEN}"        # or tokenEnv = "BUS_TOKEN"
+subject = "db.{db}.{table}"   # default; each part sanitised to [A-Za-z0-9_-]
+include = "row"               # "pk" | "row" | "row+old"; refused if above logicalChanges
+workspace = ""                # x-bus-workspace, for an admin token
+name = ""                     # the cursor's name; derived from busUrl and subject when empty
+```
+
+`BQL_OUTBOX_RULES='[{"db":"app-*","busUrl":"http://bus:4317","tokenEnv":"BUS_TOKEN"}]'` is the same
+rule from the environment.
+
+One message per row change, published with `POST /api/publish/batch` (one bus transaction per
+batch; a bus without the route is published to one message at a time):
+
+| field | |
+|---|---|
+| `subject` | the rule's template, e.g. `db.app-1.users` |
+| `key` | `<db>.<table>`, the bus ordering key |
+| `dedupeKey` | `<db>:<generation>:<txid>:<postChecksum>:<seq>:<i>` — the change's place in the log and the database state it produced. A txid alone is reused after a branch `reset`, a rewind, or a failover to a replica; the checksum keeps those apart while a crash-restart, or a promoted replica re-reading records it shares with the old primary, produce the same key and dedupe |
+| `body` | `{ db, table, op, txid, seq, i, rowid, pk?, row?, old?, committedAt, truncated?, oversized? }` — `seq` and `i` are the statement and the row within it; `committedAt` is epoch ms. A change whose JSON alone is over 4 MiB goes without `row`/`old`, marked `oversized` |
+
+**Exactly once on the bus.** The cursor (`<db dir>/outbox.json`, one per rule) is written only
+after the bus acknowledged every message up to it; a crash in between republishes the batch and
+the dedupe keys make the repeat a no-op. A transaction with more rows than a batch goes out in
+chunks of at most `batchSize`, and the cursor moves only after the last one. A bus that answers
+`413` (its request ceiling, or a `--publish-rate` burst smaller than the batch) gets the batch in
+halves. A drain fsyncs the log before reading it, so nothing a
+crash could take back is ever published. A bus that fails is retried with jittered backoff up to
+`maxBackoffMs`; the cursor does not move.
+
+**Never a silent skip.** A cursor that log retention overtook is logged as `bql: OUTBOX_GAP <db>
+(<rule>): transactions a..b were retained away…`, counted in `bql_outbox_gaps_total`, and jumps to
+the first retained record. Records written before `logicalChanges` was on carry no rows and are
+counted in `bql_outbox_skipped_total`. A transaction past `maxRowsPerTxn` publishes what was
+recorded with `truncated: true` on each message.
+
+Primary only: a replica's copy is never relayed, and a promoted node's relay starts from the start
+of its own log — the dedupe keys make that safe. A cursor carries the checksum at its txid; one the
+log no longer agrees with (the database reached that txid by another history) is discarded and the
+log republished, the shared part deduping. A fork or a reset branch with no cursor starts at its
+fork point. Databases matching a rule are picked up when they
+are created or opened; one that closed while behind is reopened by the sweep.
+
+`GET /v1/db/{db}/replication` carries `outbox: [{ rule, busUrl, subject, cursor, lag, published,
+skipped, gaps, lastError, lastPublishedAt, backoffMs }]` (null with no rules). `/metrics` adds
+`bql_outbox_published_total`, `bql_outbox_gaps_total`, `bql_outbox_skipped_total`,
+`bql_outbox_truncated_total`, `bql_outbox_errors_total` and the gauges `bql_outbox_behind` and
+`bql_outbox_lag_max`.
 
 ### Tokens
 
@@ -1414,6 +1508,7 @@ await admin.fork("acme-copy", "acme", 4812)           // a txid, or an ISO-8601 
 await admin.stat("acme")                              // size, position, subscribers, replicas
 await admin.configure("acme", { foreignKeys: true })  // null on a field follows the config again
 await admin.delete("acme")                            // → { name, deleted, trash }
+await admin.reset("pr-42")                            // a branch back to its parent's head
 
 await admin.snapshot("acme")                          // → { snapshotId, txid, bytes, checksum, … }
 await admin.restore("acme", { at: 4800, into: "acme-recovered" })
@@ -1433,6 +1528,22 @@ await admin.generations("acme")
 
 const { token, jti, exp } = await admin.mintToken({ dbs: ["acme"], scope: "ro", ttlMs: 86_400_000 })
 await admin.revokeToken(jti)
+```
+
+`diffSchema(a, b)` compares two databases through anything with `execute` — two `client.db()`
+handles, or the embedded `bq.db()` — with no route of its own: tables, columns (type, not null,
+default, primary key), indexes, triggers and views, plus each table's `count(*)` on both sides
+(`{ rows: false }` skips the scans). FTS5, vec0 and R*Tree shadow tables are left out.
+`formatSchemaDiff` renders it the way `bql db diff` prints it.
+
+```ts
+import { diffSchema, formatSchemaDiff } from "bql.sh/client"
+
+const diff = await diffSchema(client.db("main"), client.db("pr-42"))
+diff.sameSchema            // false
+diff.tables.changed[0]     // { name: "todos", columns: { added: [{ name: "due", … }], … }, … }
+diff.rows                  // [{ table: "todos", a: 120, b: 122 }, …]
+console.log(formatSchemaDiff(diff, { a: "main", b: "pr-42" }))
 ```
 
 Two rules worth knowing. **`restore` always builds a new database**, here as everywhere else, so
@@ -1482,6 +1593,56 @@ an ORM that throws on an integer past 2^53 is worse than one that hands back a b
   still collide with `409 TX_BUSY`.
 - **Errors keep bql.sh's `code`.** Kysely propagates the `BqlClientError`; Drizzle wraps it, so
   the bql.sh error is the `cause`.
+
+### Vector columns in Drizzle
+
+`vector({ dimensions })` (or `vector("name", { dimensions })`) from `bql.sh/drizzle` is a `blob`
+column holding `bql.sh/search`'s float32 little-endian encoding. It reads back as `number[]` and
+throws on a write of the wrong length. Drizzle does not create `vec0` tables; declare one with
+`vectorIndex` and map it with `sqliteTable` to read or write it through Drizzle.
+
+---
+
+## Search helpers
+
+`bql.sh/search`. SQL builders, not routes: each helper takes a `SearchDb` — anything with
+`execute(sql, args)` answering rows (a client or embedded `Db`, `bq.db(name).sync`, a `Tx`) and
+optionally `batch(items)` — and runs ordinary statements through it. Multi-statement steps
+(`create`, `upsert`, `drop`, `rebuild`) go through one atomic `batch` when the handle has one.
+
+| Function | Returns |
+|---|---|
+| `vectorIndex(db, { table, dimensions, metric?: "cosine" \| "l2" \| "l1", metadata?: { col: "integer" \| "float" \| "text" \| "boolean" }, id?: "integer" \| "text" })` | `VectorIndex`: `create()`, `drop()`, `upsert(id, vector, metadata?)`, `delete(id)`, `search(vector, { k? = 10, where? })` → `{ id, distance, ...metadata }[]`, nearest first. `where` is `{ col: value }` or `{ col: { ne, gt, gte, lt, lte } }`, applied inside the KNN. `k` ≤ 4096. |
+| `toVector(number[] \| Float32Array)` / `fromVector(blob)` | `Uint8Array` / `Float32Array`. Float32 little-endian, vec0's format. |
+| `hybridSearch(db, { fts, vector, query, embedding, k? = 10, candidates? = 4k, weights?: { fts?, vector? } })` | `{ id, score, ftsRank, vectorRank, bm25, distance }[]`, best first. One statement; `score = Σ weight / (60 + rank)` over the legs that returned the id. The FTS rowid and the vector id must be the same integer. |
+| `ftsIndex(db, { table, columns, source?, sourceKey? = "rowid", tokenizer? })` | `FtsIndex`: `create()` (with `source`: external-content, `_ai`/`_ad`/`_au` triggers, filled from existing rows the first time), `drop()`, `rebuild()`, `upsert(rowid, doc)`/`delete(rowid)` (no `source` only), `search(query, { limit? = 20, offset?, highlight?, snippet? })` → `{ rowid, rank, ...columns, highlight?, snippet? }[]` ordered by bm25 (`rank`, lower is better). |
+| `ftsQuote(text, { mode?: "all" \| "any" \| "phrase", prefix? })` | An FTS5 query in which every word of `text` is a quoted string. Empty text gives `""`, which matches nothing. |
+| `geoIndex(db, { table, source?, lat? = "lat", lon? = "lon", sourceKey? = "rowid" })` | `GeoIndex`: `create()`, `drop()`, `rebuild()`, `upsert(id, lat, lon)`/`delete(id)` (no `source` only), `within({ minLat, maxLat, minLon, maxLon }, { limit? })` → `{ id, lat, lon }[]` (`minLon > maxLon` crosses the antimeridian), `near(lat, lon, radiusM, { limit? = 100 })` → `{ id, lat, lon, distance }[]` in metres, nearest first. |
+| `searchFeatures(db)` | `{ vec, geo, fts5, rtree }` booleans, one probe statement each. |
+
+Errors: a bad option or identifier is a `BqlClientError` with `code: "CLIENT"`, thrown before
+anything is sent; a missing capability is `FeatureUnavailableError` (`code: "FEATURE_UNAVAILABLE"`,
+`feature`). Table and column names must match `[A-Za-z_][A-Za-z0-9_]*` and may not start with
+`sqlite_`.
+
+SQL functions on every connection of the vendored library, usable directly:
+`vec_*` and the `vec0` module (sqlite-vec 0.1.9, without `vec_npy_each`),
+`bql_haversine(lat1, lon1, lat2, lon2)` (metres, mean Earth radius 6,371,008.8 m) and
+`bql_bbox_min_lat` / `_max_lat` / `_min_lon` / `_max_lon(lat, lon, radiusM)` — the bounding box of
+the circle, with the full longitude range when it reaches a pole or crosses the antimeridian. All
+are deterministic and innocuous, so triggers and views may call them under
+`trusted_schema = off`. `sqlite().features.vec` / `.geo` say whether the loaded library has them.
+
+Shadow tables — FTS5's `_data`/`_idx`/…, vec0's `_chunks`/`_vector_chunksNN`/…, R*Tree's
+`_node`/`_parent`/`_rowid` — are left out of the Data API, their rows are dropped from the change
+feed (and the P9 logical record), and a live query over the virtual table is invalidated when they
+change. With a per-table token ACL, a shadow table is judged by its owning virtual table's entry
+for the same action (read, or `rw` for a write). Ownership is the exact set of tables the module
+created for that virtual table's options, not the name, so an ordinary `docs_fts_content` beside an
+external-content `docs_fts` is not covered by its grant. A table-ACL request runs with
+`SQLITE_DBCONFIG_DEFENSIVE`, so a write grant reaches the storage only through the module (a
+trigger's insert into the index), never directly; on a library without the vendored shim the rule
+covers reads only.
 
 ---
 
@@ -1555,6 +1716,10 @@ bql db list
 bql db stat <name>
 bql db delete <name>
 bql db fork <name> --from <db>[@<txid|time>]
+bql db branch <name> --from <db>[@<txid|time>]
+bql db branches [<db>]
+bql db diff <a> <b>
+bql db reset <branch>
 bql snapshot <db>
 bql restore <db> --at <txid|time> [--into <name>]
 bql restore <db> --from s3://bucket/prefix [--at <txid|time>] [--into <name>] [--generation G]
@@ -1582,6 +1747,27 @@ writer for it.
 `--ttl` takes `ms`, `s`, `m`, `h`, `d`, `w` suffixes. `--tables` is `name:r,name:rw`. `--from` and
 `--at` take a txid or an ISO-8601 timestamp, so `bql db fork x --from y@2026-09-11T10:00:00Z`
 works. `shell` is a REPL over the WebSocket protocol; `exec` is the one-shot a script wants.
+
+**Branches.** `db branch` is `fork` under the name a per-PR workflow uses; both record lineage.
+`db branches <db>` lists that database's children, and bare `db branches` every database that has
+a parent (a deleted parent shows as `name (deleted)`). `db diff <a> <b>` prints `diffSchema`'s
+text — `+` only in `b`, `-` only in `a`, `~` in both but different — or its JSON with `--json`.
+`db reset <branch>` is `POST /v1/db/:db/reset`.
+
+```sh
+bql db branch pr-42 --from main
+bql db diff main pr-42
+--- main
++++ pr-42
+tables
+  ~ todos
+      + due TEXT NOT NULL DEFAULT ''
+indexes
+  + todos_due on todos(due)
+rows
+  todos  120 → 122 (+2)
+bql db reset pr-42
+```
 
 `serve --replica-of <url>` makes the node a replica of that primary: it needs the same
 `--cluster-secret`, and `--follow a,b` narrows what it tracks from the default of every database
@@ -1948,6 +2134,10 @@ the canonical one wins when both are set.
 | `[s3] uploadWaitMs` | `5000` | `BQL_S3_UPLOAD_WAIT_MS` | — |
 | `[s3] maxPendingBytes` | `67108864` | `BQL_S3_MAX_PENDING_BYTES` | — |
 | `[s3] retries` | `4` | `BQL_S3_RETRIES` | — |
+| `[outbox] rules` | `[]` (off); `[[outbox.rules]]` tables — see [Outbox](#outbox) | `BQL_OUTBOX_RULES` (a JSON array) | — |
+| `[outbox] batchSize` | `256` messages per publish; clamped to 1000 | `BQL_OUTBOX_BATCH_SIZE` | — |
+| `[outbox] intervalMs` | `1000` | `BQL_OUTBOX_INTERVAL_MS` | — |
+| `[outbox] maxBackoffMs` | `30000` | `BQL_OUTBOX_MAX_BACKOFF_MS` | — |
 | `[api] enabled` | `true` | `BQL_API_ENABLED` | — |
 | `[api] prefix` | `"api"` (one path segment) | `BQL_API_PREFIX` | — |
 | `[api] defaultLimit` | `100` | `BQL_API_DEFAULT_LIMIT` | — |

@@ -1,0 +1,137 @@
+name: bql.sh branch
+description: >-
+  Create, reset or delete a bql.sh database branch for a pull request, over the server's HTTP API
+  with curl. No npm install, no Bun. See packages/db/docs/x2-branching.md.
+
+inputs:
+  url:
+    description: Base URL of the bql.sh server, e.g. https://db.example.com
+    required: true
+  token:
+    description: The server's admin key (keep it in a secret).
+    required: true
+  source:
+    description: The database to branch from.
+    required: false
+    default: main
+  branch:
+    description: >-
+      Branch name. Default `pr-<number>` on a pull_request event, else the ref name. Either way it
+      is sanitised to a valid database name: [a-z0-9][a-z0-9-_]{0,63}.
+    required: false
+    default: ""
+  action:
+    description: >-
+      `create` (idempotent) or `delete` (a missing branch is not an error). `delete` only ever
+      removes a database whose stat shows a parent, and never the source itself.
+    required: false
+    default: create
+  on-exists:
+    description: "What `create` does when the branch already exists: `keep` it, or `reset` it to the source's head."
+    required: false
+    default: keep
+
+outputs:
+  name:
+    description: The branch's database name.
+    value: ${{ steps.run.outputs.name }}
+  created:
+    description: "`true` when this run created the branch, `false` when it already existed or was deleted."
+    value: ${{ steps.run.outputs.created }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        BQL_URL: ${{ inputs.url }}
+        BQL_TOKEN: ${{ inputs.token }}
+        BQL_SOURCE: ${{ inputs.source }}
+        BQL_BRANCH: ${{ inputs.branch }}
+        BQL_ACTION: ${{ inputs.action }}
+        BQL_ON_EXISTS: ${{ inputs.on-exists }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REF_NAME: ${{ github.head_ref || github.ref_name }}
+      run: |
+        set -euo pipefail
+
+        # A database name is [a-z0-9][a-z0-9-_]{0,63}: lower-case, anything else becomes a dash,
+        # runs of dashes collapse, leading and trailing ones go, and it is cut to 64.
+        sanitize() {
+          printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/-+/-/g; s/^[-_]+//' \
+            | cut -c1-64 | sed -E 's/-+$//'
+        }
+
+        name="$BQL_BRANCH"
+        if [ -z "$name" ]; then
+          if [ -n "${PR_NUMBER:-}" ]; then name="pr-$PR_NUMBER"; else name="$REF_NAME"; fi
+        fi
+        name="$(sanitize "$name")"
+        if ! printf '%s' "$name" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$'; then
+          echo "::error::cannot make a database name out of '$BQL_BRANCH${PR_NUMBER:-}${REF_NAME}'"
+          exit 1
+        fi
+        if ! printf '%s' "$BQL_SOURCE" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$'; then
+          echo "::error::source '$BQL_SOURCE' is not a valid database name"
+          exit 1
+        fi
+        # The branch is never the database it comes from: on a push to main the ref fallback would
+        # otherwise name `main`, and `delete` would remove it.
+        if [ "$name" = "$BQL_SOURCE" ]; then
+          echo "::error::branch name '$name' is the source database; refusing to $BQL_ACTION it"
+          exit 1
+        fi
+        echo "name=$name" >> "$GITHUB_OUTPUT"
+
+        base="${BQL_URL%/}"
+        body="$(mktemp)"
+        call() { # method path [json]
+          if [ $# -ge 3 ]; then
+            curl -sS -o "$body" -w '%{http_code}' -X "$1" "$base$2" \
+              -H "authorization: Bearer $BQL_TOKEN" -H 'content-type: application/json' --data "$3"
+          else
+            curl -sS -o "$body" -w '%{http_code}' -X "$1" "$base$2" \
+              -H "authorization: Bearer $BQL_TOKEN"
+          fi
+        }
+
+        case "$BQL_ACTION" in
+          create)
+            status="$(call POST /v1/db "{\"name\":\"$name\",\"from\":{\"db\":\"$BQL_SOURCE\"}}")"
+            if [ "$status" = 201 ]; then
+              echo "created=true" >> "$GITHUB_OUTPUT"
+              echo "branched $BQL_SOURCE into $name"
+            elif [ "$status" = 409 ]; then
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              if [ "$BQL_ON_EXISTS" = reset ]; then
+                status="$(call POST "/v1/db/$name/reset")"
+                if [ "$status" != 200 ]; then cat "$body"; echo "::error::reset $name: HTTP $status"; exit 1; fi
+                echo "reset $name to the head of its parent"
+              else
+                echo "$name already exists; kept"
+              fi
+            else
+              cat "$body"; echo; echo "::error::create $name from $BQL_SOURCE: HTTP $status"; exit 1
+            fi
+            ;;
+          delete)
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            # Only a branch: a database with lineage. One that was created, not forked, is somebody's
+            # real data, whatever its name looks like.
+            status="$(call GET "/v1/db/$name")"
+            if [ "$status" = 404 ]; then echo "$name does not exist; nothing to delete"; exit 0; fi
+            if [ "$status" != 200 ]; then cat "$body"; echo; echo "::error::stat $name: HTTP $status"; exit 1; fi
+            if ! grep -Eq '"parent":"[a-z0-9][a-z0-9_-]*"' "$body"; then
+              echo "::error::$name has no parent, so it is not a branch; refusing to delete it"
+              exit 1
+            fi
+            status="$(call DELETE "/v1/db/$name")"
+            if [ "$status" = 200 ]; then echo "deleted $name"
+            elif [ "$status" = 404 ]; then echo "$name does not exist; nothing to delete"
+            else cat "$body"; echo; echo "::error::delete $name: HTTP $status"; exit 1
+            fi
+            ;;
+          *)
+            echo "::error::action must be create or delete, got '$BQL_ACTION'"; exit 1 ;;
+        esac

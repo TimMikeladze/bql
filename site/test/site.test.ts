@@ -119,7 +119,7 @@ test("every capability section has id, h2, 1–3 sentences with inline code", ()
     expect(sec).toBeTruthy()
     const sentences = sec![1]!.replace(/<code>.*?<\/code>/g, "x").split(/[.](\s|$)/).filter((s) => s.trim().length > 1)
     expect(sentences.length).toBeGreaterThanOrEqual(1)
-    expect(sentences.length).toBeLessThanOrEqual(3)
+    expect(sentences.length).toBeLessThanOrEqual(2) // terse by design: the artefact carries the rest
     expect(sec![1]).toContain("<code>")
   }
 })
@@ -166,5 +166,21 @@ test("hero is centred with both audience panels", () => {
 test("New pills carry a release date within 90 days", () => {
   for (const c of site.footer) for (const l of c.links) if (l.released) {
     expect(Date.now() - Date.parse(l.released)).toBeLessThan(90 * 864e5)
+  }
+})
+
+test("chapter rules open each group, and the nav anchors land on them", () => {
+  for (const c of Object.values(site.chapters)) expect(index).toContain(`<div class="chapter" id="${c.id}">`)
+  for (const [, id] of index.matchAll(/href="\/#([^"]+)"/g)) expect(index).toContain(`id="${id}"`)
+  const order = site.capabilities.map((c) => index.indexOf(`id="${c.id}"`))
+  expect(order).toEqual([...order].sort((a, b) => a - b))
+  expect(index.indexOf('id="database"')).toBeLessThan(index.indexOf(`id="${site.capabilities[0]!.id}"`))
+})
+
+test("pairs render both artefacts", () => {
+  for (const { cap, demo } of m.capabilities) if (demo.kind === "pair") {
+    const sec = new RegExp(`id="${cap.id}"[\\s\\S]*?</section>`).exec(index)![0]
+    expect(sec).toContain('class="pair')
+    for (const f of demo.items) expect(sec).toContain(f.kind === "terminal" ? `$ ${esc(f.cmd)}` : f.kind === "snippet" ? `>${esc(f.label)}<` : "<table")
   }
 })

@@ -25,6 +25,8 @@ import type {
   Quota,
   RegisterConsumer,
   Response,
+  Schedule,
+  ScheduleRequest,
   Stats,
   SchemaBinding,
   SchemaMode,
@@ -36,6 +38,7 @@ import type {
 } from "../shared/protocol";
 import { DEFAULT_WORKSPACE, MAX_PRIORITY, MIN_PRIORITY } from "../shared/protocol";
 import { type BlobStore, BlobMissingError } from "./blobs";
+import { assertTimeZone, CronError, nextFire, parseCron } from "./cron";
 import { fault } from "./faults";
 import { type MetricsSink, noopMetrics } from "./metrics";
 import {
@@ -344,6 +347,34 @@ export const MIGRATIONS: Migration[] = [
       "INSERT OR IGNORE INTO cluster (id, epoch, role, upstream, applied_seq, updated_at) VALUES (1, 0, 'leader', NULL, 0, 0)",
     ],
   },
+  {
+    version: 9,
+    statements: [
+      // Cron on the bus. A fire is an ordinary publish whose dedupe key is the
+      // schedule and the scheduled instant, so this table only has to say what
+      // is due next — the log is what says what already happened.
+      `CREATE TABLE IF NOT EXISTS schedules (
+        workspace TEXT NOT NULL,
+        name TEXT NOT NULL,
+        cron TEXT NOT NULL,
+        tz TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        headers TEXT NOT NULL,
+        next_at INTEGER,
+        last_at INTEGER,
+        catch_up TEXT NOT NULL,
+        paused INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        -- A failing fire backs off here instead of being retried every sweep.
+        retry_at INTEGER,
+        failures INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (workspace, name))`,
+      "CREATE INDEX IF NOT EXISTS schedules_due ON schedules(next_at) WHERE paused = 0",
+    ],
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
@@ -432,6 +463,56 @@ interface SubscriptionRow {
   quarantined_at: number | null;
 }
 
+interface ScheduleRow {
+  workspace: string;
+  name: string;
+  cron: string;
+  tz: string;
+  subject: string;
+  body: string;
+  headers: string;
+  next_at: number | null;
+  last_at: number | null;
+  catch_up: string;
+  paused: number;
+  last_error: string | null;
+  retry_at: number | null;
+  failures: number;
+  created_at: number;
+  updated_at: number;
+}
+
+const SCHEDULE_NAME = /^[A-Za-z0-9][\w.-]{0,99}$/;
+/**
+ * How late a fire may be and still count as on time under `catchUp: "none"`.
+ * The sweep runs every second, so anything later than this was missed rather
+ * than merely delayed by a busy tick.
+ */
+const ON_TIME_MS = 60_000;
+/** Retry pacing for a fire that failed to publish: 2 s doubling to 5 min. */
+const retryDelayMs = (failures: number) =>
+  Math.min(300_000, 1000 * 2 ** Math.min(failures, 20));
+
+function toSchedule(row: ScheduleRow): Schedule {
+  return {
+    workspace: row.workspace,
+    name: row.name,
+    cron: row.cron,
+    tz: row.tz,
+    subject: row.subject,
+    body: JSON.parse(row.body) as Json,
+    headers: parse<Headers>(row.headers, {}),
+    catchUp: row.catch_up === "none" ? "none" : "latest",
+    paused: row.paused === 1,
+    nextAt: row.next_at,
+    lastAt: row.last_at,
+    lastError: row.last_error,
+    retryAt: row.retry_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 interface DeliveryRow {
   id: string;
   subscription_id: string;
@@ -494,6 +575,8 @@ export class BusStore {
   /** Set on a follower, and on a leader whose epoch has been fenced out. */
   private readOnly = false;
   private readOnlyReason = "read-only";
+  /** The schedule pass in flight, so overlapping sweeps share one. */
+  private firing: Promise<number> | null = null;
 
   constructor(path: string, options: StoreOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -549,7 +632,7 @@ export class BusStore {
     let current = applied ?? 0;
     if (applied === null && this.hasTable("messages")) {
       this.db.run(
-        "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)",
+        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (1, ?)",
         [this.now()],
       );
       current = 1;
@@ -568,13 +651,23 @@ export class BusStore {
 
     for (const migration of MIGRATIONS) {
       if (migration.version <= current) continue;
+      // IMMEDIATE, and the version re-read inside it: two processes opening
+      // a new file at once (a follower creating its database while a tool
+      // opens it) otherwise both apply a migration and one dies on the
+      // version row's primary key.
       this.db.transaction(() => {
+        const applied = (
+          this.db.query("SELECT MAX(version) AS version FROM schema_version").get() as {
+            version: number | null;
+          }
+        ).version;
+        if ((applied ?? 0) >= migration.version) return;
         for (const statement of migration.statements) this.db.run(statement);
         this.db.run(
           "INSERT INTO schema_version (version, applied_at) VALUES (?,?)",
           [migration.version, this.now()],
         );
-      })();
+      }).immediate();
     }
   }
 
@@ -726,6 +819,35 @@ export class BusStore {
       },
     });
     return result;
+  }
+
+  /**
+   * Publish several messages in one transaction: all of them or none.
+   *
+   * What a relay wants — the db outbox publishes a batch of row changes and
+   * advances its cursor only once the whole batch is in, so one request and one
+   * commit per batch is the difference between keeping up and not. Dedupe
+   * applies per message, including between two messages of the same batch.
+   */
+  async publishBatch(
+    workspace: string,
+    requests: PublishRequest[],
+    publisher: string | null = null,
+  ): Promise<PublishResult[]> {
+    this.assertWritable();
+    const started = this.now();
+    const prepared: PreparedMessage[] = [];
+    for (const request of requests)
+      prepared.push(await this.prepare(workspace, request));
+    const results = this.db.transaction(() =>
+      prepared.map((one) => this.insert(workspace, one, publisher)),
+    )();
+    this.metrics.histogram(
+      "bql-bus.publish.duration",
+      this.now() - started,
+      { workspace },
+    );
+    return results;
   }
 
   /** Record one span, if an exporter was configured. */
@@ -2556,6 +2678,7 @@ export class BusStore {
       .query("SELECT COUNT(*) AS n FROM messages WHERE workspace=?")
       .get(workspace) as { n: number };
     return {
+      workspace,
       subscriptions,
       consumers: this.consumers(workspace),
       messages: messages.n,
@@ -2935,6 +3058,347 @@ export class BusStore {
       version: latest.version,
       violations: this.validatorFor(latest)(body),
     };
+  }
+
+  // ------------------------------------------------------------ schedules
+
+  private scheduleRow(workspace: string, name: string): ScheduleRow {
+    const row = this.db
+      .query("SELECT * FROM schedules WHERE workspace=? AND name=?")
+      .get(workspace, name) as ScheduleRow | null;
+    if (!row) throw new BusError(`no such schedule '${name}'`, 404);
+    return row;
+  }
+
+  /** `nextFire`, with a bad expression or zone as a 400 rather than a 500. */
+  private nextFireOf(cron: string, tz: string, afterMs: number): number {
+    try {
+      return nextFire(cron, tz, afterMs);
+    } catch (error) {
+      if (error instanceof CronError) throw new BusError(error.message, 400);
+      throw error;
+    }
+  }
+
+  /**
+   * Create or replace a schedule.
+   *
+   * Changing the expression or zone recomputes the next fire from now;
+   * rewriting only the payload keeps it, so an edit does not skip a fire that
+   * was about to happen.
+   */
+  upsertSchedule(workspace: string, request: ScheduleRequest): Schedule {
+    this.assertWritable();
+    if (!SCHEDULE_NAME.test(request.name))
+      throw new BusError(`invalid schedule name '${request.name}'`, 400);
+    const tz = request.tz ?? "UTC";
+    try {
+      parseCron(request.cron);
+      assertTimeZone(tz);
+    } catch (error) {
+      if (error instanceof CronError) throw new BusError(error.message, 400);
+      throw error;
+    }
+    assertSubject(request.subject);
+    const catchUp = request.catchUp ?? "latest";
+    if (catchUp !== "latest" && catchUp !== "none")
+      throw new BusError("catchUp must be latest or none", 400);
+    const body = JSON.stringify(request.body ?? null);
+    if (body.length > this.inlineMaxBytes)
+      throw new BusError(
+        `a schedule body is stored inline and may be at most ${this.inlineMaxBytes} bytes`,
+        413,
+      );
+    const now = this.now();
+    const paused = request.paused === true;
+    // Validates that the expression can fire at all, before anything is written.
+    const computed = this.nextFireOf(request.cron, tz, now);
+    this.db.transaction(() => {
+      const existing = this.db
+        .query("SELECT * FROM schedules WHERE workspace=? AND name=?")
+        .get(workspace, request.name) as ScheduleRow | null;
+      const keep =
+        existing &&
+        !paused &&
+        existing.paused === 0 &&
+        existing.cron === request.cron.trim() &&
+        existing.tz === tz;
+      this.db.run(
+        `INSERT INTO schedules (workspace, name, cron, tz, subject, body, headers, next_at, last_at, catch_up, paused, last_error, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)
+         ON CONFLICT(workspace, name) DO UPDATE SET
+           cron=excluded.cron, tz=excluded.tz, subject=excluded.subject,
+           body=excluded.body, headers=excluded.headers, next_at=excluded.next_at,
+           catch_up=excluded.catch_up, paused=excluded.paused,
+           retry_at=NULL, failures=0, updated_at=excluded.updated_at`,
+        [
+          workspace,
+          request.name,
+          request.cron.trim(),
+          tz,
+          request.subject,
+          body,
+          JSON.stringify(request.headers ?? {}),
+          paused ? null : keep ? existing.next_at : computed,
+          existing?.last_at ?? null,
+          catchUp,
+          paused ? 1 : 0,
+          existing?.created_at ?? now,
+          now,
+        ],
+      );
+    })();
+    return this.schedule(workspace, request.name);
+  }
+
+  schedule(workspace: string, name: string): Schedule {
+    return toSchedule(this.scheduleRow(workspace, name));
+  }
+
+  schedules(workspace: string): Schedule[] {
+    return (
+      this.db
+        .query("SELECT * FROM schedules WHERE workspace=? ORDER BY name")
+        .all(workspace) as ScheduleRow[]
+    ).map(toSchedule);
+  }
+
+  deleteSchedule(workspace: string, name: string): { deleted: string } {
+    this.assertWritable();
+    this.scheduleRow(workspace, name);
+    this.db.run("DELETE FROM schedules WHERE workspace=? AND name=?", [
+      workspace,
+      name,
+    ]);
+    return { deleted: name };
+  }
+
+  /**
+   * Pause or resume.
+   *
+   * Resuming computes the next fire from now: the fires a pause skipped were
+   * skipped on purpose, so they are not caught up.
+   */
+  pauseSchedule(workspace: string, name: string, paused: boolean): Schedule {
+    this.assertWritable();
+    const row = this.scheduleRow(workspace, name);
+    const now = this.now();
+    this.db.run(
+      "UPDATE schedules SET paused=?, next_at=?, retry_at=NULL, failures=0, updated_at=? WHERE workspace=? AND name=?",
+      [
+        paused ? 1 : 0,
+        paused ? null : this.nextFireOf(row.cron, row.tz, now),
+        now,
+        workspace,
+        name,
+      ],
+    );
+    return this.schedule(workspace, name);
+  }
+
+  /** Headers every fire carries, on top of the schedule's own. */
+  private scheduleHeaders(row: ScheduleRow, fireAt: number): Headers {
+    return {
+      ...parse<Headers>(row.headers, {}),
+      "schedule-name": row.name,
+      "schedule-at": new Date(fireAt).toISOString(),
+    };
+  }
+
+  /**
+   * Fire a schedule now, outside its cadence.
+   *
+   * Not deduplicated and does not move `nextAt`: "run it now" is a manual
+   * action, and it should neither swallow nor be swallowed by the next
+   * scheduled fire.
+   */
+  async runSchedule(workspace: string, name: string): Promise<PublishResult> {
+    const row = this.scheduleRow(workspace, name);
+    return this.publish(workspace, {
+      subject: row.subject,
+      body: JSON.parse(row.body) as Json,
+      headers: { ...this.scheduleHeaders(row, this.now()), "schedule-manual": "true" },
+    });
+  }
+
+  /**
+   * The most recent fire at or before `now`, for `catchUp: "latest"`.
+   *
+   * Widening windows rather than stepping from `next_at`: a minutely schedule
+   * back from a week of downtime would otherwise walk ten thousand fires to
+   * find the one it keeps.
+   */
+  private latestFire(row: ScheduleRow, now: number): number {
+    const from = row.next_at!;
+    for (const span of [3_600_000, 86_400_000, 31 * 86_400_000, 366 * 86_400_000, Infinity]) {
+      let fire = nextFire(row.cron, row.tz, Math.max(from - 1, now - span));
+      if (fire > now) continue;
+      for (;;) {
+        const next = nextFire(row.cron, row.tz, fire);
+        if (next > now) return fire;
+        fire = next;
+      }
+    }
+    return from;
+  }
+
+  /**
+   * Publish every schedule that is due. Runs from the sweep.
+   *
+   * On the leader only: a follower is read-only, and so is a leader that has
+   * been fenced out. Each fire is a publish whose dedupe key is the schedule
+   * and its scheduled instant, committed in one transaction with the move to
+   * the next fire — so a double sweep finds nothing due, and a promoted
+   * follower whose schedule row lags the log it replicated re-derives the same
+   * key and gets the existing message back rather than a second one.
+   */
+  fireSchedules(): Promise<number> {
+    this.firing ??= this.fireDue().finally(() => {
+      this.firing = null;
+    });
+    return this.firing;
+  }
+
+  private async fireDue(): Promise<number> {
+    if (this.readOnly || this.cluster().role !== "leader") return 0;
+    const now = this.now();
+    let fired = 0;
+    // Batches until nothing is due. Every row a batch touches leaves the due
+    // set — its `next_at` moves past now, or a failure parks it behind
+    // `retry_at` — so a hundred failing schedules cannot hold a healthy one
+    // behind them by always sorting first. The batch count is a backstop.
+    for (let batch = 0; batch < 1000; batch++) {
+      const due = this.db
+        .query(
+          `SELECT * FROM schedules
+            WHERE paused = 0 AND next_at IS NOT NULL AND next_at <= ?1
+              AND (retry_at IS NULL OR retry_at <= ?1)
+            ORDER BY next_at LIMIT 100`,
+        )
+        .all(now) as ScheduleRow[];
+      if (due.length === 0) break;
+      fired += await this.fireBatch(due, now);
+    }
+    return fired;
+  }
+
+  private async fireBatch(due: ScheduleRow[], now: number): Promise<number> {
+    let fired = 0;
+    for (const row of due) {
+      const labels = { workspace: row.workspace };
+      let fireAt: number | null;
+      let next: number;
+      try {
+        fireAt =
+          row.catch_up === "none"
+            ? now - row.next_at! <= ON_TIME_MS
+              ? row.next_at!
+              : null
+            : this.latestFire(row, now);
+        next = nextFire(row.cron, row.tz, now);
+      } catch (error) {
+        // An expression that stopped being able to fire: park it with the
+        // reason rather than re-reading it every second.
+        this.db.run(
+          "UPDATE schedules SET next_at=NULL, retry_at=NULL, last_error=? WHERE workspace=? AND name=?",
+          [String(error instanceof Error ? error.message : error), row.workspace, row.name],
+        );
+        continue;
+      }
+      if (fireAt === null) {
+        this.metrics.counter("bql-bus.schedules.skipped", 1, labels);
+        this.db.run(
+          "UPDATE schedules SET next_at=?, retry_at=NULL, failures=0 WHERE workspace=? AND name=? AND next_at=?",
+          [next, row.workspace, row.name, row.next_at],
+        );
+        continue;
+      }
+      try {
+        const prepared = await this.prepare(row.workspace, {
+          subject: row.subject,
+          body: JSON.parse(row.body) as Json,
+          headers: this.scheduleHeaders(row, fireAt),
+          dedupeKey: `schedule:${row.name}:${fireAt}`,
+        });
+        const published = this.db.transaction(() => {
+          // The row may have been paused, edited or deleted while the body was
+          // being written; only the version that was read gets fired.
+          const moved = this.db.run(
+            `UPDATE schedules SET next_at=?, last_at=?, last_error=NULL, retry_at=NULL, failures=0
+              WHERE workspace=? AND name=? AND paused=0 AND next_at=?`,
+            [next, fireAt, row.workspace, row.name, row.next_at],
+          );
+          if (moved.changes === 0) return null;
+          return this.insert(row.workspace, prepared, null);
+        })();
+        if (published && !published.duplicate) {
+          fired++;
+          this.metrics.counter("bql-bus.schedules.fired", 1, labels);
+        }
+      } catch (error) {
+        // Quota, disk, an enforced schema: the fire stays due, is retried
+        // with backoff, and the reason is on the schedule where an operator
+        // will look for it.
+        this.metrics.counter("bql-bus.schedules.failed", 1, labels);
+        this.db.run(
+          "UPDATE schedules SET last_error=?, failures=failures+1, retry_at=? WHERE workspace=? AND name=?",
+          [
+            String(error instanceof Error ? error.message : error).slice(0, 500),
+            now + retryDelayMs(row.failures + 1),
+            row.workspace,
+            row.name,
+          ],
+        );
+      }
+    }
+    return fired;
+  }
+
+  /**
+   * Mirror the upstream's schedules for one workspace.
+   *
+   * Replicated like cursors: the row, not the fires. A promoted follower fires
+   * from the `next_at` it last saw, and the dedupe key makes any fire the old
+   * leader already published a no-op.
+   */
+  applySchedules(workspace: string, schedules: Schedule[]): void {
+    // The follower calls this every poll; an unchanged list is the common
+    // case and should not cost a write transaction.
+    if (JSON.stringify(this.schedules(workspace)) === JSON.stringify(schedules))
+      return;
+    this.db.transaction(() => {
+      const names = new Set(schedules.map((schedule) => schedule.name));
+      for (const { name } of this.db
+        .query("SELECT name FROM schedules WHERE workspace=?")
+        .all(workspace) as { name: string }[])
+        if (!names.has(name))
+          this.db.run("DELETE FROM schedules WHERE workspace=? AND name=?", [
+            workspace,
+            name,
+          ]);
+      for (const schedule of schedules)
+        this.db.run(
+          `INSERT OR REPLACE INTO schedules (workspace, name, cron, tz, subject, body, headers, next_at, last_at, catch_up, paused, last_error, retry_at, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            workspace,
+            schedule.name,
+            schedule.cron,
+            schedule.tz,
+            schedule.subject,
+            JSON.stringify(schedule.body ?? null),
+            JSON.stringify(schedule.headers ?? {}),
+            schedule.nextAt,
+            schedule.lastAt,
+            schedule.catchUp,
+            schedule.paused ? 1 : 0,
+            schedule.lastError,
+            schedule.retryAt ?? null,
+            schedule.createdAt,
+            schedule.updatedAt,
+          ],
+        );
+    })();
   }
 
   // ------------------------------------------------------------ cluster
@@ -3403,5 +3867,8 @@ export class BusStore {
     ]);
     this.revoked = null;
     this.checkpoint();
+    // Async because a fire is a publish; the sweep's timer does not wait on
+    // it, and a pass still running when the next tick lands is shared.
+    void this.fireSchedules().catch(() => {});
   }
 }

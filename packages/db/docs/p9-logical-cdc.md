@@ -270,6 +270,10 @@ Two residuals, neither a contradiction but both worth stating:
   the replica, on a feed that has already promised rows. It is bounded to transactions that changed
   no rows and to `maxBufferedTxns` overflow, and the alternative is filing rows under the wrong key.
 
+- **Fixed later, by X6:** the capture floor (§3.6) was applied only when a subscription came or
+  went, so a primary with nobody subscribed recorded `pk` whatever the level said. Every test here
+  had a local subscriber. `TenantRealtime`'s constructor now applies it; `docs/x6-outbox.md` §3.1.
+
 ## 6. No preupdate hook, no rows
 
 A primary on a libsqlite3 built without `SQLITE_ENABLE_PREUPDATE_HOOK` runs the update-hook

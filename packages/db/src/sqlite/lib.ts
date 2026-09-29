@@ -212,6 +212,20 @@ const WALSUM = {
 } as const
 
 /**
+ * Also not SQLite's: `scripts/native/ext.c`, which registers sqlite-vec and bql.sh's geo functions
+ * as an auto-extension. `loadFrom` calls `bql_ext_init` once, before anything opens a connection.
+ * `docs/x1-search.md`.
+ */
+const EXT = {
+  bql_ext_init: { args: [], returns: T.i32 },
+  bql_ext_features: { args: [], returns: T.i32 },
+} as const
+
+/** The bits `bql_ext_features` reports. */
+const EXT_VEC = 1
+const EXT_GEO = 2
+
+/**
  * bun:ffi hands pointers back as plain numbers and accepts a number, a typed array or null
  * wherever C wants a `void *`. The symbol tables below are declared by hand in those terms:
  * inferring them from `dlopen` loses the pointer types and makes every call site `any`.
@@ -374,6 +388,14 @@ export interface WalsumSymbols {
   bql_db_config_int(db: Ptr, op: number, v: number, out: PtrArg): number
 }
 
+/** bql.sh's own C, from `scripts/native/ext.c`. */
+export interface ExtSymbols {
+  /** Registers the auto-extension; an SQLite result code. Idempotent. */
+  bql_ext_init(): number
+  /** `1` sqlite-vec, `2` geo functions. */
+  bql_ext_features(): number
+}
+
 export interface SqliteFeatures {
   /** `sqlite3_preupdate_*` present (built with `SQLITE_ENABLE_PREUPDATE_HOOK`). */
   readonly preupdate: boolean
@@ -383,6 +405,10 @@ export interface SqliteFeatures {
   readonly snapshot: boolean
   /** `bql_wal_*` present: the artefact `bun run sqlite:build` produced, not a system library. */
   readonly walsum: boolean
+  /** sqlite-vec (`vec0`, `vec_*`) on every connection: the vendored build's `ext.c`. */
+  readonly vec: boolean
+  /** `bql_haversine` and `bql_bbox_*` on every connection: the vendored build's `ext.c`. */
+  readonly geo: boolean
   readonly fts5: boolean
   readonly rtree: boolean
   readonly dbstat: boolean
@@ -439,6 +465,9 @@ export function loadFrom(candidates: readonly string[]): SqliteLibrary {
   const session = tryOpen<SessionSymbols>(path, SESSION)
   const snapshot = tryOpen<SnapshotSymbols>(path, SNAPSHOT)
   const walsum = tryOpen<WalsumSymbols>(path, WALSUM)
+  const ext = tryOpen<ExtSymbols>(path, EXT)
+  // Registered here, before any caller can have opened a connection, so every connection has it.
+  const extBits = ext && ext.bql_ext_init() === 0 ? ext.bql_ext_features() : 0
 
   const s = core.symbols as unknown as CoreSymbols
   const compileOptions = readCompileOptions(s)
@@ -461,6 +490,8 @@ export function loadFrom(candidates: readonly string[]): SqliteLibrary {
       session: session !== null && has("ENABLE_SESSION"),
       snapshot: snapshot !== null,
       walsum: walsum !== null,
+      vec: (extBits & EXT_VEC) !== 0,
+      geo: (extBits & EXT_GEO) !== 0,
       fts5: has("ENABLE_FTS5"),
       rtree: has("ENABLE_RTREE"),
       dbstat: has("ENABLE_DBSTAT_VTAB"),

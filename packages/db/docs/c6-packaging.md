@@ -110,6 +110,18 @@ fixed flag list **together with `scripts/native/walsum.c`**, and writes
 there is one library, one `dlopen` and one capability check; `src/sqlite/lib.ts` resolves its two
 symbols optionally, so a node on a system libsqlite3 simply does not get them.
 
+**Added 2026-09-28 (`docs/x1-search.md`):** the same compile also carries the pinned
+[sqlite-vec](https://github.com/asg017/sqlite-vec) 0.1.9 amalgamation and `scripts/native/ext.c`,
+which registers sqlite-vec and bql.sh's geo functions (`bql_haversine`, `bql_bbox_*`) on every
+connection through `sqlite3_auto_extension`. `lib.ts` calls the exported `bql_ext_init` once on
+load and reports the result as `features.vec` and `features.geo`; a system library has neither.
+sqlite-vec is fetched and verified like SQLite (size plus the sha256 GitHub publishes for the
+asset, recomputed before it was written into the script), its version and hash are in the stamp,
+and it is compiled with `-DSQLITE_CORE -DSQLITE_VEC_STATIC -DSQLITE_VEC_OMIT_FS` — the last so
+that a server running client SQL has no function that reads a file. `check()` now also requires
+`vec` and `geo`, and opens a fresh connection to run `vec_version()` and `bql_haversine()` on it,
+so an artefact whose auto-extension did not take cannot be left behind.
+
 - **Pinned to SQLite 3.53.4**, the same version Homebrew installs, so a macOS developer who has
   not run the script is on the same SQLite as one who has.
 - **Verified against two digests.** `sha3-256` is the hash sqlite.org publishes on its download
@@ -117,8 +129,9 @@ symbols optionally, so a node on a system libsqlite3 simply does not get them.
   of the repo speaks. A mismatch on either deletes the download and aborts; there is no flag to
   skip it. Verified by corrupting the cached archive: it refuses, names both digests, removes the
   poisoned file, and the next run re-fetches and succeeds.
-- **Idempotent.** A stamp beside the artefact records a hash of the pinned version, the flag list,
-  `scripts/native/walsum.c`, the platform and the architecture. A matching stamp skips the build;
+- **Idempotent.** A stamp beside the artefact records a hash of the pinned version, the
+  sqlite-vec pin, the flag list, `scripts/native/{walsum,ext}.c`, the platform and the
+  architecture. A matching stamp skips the build;
   changing the version, any flag or the C invalidates it. `--force` rebuilds regardless.
 - **Self-verifying.** After compiling it loads the artefact through `loadFrom` and refuses to
   leave one behind that does not report preupdate, session and snapshot. A library that compiled

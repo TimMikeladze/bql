@@ -120,6 +120,17 @@ export interface CreateOptions {
   from?: { db: string; at?: bigint }
 }
 
+export interface ResetOptions {
+  /** Runs once the copy is built, just before the branch is closed and swapped. */
+  beforeSwap?: () => void
+  /** Tests only: throw at this step of the swap, the way a crash would stop it there. */
+  crashAt?: "marked" | "moved" | "swapped"
+}
+
+function crashPoint(options: ResetOptions, step: NonNullable<ResetOptions["crashAt"]>): void {
+  if (options.crashAt === step) throw new Error(`simulated crash after ${step}`)
+}
+
 /** Everything the replication client needs to swap a bootstrapped snapshot into place. */
 export interface SnapshotInstall {
   /** The verified snapshot file. It is *moved*, so the caller must not touch it afterwards. */
@@ -343,6 +354,7 @@ export class TenantRegistry {
       this.#open.set(name, hit)
       return hit
     }
+    this.#recoverReset(name)
     const row = this.catalog.getTenant(name)
     if (!row) throw BqlError.dbNotFound(name)
     return this.#openRow(row)
@@ -545,6 +557,120 @@ export class TenantRegistry {
     const trash = tenant.delete()
     this.#changed("delete", name)
     return trash
+  }
+
+  /**
+   * X2: puts a branch back to its parent's head, under the same name (`docs/x2-branching.md`).
+   *
+   * The replacement is built first, beside the branch, in `trash/<name>-staging-<ms>` — so a fork
+   * that fails leaves the branch exactly as it was, and a crash mid-copy leaves a directory the
+   * trash sweep removes. Only then, synchronously and with nothing awaited, is the branch closed,
+   * its directory moved to `trash/<name>-reset-<ms>`, the staging directory renamed into place and
+   * the catalog row rewritten. `beforeSwap` runs at the start of that step: the server evicts the
+   * branch's subscriptions and transactions there, so none can attach during the copy and then
+   * outlive it.
+   *
+   * Crash safety: the swap is recorded in the catalog (`beginReset`) before the first rename, and
+   * the row is rewritten in the same transaction that clears that record. A crash anywhere between
+   * leaves the record, and the next `open` of the name finishes the reset or abandons it by
+   * looking at which directories exist (`#recoverReset`) — so the directory and the catalog's
+   * position never disagree when a tenant opens.
+   */
+  async reset(name: string, options: ResetOptions = {}): Promise<Tenant> {
+    this.#assertOpen()
+    this.#recoverReset(name)
+    const row = this.catalog.getTenant(name)
+    if (!row) throw BqlError.dbNotFound(name)
+    if (row.role === "replica") {
+      throw BqlError.badRequest(`${name} is a replica here; reset it on its primary`)
+    }
+    if (row.parent === null) {
+      throw new TenantError(
+        "NO_PARENT",
+        `${name} was created, not forked, so there is no parent to reset it to`,
+      )
+    }
+    if (!this.catalog.getTenant(row.parent)) {
+      throw new BqlError(
+        "DB_NOT_FOUND",
+        `cannot reset ${name}: its parent ${row.parent} has been deleted`,
+        404,
+      )
+    }
+    const parent = this.open(row.parent)
+    const trash = trashDir(this.dir)
+    const staging = path.join(trash, `${name}-staging-${Date.now()}`)
+    fs.mkdirSync(trash, { recursive: true })
+    let copy: Awaited<ReturnType<Tenant["forkInto"]>>
+    try {
+      copy = await parent.forkInto(staging)
+    } catch (err) {
+      fs.rmSync(staging, { recursive: true, force: true })
+      throw err
+    }
+    // The copy awaited; the branch may have been deleted, or deleted and created again, meanwhile.
+    const current = this.catalog.getTenant(name)
+    if (!current || current.createdAtMs !== row.createdAtMs || current.parent !== row.parent) {
+      fs.rmSync(staging, { recursive: true, force: true })
+      throw new TenantError("DB_EXISTS", `${name} changed while it was being reset; try again`)
+    }
+
+    // ── the swap: synchronous from here, so no request interleaves ──
+    options.beforeSwap?.()
+    this.release(name)
+    const dir = tenantDir(this.dir, name)
+    const old = path.join(trash, `${name}-reset-${Date.now()}`)
+    this.catalog.beginReset({ name, staging, old, pageSize: copy.pageSize, position: copy.position })
+    crashPoint(options, "marked")
+    fs.renameSync(dir, old)
+    crashPoint(options, "moved")
+    fs.renameSync(staging, dir)
+    crashPoint(options, "swapped")
+    this.catalog.resetTenant(name, copy.pageSize, copy.position)
+    // Replicas and the change feed see what delete-then-fork would have shown them.
+    this.#changed("delete", name)
+    const tenant = this.#openRow(this.catalog.getTenant(name) as TenantRow)
+    this.#changed("create", name)
+    return tenant
+  }
+
+  /**
+   * Finishes, or abandons, a reset a crash interrupted mid-swap. Which directories exist says how
+   * far it got — `beginReset` was written before any of them moved, and the catalog row is still
+   * the branch's old one, because the rewrite and the record's removal are one transaction:
+   *
+   * - staging and the branch directory both there: nothing moved. Abandon; the branch is intact.
+   * - staging there, branch directory gone: the branch moved out, the copy did not move in. Move
+   *   it in and rewrite the row.
+   * - staging gone, branch directory there: both renames happened. Rewrite the row.
+   *
+   * Runs on the open path, not at registry start: on a node with workers every shard shares the
+   * catalog, and only the shard that opens a database may touch its directory.
+   */
+  #recoverReset(name: string): void {
+    const pending = this.catalog.pendingReset(name)
+    if (!pending) return
+    const dir = tenantDir(this.dir, name)
+    const staged = fs.existsSync(pending.staging)
+    const inPlace = fs.existsSync(dir)
+    if (staged && inPlace) {
+      fs.rmSync(pending.staging, { recursive: true, force: true })
+      this.catalog.abandonReset(name)
+      return
+    }
+    if (staged) fs.renameSync(pending.staging, dir)
+    else if (!inPlace) {
+      // Neither copy is where it should be — the trash sweep got there first. Nothing here can
+      // rebuild it; the error names what is left.
+      this.catalog.abandonReset(name)
+      throw new TenantError(
+        "RESET_LOST",
+        `${name}: a reset was interrupted and its files are gone from ${path.dirname(pending.old)}`,
+      )
+    }
+    this.catalog.resetTenant(name, pending.pageSize, pending.position)
+    const warn = this.#options.warn ?? console.warn
+    warn(`bql: completed a reset of ${name} that a crash interrupted`)
   }
 
   /** Tells the owner the database set moved. A throwing listener must not fail the operation. */

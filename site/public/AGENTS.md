@@ -1,14 +1,12 @@
 # Using bql.sh from an agent
 
-bql.sh is two packages in one Bun monorepo: `bql.sh` (SQLite as a multi-tenant database server) and `bql.sh/bus` (a durable message bus, CLI `bql bus`). Bun 1.4 or newer. Not on npm yet.
+bql.sh is one npm package with two halves: `bql.sh` (SQLite as a multi-tenant database server, CLI `bql`) and `bql.sh/bus` (a durable message bus, CLI `bql bus`). Bun 1.4 or newer. Currently v0.2.0.
 
 ## Install
 
 ```sh
-git clone https://github.com/TimMikeladze/bql && cd bql
-bun install
-bun run db sqlite:build     # once per machine → packages/db/vendor/sqlite/libsqlite3.{dylib,so,dll}
-bun run db test             # optional, and the fastest way to know the build is good
+bun add bql.sh
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
 ```
 
 ## Minimal database client
@@ -72,11 +70,13 @@ await new BusConsumer({
 | `--s3` | `bql serve` | ship log and snapshots to a bucket |
 | `ackWaitMs`, `maxAttempts` | bus subscription | lease length, retries before dead-letter |
 | `ordered` | bus subscription | per-key FIFO; off by default |
+| `[[outbox.rules]]` | `bql.toml` | publish committed row changes to a bus subject; needs `[replication] logicalChanges` |
+| `tz`, `catchUp` | bus schedule | IANA zone; `latest` (default) or `none` for missed slots |
 | `handlerTimeoutMs` | `BusConsumer` | stop a wedged handler holding its lease forever |
 
 ## Three mistakes that break it
 
-1. Using a system libsqlite3. Run `bun run db sqlite:build` once; Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size` and fails WAL tests.
+1. Skipping the engine build, or reaching for a system libsqlite3. Run the by-path build above once (`bun run sqlite:build` in your project finds no such script); Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size` and fails WAL tests.
 2. `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.
 3. Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.
 

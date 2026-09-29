@@ -1,7 +1,7 @@
 import { open, mkdir, rename, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { Message, Subscription } from "../shared/protocol";
-import type { BusClient } from "../client/bus";
+import { type BusClient, BusRequestError } from "../client/bus";
 import type { Logger } from "./log";
 import { silentLogger } from "./log";
 import type { BusStore } from "./store";
@@ -127,6 +127,20 @@ export function follow(options: FollowerOptions): Follower {
   const done = (async () => {
     while (!stopping) {
       try {
+        // Schedules are read *before* the log. A fire commits its message and
+        // its `next_at` move in one transaction, so every fire this snapshot
+        // has recorded is already in the log read below — the mirrored row
+        // can lag the log, never lead it. (Leading would carry a `next_at`
+        // past a fire this replica never received; lagging is harmless, the
+        // fire's dedupe key is already here.) An upstream from before
+        // schedules answers 404, which is simply nothing to mirror.
+        const schedules = await options.upstream
+          .schedules()
+          .catch((error: unknown) => {
+            if (error instanceof BusRequestError && error.status === 404)
+              return null;
+            throw error;
+          });
         const after = options.store.cluster().appliedSeq;
         const messages: Message[] = await options.upstream.log(after, batch);
         if (messages.length > 0) {
@@ -138,7 +152,18 @@ export function follow(options: FollowerOptions): Follower {
         const subscriptions: Subscription[] = await options.upstream.subscriptions();
         options.store.applyCursors(subscriptions);
 
-        const head = (await options.upstream.stats()).lastSeq;
+        const stats = await options.upstream.stats();
+        // Only once the log page came back short, i.e. this replica has every
+        // message up to the moment the schedules were read. The workspace
+        // comes from the upstream — the one the token actually resolves to —
+        // so an empty list still deletes this replica's copies.
+        if (schedules && messages.length < batch) {
+          const workspace =
+            stats.workspace ?? schedules[0]?.workspace ?? options.upstream.workspace;
+          options.store.applySchedules(workspace, schedules);
+        }
+
+        const head = stats.lastSeq;
         lagSeq = Math.max(0, head - options.store.cluster().appliedSeq);
         if (lagSeq === 0) lagMs = 0;
         options.onLag?.({ seqBehind: lagSeq, ms: lagMs });

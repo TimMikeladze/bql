@@ -15,6 +15,7 @@ bun add bql.sh
 | `bql.sh/sqlite` | The `bun:ffi` driver over a pinned libsqlite3: hooks, the authorizer, killable statements, changesets |
 | `bql.sh/server` | Serve it: WAL shipping, replicas, S3 backup, a Raft control plane |
 | `bql.sh/kysely`, `bql.sh/drizzle` | A Kysely dialect and a Drizzle driver over any of the above |
+| `bql.sh/search` | Vector ([sqlite-vec](https://github.com/asg017/sqlite-vec)), hybrid, full-text and geo search — SQL builders over any `Db` |
 | `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
@@ -201,6 +202,83 @@ restore, and one operation model rendered as REST, OpenAPI 3.1 and GraphQL. The 
 the client too, under `client.admin`. [packages/db/README.md](packages/db/README.md) is the real
 documentation; [packages/db/docs/api.md](packages/db/docs/api.md) is the API as built.
 
+### Search
+
+Vector, hybrid, full-text and geo search are SQL builders over any `Db` — client, embedded or a
+transaction — so they work the same against a server, a replica and your own process. sqlite-vec
+and the geo functions are compiled into the library `bun run db sqlite:build` makes; on any other
+library the helpers throw `FEATURE_UNAVAILABLE` rather than fall back.
+
+```ts
+import { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } from "bql.sh/search"
+
+const fts = ftsIndex(db, { table: "posts_fts", source: "posts", columns: ["title", "body"] })
+const vec = vectorIndex(db, { table: "posts_vec", dimensions: 384 })
+await fts.create() // triggers keep it in step with `posts`
+await vec.create()
+await vec.upsert(postId, embedding)
+
+await hybridSearch(db, { fts, vector: vec, query: ftsQuote(userInput), embedding: queryEmbedding, k: 10 })
+await geoIndex(db, { table: "shops_geo", source: "shops" }).near(51.5, -0.12, 2_000)
+```
+
+### A database per pull request
+
+Forks are O(1) and record their parent, so a branch per pull request costs a directory. The
+`bql-branch` action creates one when a pull request opens and deletes it when it closes — curl
+against the HTTP API, no install. Branch names default to `pr-<number>`. `delete` only removes a
+database that has a parent, and never the source itself.
+
+```yaml
+# .github/workflows/db-branch.yml
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+jobs:
+  branch:
+    runs-on: ubuntu-latest
+    steps:
+      - id: db
+        uses: TimMikeladze/bql/.github/actions/bql-branch@main
+        with:
+          url: ${{ secrets.BQL_URL }}
+          token: ${{ secrets.BQL_ADMIN_KEY }}
+          source: main
+          action: ${{ github.event.action == 'closed' && 'delete' || 'create' }}
+          on-exists: keep            # or `reset`: back to main's head on every push
+      - run: echo "database ${{ steps.db.outputs.name }}"
+```
+
+**Vercel previews.** A preview build knows its git branch as `VERCEL_GIT_COMMIT_REF`. Turn it into a
+database name — `[a-z0-9][a-z0-9-_]{0,63}`, so lower-case it, dash everything else, trim, cut to
+64 — fork it from `main` before the build, and read the same name at runtime:
+
+```ts
+// db-name.ts — imported by the build step and by the app
+export function dbName(): string {
+  const ref = process.env.VERCEL_ENV === "preview" ? process.env.VERCEL_GIT_COMMIT_REF : undefined
+  if (!ref) return "main"
+  const name = ref.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/-+/g, "-")
+    .replace(/^[-_]+/, "").slice(0, 64).replace(/-+$/, "")
+  return name || "main"
+}
+```
+
+```ts
+// scripts/branch.ts — the build command is `bun scripts/branch.ts && next build`
+import { createClient } from "bql.sh/client"
+import { dbName } from "../db-name"
+
+const name = dbName()
+if (name !== "main") {
+  const admin = createClient({ url: process.env.BQL_URL!, token: process.env.BQL_ADMIN_KEY! }).admin
+  await admin.fork(name, "main").catch((err) => { if (err.code !== "CONFLICT") throw err })
+}
+```
+
+`bql db diff main <branch>` shows what the branch's migrations did, and `bql db reset <branch>`
+throws them away. [packages/db/docs/x2-branching.md](packages/db/docs/x2-branching.md) has the rest.
+
 ## The bus
 
 Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and
@@ -223,16 +301,43 @@ embedded mode, atomic read-process-write inside the bus, and fenced ledgered eff
 outside world. Fan-out happens on pull rather than on publish, so publishing is O(1) in the number
 of subscriptions and a subscription created today can read last week. A JSON Schema registry with
 computed compatibility checks, scoped tokens with affordable revocation, W3C `traceparent` end to
-end, and epoch-fenced promotion over asynchronous log replication.
+end, and epoch-fenced promotion over asynchronous log replication. Cron schedules
+(`bql bus schedule add nightly '30 2 * * *' reports.nightly --tz America/New_York`) fire on the
+leader as ordinary deduplicated publishes, DST-correct in any IANA zone.
 [packages/bus/README.md](packages/bus/README.md) is the real documentation.
 
 ## Together
 
-Neither half imports the other yet. The coupling is the work after the move, in the order the
-value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then a commit hook publishing to
-a subject as a transactional outbox with no dual-write window, then the bus's own replication and
-backup giving way to WAL shipping. [docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the
-sequence and why each step is independently revertable.
+Neither half imports the other's source. The coupling is the work after the move, in the order the
+value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then the database as a
+transactional outbox, then the bus's own replication and backup giving way to WAL shipping.
+[docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the sequence and why each step is
+independently revertable.
+
+**The outbox has landed.** A database server with `[outbox]` rules tails each matching database's
+log and publishes every committed row change to a bus subject over HTTP, with a dedupe key per
+change and a cursor that moves only after the bus acknowledged — so a crash never loses a change and
+never puts one on the bus twice. It reads the durable log rather than a commit hook, which is what
+closes the dual-write window for real. On the other side, `bql bus sink webhook|s3|clickhouse`
+drains a subscription into a webhook, a bucket of gzipped NDJSON, or ClickHouse:
+
+```toml
+# bql.toml
+[replication]
+logicalChanges = "row"
+
+[[outbox.rules]]
+db = "app-*"
+busUrl = "http://127.0.0.1:4317"
+tokenEnv = "BUS_TOKEN"
+```
+
+```sh
+bql bus sink webhook --subscription cdc --subject 'db.>' --to https://example.com/hook
+```
+
+[packages/db/docs/x6-outbox.md](packages/db/docs/x6-outbox.md) is the design and what changed
+while building it.
 
 ## CI and releases
 

@@ -187,9 +187,13 @@ function quarantineOf(value: unknown): Partial<Quarantine> {
 }
 
 /** Messages an ack carries, each authorized as though it were published alone. */
-function publishList(value: unknown, claims: TokenClaims): PublishRequest[] {
+function publishList(
+  value: unknown,
+  claims: TokenClaims,
+  max = 64,
+): PublishRequest[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > 64)
+  if (!Array.isArray(value) || value.length > max)
     throw new BusError("invalid publish", 400);
   return value.map((entry) => {
     const item = record(entry);
@@ -273,8 +277,12 @@ export function createServer(options: ServerOptions): BusServer {
    */
   const identity = (claims: TokenClaims) => `${claims.workspace}/${claims.sub}`;
 
-  const limit = (bucket: ReturnType<typeof tokenBucket>, claims: TokenClaims) => {
-    const decision = bucket.take(identity(claims));
+  const limit = (
+    bucket: ReturnType<typeof tokenBucket>,
+    claims: TokenClaims,
+    cost = 1,
+  ) => {
+    const decision = bucket.take(identity(claims), cost);
     if (decision.ok) return;
     throw new RateLimited(decision.retryAfterMs);
   };
@@ -459,7 +467,7 @@ export function createServer(options: ServerOptions): BusServer {
         const claims = authenticate(req, url);
         const workspace = workspaceFor(claims, req, url);
         const body =
-          req.method === "POST"
+          req.method === "POST" || req.method === "PUT"
             ? await req
                 .json()
                 .then(record)
@@ -517,6 +525,34 @@ export function createServer(options: ServerOptions): BusServer {
             );
           }
           return json(result, result.duplicate ? 200 : 201);
+        }
+
+        // Many messages, one transaction. Each is authorized as though it were
+        // published alone; a reply has its own route and is refused here.
+        if (req.method === "POST" && path === "/api/publish/batch") {
+          const messages = publishList(body.messages, claims, 1000);
+          if (messages.length === 0)
+            throw new BusError("messages must be a non-empty array", 400);
+          if (messages.some((one) => one.reply))
+            throw new BusError("a reply cannot be batched", 400);
+          // A batch costs what its messages would cost published one at a
+          // time, or a batch route would be a way around `--publish-rate`. A
+          // batch larger than the burst could never be admitted, so it is
+          // refused by name rather than answered 429 for ever.
+          const rate = options.publishRate;
+          if (rate && rate.perSecond > 0 && messages.length > rate.burst)
+            throw new BusError(
+              `a batch of ${messages.length} is larger than the publish burst (${rate.burst}); send at most ${rate.burst} at a time`,
+              413,
+            );
+          limit(publishes, claims, messages.length);
+          requireRoom(store);
+          const results = await store.publishBatch(
+            workspace,
+            messages,
+            claims.sub,
+          );
+          return json({ results }, 201);
         }
 
         // ---------------------------------------------------- subscriptions
@@ -680,6 +716,63 @@ export function createServer(options: ServerOptions): BusServer {
             return json(
               store.pauseSubscription(workspace, name, body.paused === true),
             );
+          }
+        }
+
+        // ------------------------------------------------------- schedules
+        // Defining a schedule is an admin action, like a subscription: it is
+        // a standing publish that no token is present for when it fires.
+        if (req.method === "GET" && path === "/api/schedules") {
+          requireRead(claims);
+          return json(store.schedules(workspace));
+        }
+        const schedulePath =
+          /^\/api\/schedules\/([A-Za-z0-9][\w.-]{0,99})(?:\/(pause|resume|run))?$/.exec(
+            path,
+          );
+        if (schedulePath) {
+          const name = schedulePath[1]!;
+          const action = schedulePath[2];
+          if (req.method === "GET" && !action) {
+            requireRead(claims);
+            return json(store.schedule(workspace, name));
+          }
+          if (req.method === "PUT" && !action) {
+            requireAdmin(claims);
+            const catchUp = optionalStr(body.catchUp, "catchUp", 10) ?? "latest";
+            if (catchUp !== "latest" && catchUp !== "none")
+              throw new BusError("catchUp must be latest or none", 400);
+            const schedule = store.upsertSchedule(workspace, {
+              name,
+              cron: str(body.cron, "cron", 200),
+              tz: optionalStr(body.tz, "tz", 64) ?? "UTC",
+              subject: str(body.subject, "subject", 512),
+              body: (body.body ?? null) as Json,
+              headers: headerMap(body.headers, "headers"),
+              catchUp,
+              paused: body.paused === true,
+            });
+            audit(claims, "schedule.put", `${name} ${schedule.cron} ${schedule.tz}`);
+            return json(schedule);
+          }
+          if (req.method === "DELETE" && !action) {
+            requireAdmin(claims);
+            audit(claims, "schedule.delete", name);
+            return json(store.deleteSchedule(workspace, name));
+          }
+          if (req.method === "POST" && (action === "pause" || action === "resume")) {
+            requireAdmin(claims);
+            audit(claims, `schedule.${action}`, name);
+            return json(store.pauseSchedule(workspace, name, action === "pause"));
+          }
+          // Running one now is a publish: an admin, or a token that could
+          // have published to the schedule's subject directly anyway.
+          if (req.method === "POST" && action === "run") {
+            authorizePublish(claims, store.schedule(workspace, name).subject);
+            limit(publishes, claims);
+            requireRoom(store);
+            audit(claims, "schedule.run", name);
+            return json(await store.runSchedule(workspace, name), 201);
           }
         }
 

@@ -35,7 +35,18 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 bql.sh needs **Bun 1.4 or newer** and a C compiler — the compiler once, to build the libsqlite3 the
 driver loads (see [The driver](#the-driver) for why a system one will not do).
 
-The package is `bql.sh`. It is **not on npm yet**; until the first release, use it from a clone:
+The package is `bql.sh`, on npm. Install it, then build the engine **by path**:
+
+```sh
+bun add bql.sh
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
+```
+
+`npm run` cannot reach a dependency's own scripts, so `bun run sqlite:build` in your project would
+look for a script of yours by that name and find none — the path above is the contract. CI proves
+it on the real tarball on every push (`bun run pack:check`, `docs/l7-tarball.md`).
+
+Working on bql.sh itself runs it from a clone:
 
 ```sh
 git clone https://github.com/TimMikeladze/bql && cd bql
@@ -48,16 +59,6 @@ This tree is the database half of one package, `bql.sh` — [`packages/bus`](../
 under `bql.sh/bus`, and [docs/monorepo.md](../../docs/monorepo.md) is why they ship together. `bun run
 db <script>` forwards from the root to this tree; from inside `packages/db`, every script still runs
 by its own name.
-
-Once published, `bun add bql.sh`, then build the engine **by path**:
-
-```sh
-bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
-```
-
-`npm run` cannot reach a dependency's own scripts, so `bun run sqlite:build` in your project would
-look for a script of yours by that name and find none — the path above is the contract. CI proves
-it on the real tarball on every push (`bun run pack:check`, `docs/l7-tarball.md`).
 
 ## Getting started
 
@@ -166,7 +167,7 @@ await client.admin.restore("acme", { at: 4800, into: "acme-recovered" })   // a 
 const { token, jti } = await client.admin.mintToken({ dbs: ["acme"], scope: "ro" })
 ```
 
-Nineteen methods, one for each route of the admin surface: lifecycle, dump and import, replication
+Twenty methods, one for each route of the admin surface: lifecycle, dump and import, replication
 and promotion, the backup bucket, tokens. It needs the admin key, and it is built on first use, so
 a browser that only queries never constructs it.
 
@@ -200,7 +201,7 @@ await bq.serve({ port: 4321 })                       // the same engine, now ove
 `db` is the same interface the client exposes, so code written against one runs against the other.
 `db.sync` is the escape hatch for hot loops. The embedded caller is the admin principal; tokens
 start applying at `serve()`. The lifecycle calls are here too — `bq.create`, `bq.fork`, `bq.list`,
-`bq.stat`, `bq.delete`, `bq.snapshot`, `bq.restore`, `bq.checkpoint` — with the same shapes
+`bq.stat`, `bq.delete`, `bq.reset`, `bq.snapshot`, `bq.restore`, `bq.checkpoint` — with the same shapes
 `client.admin` answers. Restoring from an S3 bucket stays on the server route, which is where the
 store is built.
 
@@ -255,6 +256,60 @@ Transactions, savepoints, `db.batch()` and both migrators run on bql.sh's own tr
 routes rather than on `begin`/`commit` sent as loose statements. Streaming is not implemented —
 bql.sh answers with whole result sets, so Kysely's `.stream()` says so.
 [docs/r5-orm.md](docs/r5-orm.md) has the mapping and every limitation.
+
+## Search
+
+`bql.sh/search` builds vector, hybrid, full-text and geo search out of SQL and runs it through any
+`Db` — the client's, the embedded one, its `.sync`, a transaction. There is no search route: the
+statements are ordinary ones, so they work against a primary, a replica, the cloud and your own
+process alike.
+
+```ts
+import { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } from "bql.sh/search"
+
+// Full-text: an external-content FTS5 index kept in step with `posts` by three triggers.
+const fts = ftsIndex(db, { table: "posts_fts", source: "posts", columns: ["title", "body"], tokenizer: "porter unicode61" })
+await fts.create()                                 // fills from existing rows the first time
+await fts.search(ftsQuote(userInput), { limit: 20, highlight: true, snippet: { column: "body" } })
+// → [{ rowid, rank /* bm25, lower is better */, title, body, highlight, snippet }]
+
+// Vectors: a sqlite-vec vec0 table; metadata columns filter inside the KNN.
+const vec = vectorIndex(db, { table: "posts_vec", dimensions: 384, metric: "cosine", metadata: { lang: "text" } })
+await vec.create()
+await vec.upsert(post.id, embedding, { lang: "en" })
+await vec.search(queryEmbedding, { k: 10, where: { lang: "en" } })   // → [{ id, distance, lang }]
+
+// Hybrid: one statement, bm25 rank and KNN rank fused by reciprocal rank (k = 60).
+await hybridSearch(db, { fts, vector: vec, query: ftsQuote(userInput), embedding: queryEmbedding, k: 10 })
+// → [{ id, score, ftsRank, vectorRank, bm25, distance }]
+
+// Geo: an R*Tree over `shops.lat`/`shops.lon`, exact great-circle distance on top.
+const geo = geoIndex(db, { table: "shops_geo", source: "shops" })
+await geo.create()
+await geo.near(51.5033, -0.1196, 2_000, { limit: 20 })              // → [{ id, lat, lon, distance /* m */ }]
+await geo.within({ minLat: 51.4, maxLat: 51.6, minLon: -0.3, maxLon: 0.1 })
+```
+
+- **Where the capabilities come from.** FTS5 and R*Tree are in almost every SQLite. sqlite-vec
+  (pinned, 0.1.9) and bql.sh's geo functions (`bql_haversine(lat1, lon1, lat2, lon2)` in metres,
+  `bql_bbox_{min,max}_{lat,lon}(lat, lon, radiusM)`) are compiled into the library
+  `bun run db sqlite:build` produces and registered on every connection — usable from plain SQL
+  too. On any other library a helper throws `FeatureUnavailableError` (`code: "FEATURE_UNAVAILABLE"`,
+  a `BqlClientError`) instead of falling back; `searchFeatures(db)` asks up front.
+- **Vectors** are float32 little-endian blobs: `toVector(number[] | Float32Array)` and
+  `fromVector(blob)`. `bql.sh/drizzle` has a `vector({ dimensions })` column that encodes the same
+  way. `hybridSearch` joins the FTS rowid to the vector id, so key both by the same integer.
+- **Untrusted query text** goes through `ftsQuote`, which turns every word into a quoted string:
+  FTS5 operators become text and a user can never make `MATCH` throw a syntax error.
+- **Table and column names** are checked against `[A-Za-z_][A-Za-z0-9_]*` before any SQL is built.
+- **The index's own tables stay out of sight.** An FTS5, vec0 or R*Tree table stores itself in
+  shadow tables; they are not listed by the Data API, their rows never reach the change feed, and a
+  live query over the virtual table refreshes when the module writes them.
+- **Per-table tokens grant the index, not its storage.** A token scoped with
+  `tables: { posts: "rw", posts_fts: "r" }` can search `posts_fts`; the module's own storage tables
+  follow `posts_fts`'s grant. Writing `posts` fires the index triggers, so a writer needs the index
+  granted `rw` too; the request runs with `SQLITE_DBCONFIG_DEFENSIVE`, so that grant cannot write
+  the storage tables directly. [docs/x1-search.md](docs/x1-search.md).
 
 ## A primary and a replica
 
@@ -386,6 +441,40 @@ newest snapshot at or before the target, and replays the segments after it throu
 verifier a replica uses — so it either reproduces the target txid checksum for checksum or fails
 loudly. The bucket layout is a documented contract ([docs/r3-storage.md](docs/r3-storage.md)).
 
+## Stream changes to the bus (outbox)
+
+With `[replication] logicalChanges` on, every transaction record carries its row changes. An
+`[outbox]` rule tails the log of each matching database and publishes one bus message per row
+change — from the durable log, not the in-memory feed, so a crash never loses one and a restart
+never duplicates one on the bus.
+
+```toml
+[replication]
+logicalChanges = "row"
+
+[[outbox.rules]]
+db = "app-*"                   # database-name glob
+busUrl = "http://bus:4317"
+tokenEnv = "BUS_TOKEN"         # or token = "${BUS_TOKEN}"
+subject = "db.{db}.{table}"    # the default
+include = "row"                # "pk" | "row" | "row+old", at most what logicalChanges records
+```
+
+```sh
+bql bus subscribe cdc 'db.app-1.>'
+# {"db":"app-1","table":"users","op":"insert","txid":42,"seq":0,"i":0,"rowid":7,
+#  "pk":{"id":7},"row":{"id":7,"email":"a@b.c"},"committedAt":1790640000000}
+bql bus sink webhook --subscription cdc --to https://example.com/hook --secret "$HOOK_SECRET"
+```
+
+Each message's dedupe key is `<db>:<generation>:<txid>:<postChecksum>:<seq>:<i>` — so a branch
+reset or a failover that reuses a txid cannot collide with a change already on the bus — and the cursor
+(`<db dir>/outbox.json`) moves only after the bus acknowledged the batch. A cursor that log
+retention overtakes is logged as `OUTBOX_GAP` and counted in `bql_outbox_gaps_total`, never skipped
+quietly. The server refuses to start with rules and no `logicalChanges`. Status is on
+`GET /v1/db/:db/replication` (`outbox`) and `/metrics` (`bql_outbox_*`);
+[docs/x6-outbox.md](docs/x6-outbox.md) has the whole story.
+
 ## The CLI
 
 `bql` is the package's `bin`. From a clone, `bun run src/cli.ts <command>` is the same thing, or
@@ -397,6 +486,7 @@ bql serve --dir ./r --replica-of ws://primary:4321/v1/replication --cluster-secr
 bql serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
 bql db create acme                          # also: list, stat, delete, fork
 bql db fork acme-copy --from acme@4812      # a txid, or @2026-09-11T10:00:00Z
+bql db branch pr-42 --from acme             # a fork that records its parent; see Branches
 bql snapshot acme
 bql restore acme --at 2026-09-11T10:00:00Z --into acme-recovered
 bql backup status acme                      # also: verify, generations
@@ -415,6 +505,35 @@ Configuration is `bql.toml` in the working directory, then `BQL_*` in the enviro
 key has an override named after its section and its key — `BQL_DATA_DIR`, `BQL_SERVER_PORT`,
 `BQL_LIMITS_QUERY_TIMEOUT_MS` — plus the short forms `BQL_DIR`, `BQL_PORT`,
 `BQL_ADMIN_KEY`. Every key and its default is in [docs/api.md](docs/api.md#configuration).
+
+## Branches
+
+A fork is O(1) where the filesystem reflinks, so a database per pull request is cheap. Every fork
+records its `parent` and the parent txid it was taken at (`forkedAt`); `bql db list`, `admin.list()`
+and `admin.stat()` show both, and a child whose parent was deleted keeps working and reports
+`parentDeleted: true`.
+
+```sh
+bql db branch pr-42 --from main             # --from main@4812 or @2026-09-11T10:00:00Z also work
+bql db branches main                        # main's children; bare `branches` lists every branch
+bql db diff main pr-42                      # schema and row counts; --json for the structure
+bql db reset pr-42                          # back to main's head, same name
+```
+
+`reset` builds the copy before it touches the branch, then swaps it in; the old files go to
+`trash/`. A database that was never forked has nothing to reset to and is refused. The diff is
+`diffSchema` from `bql.sh/client`, which runs over any two `Db` handles:
+
+```ts
+import { diffSchema, formatSchemaDiff } from "bql.sh/client"
+
+const diff = await diffSchema(client.db("main"), client.db("pr-42"))
+if (!diff.sameSchema) console.log(formatSchemaDiff(diff, { a: "main", b: "pr-42" }))
+```
+
+For CI, `.github/actions/bql-branch` creates a branch when a pull request opens and deletes it when
+it closes, with curl and nothing else; the root README has the workflow and a Vercel preview recipe.
+[docs/x2-branching.md](docs/x2-branching.md) is the design as built.
 
 ## Generated REST, OpenAPI and GraphQL
 

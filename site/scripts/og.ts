@@ -9,7 +9,7 @@ import { CSS } from "../src/render.ts"
 import { esc } from "../src/markdown.ts"
 
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-const lede = "Thousands of SQLite databases in one Bun process, and a durable message bus beside them."
+const lede = "Thousands of SQLite databases in one Bun process, and the durable bus that runs work against them."
 
 export function cardHtml(): string {
   return `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${CSS}
@@ -21,7 +21,7 @@ p{margin-top:26px;font-size:26px;color:var(--body);max-width:46ch}
 .row code{font-size:22px;padding:.3em .6em;border:1px solid var(--line);border-radius:10px}
 .row i{font-style:normal;color:var(--accent)}</style></head><body><div class="card">
 ${productMark(64)}<h1>${esc(site.h1)}</h1><p>${esc(lede)}</p>
-<div class="row"><code>bun run bus dev</code><i>·</i><span>zero dependencies</span><i>·</i><span>${esc(new URL(site.origin).host)}</span></div>
+<div class="row"><code>${esc(site.install.humans.cmd)}</code><i>·</i><span>zero dependencies</span><i>·</i><span>${esc(new URL(site.origin).host)}</span></div>
 </div></body></html>`
 }
 

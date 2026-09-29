@@ -72,6 +72,7 @@ const installed = join(consumer, "node_modules", "bql.sh")
 for (const needed of [
   `${DB}/scripts/sqlite.ts`,
   `${DB}/scripts/native/walsum.c`,
+  `${DB}/scripts/native/ext.c`,
   `${DB}/src/sqlite/lib.ts`,
   `${DB}/deploy-templates/vercel/blob-store.ts`,
   `${DB}/deploy-templates/vercel/Dockerfile.vercel.dockerignore`,
@@ -129,7 +130,7 @@ import os from "node:os"
 import path from "node:path"
 
 const lib = sqlite()
-const missing = ["preupdate", "session", "walsum"].filter((name) => !lib.features[name])
+const missing = ["preupdate", "session", "walsum", "vec", "geo"].filter((name) => !lib.features[name])
 if (missing.length > 0) throw new Error("the built library lacks " + missing.join(", "))
 if (!lib.path.includes("vendor")) throw new Error("not the vendored library: " + lib.path)
 

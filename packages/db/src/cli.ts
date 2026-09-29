@@ -18,6 +18,7 @@ import { cliFetch, cliSocketFactory, endpointFetch } from "./cli/transport.ts"
 import { createClient, type Client } from "./client/index.ts"
 import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
+import { diffSchema, formatSchemaDiff } from "./client/diff.ts"
 import type { CheckpointMode, QueryResult, Revision, TableScope } from "./client/protocol.ts"
 import { SocketClient } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
@@ -46,6 +47,10 @@ bql — SQLite as a multi-tenant database server (design §9.3)
   bql db stat <name>
   bql db delete <name>
   bql db fork <name> --from <db>[@<txid|time>]
+  bql db branch <name> --from <db>[@<txid|time>]   a fork that is meant to be thrown away
+  bql db branches [<db>]      <db>'s branches, or every database that has a parent
+  bql db diff <a> <b>         schema (tables, columns, indexes, triggers, views) and row counts
+  bql db reset <branch>       back to its parent's head, same name
   bql snapshot <db>
   bql restore <db> --at <txid|time> [--into <name>]
   bql restore <db> --from s3://bucket/prefix --at <txid|time> [--into <name>]
@@ -443,13 +448,62 @@ async function dbCommand(args: ParsedArgs, remote: Remote): Promise<void> {
       out(remote, stats, `created ${stats.name} at txid ${stats.txid}`)
       return
     }
-    case "fork": {
-      if (!name) throw new CliError("db fork needs a name")
+    // `branch` is `fork` under the name the workflow uses; both record lineage (X2).
+    case "fork":
+    case "branch": {
+      if (!name) throw new CliError(`db ${action} needs a name`)
       const from = str(args, "from")
-      if (!from) throw new CliError("db fork needs --from <db>[@<txid|time>]")
+      if (!from) throw new CliError(`db ${action} needs --from <db>[@<txid|time>]`)
       const source = parseFrom(from)
       const stats = await admin.fork(name, source.db, source.at)
-      out(remote, stats, `forked ${from} into ${stats.name} at txid ${stats.txid}`)
+      const verb = action === "fork" ? "forked" : "branched"
+      out(remote, stats, `${verb} ${from} into ${stats.name} at txid ${stats.txid}`)
+      return
+    }
+    case "branches": {
+      const all = await admin.list()
+      const branches = all.filter((row) => (name ? row.parent === name : row.parent !== null))
+      if (name && !all.some((row) => row.name === name)) {
+        throw new CliError(`DB_NOT_FOUND: database ${name} does not exist`)
+      }
+      if (remote.json) {
+        console.log(JSON.stringify({ databases: branches }, null, 2))
+        return
+      }
+      if (branches.length === 0) {
+        console.log(name ? `${name} has no branches` : "no branches")
+        return
+      }
+      console.log(
+        Bun.inspect.table(
+          branches.map((row) => ({
+            name: row.name,
+            parent: row.parentDeleted ? `${row.parent} (deleted)` : row.parent,
+            forkedAt: row.forkedAt,
+            txid: row.txid,
+          })),
+        ),
+      )
+      return
+    }
+    case "diff": {
+      const other = args.positional[3]
+      if (!name || !other) throw new CliError("db diff needs two databases: db diff <a> <b>")
+      // Both exist, or the answer would be "every table was added" rather than an error.
+      await Promise.all([admin.stat(name), admin.stat(other)])
+      const diff = await diffSchema(remote.client.db(name), remote.client.db(other))
+      out(remote, diff, formatSchemaDiff(diff, { a: name, b: other }))
+      return
+    }
+    case "reset": {
+      if (!name) throw new CliError("db reset needs a branch")
+      const stats = await admin.reset(name)
+      out(
+        remote,
+        stats,
+        `reset ${stats.name} to ${stats.parent} at txid ${stats.forkedAt}; ` +
+          "its previous files are in the trash",
+      )
       return
     }
     case "list": {

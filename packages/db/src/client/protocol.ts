@@ -447,8 +447,18 @@ export const HEADERS = {
 // where they are declared and enforced; these are the same shapes as the client reads them, and
 // `src/client/admin.ts` is the only thing that asks for them.
 
+/** X2 lineage, on `GET /v1/db` rows and on every stats body. */
+export interface DatabaseLineage {
+  /** The database this one was forked from, or null for one that was created. */
+  parent: string | null
+  /** The parent's txid the fork was taken at — its head at the last `reset`. */
+  forkedAt: number | null
+  /** True when `parent` names a database that no longer exists. */
+  parentDeleted: boolean
+}
+
 /** One row of `GET /v1/db`. */
-export interface DatabaseInfo {
+export interface DatabaseInfo extends DatabaseLineage {
   name: string
   txid: number
   epoch: number
@@ -468,7 +478,7 @@ export interface ReplicaPosition {
 }
 
 /** `GET /v1/db/{db}`, and the answer to every route that creates a database. */
-export interface DatabaseStats {
+export interface DatabaseStats extends DatabaseLineage {
   name: string
   role: string
   sizeBytes: number

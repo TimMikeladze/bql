@@ -2,7 +2,7 @@
 // the reference page, their Markdown twins and the agent/SEO artefacts. No copy lives here —
 // markup, styles, icons and the two small scripts do.
 
-import { site, type Capability, type Demo, type Figure, type IconName } from "./content.ts"
+import { site, type Capability, type Demo, type Figure, type Frame, type IconName } from "./content.ts"
 import { brand, faviconSvg, glyph, productMark } from "./icons.ts"
 import { esc, highlight, inline, renderDoc, renderTable, slug, type LinkContext } from "./markdown.ts"
 import {
@@ -37,13 +37,17 @@ export function figureValue(f: Figure, p: Parsed = source()): ResolvedFigure {
   return { label: f.label, value: resolveFigure(f.from.re, f.from.doc, p), source: `${f.from.doc} README ${f.from.re}` }
 }
 
-export type ResolvedDemo =
+export type ResolvedFrame =
   | { kind: "terminal"; cmd: string; block: Block }
   | { kind: "snippet"; label: string; block: Block }
   | { kind: "table"; table: Table }
+
+export type ResolvedDemo =
+  | ResolvedFrame
+  | { kind: "pair"; items: [ResolvedFrame, ResolvedFrame] }
   | { kind: "variants"; items: { label: string; caption: string; block: Block }[] }
 
-export function resolveDemo(d: Demo, p: Parsed = source()): ResolvedDemo {
+function resolveFrame(d: Frame, p: Parsed): ResolvedFrame {
   switch (d.kind) {
     case "terminal":
       return { kind: "terminal", cmd: d.cmd, block: resolveTerminal(d.cmd, d.where, p) }
@@ -51,6 +55,17 @@ export function resolveDemo(d: Demo, p: Parsed = source()): ResolvedDemo {
       return { kind: "snippet", label: d.label, block: resolveSnippet(d.line, d.where, p) }
     case "table":
       return { kind: "table", table: resolveTable(d.header, d.where, p) }
+  }
+}
+
+export function resolveDemo(d: Demo, p: Parsed = source()): ResolvedDemo {
+  switch (d.kind) {
+    case "terminal":
+    case "snippet":
+    case "table":
+      return resolveFrame(d, p)
+    case "pair":
+      return { kind: "pair", items: [resolveFrame(d.items[0], p), resolveFrame(d.items[1], p)] }
     case "variants":
       return {
         kind: "variants",
@@ -70,7 +85,7 @@ export function resolveModel(p: Parsed = source()) {
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
     capabilities: site.capabilities.map((c) => ({ cap: c as Capability, demo: resolveDemo(c.demo, p) })),
     startInstall: resolveTerminal(site.start.install.cmd, site.start.install.where, p),
-    startVerify: resolveTerminal(site.start.verify.cmd, site.start.verify.where, p),
+    startEngine: resolveTerminal(site.start.engine.cmd, site.start.engine.where, p),
     buildToday: resolveTerminal(site.buildToday.cmd, site.buildToday.where, p),
     guides: site.guides.map((g) => ({ ...g, block: resolveSnippet(g.line, g.where, p) })),
     version: version(),
@@ -175,7 +190,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .hero { padding-top: clamp(5rem, 12vw, 9rem); text-align: center; }
 .hero > * { margin-inline: auto; }
 .mark { display: inline-grid; place-items: center; background: var(--raise); border: 1px solid var(--line); border-radius: .8rem; color: var(--ink); }
-.hero h1 { margin-top: 1.6rem; font-size: clamp(2.8rem, 7vw, 5rem); font-weight: 680; letter-spacing: -.045em; line-height: 1; max-width: 18ch; text-wrap: balance; }
+.hero h1 { margin-top: 1.6rem; font-size: clamp(2.8rem, 7vw, 5.2rem); font-weight: 680; letter-spacing: -.045em; line-height: 1; max-width: 18ch; text-wrap: balance; }
 .lede { margin-top: 1.4rem; font-size: clamp(1.05rem, 1.7vw, 1.3rem); line-height: 1.6; max-width: 62ch; color: var(--body); }
 .aud { margin-top: 2.2rem; display: flex; flex-direction: column; align-items: center; }
 .aud > input { position: absolute; opacity: 0; pointer-events: none; }
@@ -195,6 +210,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .agent-links a, .agent-links button { color: var(--soft); background: none; border: 0; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: .18em; text-decoration-color: var(--line); padding: 0; }
 .agent-links a:hover, .agent-links button:hover { color: var(--ink); }
 .version { margin-top: 1.1rem; font-size: .85rem; color: var(--soft); }
+.version a { color: var(--body); text-underline-offset: .18em; text-decoration-color: var(--line); }
 
 /* frames */
 .frame { border: 1px solid var(--line); border-radius: .7rem; overflow: hidden; background: var(--paper); min-width: 0; }
@@ -208,7 +224,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .prompt-line::before { content: "$ "; color: var(--soft); }
 
 .split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
-.split .frame pre { height: 20rem; overflow: hidden; white-space: pre; }
+.split .frame pre { height: 17.5rem; overflow: hidden; white-space: pre; }
 
 /* sections */
 .section { padding-block: clamp(3.5rem, 7vw, 6rem); scroll-margin-top: 4.5rem; }
@@ -216,6 +232,22 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .section h2 { font-size: clamp(1.35rem, 2.4vw, 1.7rem); font-weight: 650; line-height: 1.2; letter-spacing: -.02em; }
 .explain { margin-top: .6rem; max-width: 68ch; }
 .demo { margin-top: 1.6rem; }
+.sec-head { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: .6rem 2.5rem; align-items: baseline; }
+.sec-head .explain { margin-top: 0; max-width: 60ch; }
+.cap { padding-block: clamp(2.5rem, 5vw, 3.75rem); }
+.cap + .cap { border-top: 1px solid var(--line-soft); }
+.cap .frame pre { max-height: 28rem; }
+.chapter { background: var(--band); border-block: 1px solid var(--line); padding-block: 1.1rem; scroll-margin-top: 3.75rem; }
+.chapter .shell { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
+.chapter code { background: none; padding: 0; font: 600 1.15rem/1.2 var(--mono); letter-spacing: -.02em; }
+.chapter span { color: var(--body); }
+.chapter em { font: .75rem var(--mono); font-style: normal; color: var(--soft); }
+.chapter a { margin-left: auto; font-size: .85rem; color: var(--soft); text-decoration: none; transition: color .14s ease; }
+.chapter a:hover { color: var(--ink); }
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
+.pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
+.pair > .frame { display: flex; flex-direction: column; }
+.pair > .frame pre { flex: 1; }
 .centre { text-align: center; }
 .centre .explain, .centre h2 { margin-inline: auto; }
 
@@ -336,13 +368,14 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .figures { grid-template-columns: repeat(2, 1fr); }
   .cols { grid-template-columns: repeat(3, 1fr); }
   .showcase { grid-template-columns: minmax(0, 1fr); }
+  .sec-head { grid-template-columns: minmax(0, 1fr); }
   .guides, .variants { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
   .shell { width: calc(100% - 2rem); }
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
-  .split, .principles, .bounds, .start { grid-template-columns: minmax(0, 1fr); }
+  .split, .principles, .bounds, .start, .pair { grid-template-columns: minmax(0, 1fr); }
   .split .frame pre { height: 16rem; }
   .split .frame:first-child pre { height: auto; }
   .figures.three { grid-template-columns: minmax(0, 1fr); }
@@ -463,7 +496,7 @@ function codeFrame(label: string, block: Block, dots = true): string {
   return `<div class="frame"><div class="bar">${dots ? '<span class="dots"><i></i><i></i><i></i></span>' : glyph("file", 14)}<span class="label">${esc(label)}</span></div><pre><code>${highlight(block.code, block.lang)}</code></pre></div>`
 }
 
-function demoHtml(d: ResolvedDemo): string {
+function frameHtml(d: ResolvedFrame): string {
   switch (d.kind) {
     case "terminal":
       return terminalFrame(d.cmd, d.block)
@@ -471,6 +504,19 @@ function demoHtml(d: ResolvedDemo): string {
       return codeFrame(d.label, d.block)
     case "table":
       return renderTable(d.table.header, d.table.rows)
+  }
+}
+
+function demoHtml(d: ResolvedDemo): string {
+  switch (d.kind) {
+    case "terminal":
+    case "snippet":
+    case "table":
+      return frameHtml(d)
+    case "pair": {
+      const stacked = d.items.some((i) => i.kind === "table")
+      return `<div class="pair${stacked ? " stacked" : ""}">${d.items.map(frameHtml).join("")}</div>`
+    }
     case "variants":
       return `<div class="variants">${d.items
         .map((i) => `<figure>${codeFrame(i.label, i.block)}<figcaption>${esc(i.caption)}</figcaption></figure>`)
@@ -479,11 +525,15 @@ function demoHtml(d: ResolvedDemo): string {
 }
 
 function section(id: string, title: string, body: string, demo: string, cls = ""): string {
-  return `<section class="section${cls ? ` ${cls}` : ""}" id="${id}" aria-labelledby="${id}-h"><div class="shell">
-<h2 id="${id}-h">${esc(title)}</h2>
-<p class="explain">${inline(body, linkContext())}</p>
+  return `<section class="section cap${cls ? ` ${cls}` : ""}" id="${id}" aria-labelledby="${id}-h"><div class="shell">
+<div class="sec-head"><h2 id="${id}-h">${esc(title)}</h2>
+<p class="explain">${inline(body, linkContext())}</p></div>
 <div class="demo">${demo}</div>
 </div></section>`
+}
+
+function chapterRule(c: { id: string; pkg: string; title: string; href: string }, count: number): string {
+  return `<div class="chapter" id="${c.id}"><div class="shell"><code>${esc(c.pkg)}</code><span>${esc(c.title)}</span><em>${count} capabilities</em><a href="${esc(c.href)}">Reference</a></div></div>`
 }
 
 function head(opts: { title: string; description: string; path: string; md: string }): string {
@@ -565,7 +615,7 @@ ${productMark(44)}
 <div class="aud-panel p-a" data-panel="agents"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.install.agents)}</code>${copyBtn(site.install.agents, "agent command")}</div>
 <div class="agent-links"><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">AGENTS.md</a><button type="button" data-copy-page="/index.md">Copy page as Markdown</button></div></div>
 </div>
-<p class="version">Currently <code>bql.sh</code> v${esc(m.version)} · ${esc(site.install.note)}</p>
+<p class="version">Currently <a href="${esc(site.npm)}" rel="noopener">v${esc(m.version)}</a> · ${esc(site.install.note)}</p>
 <div class="split">
 <div class="frame"><div class="bar">${glyph("terminal", 14)}<span class="label">${esc(site.split.left.label)}</span></div><pre><code>${left}</code></pre></div>
 ${codeFrame(site.split.right.label, m.splitRight, false)}
@@ -577,7 +627,7 @@ ${codeFrame(site.split.right.label, m.splitRight, false)}
 
   const figures = `<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2>${figs(m.figures)}</div></section>`
 
-  const eco = `<section class="section band eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
 <p class="explain">${inline(site.ecosystem.lede)}</p>
 <div class="marks">${site.ecosystem.marks.map((k) => `<a href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`).join("")}</div>
@@ -609,27 +659,31 @@ ${m.tabs
 </div></section>`
 
   const caps = m.capabilities
-    .map(({ cap, demo }, i) => section(cap.id, cap.title, cap.body, demoHtml(demo), i % 2 ? "band" : ""))
+    .map(({ cap, demo }, i, all) => {
+      const first = i === 0 || all[i - 1]!.cap.chapter !== cap.chapter
+      const rule = first ? chapterRule(site.chapters[cap.chapter], all.filter((x) => x.cap.chapter === cap.chapter).length) : ""
+      return rule + section(cap.id, cap.title, cap.body, demoHtml(demo))
+    })
     .join("\n")
-  const aside = `<p class="aside shell">Want it without a server? <code>Bql.open()</code> runs the same engine in your process — see <a href="/reference#db-embedded">Embedded</a>.</p>`
+  const aside = `<p class="aside shell">Want it without a server? <code>Bql.open()</code> runs the same engine in your process. See <a href="/reference#db-embedded">Embedded</a>.</p>`
 
   const measured = `<section class="section band" id="measured" aria-labelledby="measured-h"><div class="shell">
-<h2 id="measured-h">${esc(site.measured.title)}</h2>
-<p class="explain">${inline(site.measured.body)}</p>
+<div class="sec-head"><h2 id="measured-h">${esc(site.measured.title)}</h2>
+<p class="explain">${inline(site.measured.body)}</p></div>
 <div class="demo">${figs(m.measuredFigures, " three")}</div>
 <div class="demo">${m.measuredTables.map((t) => renderTable(t.header, t.rows)).join("")}</div>
 </div></section>`
 
   const bounds = `<section class="section" id="boundaries" aria-labelledby="boundaries-h"><div class="shell">
-<h2 id="boundaries-h">Boundaries</h2>
-<p class="explain">What the repository proves, what it chose, and what it does not do yet. See <a href="/reference#bus-boundaries">the bus's boundaries</a> in full.</p>
+<div class="sec-head"><h2 id="boundaries-h">Boundaries</h2>
+<p class="explain">What is proven, what is chosen, what is missing. <a href="/reference#bus-boundaries">The bus's boundaries</a> in full.</p></div>
 <div class="demo bounds">${site.boundaries.map((b) => `<div><h3>${esc(b.title)}<span>${b.items.length}</span></h3><ul>${b.items.map((x) => `<li>${inline(x)}</li>`).join("")}</ul></div>`).join("")}</div>
 </div></section>`
 
   const start = `<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
-<h2 id="start-h">Start from a clone</h2>
-<p class="explain">Neither package is on npm yet, so <code>git clone</code> is the install. <code>bun run typecheck</code> and <code>bun run test</code> are the whole gate CI runs.</p>
-<div class="demo start">${terminalFrame(site.start.install.cmd, m.startInstall)}${terminalFrame(site.start.verify.cmd, m.startVerify)}</div>
+<div class="sec-head"><h2 id="start-h">Two commands to start</h2>
+<p class="explain">Install <code>bql.sh</code>, then build the engine's libsqlite3 once, by path. It needs a C compiler.</p></div>
+<div class="demo">${terminalFrame(site.start.install.cmd, m.startInstall)}</div>
 </div></section>`
 
   const today = `<section class="section" id="today" aria-labelledby="today-h"><div class="shell today">
@@ -638,8 +692,8 @@ ${m.tabs
 </div></section>`
 
   const guides = `<section class="section band" id="guides" aria-labelledby="guides-h"><div class="shell">
-<h2 id="guides-h">Guides</h2>
-<p class="explain">The design notes behind three of the sharpest edges, from <code>packages/*/docs</code>.</p>
+<div class="sec-head"><h2 id="guides-h">Guides</h2>
+<p class="explain">The design notes behind the sharpest edges, from <code>packages/*/docs</code>.</p></div>
 <div class="demo guides">${m.guides
     .map((g) => `<a class="guide" href="${esc(g.href)}" rel="noopener"><span class="gt">${esc(g.title)}<span class="ext" aria-hidden="true">↗</span></span><span class="gb">${esc(g.body)}</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(g.file)}</span></span><pre><code>${highlight(g.block.code, g.block.lang)}</code></pre></span></a>`)
     .join("")}</div>
@@ -649,12 +703,12 @@ ${m.tabs
 <main id="main">
 ${hero}
 ${figures}
-${eco}
-${principles}
 ${showcase}
 ${caps}
 ${aside}
 ${measured}
+${eco}
+${principles}
 ${bounds}
 ${start}
 ${today}
@@ -703,13 +757,18 @@ function tableMd(t: Table): string {
   return [`| ${t.header.join(" | ")} |`, `| ${t.header.map(() => "---").join(" | ")} |`, ...t.rows.map((r) => `| ${r.join(" | ")} |`)].join("\n")
 }
 
+function frameMd(d: ResolvedFrame): string {
+  return d.kind === "table" ? tableMd(d.table) : fence(d.block)
+}
+
 function demoMd(d: ResolvedDemo): string {
   switch (d.kind) {
     case "terminal":
     case "snippet":
-      return fence(d.block)
     case "table":
-      return tableMd(d.table)
+      return frameMd(d)
+    case "pair":
+      return d.items.map(frameMd).join("\n\n")
     case "variants":
       return d.items.map((i) => `${i.caption}:\n\n${fence(i.block)}`).join("\n\n")
   }
@@ -751,11 +810,9 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     "## Boundaries",
     "",
     ...site.boundaries.flatMap((b) => [`### ${b.title}`, "", ...b.items.map((x) => `- ${x}`), ""]),
-    "## Start from a clone",
+    "## Two commands to start",
     "",
     fence(m.startInstall),
-    "",
-    fence(m.startVerify),
     "",
     "## Guides",
     "",
@@ -779,7 +836,7 @@ export function renderLlms(m: Model = resolveModel()): string {
     "",
     plain(site.lede),
     "",
-    `Status: \`bql.sh\` v${m.version}. ${site.install.note}; install from a clone.`,
+    `Status: \`bql.sh\` v${m.version}, ${site.install.note}. Install with \`${site.install.humans.cmd}\`.`,
     "",
     ...m.capabilities.flatMap(({ cap, demo }) => [`## ${cap.title}`, "", cap.body, "", demoMd(demo), ""]),
     "## Links",
@@ -799,7 +856,7 @@ export function renderAgents(m: Model = resolveModel()): string {
   return [
     `# Using ${site.name} from an agent`,
     "",
-    `${site.name} is two packages in one Bun monorepo: \`bql.sh\` (SQLite as a multi-tenant database server) and \`bql.sh/bus\` (a durable message bus, CLI \`bql bus\`). Bun 1.4 or newer. ${site.install.note}.`,
+    `${site.name} is one npm package with two halves: \`bql.sh\` (SQLite as a multi-tenant database server, CLI \`bql\`) and \`bql.sh/bus\` (a durable message bus, CLI \`bql bus\`). Bun 1.4 or newer. Currently v${m.version}.`,
     "",
     "## Install",
     "",
@@ -824,11 +881,13 @@ export function renderAgents(m: Model = resolveModel()): string {
     "| `--s3` | `bql serve` | ship log and snapshots to a bucket |",
     "| `ackWaitMs`, `maxAttempts` | bus subscription | lease length, retries before dead-letter |",
     "| `ordered` | bus subscription | per-key FIFO; off by default |",
+    "| `[[outbox.rules]]` | `bql.toml` | publish committed row changes to a bus subject; needs `[replication] logicalChanges` |",
+    "| `tz`, `catchUp` | bus schedule | IANA zone; `latest` (default) or `none` for missed slots |",
     "| `handlerTimeoutMs` | `BusConsumer` | stop a wedged handler holding its lease forever |",
     "",
     "## Three mistakes that break it",
     "",
-    "1. Using a system libsqlite3. Run `bun run db sqlite:build` once; Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size` and fails WAL tests.",
+    "1. Skipping the engine build, or reaching for a system libsqlite3. Run the by-path build above once (`bun run sqlite:build` in your project finds no such script); Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size` and fails WAL tests.",
     "2. `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.",
     "3. Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.",
     "",

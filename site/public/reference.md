@@ -17,6 +17,7 @@ bun add bql.sh
 | `bql.sh/sqlite` | The `bun:ffi` driver over a pinned libsqlite3: hooks, the authorizer, killable statements, changesets |
 | `bql.sh/server` | Serve it: WAL shipping, replicas, S3 backup, a Raft control plane |
 | `bql.sh/kysely`, `bql.sh/drizzle` | A Kysely dialect and a Drizzle driver over any of the above |
+| `bql.sh/search` | Vector ([sqlite-vec](https://github.com/asg017/sqlite-vec)), hybrid, full-text and geo search — SQL builders over any `Db` |
 | `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
@@ -203,6 +204,83 @@ restore, and one operation model rendered as REST, OpenAPI 3.1 and GraphQL. The 
 the client too, under `client.admin`. [packages/db/README.md](packages/db/README.md) is the real
 documentation; [packages/db/docs/api.md](packages/db/docs/api.md) is the API as built.
 
+### Search
+
+Vector, hybrid, full-text and geo search are SQL builders over any `Db` — client, embedded or a
+transaction — so they work the same against a server, a replica and your own process. sqlite-vec
+and the geo functions are compiled into the library `bun run db sqlite:build` makes; on any other
+library the helpers throw `FEATURE_UNAVAILABLE` rather than fall back.
+
+```ts
+import { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } from "bql.sh/search"
+
+const fts = ftsIndex(db, { table: "posts_fts", source: "posts", columns: ["title", "body"] })
+const vec = vectorIndex(db, { table: "posts_vec", dimensions: 384 })
+await fts.create() // triggers keep it in step with `posts`
+await vec.create()
+await vec.upsert(postId, embedding)
+
+await hybridSearch(db, { fts, vector: vec, query: ftsQuote(userInput), embedding: queryEmbedding, k: 10 })
+await geoIndex(db, { table: "shops_geo", source: "shops" }).near(51.5, -0.12, 2_000)
+```
+
+### A database per pull request
+
+Forks are O(1) and record their parent, so a branch per pull request costs a directory. The
+`bql-branch` action creates one when a pull request opens and deletes it when it closes — curl
+against the HTTP API, no install. Branch names default to `pr-<number>`. `delete` only removes a
+database that has a parent, and never the source itself.
+
+```yaml
+# .github/workflows/db-branch.yml
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+jobs:
+  branch:
+    runs-on: ubuntu-latest
+    steps:
+      - id: db
+        uses: TimMikeladze/bql/.github/actions/bql-branch@main
+        with:
+          url: ${{ secrets.BQL_URL }}
+          token: ${{ secrets.BQL_ADMIN_KEY }}
+          source: main
+          action: ${{ github.event.action == 'closed' && 'delete' || 'create' }}
+          on-exists: keep            # or `reset`: back to main's head on every push
+      - run: echo "database ${{ steps.db.outputs.name }}"
+```
+
+**Vercel previews.** A preview build knows its git branch as `VERCEL_GIT_COMMIT_REF`. Turn it into a
+database name — `[a-z0-9][a-z0-9-_]{0,63}`, so lower-case it, dash everything else, trim, cut to
+64 — fork it from `main` before the build, and read the same name at runtime:
+
+```ts
+// db-name.ts — imported by the build step and by the app
+export function dbName(): string {
+  const ref = process.env.VERCEL_ENV === "preview" ? process.env.VERCEL_GIT_COMMIT_REF : undefined
+  if (!ref) return "main"
+  const name = ref.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/-+/g, "-")
+    .replace(/^[-_]+/, "").slice(0, 64).replace(/-+$/, "")
+  return name || "main"
+}
+```
+
+```ts
+// scripts/branch.ts — the build command is `bun scripts/branch.ts && next build`
+import { createClient } from "bql.sh/client"
+import { dbName } from "../db-name"
+
+const name = dbName()
+if (name !== "main") {
+  const admin = createClient({ url: process.env.BQL_URL!, token: process.env.BQL_ADMIN_KEY! }).admin
+  await admin.fork(name, "main").catch((err) => { if (err.code !== "CONFLICT") throw err })
+}
+```
+
+`bql db diff main <branch>` shows what the branch's migrations did, and `bql db reset <branch>`
+throws them away. [packages/db/docs/x2-branching.md](packages/db/docs/x2-branching.md) has the rest.
+
 ## The bus
 
 Publish to a subject; durable subscriptions deliver to consumers with leases, retries, ordering and
@@ -225,16 +303,43 @@ embedded mode, atomic read-process-write inside the bus, and fenced ledgered eff
 outside world. Fan-out happens on pull rather than on publish, so publishing is O(1) in the number
 of subscriptions and a subscription created today can read last week. A JSON Schema registry with
 computed compatibility checks, scoped tokens with affordable revocation, W3C `traceparent` end to
-end, and epoch-fenced promotion over asynchronous log replication.
+end, and epoch-fenced promotion over asynchronous log replication. Cron schedules
+(`bql bus schedule add nightly '30 2 * * *' reports.nightly --tz America/New_York`) fire on the
+leader as ordinary deduplicated publishes, DST-correct in any IANA zone.
 [packages/bus/README.md](packages/bus/README.md) is the real documentation.
 
 ## Together
 
-Neither half imports the other yet. The coupling is the work after the move, in the order the
-value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then a commit hook publishing to
-a subject as a transactional outbox with no dual-write window, then the bus's own replication and
-backup giving way to WAL shipping. [docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the
-sequence and why each step is independently revertable.
+Neither half imports the other's source. The coupling is the work after the move, in the order the
+value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then the database as a
+transactional outbox, then the bus's own replication and backup giving way to WAL shipping.
+[docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the sequence and why each step is
+independently revertable.
+
+**The outbox has landed.** A database server with `[outbox]` rules tails each matching database's
+log and publishes every committed row change to a bus subject over HTTP, with a dedupe key per
+change and a cursor that moves only after the bus acknowledged — so a crash never loses a change and
+never puts one on the bus twice. It reads the durable log rather than a commit hook, which is what
+closes the dual-write window for real. On the other side, `bql bus sink webhook|s3|clickhouse`
+drains a subscription into a webhook, a bucket of gzipped NDJSON, or ClickHouse:
+
+```toml
+# bql.toml
+[replication]
+logicalChanges = "row"
+
+[[outbox.rules]]
+db = "app-*"
+busUrl = "http://127.0.0.1:4317"
+tokenEnv = "BUS_TOKEN"
+```
+
+```sh
+bql bus sink webhook --subscription cdc --subject 'db.>' --to https://example.com/hook
+```
+
+[packages/db/docs/x6-outbox.md](packages/db/docs/x6-outbox.md) is the design and what changed
+while building it.
 
 ## CI and releases
 
@@ -655,7 +760,18 @@ protocol, the SSE formats, the SDKs, the CLI, every config key.
 bql.sh needs **Bun 1.4 or newer** and a C compiler — the compiler once, to build the libsqlite3 the
 driver loads (see [The driver](#the-driver) for why a system one will not do).
 
-The package is `bql.sh`. It is **not on npm yet**; until the first release, use it from a clone:
+The package is `bql.sh`, on npm. Install it, then build the engine **by path**:
+
+```sh
+bun add bql.sh
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
+```
+
+`npm run` cannot reach a dependency's own scripts, so `bun run sqlite:build` in your project would
+look for a script of yours by that name and find none — the path above is the contract. CI proves
+it on the real tarball on every push (`bun run pack:check`, `docs/l7-tarball.md`).
+
+Working on bql.sh itself runs it from a clone:
 
 ```sh
 git clone https://github.com/TimMikeladze/bql && cd bql
@@ -668,16 +784,6 @@ This tree is the database half of one package, `bql.sh` — [`packages/bus`](../
 under `bql.sh/bus`, and [docs/monorepo.md](../../docs/monorepo.md) is why they ship together. `bun run
 db <script>` forwards from the root to this tree; from inside `packages/db`, every script still runs
 by its own name.
-
-Once published, `bun add bql.sh`, then build the engine **by path**:
-
-```sh
-bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
-```
-
-`npm run` cannot reach a dependency's own scripts, so `bun run sqlite:build` in your project would
-look for a script of yours by that name and find none — the path above is the contract. CI proves
-it on the real tarball on every push (`bun run pack:check`, `docs/l7-tarball.md`).
 
 ## Getting started
 
@@ -786,7 +892,7 @@ await client.admin.restore("acme", { at: 4800, into: "acme-recovered" })   // a 
 const { token, jti } = await client.admin.mintToken({ dbs: ["acme"], scope: "ro" })
 ```
 
-Nineteen methods, one for each route of the admin surface: lifecycle, dump and import, replication
+Twenty methods, one for each route of the admin surface: lifecycle, dump and import, replication
 and promotion, the backup bucket, tokens. It needs the admin key, and it is built on first use, so
 a browser that only queries never constructs it.
 
@@ -820,7 +926,7 @@ await bq.serve({ port: 4321 })                       // the same engine, now ove
 `db` is the same interface the client exposes, so code written against one runs against the other.
 `db.sync` is the escape hatch for hot loops. The embedded caller is the admin principal; tokens
 start applying at `serve()`. The lifecycle calls are here too — `bq.create`, `bq.fork`, `bq.list`,
-`bq.stat`, `bq.delete`, `bq.snapshot`, `bq.restore`, `bq.checkpoint` — with the same shapes
+`bq.stat`, `bq.delete`, `bq.reset`, `bq.snapshot`, `bq.restore`, `bq.checkpoint` — with the same shapes
 `client.admin` answers. Restoring from an S3 bucket stays on the server route, which is where the
 store is built.
 
@@ -875,6 +981,60 @@ Transactions, savepoints, `db.batch()` and both migrators run on bql.sh's own tr
 routes rather than on `begin`/`commit` sent as loose statements. Streaming is not implemented —
 bql.sh answers with whole result sets, so Kysely's `.stream()` says so.
 [docs/r5-orm.md](docs/r5-orm.md) has the mapping and every limitation.
+
+## Search
+
+`bql.sh/search` builds vector, hybrid, full-text and geo search out of SQL and runs it through any
+`Db` — the client's, the embedded one, its `.sync`, a transaction. There is no search route: the
+statements are ordinary ones, so they work against a primary, a replica, the cloud and your own
+process alike.
+
+```ts
+import { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } from "bql.sh/search"
+
+// Full-text: an external-content FTS5 index kept in step with `posts` by three triggers.
+const fts = ftsIndex(db, { table: "posts_fts", source: "posts", columns: ["title", "body"], tokenizer: "porter unicode61" })
+await fts.create()                                 // fills from existing rows the first time
+await fts.search(ftsQuote(userInput), { limit: 20, highlight: true, snippet: { column: "body" } })
+// → [{ rowid, rank /* bm25, lower is better */, title, body, highlight, snippet }]
+
+// Vectors: a sqlite-vec vec0 table; metadata columns filter inside the KNN.
+const vec = vectorIndex(db, { table: "posts_vec", dimensions: 384, metric: "cosine", metadata: { lang: "text" } })
+await vec.create()
+await vec.upsert(post.id, embedding, { lang: "en" })
+await vec.search(queryEmbedding, { k: 10, where: { lang: "en" } })   // → [{ id, distance, lang }]
+
+// Hybrid: one statement, bm25 rank and KNN rank fused by reciprocal rank (k = 60).
+await hybridSearch(db, { fts, vector: vec, query: ftsQuote(userInput), embedding: queryEmbedding, k: 10 })
+// → [{ id, score, ftsRank, vectorRank, bm25, distance }]
+
+// Geo: an R*Tree over `shops.lat`/`shops.lon`, exact great-circle distance on top.
+const geo = geoIndex(db, { table: "shops_geo", source: "shops" })
+await geo.create()
+await geo.near(51.5033, -0.1196, 2_000, { limit: 20 })              // → [{ id, lat, lon, distance /* m */ }]
+await geo.within({ minLat: 51.4, maxLat: 51.6, minLon: -0.3, maxLon: 0.1 })
+```
+
+- **Where the capabilities come from.** FTS5 and R*Tree are in almost every SQLite. sqlite-vec
+  (pinned, 0.1.9) and bql.sh's geo functions (`bql_haversine(lat1, lon1, lat2, lon2)` in metres,
+  `bql_bbox_{min,max}_{lat,lon}(lat, lon, radiusM)`) are compiled into the library
+  `bun run db sqlite:build` produces and registered on every connection — usable from plain SQL
+  too. On any other library a helper throws `FeatureUnavailableError` (`code: "FEATURE_UNAVAILABLE"`,
+  a `BqlClientError`) instead of falling back; `searchFeatures(db)` asks up front.
+- **Vectors** are float32 little-endian blobs: `toVector(number[] | Float32Array)` and
+  `fromVector(blob)`. `bql.sh/drizzle` has a `vector({ dimensions })` column that encodes the same
+  way. `hybridSearch` joins the FTS rowid to the vector id, so key both by the same integer.
+- **Untrusted query text** goes through `ftsQuote`, which turns every word into a quoted string:
+  FTS5 operators become text and a user can never make `MATCH` throw a syntax error.
+- **Table and column names** are checked against `[A-Za-z_][A-Za-z0-9_]*` before any SQL is built.
+- **The index's own tables stay out of sight.** An FTS5, vec0 or R*Tree table stores itself in
+  shadow tables; they are not listed by the Data API, their rows never reach the change feed, and a
+  live query over the virtual table refreshes when the module writes them.
+- **Per-table tokens grant the index, not its storage.** A token scoped with
+  `tables: { posts: "rw", posts_fts: "r" }` can search `posts_fts`; the module's own storage tables
+  follow `posts_fts`'s grant. Writing `posts` fires the index triggers, so a writer needs the index
+  granted `rw` too; the request runs with `SQLITE_DBCONFIG_DEFENSIVE`, so that grant cannot write
+  the storage tables directly. [docs/x1-search.md](docs/x1-search.md).
 
 ## A primary and a replica
 
@@ -1006,6 +1166,40 @@ newest snapshot at or before the target, and replays the segments after it throu
 verifier a replica uses — so it either reproduces the target txid checksum for checksum or fails
 loudly. The bucket layout is a documented contract ([docs/r3-storage.md](docs/r3-storage.md)).
 
+## Stream changes to the bus (outbox)
+
+With `[replication] logicalChanges` on, every transaction record carries its row changes. An
+`[outbox]` rule tails the log of each matching database and publishes one bus message per row
+change — from the durable log, not the in-memory feed, so a crash never loses one and a restart
+never duplicates one on the bus.
+
+```toml
+[replication]
+logicalChanges = "row"
+
+[[outbox.rules]]
+db = "app-*"                   # database-name glob
+busUrl = "http://bus:4317"
+tokenEnv = "BUS_TOKEN"         # or token = "${BUS_TOKEN}"
+subject = "db.{db}.{table}"    # the default
+include = "row"                # "pk" | "row" | "row+old", at most what logicalChanges records
+```
+
+```sh
+bql bus subscribe cdc 'db.app-1.>'
+# {"db":"app-1","table":"users","op":"insert","txid":42,"seq":0,"i":0,"rowid":7,
+#  "pk":{"id":7},"row":{"id":7,"email":"a@b.c"},"committedAt":1790640000000}
+bql bus sink webhook --subscription cdc --to https://example.com/hook --secret "$HOOK_SECRET"
+```
+
+Each message's dedupe key is `<db>:<generation>:<txid>:<postChecksum>:<seq>:<i>` — so a branch
+reset or a failover that reuses a txid cannot collide with a change already on the bus — and the cursor
+(`<db dir>/outbox.json`) moves only after the bus acknowledged the batch. A cursor that log
+retention overtakes is logged as `OUTBOX_GAP` and counted in `bql_outbox_gaps_total`, never skipped
+quietly. The server refuses to start with rules and no `logicalChanges`. Status is on
+`GET /v1/db/:db/replication` (`outbox`) and `/metrics` (`bql_outbox_*`);
+[docs/x6-outbox.md](docs/x6-outbox.md) has the whole story.
+
 ## The CLI
 
 `bql` is the package's `bin`. From a clone, `bun run src/cli.ts <command>` is the same thing, or
@@ -1017,6 +1211,7 @@ bql serve --dir ./r --replica-of ws://primary:4321/v1/replication --cluster-secr
 bql serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
 bql db create acme                          # also: list, stat, delete, fork
 bql db fork acme-copy --from acme@4812      # a txid, or @2026-09-11T10:00:00Z
+bql db branch pr-42 --from acme             # a fork that records its parent; see Branches
 bql snapshot acme
 bql restore acme --at 2026-09-11T10:00:00Z --into acme-recovered
 bql backup status acme                      # also: verify, generations
@@ -1035,6 +1230,35 @@ Configuration is `bql.toml` in the working directory, then `BQL_*` in the enviro
 key has an override named after its section and its key — `BQL_DATA_DIR`, `BQL_SERVER_PORT`,
 `BQL_LIMITS_QUERY_TIMEOUT_MS` — plus the short forms `BQL_DIR`, `BQL_PORT`,
 `BQL_ADMIN_KEY`. Every key and its default is in [docs/api.md](docs/api.md#configuration).
+
+## Branches
+
+A fork is O(1) where the filesystem reflinks, so a database per pull request is cheap. Every fork
+records its `parent` and the parent txid it was taken at (`forkedAt`); `bql db list`, `admin.list()`
+and `admin.stat()` show both, and a child whose parent was deleted keeps working and reports
+`parentDeleted: true`.
+
+```sh
+bql db branch pr-42 --from main             # --from main@4812 or @2026-09-11T10:00:00Z also work
+bql db branches main                        # main's children; bare `branches` lists every branch
+bql db diff main pr-42                      # schema and row counts; --json for the structure
+bql db reset pr-42                          # back to main's head, same name
+```
+
+`reset` builds the copy before it touches the branch, then swaps it in; the old files go to
+`trash/`. A database that was never forked has nothing to reset to and is refused. The diff is
+`diffSchema` from `bql.sh/client`, which runs over any two `Db` handles:
+
+```ts
+import { diffSchema, formatSchemaDiff } from "bql.sh/client"
+
+const diff = await diffSchema(client.db("main"), client.db("pr-42"))
+if (!diff.sameSchema) console.log(formatSchemaDiff(diff, { a: "main", b: "pr-42" }))
+```
+
+For CI, `.github/actions/bql-branch` creates a branch when a pull request opens and deletes it when
+it closes, with curl and nothing else; the root README has the workflow and a Vercel preview recipe.
+[docs/x2-branching.md](docs/x2-branching.md) is the design as built.
 
 ## Generated REST, OpenAPI and GraphQL
 
@@ -1349,6 +1573,48 @@ A consumer already running the work learns on its **next lease renewal**, which 
 
 Cancelling is the **publisher's** call, or an admin's — the bus records which token published each message. A consumer cannot cancel its own work, because a consumer that could make a message it disliked disappear is a very quiet way to lose work.
 
+## Schedules
+
+Cron on the bus: a schedule is a standing publish that the existing one-second sweep fires on the
+leader. No second scheduler, no second store — a fire is an ordinary message on an ordinary subject.
+
+```sh
+bql bus schedule add nightly '30 2 * * *' reports.nightly '{"kind":"daily"}' --tz America/New_York
+bql bus schedule list            # --json for machines
+bql bus schedule run nightly     # fire once now; does not move the next fire
+bql bus schedule pause nightly · resume nightly · remove nightly
+```
+
+```ts
+await bus.putSchedule({ name: "nightly", cron: "30 2 * * *", tz: "America/New_York",
+  subject: "reports.nightly", body: { kind: "daily" }, catchUp: "latest" });
+```
+
+- **Five fields** — `*`, lists, ranges, steps (`*/15`, `5/15`), month and day names, `7` as Sunday —
+  plus `@hourly` `@daily` `@weekly` `@monthly` `@yearly`. Day of month and day of week follow Vixie
+  cron: both restricted means *either* matches, and a `*`-led field turns that back into *and*.
+  A bad expression, an unknown zone or one that can never fire (`0 0 31 2 *`) is a 400 that says why.
+- **Time zones are IANA names** (`tz`, default `UTC`) and DST follows Vixie cron. A job whose
+  minute or hour starts with `*` (`*/15 * * * *`, `@hourly`) runs on real time: it fires in both
+  passes of a repeated hour and has no fires in skipped minutes. A fixed time (`30 1 * * *`) the
+  clocks skip fires once at the first valid minute after the gap, and one that happens twice fires
+  once, the first time.
+- **Exactly one message per slot.** Each fire publishes with `dedupeKey = schedule:<name>:<fireAtMs>`
+  in the same transaction that moves `nextAt`, so a double sweep finds nothing due, and a promoted
+  follower whose schedule row lags the log re-derives the same key and gets the existing message
+  back. Every fire carries `schedule-name` and `schedule-at` (the scheduled instant, ISO) headers.
+- **`catchUp`** decides what a bus that was down does about the slots it missed: `latest` (the
+  default) fires once for the most recent one — never a burst — and `none` skips them. A fire more
+  than a minute late counts as missed under `none`.
+- **Pausing** clears `nextAt`; resuming computes it from now, so paused slots are not caught up.
+  A fire that cannot publish (quota, disk, an enforced schema) stays due, is retried with backoff
+  (`retryAt`: 2 s doubling to 5 min), and puts the reason in `lastError`.
+- **Scopes.** Defining, pausing and removing a schedule is admin, like a subscription. Reading is a
+  reader. `run` is a publish: admin, or any token allowed to publish to the schedule's subject, and it
+  counts against the publish rate limit.
+- **Replication.** A follower mirrors the schedule rows alongside the cursors and never fires; the
+  leader only fires while it holds the write fence.
+
 ## Schemas
 
 A registry of JSON Schema 2020-12 documents, bound to subject *patterns*, with an own validator —
@@ -1488,6 +1754,45 @@ bus.consumeTransactional({
 bql bus consume work --exec ./resize.sh --prefetch 4
 ```
 
+## Sinks
+
+A sink is a consumer that writes **batches** somewhere else — a webhook, a bucket, ClickHouse — and
+acks only once the destination accepted the batch. A destination that is down turns into nacks,
+so the subscription's own retry, backoff and dead letter apply; nothing is acked into nowhere.
+
+```sh
+bql bus sink webhook    --subscription cdc --subject 'db.>' --to https://example.com/hook --secret "$SECRET"
+bql bus sink s3         --subscription lake --bucket events --prefix cdc/ --endpoint-url https://…
+bql bus sink clickhouse --subscription olap --to http://clickhouse:8123 --table analytics.users --shape row
+```
+
+`--subject` creates the subscription first (or confirms it). A batch is written at `--batch`
+messages (default 500) or once its oldest message has waited `--flush-ms` (1000; 10000 for s3),
+and every lease it holds is renewed while it waits.
+
+| Sink | Writes | Notes |
+| --- | --- | --- |
+| `webhook` | `POST` a JSON array of `{seq, subject, key, publishedAt, idempotencyKey, body}` | `--secret` signs it: `x-bql-signature: t=<ms>,sha256=<hex>` over `<t>.<body>`; `verifyWebhookSignature` checks it. Non-2xx nacks |
+| `s3` | one gzipped NDJSON object per batch, same records, via `Bun.S3Client` | key `<prefix><yyyy>/<mm>/<dd>/<hh>/<time>-<firstSeq>.ndjson.gz`; credentials from `S3_*` / `AWS_*` |
+| `clickhouse` | `INSERT INTO <table> FORMAT JSONEachRow`, one line per message | `--shape body` (default) the body as is; `--shape row` for db outbox changes — unwraps `row` (`old`/`pk` for a delete) and adds `_op`, `_db`, `_table`, `_txid`, `_seq`, `_i`, `_committed_at`; `--shape record` the whole record. `input_format_skip_unknown_fields=1`, so a shape that does not fit the table inserts defaults — pick the one that does. `CLICKHOUSE_PASSWORD` |
+
+At-least-once, like every consumer: a crash between the write and the acks writes the batch again.
+Every record carries `idempotencyKey` for a destination that dedupes. Paired with the database's
+outbox (`[outbox]` in [bql.sh](../db/README.md)), this is committed rows to a webhook or a
+warehouse with no code. In a program, `SinkRunner` with `webhookSink`, `s3Sink` or `clickhouseSink`
+is the same loop:
+
+```ts
+import { BusClient, SinkRunner, webhookSink } from "bql.sh/bus";
+
+await new SinkRunner({
+  client: new BusClient({ url: "http://127.0.0.1:4317", token: process.env.BUS_TOKEN! }),
+  id: "hook-1",
+  subscription: "cdc",
+  writer: webhookSink({ url: "https://example.com/hook", secret: process.env.HOOK_SECRET }),
+}).start();
+```
+
 ## CLI
 
 | | |
@@ -1498,9 +1803,11 @@ bql bus consume work --exec ./resize.sh --prefetch 4
 | `bql bus request <subject> <json>` | publish and wait for a reply |
 | `bql bus subscribe <name> <pattern>` | create a durable subscription |
 | `bql bus consume <subscription> --exec CMD [--exec-timeout ms]` | run a consumer |
+| `bql bus sink webhook\|s3\|clickhouse --subscription name [--subject pattern]` | batch a subscription into another system |
 | `bql bus cancel <seq>` | stop a message; in-flight handlers abort |
 | `bql bus dlq <subscription>` · `dlq requeue <seq…>` | inspect and requeue dead letters |
 | `bql bus blocked <subscription>` · `unblock <sub> <key>` | ordered keys stalled behind a dead letter |
+| `bql bus schedule add <name> <cron> <subject> [json]` · `list` · `show` · `remove` · `pause` · `resume` · `run` | cron schedules (`--tz`, `--catch-up`, `--json`) |
 | `bql bus schema register <name> <file>` · `check` · `bind` · `list` | the registry |
 | `bql bus keys rotate` · `keys retire <kid>` | signing keys, with an overlap window |
 | `bql bus revoke <jti>` · `quota [set]` · `audit` | tenant safety |
@@ -1518,6 +1825,7 @@ rather than moving in lockstep. A client asking for a version this broker does n
 | Method | Path | |
 | --- | --- | --- |
 | `POST` | `/api/publish` | `{subject, key?, headers?, body, dedupeKey?, replyTo?, ttlMs?}` |
+| `POST` | `/api/publish/batch` | `{messages: [...]}`, up to 1000, one transaction — all or none; dedupe per message. Costs one `--publish-rate` token per message; a batch larger than the burst is `413` |
 | `POST` `GET` | `/api/subscriptions` | create; list |
 | `POST` | `/api/subscriptions/:name/claim` | `{consumer, max, waitMs}` — long-polls |
 | `POST` | `/api/subscriptions/:name/replay` `/purge` `/pause` | operator actions |
@@ -1529,6 +1837,8 @@ rather than moving in lockstep. A client asking for a version this broker does n
 | `POST` `GET` | `/api/consumers/register` · `/api/consumers` · `/api/stats` | fleet |
 | `POST` | `/api/subscriptions/:name/unblock` · `GET /blocked` | ordered keys stalled behind a dead letter |
 | `POST` `GET` | `/api/effects/claim` · `/api/effects/record` | the effect ledger (Tier 3) |
+| `PUT` `GET` `DELETE` | `/api/schedules/:name` · `GET /api/schedules` | `{cron, tz?, subject, body?, headers?, catchUp?, paused?}`; define is admin |
+| `POST` | `/api/schedules/:name/pause` `/resume` `/run` | `run` needs publish on the subject |
 | `POST` `GET` | `/api/schemas` · `/check` · `/bindings` · `GET /keywords` | the registry |
 | `POST` | `/api/tokens` · `/api/tokens/revoke` | mint; revoke by `jti` (admin) |
 | `POST` `GET` | `/api/quota` · `GET /api/audit` | per-workspace ceilings; the audit trail |

@@ -52,6 +52,13 @@ export interface TenantRow {
    * one of them should not have to answer for all ten the same way (`docs/r8-per-db-ack.md`).
    */
   ackWithoutReplicas: AckWithoutReplicas | null
+  /**
+   * X2 lineage: the database this one was forked from, or null for one that was created. By
+   * name, so it still reads after the parent is deleted — a dangling edge, not a broken row.
+   */
+  parent: string | null
+  /** The parent's txid the fork was taken at (the head at the last `reset`), or null. */
+  forkedAt: bigint | null
 }
 
 /** What a node — or now one database — does when an ack level it cannot satisfy is asked for. */
@@ -71,6 +78,8 @@ export interface TenantInit {
   foreignKeys?: boolean | null
   /** Null or absent follows `[replication] ackWithoutReplicas`. */
   ackWithoutReplicas?: AckWithoutReplicas | null
+  /** X2: the database this one was forked from, and the parent's txid it was taken at. */
+  lineage?: { parent: string; forkedAt: bigint } | null
 }
 
 /** A token the node minted, as recorded for revocation and audit. */
@@ -81,6 +90,17 @@ export interface TokenRow {
   expiresAtSec: number | null
   revokedAtMs: number | null
   claims: unknown
+}
+
+/** A reset caught mid-swap (`Catalog.beginReset`), with everything needed to finish it. */
+export interface PendingReset {
+  name: string
+  /** Where the replacement was built; gone once it has been renamed into place. */
+  staging: string
+  /** Where the branch's own directory goes. */
+  old: string
+  pageSize: number
+  position: Omit<RecorderPosition, "epoch">
 }
 
 export interface SnapshotRow {
@@ -110,7 +130,22 @@ create table if not exists tenants (
   -- as "off". A database that has never been told keeps following the node.
   foreign_keys  integer,
   -- Nullable for the same reason: null is "whatever [replication] ackWithoutReplicas says".
-  ack_no_replicas text
+  ack_no_replicas text,
+  -- X2 lineage. Null for a database that was created rather than forked.
+  parent        text,
+  forked_at     text
+) strict;
+
+-- X2: a reset whose directory swap has begun and whose catalog row is not rewritten yet. Present
+-- only across the swap; a row found at open is a crash in it, which \`TenantRegistry\` completes.
+create table if not exists resets (
+  name          text primary key,
+  staging       text    not null,
+  old           text    not null,
+  page_size     integer not null,
+  txid          text    not null,
+  checksum      text    not null,
+  db_size_pages integer not null
 ) strict;
 
 create table if not exists tokens (
@@ -147,6 +182,8 @@ interface RawTenant {
   role: string
   foreign_keys: number | null
   ack_no_replicas: string | null
+  parent: string | null
+  forked_at: string | null
 }
 
 function toRow(raw: RawTenant): TenantRow {
@@ -172,6 +209,8 @@ function toRow(raw: RawTenant): TenantRow {
       raw.ack_no_replicas === "error" || raw.ack_no_replicas === "allow"
         ? raw.ack_no_replicas
         : null,
+    parent: raw.parent,
+    forkedAt: raw.forked_at === null ? null : BigInt(raw.forked_at),
   }
 }
 
@@ -210,6 +249,9 @@ function migrate(db: Database): void {
   if (!columns.has("ack_no_replicas")) {
     db.exec("alter table tenants add column ack_no_replicas text")
   }
+  // X2: nullable, so every existing row reads as a database that was created, not forked.
+  if (!columns.has("parent")) db.exec("alter table tenants add column parent text")
+  if (!columns.has("forked_at")) db.exec("alter table tenants add column forked_at text")
 }
 
 export class Catalog implements RevocationList {
@@ -272,13 +314,15 @@ export class Catalog implements RevocationList {
       // is a new database: its override does not survive the delete.
       foreignKeys: init.foreignKeys ?? null,
       ackWithoutReplicas: init.ackWithoutReplicas ?? null,
+      parent: init.lineage?.parent ?? null,
+      forkedAt: init.lineage?.forkedAt ?? null,
     }
     this.db.run(
       `insert into tenants
          (name, created_at, page_size, quota_bytes, deleted_at, epoch, txid, checksum,
           db_size_pages, wal_salt1, wal_salt2, wal_frame, clean, role, foreign_keys,
-          ack_no_replicas)
-       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+          ack_no_replicas, parent, forked_at)
+       values (?, ?, ?, ?, null, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
        on conflict(name) do update set
          created_at = excluded.created_at, page_size = excluded.page_size,
          quota_bytes = excluded.quota_bytes, deleted_at = null, epoch = excluded.epoch,
@@ -286,7 +330,8 @@ export class Catalog implements RevocationList {
          db_size_pages = excluded.db_size_pages, wal_salt1 = excluded.wal_salt1,
          wal_salt2 = excluded.wal_salt2, wal_frame = excluded.wal_frame, clean = 1,
          role = excluded.role, foreign_keys = excluded.foreign_keys,
-         ack_no_replicas = excluded.ack_no_replicas`,
+         ack_no_replicas = excluded.ack_no_replicas, parent = excluded.parent,
+         forked_at = excluded.forked_at`,
       [
         row.name,
         row.createdAtMs,
@@ -302,9 +347,99 @@ export class Catalog implements RevocationList {
         row.role,
         row.foreignKeys === null ? null : row.foreignKeys ? 1 : 0,
         row.ackWithoutReplicas,
+        row.parent,
+        row.forkedAt === null ? null : row.forkedAt.toString(),
       ],
     )
     return row
+  }
+
+  /**
+   * X2 `reset`: the branch now starts again at `position`, forked from its parent at
+   * `position.txid`. One statement for the row, and the snapshot rows go with it — their files
+   * went to the trash with the old directory. Name, settings, epoch and creation time stay.
+   */
+  resetTenant(name: string, pageSize: number, position: Omit<RecorderPosition, "epoch">): void {
+    this.#assertOpen()
+    this.db.exec("begin immediate")
+    try {
+      this.db.run(
+        `update tenants set page_size = ?, txid = ?, checksum = ?, db_size_pages = ?,
+           wal_salt1 = ?, wal_salt2 = ?, wal_frame = ?, clean = 1, forked_at = ?
+         where name = ? and deleted_at is null`,
+        [
+          pageSize,
+          position.txid.toString(),
+          position.checksum.toString(),
+          position.dbSizePages,
+          position.wal.salt1,
+          position.wal.salt2,
+          position.wal.frame,
+          position.txid.toString(),
+          name,
+        ],
+      )
+      this.db.run("delete from snapshots where db = ?", [name])
+      // Same transaction as the row: a reset is either pending with the old row, or done.
+      this.db.run("delete from resets where name = ?", [name])
+      this.db.exec("commit")
+    } catch (err) {
+      this.db.exec("rollback")
+      throw err
+    }
+  }
+
+  /**
+   * Records a reset *before* its first rename, so a crash anywhere in the swap is recognised at
+   * the next open rather than leaving a directory the catalog's position does not describe. Fully
+   * synchronous: `synchronous = normal` would let a power cut keep the renames and lose this row.
+   */
+  beginReset(reset: PendingReset): void {
+    this.#assertOpen()
+    this.db.exec("pragma synchronous = full")
+    try {
+      this.db.run(
+        `insert or replace into resets
+           (name, staging, old, page_size, txid, checksum, db_size_pages)
+         values (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          reset.name,
+          reset.staging,
+          reset.old,
+          reset.pageSize,
+          reset.position.txid.toString(),
+          reset.position.checksum.toString(),
+          reset.position.dbSizePages,
+        ],
+      )
+    } finally {
+      this.db.exec("pragma synchronous = normal")
+    }
+  }
+
+  /** The reset caught mid-swap for this database, or null — which is every database, normally. */
+  pendingReset(name: string): PendingReset | null {
+    this.#assertOpen()
+    const raw = this.db.prepare("select * from resets where name = ?").get(name)
+    if (!raw) return null
+    return {
+      name: raw.name as string,
+      staging: raw.staging as string,
+      old: raw.old as string,
+      pageSize: raw.page_size as number,
+      position: {
+        txid: BigInt(raw.txid as string),
+        checksum: BigInt(raw.checksum as string),
+        dbSizePages: raw.db_size_pages as number,
+        wal: { salt1: 0, salt2: 0, frame: 0 },
+      },
+    }
+  }
+
+  /** Forgets a reset that never moved anything; the branch's row and files still agree. */
+  abandonReset(name: string): void {
+    this.#assertOpen()
+    this.db.run("delete from resets where name = ?", [name])
   }
 
   /** Switches a database between primary and replica mode, for bootstrap and for promotion. */
@@ -376,6 +511,7 @@ export class Catalog implements RevocationList {
   purgeTenant(name: string): void {
     this.#assertOpen()
     this.db.run("delete from snapshots where db = ?", [name])
+    this.db.run("delete from resets where name = ?", [name])
     this.db.run("delete from tenants where name = ?", [name])
   }
 

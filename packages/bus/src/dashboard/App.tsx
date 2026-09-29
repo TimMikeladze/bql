@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import type {
   Delivery,
   Message,
+  Schedule,
   Stats,
   SubscriptionStats,
 } from "../shared/protocol";
@@ -339,6 +340,7 @@ export function App() {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [log, setLog] = useState<Message[]>([]);
   const [dead, setDead] = useState<Message[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("log");
@@ -351,12 +353,16 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextStats, nextDeliveries, nextLog] = await Promise.all([
-        read<Stats>("/api/stats"),
-        read<Delivery[]>("/api/deliveries"),
-        read<Message[]>("/api/log?after=0&limit=60"),
-      ]);
+      const [nextStats, nextDeliveries, nextLog, nextSchedules] =
+        await Promise.all([
+          read<Stats>("/api/stats"),
+          read<Delivery[]>("/api/deliveries"),
+          read<Message[]>("/api/log?after=0&limit=60"),
+          // A bus from before schedules answers 404; that is an empty list.
+          read<Schedule[]>("/api/schedules").catch(() => [] as Schedule[]),
+        ]);
       setStats(nextStats);
+      setSchedules(nextSchedules);
       setDeliveries(nextDeliveries);
       setLog(nextLog.reverse());
       if (tabRef.current === "dead") {
@@ -683,6 +689,44 @@ export function App() {
             ) : (
               <p className="px-3.5 py-8 text-center text-xs text-[var(--muted-text)]">
                 No consumers registered.
+              </p>
+            )}
+          </div>
+
+          <div className="overflow-hidden rounded-md border border-border bg-white">
+            <h2 className="border-b border-border px-3.5 py-2.5 text-sm font-medium">
+              Schedules
+            </h2>
+            {schedules.length > 0 ? (
+              schedules.map((schedule) => (
+                <div
+                  key={schedule.name}
+                  className="flex items-center justify-between gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-medium">{schedule.name}</span>
+                      <code className="text-xs text-[var(--muted-text)]">
+                        {schedule.cron}
+                      </code>
+                    </div>
+                    <div className="mt-0.5 truncate text-xs text-[var(--muted-text)]">
+                      {schedule.subject} · {schedule.tz}
+                      {schedule.lastError ? ` · ${schedule.lastError}` : ""}
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-xs tabular-nums text-[var(--muted-text)]">
+                    {schedule.paused || schedule.nextAt === null
+                      ? "paused"
+                      : stats
+                        ? `in ${relative(stats.now, schedule.nextAt)}`
+                        : ""}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <p className="px-3.5 py-8 text-center text-xs text-[var(--muted-text)]">
+                No schedules.
               </p>
             )}
           </div>

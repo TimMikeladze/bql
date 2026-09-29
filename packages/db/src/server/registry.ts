@@ -73,6 +73,19 @@ const QueryResult = s
   })
   .id("QueryResult")
 
+/** X2 lineage, on every list row and every stats body (`docs/x2-branching.md`). */
+const LINEAGE = {
+  parent: s
+    .union([s.string(), s.null()])
+    .describe("The database this one was forked from, or null for one that was created."),
+  forkedAt: s
+    .union([s.int(), s.null()])
+    .describe("The parent's txid the fork was taken at — its head at the last reset."),
+  parentDeleted: s
+    .boolean()
+    .describe("True when `parent` names a database that no longer exists: a dangling edge."),
+}
+
 const DbStats = s
   .object({
     name: s.string(),
@@ -86,6 +99,7 @@ const DbStats = s
     openConns: s.int(),
     liveQueries: s.int(),
     subscribers: s.int(),
+    ...LINEAGE,
     readSessions: s
       .int()
       .describe(
@@ -451,6 +465,7 @@ const SPECS: Spec[] = [
           role: s.string(),
           txid: s.int(),
           open: s.boolean(),
+          ...LINEAGE,
         }),
       ),
     }),
@@ -522,6 +537,23 @@ const SPECS: Spec[] = [
     response: s.object({ name: s.string(), deleted: s.boolean(), trash: s.string() }),
     errors: [...ON_DB, "NOT_PRIMARY"],
     handler: handlers.deleteDb,
+  },
+  {
+    id: "resetDatabase",
+    method: "post",
+    path: "/v1/db/:db/reset",
+    summary: "Reset a branch to its parent's head",
+    description:
+      "Re-forks the database from the parent it was forked from, at the parent's current head, " +
+      "under the same name; its settings stay. The copy is built before the branch is touched, " +
+      "then swapped in; subscriptions and transactions on the branch end as a delete ends them. " +
+      "`400` for a database that was created rather than forked, `404` when the parent has " +
+      "been deleted.",
+    tags: ["lifecycle"],
+    security: "admin",
+    response: DbStats,
+    errors: [...ON_DB, "NOT_PRIMARY", "CONFLICT"],
+    handler: handlers.resetDb,
   },
   {
     id: "dumpDatabase",

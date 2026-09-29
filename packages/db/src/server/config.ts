@@ -457,6 +457,47 @@ export interface S3Section {
   retries: number
 }
 
+/**
+ * X6: one outbox rule — which databases, which bus, which subject (`docs/x6-outbox.md`). A relay
+ * tails each matching database's log and publishes one message per row change.
+ */
+export interface OutboxRule {
+  /** Database-name glob: `*` any run, `?` one character. */
+  db: string
+  /** The bus's base URL, `http(s)://host:port`. */
+  busUrl: string
+  /** Bearer token for the bus. `${NAME}` expands against the environment, as elsewhere. */
+  token: string
+  /** Read the token from this environment variable instead. */
+  tokenEnv: string
+  /** `{db}` and `{table}` are substituted, each sanitised to a subject token. */
+  subject: string
+  /** How much of each row goes in the message. Capped by `[replication] logicalChanges`. */
+  include: "pk" | "row" | "row+old"
+  /** `x-bus-workspace`, for an admin token. Empty is the token's own. */
+  workspace: string
+  /** Names this rule's cursor. Derived from `busUrl` and `subject` when empty. */
+  name: string
+}
+
+/**
+ * X6: the transactional outbox. Off until a rule exists, and refused at start without
+ * `[replication] logicalChanges`, because the relay reads the rows the log records and a log
+ * without them has nothing to relay.
+ */
+export interface OutboxSection {
+  rules: OutboxRule[]
+  /**
+   * Most messages in one publish request, at most 1000 (the bus's batch ceiling). Whole records
+   * where they fit; a record larger than a batch is sent in chunks and moves the cursor once.
+   */
+  batchSize: number
+  /** The sweep: databases owed a pass, and a backstop for a missed commit. */
+  intervalMs: number
+  /** Ceiling of the retry backoff while the bus is failing. */
+  maxBackoffMs: number
+}
+
 export interface AuthSection {
   /** Bearer token for the lifecycle routes. Generated and persisted when absent. */
   adminKey: string | null
@@ -520,14 +561,18 @@ export interface ServerConfig {
   replication: ReplicationSection
   cluster: ClusterSection
   s3: S3Section
+  outbox: OutboxSection
   api: ApiSection
   graphql: GraphqlSection
 }
 
 /** The same shape with every field optional, which is what a TOML file or a caller supplies. */
 export type ServerConfigInput = {
-  [K in Exclude<keyof ServerConfig, "replication">]?: Partial<ServerConfig[K]>
+  [K in Exclude<keyof ServerConfig, "replication" | "outbox">]?: Partial<ServerConfig[K]>
 } & {
+  /** X6: a rule may leave out everything but `db` and `busUrl`; `validate` fills the rest. */
+  outbox?: Partial<Omit<OutboxSection, "rules">> & { rules?: Partial<OutboxRule>[] }
+
   /**
    * P9: `[replication] logicalChanges` is a *level*, and `true` is accepted for "the sensible
    * one", which is `"row"`. `validate` resolves it before anything reads the config, so the
@@ -657,6 +702,12 @@ export const DEFAULT_CONFIG: ServerConfig = {
     uploadWaitMs: 5000,
     retries: 4,
   },
+  outbox: {
+    rules: [],
+    batchSize: 256,
+    intervalMs: 1000,
+    maxBackoffMs: 30_000,
+  },
   api: {
     enabled: true,
     prefix: "api",
@@ -779,6 +830,15 @@ function setPath(config: ServerConfig, dotted: string, raw: string): void {
     target[key] = raw
     return
   }
+  // X6: rules are a list of tables, which an environment variable can only carry as JSON.
+  if (dotted === "outbox.rules") {
+    try {
+      target[key] = JSON.parse(raw)
+    } catch {
+      throw BqlError.badRequest("BQL_OUTBOX_RULES must be a JSON array of rules")
+    }
+    return
+  }
   target[key] = coerce(target[key], raw)
 }
 
@@ -834,6 +894,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
     },
     cluster: { ...DEFAULT_CONFIG.cluster, peers: [...DEFAULT_CONFIG.cluster.peers] },
     s3: { ...DEFAULT_CONFIG.s3 },
+    outbox: { ...DEFAULT_CONFIG.outbox, rules: [] },
     api: { ...DEFAULT_CONFIG.api },
     graphql: { ...DEFAULT_CONFIG.graphql },
   }
@@ -857,6 +918,7 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
       ),
       cluster: mergeSection(config.cluster, patch.cluster, env),
       s3: mergeSection(config.s3, patch.s3, env),
+      outbox: mergeSection(config.outbox, patch.outbox as Partial<OutboxSection> | undefined, env),
       api: mergeSection(config.api, patch.api, env),
       graphql: mergeSection(config.graphql, patch.graphql, env),
     }
@@ -959,6 +1021,9 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   }
 
   assertWorkers(config)
+  config.outbox.rules = resolveOutboxRules(config, env)
+  // `POST /api/publish/batch` takes at most 1000; a larger batch would be refused on every try.
+  config.outbox.batchSize = Math.min(1000, Math.max(1, Math.trunc(config.outbox.batchSize)))
 
   // `s3://bucket/prefix` in one variable, because that is how an operator writes a bucket.
   if (config.s3.bucket.startsWith("s3://")) {
@@ -994,6 +1059,77 @@ export function loadConfig(options: LoadConfigOptions = {}): ServerConfig {
   if (config.api.defaultLimit < 1) config.api.defaultLimit = 1
   if (config.api.maxLimit < config.api.defaultLimit) config.api.maxLimit = config.api.defaultLimit
   return config
+}
+
+const INCLUDE_RANK = { pk: 1, row: 2, "row+old": 3 } as const
+
+/**
+ * X6: fills each rule's defaults and refuses what cannot work. Every refusal names the rule, and
+ * the one that matters most is the first: an outbox on a node that records no rows would start,
+ * run, and publish nothing, which is the silent failure this check exists to make loud.
+ */
+function resolveOutboxRules(config: ServerConfig, env: Env): OutboxRule[] {
+  const raw = config.outbox.rules as unknown
+  if (!Array.isArray(raw)) throw BqlError.badRequest("[outbox] rules must be a list of rules")
+  if (raw.length === 0) return []
+  const level = config.replication.logicalChanges
+  if (level === false) {
+    throw BqlError.badRequest(
+      "[outbox] needs [replication] logicalChanges: the relay publishes the row changes each " +
+        'transaction record carries, and with it off no record carries any. Set logicalChanges = "row" ' +
+        "(or BQL_REPLICATION_LOGICAL_CHANGES=row).",
+    )
+  }
+  const names = new Set<string>()
+  return raw.map((entry: Partial<OutboxRule>, index: number) => {
+    const where = `[[outbox.rules]] #${index + 1}`
+    if (!entry || typeof entry !== "object") throw BqlError.badRequest(`${where} must be a table`)
+    const text = (value: unknown): string => (typeof value === "string" ? expand(value, env) : "")
+    const busUrl = text(entry.busUrl).replace(/\/$/, "")
+    if (!/^https?:\/\/[^/]/.test(busUrl)) {
+      throw BqlError.badRequest(`${where} needs busUrl, an http:// or https:// URL`)
+    }
+    const tokenEnv = text(entry.tokenEnv)
+    const token = tokenEnv ? (env[tokenEnv] ?? "") : text(entry.token)
+    if (!token) {
+      throw BqlError.badRequest(
+        tokenEnv ? `${where}: ${tokenEnv} is not set` : `${where} needs token or tokenEnv`,
+      )
+    }
+    const include = (text(entry.include) || "row") as OutboxRule["include"]
+    if (!(include in INCLUDE_RANK)) {
+      throw BqlError.badRequest(`${where} include must be "pk", "row" or "row+old"`)
+    }
+    if (INCLUDE_RANK[include] > INCLUDE_RANK[level]) {
+      throw BqlError.badRequest(
+        `${where} asks for include = "${include}" but [replication] logicalChanges records only ` +
+          `"${level}"; the log does not hold what this rule would publish`,
+      )
+    }
+    const subject = text(entry.subject) || "db.{db}.{table}"
+    const name =
+      text(entry.name) ||
+      Bun.hash.xxHash3(`${busUrl}\0${subject}`).toString(16).padStart(16, "0").slice(0, 12)
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+      throw BqlError.badRequest(`${where} name must be letters, digits, _ and -`)
+    }
+    if (names.has(name)) {
+      throw BqlError.badRequest(
+        `${where} has the same cursor name as another rule (${name}); give one of them a name`,
+      )
+    }
+    names.add(name)
+    return {
+      db: text(entry.db) || "*",
+      busUrl,
+      token,
+      tokenEnv,
+      subject,
+      include,
+      workspace: text(entry.workspace),
+      name,
+    }
+  })
 }
 
 /**
