@@ -2,7 +2,7 @@
 // `client.db()` handles (`docs/x2-branching.md`).
 
 import { afterAll, describe, expect, test } from "bun:test"
-import { diffSchema, formatSchemaDiff } from "../../src/client/index.ts"
+import { createClient, diffSchema, formatSchemaDiff } from "../../src/client/index.ts"
 import { sqlite } from "../../src/sqlite/index.ts"
 import { failure, startClientFixture, stopAll } from "./harness.ts"
 
@@ -46,6 +46,20 @@ describe("lineage", () => {
 })
 
 describe("diffSchema", () => {
+  test("works under a read-only token, not only the admin key", async () => {
+    const { server, client } = await startClientFixture()
+    await client.db("acme").sql`create index todos_title on todos(title)`.run()
+    await client.admin.fork("pr", "acme")
+    const { token } = await client.admin.mintToken({ dbs: ["acme", "pr"], scope: "ro", ttlMs: 60_000 })
+    const scoped = createClient({ url: server.url, token })
+    try {
+      const diff = await diffSchema(scoped.db("acme"), scoped.db("pr"))
+      expect(formatSchemaDiff(diff)).not.toContain("todos_title")
+    } finally {
+      scoped.close()
+    }
+  })
+
   test("finds added, dropped and changed tables, columns, indexes, and row counts", async () => {
     const { client } = await startClientFixture()
     const a = client.db("acme")

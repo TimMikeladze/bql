@@ -122,3 +122,10 @@ step's script out of `action.yml` and runs it with bash and curl against a test 
   skips them.
 - **Cloud mode** needed nothing: forks are refused there, so lineage never arises and `reset` is
   outside `CLOUD_OPERATIONS`.
+
+## After ship: `diffSchema` under a token
+
+`diffSchema` reads `pragma_table_xinfo` and `pragma_index_xinfo`, which `src/server/auth.ts` denied
+to every non-admin token, so the "any `client.db()`" claim above held only for the admin key. The
+three read-only schema pragmas (`table_xinfo`, `index_info`, `index_xinfo`) are now on the token
+allow-list. A table-scoped token is still checked table by table, so use a database-wide token.

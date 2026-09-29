@@ -191,6 +191,8 @@ describe("pragmas", () => {
     const db = fresh()
     policyFor(db, ro, "acme")
     expect(db.prepare("pragma table_info(todos)").all()).toHaveLength(3)
+    expect(db.prepare("select * from pragma_table_xinfo('todos')").all()).toHaveLength(3)
+    expect(db.prepare("select * from pragma_index_list('todos') l join pragma_index_xinfo(l.name)").all()).toBeDefined()
     expect(db.prepare("pragma table_list").all().length).toBeGreaterThan(0)
     expect(db.prepare("pragma index_list(todos)").all()).toBeDefined()
     expect(db.prepare("pragma foreign_key_list(todos)").all()).toEqual([])

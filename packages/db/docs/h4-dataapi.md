@@ -255,15 +255,12 @@ silently.
   has never heard of, so inventing `NOT_FOUND` here would have produced either an undocumented
   status or a document that refuses to build — the second error vocabulary `plan-surfaces.md`
   forbids.
-- **`PRAGMA table_xinfo` and `PRAGMA index_info` are denied to a token.** `PRAGMA_SUBJECT` in
-  `src/server/auth.ts` allows `table_info`, `table_list`, `index_list` and `foreign_key_list`;
-  `table_xinfo` (needed for generated columns) and `index_info` (needed for a unique index's
-  columns) are not on it, and neither is the `pragma_table_info(?)` table-valued function, which
-  reads as an ordinary table and fails the ACL. This costs nothing today — introspection runs with
-  the server's own rights, which it must anyway for the cache to be shareable — but a caller who
-  wired introspection to the request's principal would get a partial schema on a table-scoped
-  token and an error on any token at all. **If `src/server/auth.ts` ever wants to allow them,
-  `table_xinfo` and `index_info` are the two names.**
+- **`PRAGMA table_xinfo` and `PRAGMA index_info` were denied to a token** when this was written.
+  `PRAGMA_SUBJECT` in `src/server/auth.ts` now allows them, and `index_xinfo`, because X2's
+  `diffSchema` reads them through `client.db()` and failed with `NOT_AUTHORIZED` on any
+  non-admin token (`docs/x2-branching.md`). The table-valued form is still checked against a
+  table-scoped token's ACL like any other table, so `diffSchema` wants a database-wide token.
+  Introspection here still runs with the server's own rights, for the shareable cache.
 - **`.nullable()` on a node that carries a codec still refuses `null`.** `walk` in
   `src/core/validate.ts` reads the `CODEC` mark *before* it consults the type list, so
   `s.int64().nullable()` and `s.blob().nullable()` reject a null that their own published `type`

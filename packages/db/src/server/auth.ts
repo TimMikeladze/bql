@@ -803,8 +803,12 @@ const DDL_ACTIONS: ReadonlySet<number> = new Set([
 /** Pragmas whose argument names a table rather than setting a value: always a read. */
 const PRAGMA_SUBJECT: ReadonlySet<string> = new Set([
   "table_info",
+  // The same description plus hidden and generated columns; `diffSchema` reads it.
+  "table_xinfo",
   "table_list",
   "index_list",
+  "index_info",
+  "index_xinfo",
   "foreign_key_list",
 ])
 
