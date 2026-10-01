@@ -11,6 +11,10 @@ GitHub Action for per-PR branches.
   fork passes through — so `POST /v1/db` with `from` *and* a local point-in-time restore
   (`POST /v1/db/:db/restore`, which forks into a new name) both record it. Additive migration:
   existing rows read null.
+- **A fork keeps the parent's settings.** `foreignKeys` and `ackWithoutReplicas` are copied from
+  the parent's row when the fork's row is written (`Tenant.fork`). The fork's file was written under
+  the parent's foreign keys; a branch that silently followed a node default of `false` would accept
+  rows the parent never could. A later change to either side's setting does not propagate.
 - **Deleting a parent leaves the child alone.** The child's `parent` still names it; list/stat
   report `parentDeleted: true` so a UI can show the dangling edge. No cascade, no rewrite. A name
   later re-created is a *different* database: lineage is by name, so `parentDeleted` is computed

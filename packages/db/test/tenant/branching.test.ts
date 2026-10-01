@@ -46,6 +46,38 @@ describe("branching", () => {
     reg.close()
   })
 
+  test("a fork keeps its parent's foreign keys and ack override, and enforces them", async () => {
+    const dir = tempDir()
+    const reg = TenantRegistry.open({ dir })
+    await reg.create("main")
+    reg.setForeignKeys("main", true)
+    reg.setAckWithoutReplicas("main", "allow")
+    reg.open("main").write((db) =>
+      db.exec("create table p(id integer primary key); create table c(p integer references p(id))"),
+    )
+    const at = reg.open("main").txid
+
+    await reg.create("pr-1", { from: { db: "main" } })
+    await reg.create("pr-2", { from: { db: "main", at } })
+    await reg.create("plain")
+    for (const name of ["pr-1", "pr-2"]) {
+      expect(reg.catalog.getTenant(name)).toMatchObject({
+        foreignKeys: true,
+        ackWithoutReplicas: "allow",
+      })
+      expect(reg.ackWithoutReplicasOf(name)).toBe("allow")
+      expect(() => reg.open(name).write((db) => db.run("insert into c(p) values (1)"))).toThrow(
+        /FOREIGN KEY/,
+      )
+    }
+    // A database created from nothing still follows the node.
+    expect(reg.catalog.getTenant("plain")).toMatchObject({
+      foreignKeys: null,
+      ackWithoutReplicas: null,
+    })
+    reg.close()
+  })
+
   test("a catalog from before lineage migrates to nulls", () => {
     const dir = tempDir()
     let reg = TenantRegistry.open({ dir })

@@ -579,7 +579,8 @@ POST /v1/db      { "name": "acme-copy", "from": { "db": "acme", "at": 4812 } }  
 `from` forks, which is O(1) where the filesystem reflinks. `at` is a txid, or a timestamp: an
 ISO-8601 string or an epoch-millisecond number at or above 1e12, resolved against the log, whose
 records each carry a microsecond timestamp. A time older than the log is a `400` naming what the
-log still holds.
+log still holds. A fork keeps the source's per-database `foreignKeys` and `ackWithoutReplicas`
+overrides: its file was written under them.
 
 ```http
 GET /v1/db     → { "open": 3, "maxOpen": 1024,

@@ -1691,12 +1691,18 @@ export class Tenant {
       throw new TenantError("DB_EXISTS", `${target} already holds a database`)
     }
     const copy = await this.forkInto(target, at)
+    const parent = this.catalog.getTenant(this.name)
     this.catalog.createTenant({
       name: newName,
       pageSize: copy.pageSize,
       quotaBytes: this.quotaBytes,
       epoch: this.epoch,
       position: copy.position,
+      // A branch keeps the parent's per-database overrides. Its file is the parent's file, written
+      // under them; a fork of a `foreignKeys = true` database that quietly stopped enforcing them
+      // would accept rows the parent never could.
+      foreignKeys: parent?.foreignKeys ?? null,
+      ackWithoutReplicas: parent?.ackWithoutReplicas ?? null,
       // X2: every fork records where it came from, which is what `bql db branches` reads.
       lineage: { parent: this.name, forkedAt: copy.position.txid },
     })
