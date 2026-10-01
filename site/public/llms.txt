@@ -4,7 +4,7 @@
 
 `bql.sh` serves thousands of SQLite databases from one process. `bql.sh/bus` runs the work against them. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
 
-Status: `bql.sh` v0.3.0, on npm, Bun 1.4+. Install with `bun add bql.sh`.
+Status: `bql.sh` v0.4.0, on npm, Bun 1.4+. Install with `bun add bql.sh`.
 
 ## Realtime from SQLite's hooks
 

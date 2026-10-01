@@ -1,6 +1,6 @@
 # Using bql.sh from an agent
 
-bql.sh is one npm package with two halves: `bql.sh` (SQLite as a multi-tenant database server, CLI `bql`) and `bql.sh/bus` (a durable message bus, CLI `bql bus`). Bun 1.4 or newer. Currently v0.3.0.
+bql.sh is one npm package with two halves: `bql.sh` (SQLite as a multi-tenant database server, CLI `bql`) and `bql.sh/bus` (a durable message bus, CLI `bql bus`). Bun 1.4 or newer. Currently v0.4.0.
 
 ## Install
 
