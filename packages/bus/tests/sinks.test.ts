@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { createServer } from "../src/bus/server";
 import { BusStore } from "../src/bus/store";
 import { generateKey } from "../src/bus/tokens";
@@ -17,7 +18,7 @@ import {
 } from "../src/sinks";
 
 const adminToken = generateKey();
-const store = new BusStore(":memory:");
+const store = testStore();
 const server = createServer({
   store,
   signingKey: generateKey(),
@@ -226,7 +227,7 @@ test("a partial batch is written once flushMs passes, not held for a full one", 
 });
 
 test("a batch is charged per message against --publish-rate, and one past the burst is refused", async () => {
-  const limitedStore = new BusStore(":memory:");
+  const limitedStore = testStore();
   const limited = createServer({
     store: limitedStore,
     signingKey: generateKey(),

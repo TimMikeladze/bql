@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { createServer } from "../src/bus/server";
 import { BusStore } from "../src/bus/store";
 import { generateKey, mint } from "../src/bus/tokens";
@@ -6,7 +7,7 @@ import { BusClient } from "../src/client/bus";
 
 const signingKey = generateKey();
 const adminToken = generateKey();
-const store = new BusStore(":memory:");
+const store = testStore();
 const server = createServer({
   store,
   signingKey,

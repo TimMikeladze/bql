@@ -367,9 +367,9 @@ export class ReplicationRouter {
   #announcement(): Map<string, string> {
     const out = new Map<string, string>()
     try {
-      const replica = this.#runtime.replica
+      const held = this.#runtime.generations
       for (const row of this.#runtime.registry.list()) {
-        out.set(row.name, replica?.generationOf(row.name) ?? generationId(row))
+        out.set(row.name, held.get(row.name) ?? generationId(row))
       }
     } catch {
       return out

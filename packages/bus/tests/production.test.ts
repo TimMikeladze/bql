@@ -6,18 +6,15 @@
  * overtaking its dead predecessor — rather than merely absent.
  */
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, readdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { fileBlobs } from "../src/bus/blobs";
-import { createBus } from "../src/bus/embedded";
-import { BusStore } from "../src/bus/store";
+import { testBus, testStore } from "./helpers";
+import type { BusStore } from "../src/bus/store";
 
 let clock = 1_000_000;
 const now = () => clock;
 const W = "default";
 
 const bus = (options: Record<string, unknown> = {}) =>
-  new BusStore(":memory:", { now, ...options });
+  testStore({ now, ...options });
 
 const sub = (
   store: BusStore,
@@ -37,130 +34,26 @@ const sub = (
 
 // ------------------------------------------------------------- durability
 
-test("a blob is written atomically and leaves no temporary behind", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/bql-bus-blobs-`);
-  try {
-    const blobs = fileBlobs(directory);
-    await blobs.put("abc", JSON.stringify({ hello: "world" }));
-    expect(JSON.parse(await blobs.get("abc"))).toEqual({ hello: "world" });
-    expect(await blobs.has("abc")).toBe(true);
-    // The `.tmp` is renamed, not left: a directory listing after a successful
-    // put has exactly the one file in it.
-    expect(await readdir(directory)).toEqual(["abc.json"]);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("a truncated blob is caught rather than handed to a handler", async () => {
-  const blobs = new Map<string, string>();
-  const store = bus({
-    inlineMaxBytes: 32,
-    blobs: {
-      put: async (key: string, data: string) => {
-        blobs.set(key, data);
-        return key;
-      },
-      get: async (handle: string) => blobs.get(handle)!,
-      has: async (handle: string) => blobs.has(handle),
-      delete: async (handle: string) => {
-        blobs.delete(handle);
-      },
-    },
-  });
-  sub(store, "work", "work.>");
-  await store.publish(W, { subject: "work.do", body: { big: "x".repeat(200) } });
-  // Truncate the file behind the bus's back — still valid JSON, which is what
-  // makes a length-and-checksum check worth having rather than a parse.
-  const [handle] = [...blobs.keys()];
-  blobs.set(handle!, JSON.stringify({ big: "x".repeat(100) }));
-
-  // The claim does not throw and does not stall: the one unreadable delivery
-  // is dead-lettered and the subscription keeps moving.
-  expect(await store.claim(W, "work", "c1", 1)).toHaveLength(0);
-  const stats = store.stats(W);
-  expect(stats.subscriptions.find((s) => s.name === "work")!.dead).toBe(1);
-  store.close();
-});
-
-test("a message whose blob vanished is reconciled at startup", async () => {
-  const blobs = new Map<string, string>();
-  const store = bus({
-    inlineMaxBytes: 32,
-    blobs: {
-      put: async (key: string, data: string) => {
-        blobs.set(key, data);
-        return key;
-      },
-      get: async (handle: string) => {
-        const found = blobs.get(handle);
-        if (found === undefined) throw new Error("gone");
-        return found;
-      },
-      has: async (handle: string) => blobs.has(handle),
-      delete: async (handle: string) => {
-        blobs.delete(handle);
-      },
-    },
-  });
-  sub(store, "work", "work.>");
-  await store.publish(W, { subject: "work.do", body: { big: "x".repeat(200) } });
-  await store.claim(W, "work", "c1", 1);
-  blobs.clear();
-
-  const reconciled = await store.reconcileBlobs();
-  expect(reconciled.missing).toBe(1);
-  expect(reconciled.deadLettered).toBe(1);
-  store.close();
-});
-
 test("a full disk refuses publishes and still allows draining", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/bql-bus-full-`);
-  try {
-    const store = new BusStore(`${directory}/bus.db`, {
-      now,
-      // Nothing on earth has this much free space, so the watermark is always
-      // breached — which is the point: the refusal is a policy, not a crash.
-      minFreeBytes: Number.MAX_SAFE_INTEGER,
-    });
-    sub(store, "work", "work.>");
-    expect(store.capacity().ok).toBe(false);
-    // Claims and acks are deliberately not gated on capacity: a full disk is
-    // exactly when consumers have to be able to finish what they hold.
-    await store.publish(W, { subject: "work.do", body: 1 });
-    const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
-    const acked = await store.ack(
-      W,
-      envelope.delivery.id,
-      "c1",
-      envelope.delivery.generation,
-    );
-    expect(acked.status).toBe("acked");
-    store.close();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("the WAL is truncated once it passes its ceiling", async () => {
-  const directory = await mkdtemp(`${tmpdir()}/bql-bus-wal-`);
-  try {
-    const store = new BusStore(`${directory}/bus.db`, {
-      now,
-      walCheckpointBytes: 4096,
-    });
-    sub(store, "work", "work.>");
-    for (let index = 0; index < 400; index++)
-      await store.publish(W, { subject: "work.do", body: { index } });
-    expect(store.sizes().walBytes).toBeGreaterThan(0);
-    store.sweep();
-    // TRUNCATE gives the space back; with no reader holding it open this is
-    // deterministic.
-    expect(store.sizes().walBytes).toBe(0);
-    store.close();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const store = bus({
+    // Nothing on earth has this much free space, so the watermark is always
+    // breached, which is the point: the refusal is a policy, not a crash.
+    minFreeBytes: Number.MAX_SAFE_INTEGER,
+  });
+  sub(store, "work", "work.>");
+  expect(store.capacity().ok).toBe(false);
+  // Claims and acks are deliberately not gated on capacity: a full disk is
+  // exactly when consumers have to be able to finish what they hold.
+  await store.publish(W, { subject: "work.do", body: 1 });
+  const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
+  const acked = await store.ack(
+    W,
+    envelope.delivery.id,
+    "c1",
+    envelope.delivery.generation,
+  );
+  expect(acked.status).toBe("acked");
+  store.close();
 });
 
 // ---------------------------------------------------------- exactly-once
@@ -237,7 +130,7 @@ test("an ack commits the messages it produced in the same transaction", async ()
 });
 
 test("a transactional handler that throws leaves neither its writes nor an ack", async () => {
-  const embedded = createBus({ now });
+  const embedded = testBus({ now });
   embedded.store.subscribe(W, {
     name: "work",
     pattern: "work.>",
@@ -503,41 +396,6 @@ test("maxInFlight caps what one consumer can lease", async () => {
   store.close();
 });
 
-// -------------------------------------------------------- point in time
-
-test("truncating the log pulls cursors back with it", async () => {
-  const store = bus();
-  sub(store, "work", "work.>");
-  for (let index = 0; index < 6; index++)
-    await store.publish(W, { subject: "work.do", body: { index } });
-  await store.claim(W, "work", "c1", 6);
-  expect(store.subscription(W, "work").cursorSeq).toBe(6);
-
-  const result = store.truncateAfter(3);
-  expect(result).toEqual({ removed: 3, lastSeq: 3 });
-  // A cursor past the end of the log would silently skip everything published
-  // after the recovery point, which is the quiet way a restore loses data.
-  expect(store.subscription(W, "work").cursorSeq).toBe(3);
-
-  await store.publish(W, { subject: "work.do", body: { index: "after" } });
-  const claimed = await store.claim(W, "work", "c2", 10);
-  expect(claimed.map((envelope) => envelope.message.body)).toEqual([
-    { index: "after" },
-  ]);
-  store.close();
-});
-
-test("seqAt finds the recovery point for a timestamp", async () => {
-  const store = bus();
-  await store.publish(W, { subject: "work.do", body: 1 });
-  const cut = clock;
-  clock += 1000;
-  await store.publish(W, { subject: "work.do", body: 2 });
-  expect(store.seqAt(cut)).toBe(1);
-  expect(store.seqAt(clock)).toBe(2);
-  store.close();
-});
-
 // ------------------------------------------------------- shared handles
 
 test("a dead letter shares its original's blob handle, and the sweep knows", async () => {
@@ -545,25 +403,13 @@ test("a dead letter shares its original's blob handle, and the sweep knows", asy
   // handle", not "the message that created it is gone". A future change that
   // deletes the blob when deleting *a* message would take the dead letter's
   // body with it — this test is named so that change fails here.
-  const blobs = new Map<string, string>();
-  const store = bus({
-    inlineMaxBytes: 32,
-    blobs: {
-      put: async (key: string, data: string) => {
-        blobs.set(key, data);
-        return key;
-      },
-      get: async (handle: string) => blobs.get(handle)!,
-      has: async (handle: string) => blobs.has(handle),
-      delete: async (handle: string) => {
-        blobs.delete(handle);
-      },
-    },
-  });
+  const store = bus({ inlineMaxBytes: 32 });
+  const blobs = () =>
+    (store.raw().query("SELECT COUNT(*) AS n FROM blobs_data").get() as { n: number }).n;
   sub(store, "work", "work.>", { maxAttempts: 1 });
   const big = "x".repeat(200);
   await store.publish(W, { subject: "work.do", body: { big } });
-  expect(blobs.size).toBe(1);
+  expect(blobs()).toBe(1);
 
   const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
   store.nack(W, envelope.delivery.id, "c1", envelope.delivery.generation, {
@@ -574,7 +420,7 @@ test("a dead letter shares its original's blob handle, and the sweep knows", asy
   const dead = (await store.log(W, 0, 10, { subject: "dlq.work" }))[0]!;
   expect(dead.body).toEqual({ big });
   expect(await store.collectBlobs()).toBe(0);
-  expect(blobs.size).toBe(1);
+  expect(blobs()).toBe(1);
   store.close();
 });
 
@@ -582,8 +428,7 @@ test("a dead letter shares its original's blob handle, and the sweep knows", asy
 
 test("a shutdown hands in-flight work straight back", async () => {
   const { BusConsumer } = await import("../src/client/bus");
-  const { createBus } = await import("../src/bus/embedded");
-  const embedded = createBus({ now });
+  const embedded = testBus({ now });
   embedded.store.subscribe(W, {
     name: "work",
     pattern: "work.>",

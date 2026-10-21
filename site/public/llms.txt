@@ -294,7 +294,7 @@ async handle({ message }, api) {
 
 ## Cron, as ordinary messages
 
-`bql bus schedule add` fires on the leader, one deduplicated publish per slot, DST-correct in any IANA zone.
+`bql bus schedule add` fires on the primary, one deduplicated publish per slot, DST-correct in any IANA zone.
 
 ```sh
 bql bus schedule add nightly '30 2 * * *' reports.nightly '{"kind":"daily"}' --tz America/New_York

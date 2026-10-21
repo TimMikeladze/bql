@@ -1,11 +1,10 @@
 import { statfsSync } from "node:fs";
-import { Database } from "bun:sqlite";
+import type { Database } from "../../../db/src/sqlite/index.ts";
 import type {
   AckResult,
   AuditEntry,
   BlockedKey,
   CancelResult,
-  ClusterState,
   CompatChange,
   CompatMode,
   Consumer,
@@ -37,9 +36,16 @@ import type {
   Violation,
 } from "../shared/protocol";
 import { DEFAULT_WORKSPACE, MAX_PRIORITY, MIN_PRIORITY } from "../shared/protocol";
-import { type BlobStore, BlobMissingError } from "./blobs";
+import { BlobMissingError, SqliteBlobStore } from "./blobs";
 import { assertTimeZone, CronError, nextFire, parseCron } from "./cron";
 import { fault } from "./faults";
+import {
+  type Ack,
+  type BusStorage,
+  retryContention,
+  StorageError,
+  StoreDb,
+} from "./storage";
 import { type MetricsSink, noopMetrics } from "./metrics";
 import {
   childOf,
@@ -62,12 +68,33 @@ export class BusError extends Error {
   constructor(
     message: string,
     public status = 409,
+    /** Extra fields for the JSON answer, beside `error`. */
+    public details: Record<string, unknown> = {},
   ) {
     super(message);
   }
 }
 
+/** A storage refusal (`NO_REPLICAS`, `ACK_TIMEOUT`, a bad ack level) as the bus answers it. */
+function asBusError(error: unknown, extra: Record<string, unknown> = {}): unknown {
+  if (!(error instanceof StorageError)) return error;
+  return new BusError(error.message, error.status, { ...error.details, ...extra });
+}
+
+/** A publish waits for this much durability before it is answered. */
+export interface PublishOptions {
+  ack?: Ack;
+}
+
 const uuid = () => crypto.randomUUID();
+/**
+ * A row id that sorts by time (UUIDv7), for the ids behind a unique index
+ * written on every publish and claim (`messages.id`, `deliveries.id`). A
+ * random v4 lands each insert on a random leaf of that index; a v7 lands on
+ * the rightmost one, which is one page per commit instead of a scattered
+ * page plus the occasional split, and fewer distinct pages to checkpoint.
+ */
+const rowId = () => Bun.randomUUIDv7();
 const sha256Hex = (text: string) =>
   new Bun.CryptoHasher("sha256").update(text).digest("hex");
 const parse = <T>(text: string | null, fallback: T): T =>
@@ -107,6 +134,8 @@ interface PreparedMessage {
   blob: string | null;
   sha256: string | null;
   bytes: number;
+  /** A body bound for `blobs_data`, written by `insert` inside the transaction. */
+  blobText: string | null;
   correlation: string | null;
   headers: Headers;
   /** This publish's own span, in the trace the caller's `traceparent` named. */
@@ -119,13 +148,14 @@ interface PreparedMessage {
  *
  * Append only. A migration that has shipped is history: editing one changes
  * what a database at that version means, which is the whole failure mode the
- * version table exists to prevent.
+ * version table exists to prevent. Version 1 is the schema as of the move onto
+ * bql.sh; the bus's own file format before that is not read by this build.
  */
 export const MIGRATIONS: Migration[] = [
   {
     version: 1,
     statements: [
-      `CREATE TABLE IF NOT EXISTS messages (
+      `CREATE TABLE messages (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         id TEXT NOT NULL UNIQUE,
         workspace TEXT NOT NULL,
@@ -133,13 +163,25 @@ export const MIGRATIONS: Migration[] = [
         key TEXT,
         headers TEXT NOT NULL,
         body TEXT,
+        -- A handle into blobs_data for a body over inlineMaxBytes.
         body_blob TEXT,
         published_at INTEGER NOT NULL,
         expires_at INTEGER,
-        dedupe_key TEXT)`,
-      "CREATE UNIQUE INDEX IF NOT EXISTS messages_dedupe ON messages(workspace, dedupe_key) WHERE dedupe_key IS NOT NULL",
-      "CREATE INDEX IF NOT EXISTS messages_log ON messages(workspace, seq)",
-      `CREATE TABLE IF NOT EXISTS subscriptions (
+        dedupe_key TEXT,
+        -- Stops a subscription whose cursor has not reached the message yet
+        -- from materializing a delivery after the cancel.
+        cancelled_at INTEGER,
+        -- The token subject that published it: who may cancel it.
+        publisher TEXT,
+        -- Checked on read for a body in blobs_data.
+        body_sha256 TEXT,
+        -- The encoded length of every body, inline or not: what a byte quota counts.
+        body_bytes INTEGER,
+        priority INTEGER NOT NULL DEFAULT 0,
+        available_at INTEGER NOT NULL DEFAULT 0)`,
+      "CREATE UNIQUE INDEX messages_dedupe ON messages(workspace, dedupe_key) WHERE dedupe_key IS NOT NULL",
+      "CREATE INDEX messages_log ON messages(workspace, seq)",
+      `CREATE TABLE subscriptions (
         id TEXT PRIMARY KEY,
         workspace TEXT NOT NULL,
         name TEXT NOT NULL,
@@ -151,9 +193,23 @@ export const MIGRATIONS: Migration[] = [
         dlq_subject TEXT NOT NULL,
         paused INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL)`,
-      "CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_name ON subscriptions(workspace, name)",
-      `CREATE TABLE IF NOT EXISTS deliveries (
+        updated_at INTEGER NOT NULL,
+        -- Full jitter rather than equal jitter: the failure this is for is a
+        -- fleet retrying in lockstep, and half a fixed delay is still a lockstep.
+        backoff_base_ms INTEGER NOT NULL DEFAULT 1000,
+        backoff_max_ms INTEGER NOT NULL DEFAULT 60000,
+        backoff_factor REAL NOT NULL DEFAULT 2.0,
+        backoff_jitter TEXT NOT NULL DEFAULT 'full',
+        -- What an ordered subscription does when a key's message dies.
+        on_failure TEXT NOT NULL DEFAULT 'block',
+        -- 0 means unbounded.
+        max_in_flight INTEGER NOT NULL DEFAULT 0,
+        quarantine_dead_rate REAL NOT NULL DEFAULT 0,
+        quarantine_window_ms INTEGER NOT NULL DEFAULT 60000,
+        quarantine_min_dead INTEGER NOT NULL DEFAULT 20,
+        quarantined_at INTEGER)`,
+      "CREATE UNIQUE INDEX subscriptions_name ON subscriptions(workspace, name)",
+      `CREATE TABLE deliveries (
         id TEXT PRIMARY KEY,
         subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
         message_seq INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
@@ -167,11 +223,20 @@ export const MIGRATIONS: Migration[] = [
         error TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
+        -- What an ack produced, so a retried ack replays it rather than
+        -- publishing a second time. NULL for almost every ack.
+        ack_result TEXT,
+        -- Copied from the message: the candidate scan reads deliveries and
+        -- must not join to order or to filter.
+        priority INTEGER NOT NULL DEFAULT 0,
         UNIQUE(subscription_id, message_seq))`,
-      "CREATE INDEX IF NOT EXISTS deliveries_ready ON deliveries(subscription_id, status, available_at, message_seq)",
-      "CREATE INDEX IF NOT EXISTS deliveries_lease ON deliveries(status, lease_until)",
-      "CREATE INDEX IF NOT EXISTS deliveries_key ON deliveries(subscription_id, status, key)",
-      `CREATE TABLE IF NOT EXISTS responses (
+      // Every status change rewrites one page per index holding `status`, so
+      // there is one index for the ready scan, not two.
+      "CREATE INDEX deliveries_ready_priority ON deliveries(subscription_id, status, available_at, priority DESC, message_seq)",
+      "CREATE INDEX deliveries_lease ON deliveries(status, lease_until)",
+      "CREATE INDEX deliveries_key ON deliveries(subscription_id, status, key)",
+      "CREATE INDEX deliveries_settled ON deliveries(subscription_id, status, updated_at)",
+      `CREATE TABLE responses (
         workspace TEXT NOT NULL,
         correlation TEXT NOT NULL,
         message_seq INTEGER NOT NULL,
@@ -179,46 +244,20 @@ export const MIGRATIONS: Migration[] = [
         body TEXT,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (workspace, correlation))`,
-      `CREATE TABLE IF NOT EXISTS blobs (
-        handle TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`,
-      `CREATE TABLE IF NOT EXISTS consumers (
+      // Bodies over inlineMaxBytes, in the same database so WAL shipping
+      // carries them, written in the publishing transaction.
+      `CREATE TABLE blobs_data (
+        handle TEXT PRIMARY KEY,
+        bytes BLOB NOT NULL)`,
+      `CREATE TABLE consumers (
         id TEXT PRIMARY KEY,
         workspace TEXT NOT NULL,
         last_seen INTEGER NOT NULL,
         data TEXT NOT NULL)`,
-    ],
-  },
-  {
-    version: 2,
-    statements: [
-      // Cancellation. `cancelled_at` on the message is what stops a
-      // subscription whose cursor has not reached it yet from materializing a
-      // delivery *after* the cancel; `publisher` is who may cancel it.
-      "ALTER TABLE messages ADD COLUMN cancelled_at INTEGER",
-      "ALTER TABLE messages ADD COLUMN publisher TEXT",
-    ],
-  },
-  {
-    version: 3,
-    statements: [
-      // Integrity for overflow bodies. `body_bytes` is the encoded length of
-      // every body, inline or not — it is also what a per-workspace byte quota
-      // has to count. `body_sha256` is only set for a body that left the
-      // database: inside a SQLite row the checksum would be guarding against
-      // SQLite, which has its own.
-      "ALTER TABLE messages ADD COLUMN body_sha256 TEXT",
-      "ALTER TABLE messages ADD COLUMN body_bytes INTEGER",
-    ],
-  },
-  {
-    version: 4,
-    statements: [
       // The effect ledger. A key is claimed exactly once; the result recorded
-      // against it is replayed to every later attempt instead of the effect
-      // being repeated. `fence` records which attempt holds the claim, which
-      // is what distinguishes "you already did this" from "an older attempt
-      // claimed it and we never heard how it went".
-      `CREATE TABLE IF NOT EXISTS effects (
+      // against it is replayed to every later attempt. `fence` records which
+      // attempt holds the claim.
+      `CREATE TABLE effects (
         workspace TEXT NOT NULL,
         key TEXT NOT NULL,
         fence TEXT,
@@ -227,43 +266,10 @@ export const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (workspace, key))`,
-      // What an ack produced, so a retried ack replays it rather than
-      // publishing a second time. NULL for the overwhelming majority of acks,
-      // which produce nothing.
-      "ALTER TABLE deliveries ADD COLUMN ack_result TEXT",
-    ],
-  },
-  {
-    version: 5,
-    statements: [
-      // Retry backoff, per subscription. Full jitter rather than equal jitter:
-      // the failure this is for is a fleet retrying in lockstep, and half a
-      // fixed delay is still a lockstep.
-      "ALTER TABLE subscriptions ADD COLUMN backoff_base_ms INTEGER NOT NULL DEFAULT 1000",
-      "ALTER TABLE subscriptions ADD COLUMN backoff_max_ms INTEGER NOT NULL DEFAULT 60000",
-      "ALTER TABLE subscriptions ADD COLUMN backoff_factor REAL NOT NULL DEFAULT 2.0",
-      "ALTER TABLE subscriptions ADD COLUMN backoff_jitter TEXT NOT NULL DEFAULT 'full'",
-      // What an ordered subscription does when a key's message dies.
-      "ALTER TABLE subscriptions ADD COLUMN on_failure TEXT NOT NULL DEFAULT 'block'",
-      // 0 means unbounded.
-      "ALTER TABLE subscriptions ADD COLUMN max_in_flight INTEGER NOT NULL DEFAULT 0",
-      "ALTER TABLE subscriptions ADD COLUMN quarantine_dead_rate REAL NOT NULL DEFAULT 0",
-      "ALTER TABLE subscriptions ADD COLUMN quarantine_window_ms INTEGER NOT NULL DEFAULT 60000",
-      "ALTER TABLE subscriptions ADD COLUMN quarantine_min_dead INTEGER NOT NULL DEFAULT 20",
-      "ALTER TABLE subscriptions ADD COLUMN quarantined_at INTEGER",
-      // Priority classes, and delayed delivery. Both live on the message and
-      // are copied onto the delivery, because the candidate scan reads
-      // deliveries and must not join to order or to filter.
-      "ALTER TABLE messages ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
-      "ALTER TABLE messages ADD COLUMN available_at INTEGER NOT NULL DEFAULT 0",
-      "ALTER TABLE deliveries ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
-      "CREATE INDEX IF NOT EXISTS deliveries_ready_priority ON deliveries(subscription_id, status, available_at, priority DESC, message_seq)",
-      "CREATE INDEX IF NOT EXISTS deliveries_settled ON deliveries(subscription_id, status, updated_at)",
-      // A key that may not move until an operator says so. `ordered: true` was
-      // bought to stop a key's messages overtaking one another; letting the
-      // next one through because its predecessor died is exactly the
-      // reordering it was bought to prevent.
-      `CREATE TABLE IF NOT EXISTS blocked_keys (
+      // A key that may not move until an operator says so: letting the next
+      // message through because its predecessor died is the reordering
+      // `ordered: true` exists to prevent.
+      `CREATE TABLE blocked_keys (
         subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
         key TEXT NOT NULL,
         message_seq INTEGER NOT NULL,
@@ -271,15 +277,8 @@ export const MIGRATIONS: Migration[] = [
         reason TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (subscription_id, key))`,
-    ],
-  },
-  {
-    version: 6,
-    statements: [
-      // The schema registry. Versions are per name and monotonic; `hash` keys
-      // the compiled-validator cache, so two subjects bound to the same schema
-      // compile it once.
-      `CREATE TABLE IF NOT EXISTS schemas (
+      // The schema registry. `hash` keys the compiled-validator cache.
+      `CREATE TABLE schemas (
         workspace TEXT NOT NULL,
         name TEXT NOT NULL,
         version INTEGER NOT NULL,
@@ -288,24 +287,16 @@ export const MIGRATIONS: Migration[] = [
         compat TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (workspace, name, version))`,
-      // Bindings are to *patterns*, not concrete subjects — the same matcher
-      // subscriptions use — so `orders.>` covers the family rather than
-      // needing a row per subject nobody has published yet.
-      `CREATE TABLE IF NOT EXISTS schema_bindings (
+      // Bindings are to patterns, the same matcher subscriptions use.
+      `CREATE TABLE schema_bindings (
         workspace TEXT NOT NULL,
         subject_pattern TEXT NOT NULL,
         schema_name TEXT NOT NULL,
         mode TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (workspace, subject_pattern))`,
-    ],
-  },
-  {
-    version: 7,
-    statements: [
-      // Operator actions without a trail are not operable, they are just
-      // powerful. Append-only: there is no update or delete path anywhere.
-      `CREATE TABLE IF NOT EXISTS audit (
+      // Append-only: there is no update or delete path anywhere.
+      `CREATE TABLE audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         workspace TEXT NOT NULL,
         actor TEXT NOT NULL,
@@ -313,47 +304,22 @@ export const MIGRATIONS: Migration[] = [
         action TEXT NOT NULL,
         target TEXT,
         at INTEGER NOT NULL)`,
-      "CREATE INDEX IF NOT EXISTS audit_recent ON audit(workspace, id DESC)",
-      // Revocation for tokens that are otherwise verified statelessly. The
-      // probe is a local index lookup, not a network round trip, so the
-      // property that made stateless tokens worth having survives.
-      `CREATE TABLE IF NOT EXISTS revocations (
+      "CREATE INDEX audit_recent ON audit(workspace, id DESC)",
+      // Revocation for tokens that are otherwise verified statelessly.
+      `CREATE TABLE revocations (
         jti TEXT PRIMARY KEY,
         not_after INTEGER NOT NULL,
         revoked_at INTEGER NOT NULL)`,
-      // Per-workspace ceilings. One tenant must not be able to fill the disk
-      // every other tenant's durability depends on. 0 means unlimited.
-      `CREATE TABLE IF NOT EXISTS quotas (
+      // Per-workspace ceilings. 0 means unlimited.
+      `CREATE TABLE quotas (
         workspace TEXT PRIMARY KEY,
         max_messages INTEGER NOT NULL DEFAULT 0,
         max_bytes INTEGER NOT NULL DEFAULT 0,
         max_subscriptions INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL)`,
-    ],
-  },
-  {
-    version: 8,
-    statements: [
-      // One row, by construction. Replication state is a property of the
-      // database, not of a config file that can disagree with it — a follower
-      // that forgets it is a follower is the failure this prevents.
-      `CREATE TABLE IF NOT EXISTS cluster (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        epoch INTEGER NOT NULL,
-        role TEXT NOT NULL,
-        upstream TEXT,
-        applied_seq INTEGER NOT NULL DEFAULT 0,
-        updated_at INTEGER NOT NULL)`,
-      "INSERT OR IGNORE INTO cluster (id, epoch, role, upstream, applied_seq, updated_at) VALUES (1, 0, 'leader', NULL, 0, 0)",
-    ],
-  },
-  {
-    version: 9,
-    statements: [
-      // Cron on the bus. A fire is an ordinary publish whose dedupe key is the
-      // schedule and the scheduled instant, so this table only has to say what
-      // is due next — the log is what says what already happened.
-      `CREATE TABLE IF NOT EXISTS schedules (
+      // Cron on the bus. A fire is a publish whose dedupe key is the schedule
+      // and the scheduled instant, so this table only says what is due next.
+      `CREATE TABLE schedules (
         workspace TEXT NOT NULL,
         name TEXT NOT NULL,
         cron TEXT NOT NULL,
@@ -372,7 +338,7 @@ export const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (workspace, name))`,
-      "CREATE INDEX IF NOT EXISTS schedules_due ON schedules(next_at) WHERE paused = 0",
+      "CREATE INDEX schedules_due ON schedules(next_at) WHERE paused = 0",
     ],
   },
 ];
@@ -381,9 +347,8 @@ export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
 export interface StoreOptions {
   now?: () => number;
-  /** Bodies larger than this are written to the blob store. */
+  /** Bodies larger than this go to `blobs_data` instead of the message row. */
   inlineMaxBytes?: number;
-  blobs?: BlobStore;
   /** Messages and settled deliveries older than this are pruned. 0 disables. */
   retentionMs?: number;
   /** How many log rows one claim may examine while materializing deliveries. */
@@ -395,13 +360,6 @@ export interface StoreOptions {
    */
   metrics?: MetricsSink;
   /**
-   * `synchronous`. `FULL` is the default and is load-bearing: `NORMAL` under
-   * WAL can lose the tail of the log on power loss or a kernel panic. It is
-   * settable only so the soak can run `--sync normal` and *fail*, which is
-   * what makes the default a proven choice rather than a cargo-culted one.
-   */
-  synchronous?: "FULL" | "NORMAL";
-  /**
    * Below this much free space on the database's filesystem, publishes are
    * refused with 507 and `/ready` goes 503 — while claims, acks and nacks keep
    * working so consumers can drain. `SQLITE_FULL` is otherwise undefined
@@ -409,13 +367,16 @@ export interface StoreOptions {
    * cannot keep.
    */
   minFreeBytes?: number;
-  /** WAL size above which the sweep truncates it. 0 disables checkpointing. */
-  walCheckpointBytes?: number;
   /**
    * Where spans go. Without one, trace context is still propagated in headers
    * — the part a consumer needs — and nothing is exported.
    */
   tracer?: SpanExporter;
+  /**
+   * Open as a replica of a clustered bql.sh database: no migrations, writes
+   * refused with `503 NOT_PRIMARY`. `becomePrimary()` takes the writer role.
+   */
+  replica?: boolean;
 }
 
 interface MessageRow {
@@ -534,8 +495,9 @@ interface DeliveryRow {
 /**
  * The bus.
  *
- * One process owns one SQLite file in WAL mode; consumers never open it, they
- * hold leases over HTTP. Every claim, ack and nack is a conditional UPDATE that
+ * The tables live in one bql.sh database (`bus`), and every write goes
+ * through its write path, so it lands in the database's log and ships to its
+ * replicas. Consumers never open it, they hold leases over HTTP. Every claim, ack and nack is a conditional UPDATE that
  * only transitions *out of* the state it expects, so two consumers racing for
  * one delivery is safe rather than merely unlikely.
  *
@@ -547,17 +509,15 @@ interface DeliveryRow {
  * of non-matching subjects can never hide a matching one behind it.
  */
 export class BusStore {
-  private db: Database;
+  private db: StoreDb;
+  readonly storage: BusStorage;
   private now: () => number;
   private inlineMaxBytes: number;
-  private blobs: BlobStore | undefined;
+  private blobs: SqliteBlobStore;
   private retentionMs: number;
   private scanBatch: number;
   private metrics: MetricsSink;
   private minFreeBytes: number;
-  private walCheckpointBytes: number;
-  /** Where the database file lives, for WAL size and free-space probes. */
-  private readonly path: string;
   /** Free space, cached: a publish must not cost a `statfs` per call. */
   private freeSpace: { bytes: number; at: number } | null = null;
   /** Compiled validators, keyed by schema hash. */
@@ -572,50 +532,45 @@ export class BusStore {
   private revoked: Set<string> | null = null;
   private quotaCache = new Map<string, Quota>();
   private tracer: SpanExporter;
-  /** Set on a follower, and on a leader whose epoch has been fenced out. */
-  private readOnly = false;
-  private readOnlyReason = "read-only";
+  /** True while bql.sh holds database `bus` as a replica on this node. */
+  private notPrimary = false;
   /** The schedule pass in flight, so overlapping sweeps share one. */
   private firing: Promise<number> | null = null;
 
-  constructor(path: string, options: StoreOptions = {}) {
+  /** `storage` is database `bus` on a `Bql`: `bqlStorage(bq)`. */
+  constructor(storage: BusStorage, options: StoreOptions = {}) {
     this.now = options.now ?? Date.now;
     this.inlineMaxBytes = options.inlineMaxBytes ?? 64 * 1024;
-    this.blobs = options.blobs;
     this.retentionMs = options.retentionMs ?? 7 * 24 * 60 * 60 * 1000;
     this.scanBatch = options.scanBatch ?? 500;
     this.metrics = options.metrics ?? noopMetrics();
     this.minFreeBytes = options.minFreeBytes ?? 64 * 1024 * 1024;
     this.tracer = options.tracer ?? noopExporter();
-    this.walCheckpointBytes = options.walCheckpointBytes ?? 8 * 1024 * 1024;
-    this.path = path;
-    this.db = new Database(path, { create: true, strict: true });
-    this.db.run("PRAGMA journal_mode=WAL");
-    this.db.run(`PRAGMA synchronous=${options.synchronous ?? "FULL"}`);
-    this.db.run("PRAGMA busy_timeout=5000");
-    this.db.run("PRAGMA foreign_keys=ON");
-    // A ceiling on the WAL, in pages. Without one the only checkpoint is
-    // SQLite's own 1000-page default — which a long-lived reader blocks
-    // indefinitely, and the `-wal` file then grows without bound. The sweep
-    // truncates it as well; this is the cheap automatic half.
-    this.db.run("PRAGMA wal_autocheckpoint=1000");
-    this.migrate();
-    // A follower that forgets it is a follower after a restart would start
-    // accepting writes that its upstream will overwrite.
-    if (this.hasTable("cluster") && this.cluster().role === "follower")
-      this.setReadOnly(true, "this replica is a follower");
+    this.storage = storage;
+    this.db = new StoreDb(this.storage);
+    this.blobs = new SqliteBlobStore(this.db);
+    if (options.replica) {
+      // The primary migrates; a replica only refuses a schema it cannot read.
+      if (this.hasTable("schema_version")) this.assertKnownVersion();
+      this.notPrimary = true;
+    } else {
+      this.migrate();
+    }
   }
 
   /**
-   * Bring the database up to `SCHEMA_VERSION`, or refuse to open it.
-   *
-   * The previous version of this was `CREATE TABLE IF NOT EXISTS` with no
-   * version marker at all, which meant the first schema change to a deployed
-   * bus would have been a silent corruption or a crash. Now every change is a
-   * numbered migration, and a database written by a *newer* build is refused
-   * rather than guessed at — a binary rolled back onto a schema it does not
-   * know cannot say what the extra columns mean.
+   * Refuse a database written by a newer build: a binary rolled back onto a
+   * schema it does not know cannot say what the extra columns mean.
    */
+  private assertKnownVersion(): void {
+    const current = this.schemaVersion();
+    if (current > SCHEMA_VERSION)
+      throw new BusError(
+        `this database is at schema version ${current}, and this build only knows ${SCHEMA_VERSION} — upgrade bql-bus rather than downgrading the data`,
+        500,
+      );
+  }
+
   private migrate() {
     this.db.run(`CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -627,21 +582,8 @@ export class BusStore {
       }
     ).version;
 
-    // A database from before this change has the version-1 tables and no
-    // marker. Adopting it is a one-row write, not a rewrite.
-    let current = applied ?? 0;
-    if (applied === null && this.hasTable("messages")) {
-      this.db.run(
-        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (1, ?)",
-        [this.now()],
-      );
-      current = 1;
-    }
-
+    const current = applied ?? 0;
     if (current > SCHEMA_VERSION) {
-      // Close before throwing: the constructor has already opened the file, and
-      // a caller that catches this — a CLI probing a directory of databases,
-      // say — would otherwise leak a handle per attempt.
       this.db.close();
       throw new BusError(
         `this database is at schema version ${current}, and this build only knows ${SCHEMA_VERSION} — upgrade bql-bus rather than downgrading the data`,
@@ -651,10 +593,9 @@ export class BusStore {
 
     for (const migration of MIGRATIONS) {
       if (migration.version <= current) continue;
-      // IMMEDIATE, and the version re-read inside it: two processes opening
-      // a new file at once (a follower creating its database while a tool
-      // opens it) otherwise both apply a migration and one dies on the
-      // version row's primary key.
+      // The version is re-read inside the write: two stores opening one
+      // database at once would otherwise both apply a migration and one die
+      // on the version row's primary key.
       this.db.transaction(() => {
         const applied = (
           this.db.query("SELECT MAX(version) AS version FROM schema_version").get() as {
@@ -667,7 +608,7 @@ export class BusStore {
           "INSERT INTO schema_version (version, applied_at) VALUES (?,?)",
           [migration.version, this.now()],
         );
-      }).immediate();
+      })();
     }
   }
 
@@ -698,7 +639,7 @@ export class BusStore {
    * create and write *your* schema; reaching for the bus's own tables here is
    * writing around every invariant above.
    */
-  raw(): Database {
+  raw(): StoreDb {
     return this.db;
   }
 
@@ -708,31 +649,30 @@ export class BusStore {
 
   // ------------------------------------------------------------- messages
 
-  /** Encoded body, and the two facts a row has to carry about it. */
-  private async writeBody(body: Json): Promise<{
+  /**
+   * Encoded body, and the two facts a row has to carry about it. A body over
+   * `inlineMaxBytes` is not written yet: `writeBlob` puts it in `blobs_data`
+   * inside the message's own transaction, so a rejected or deduplicated
+   * publish leaves nothing behind and a crash cannot separate the two.
+   */
+  private writeBody(body: Json): {
     inline: string | null;
     blob: string | null;
     sha256: string | null;
     bytes: number;
-  }> {
+    blobText: string | null;
+  } {
     const text = JSON.stringify(body ?? null);
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes <= this.inlineMaxBytes)
-      return { inline: text, blob: null, sha256: null, bytes };
-    if (!this.blobs)
-      throw new BusError(
-        `body is ${bytes} bytes and no blob store is configured`,
-        413,
-      );
-    const sha256 = sha256Hex(text);
-    // The blob is written — and fsynced — before the row that names it
-    // commits, so the only crash outcome is an orphaned file.
-    const handle = await this.blobs.put(uuid(), text);
-    this.db.run(
-      "INSERT INTO blobs (handle, created_at) VALUES (?,?) ON CONFLICT(handle) DO NOTHING",
-      [handle, this.now()],
-    );
-    return { inline: null, blob: handle, sha256, bytes };
+      return { inline: text, blob: null, sha256: null, bytes, blobText: null };
+    return { inline: null, blob: uuid(), sha256: sha256Hex(text), bytes, blobText: text };
+  }
+
+  /** The in-transaction half of `writeBody`. */
+  private writeBlob(handle: string | null, text: string | null): void {
+    if (handle === null || text === null) return;
+    this.blobs.write(handle, text);
   }
 
   /**
@@ -741,13 +681,11 @@ export class BusStore {
    * A truncated blob is the failure this guards: a short read parses as valid
    * JSON often enough to be dangerous, and handing a handler half a message is
    * worse than handing it an error. A mismatch names the handle so the operator
-   * can go and look at the file.
+   * can find the row in `blobs_data`.
    */
   private async readBody(row: MessageRow): Promise<Json> {
     if (row.body !== null) return JSON.parse(row.body) as Json;
     if (row.body_blob === null) return null;
-    if (!this.blobs)
-      throw new BusError("message body is in a blob store that is not configured");
     const text = await this.blobs.get(row.body_blob);
     if (row.body_bytes !== null && Buffer.byteLength(text, "utf8") !== row.body_bytes)
       throw new BusError(
@@ -792,13 +730,21 @@ export class BusStore {
     workspace: string,
     request: PublishRequest,
     publisher: string | null = null,
+    options: PublishOptions = {},
   ): Promise<PublishResult> {
     this.assertWritable();
+    const ack = options.ack ?? request.ack ?? this.storage.defaultAck;
+    // Before the body is written: a publish that cannot be acked as asked
+    // costs no disk and leaves no row.
+    this.assertAck(ack);
     const started = this.now();
     const prepared = await this.prepare(workspace, request);
-    const result = this.db.transaction(() =>
-      this.insert(workspace, prepared, publisher),
-    )();
+    const { value, txid } = await this.commit(
+      () => this.insert(workspace, prepared, publisher),
+      ack,
+    );
+    const result = txid === undefined ? value : { ...value, txid };
+    await this.awaitAck(txid, ack, { seq: result.seq });
     const ended = this.now();
     this.metrics.histogram("bql-bus.publish.duration", ended - started, {
       workspace,
@@ -833,21 +779,66 @@ export class BusStore {
     workspace: string,
     requests: PublishRequest[],
     publisher: string | null = null,
+    options: PublishOptions = {},
   ): Promise<PublishResult[]> {
     this.assertWritable();
+    const ack = options.ack ?? this.storage.defaultAck;
+    this.assertAck(ack);
     const started = this.now();
     const prepared: PreparedMessage[] = [];
     for (const request of requests)
       prepared.push(await this.prepare(workspace, request));
-    const results = this.db.transaction(() =>
-      prepared.map((one) => this.insert(workspace, one, publisher)),
-    )();
+    const { value, txid } = await this.commit(
+      () => prepared.map((one) => this.insert(workspace, one, publisher)),
+      ack,
+    );
+    const results =
+      txid === undefined ? value : value.map((one) => ({ ...one, txid }));
+    await this.awaitAck(txid, ack, { results });
     this.metrics.histogram(
       "bql-bus.publish.duration",
       this.now() - started,
       { workspace },
     );
     return results;
+  }
+
+  /**
+   * One top-level write from an async caller. bql.sh refuses a write while a
+   * snapshot holds its writer instead of waiting, so the wait happens here.
+   */
+  private commit<T>(
+    fn: () => T,
+    ack?: Ack,
+  ): Promise<{ value: T; txid?: number }> {
+    return retryContention(() => this.db.write(fn, ack ? { ack } : {}));
+  }
+
+  /** `NO_REPLICAS`, before anything is written. */
+  private assertAck(ack: Ack): void {
+    try {
+      this.storage.assertAck(ack);
+    } catch (error) {
+      throw asBusError(error);
+    }
+  }
+
+  /**
+   * Wait for `ack` to cover `txid`. `ACK_TIMEOUT` means committed and locally
+   * durable but short of replicas; the answer carries what was committed.
+   */
+  private async awaitAck(
+    txid: number | undefined,
+    ack: Ack,
+    committed: Record<string, unknown>,
+  ): Promise<void> {
+    // Nested inside another write, which waits for its own txid.
+    if (txid === undefined) return;
+    try {
+      await this.storage.replicated(txid, ack);
+    } catch (error) {
+      throw asBusError(error, committed);
+    }
   }
 
   /** Record one span, if an exporter was configured. */
@@ -909,7 +900,7 @@ export class BusStore {
         );
       }
     }
-    const { inline, blob, sha256, bytes } = await this.writeBody(
+    const { inline, blob, sha256, bytes, blobText } = await this.writeBody(
       request.body ?? null,
     );
     const correlation =
@@ -949,6 +940,7 @@ export class BusStore {
       blob,
       sha256,
       bytes,
+      blobText,
       correlation,
       headers,
       trace,
@@ -962,7 +954,7 @@ export class BusStore {
     prepared: PreparedMessage,
     publisher: string | null,
   ): PublishResult {
-    const { request, inline, blob, sha256, bytes, correlation, headers } =
+    const { request, inline, blob, sha256, bytes, blobText, correlation, headers } =
       prepared;
     {
       this.assertWithinQuota(workspace, bytes);
@@ -989,7 +981,8 @@ export class BusStore {
           };
         }
       }
-      const id = uuid();
+      this.writeBlob(blob, blobText);
+      const id = rowId();
       const now = this.now();
       // Delayed publish. `available_at` already existed on deliveries but was
       // unreachable from a publish, so "run this in an hour" needed a second
@@ -1074,7 +1067,7 @@ export class BusStore {
           `SELECT * FROM messages WHERE workspace = ? AND seq > ?
             ORDER BY seq ${order} LIMIT ?`,
         )
-        .all(workspace, after, capped) as MessageRow[];
+        .all(workspace, after, capped) as unknown as MessageRow[];
       return Promise.all(rows.map((row) => this.hydrate(row)));
     }
 
@@ -1099,7 +1092,7 @@ export class BusStore {
           options.newest ? edge : Number.MAX_SAFE_INTEGER,
           glob,
           batch,
-        ) as MessageRow[];
+        ) as unknown as MessageRow[];
       if (rows.length === 0) break;
       for (const row of rows) {
         if (matches(pattern, row.subject)) exact.push(row);
@@ -1139,7 +1132,7 @@ export class BusStore {
         if (!key.startsWith("dlq-")) carried[key] = value;
       carried["requeued-from"] = String(seq);
 
-      const id = uuid();
+      const id = rowId();
       const now = this.now();
       this.db.run(
         `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key, publisher, body_sha256, body_bytes, priority, available_at)
@@ -1249,9 +1242,6 @@ export class BusStore {
    * that quietly means something different is worse than an error.
    */
   subscribe(workspace: string, request: SubscribeRequest): Subscription {
-    // A follower's subscriptions come from its upstream. One created here
-    // would be silently overwritten by the next `applyCursors`, which is worse
-    // than being refused.
     this.assertWritable();
     assertPattern(request.pattern);
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(request.name))
@@ -1385,7 +1375,7 @@ export class BusStore {
     return (
       this.db
         .query("SELECT * FROM subscriptions WHERE workspace = ? ORDER BY name")
-        .all(workspace) as SubscriptionRow[]
+        .all(workspace) as unknown as SubscriptionRow[]
     ).map((row) => this.toSubscription(row));
   }
 
@@ -1428,7 +1418,7 @@ export class BusStore {
       "DELETE FROM deliveries WHERE subscription_id=? AND message_seq>=? AND status IN ('acked','dead','cancelled')",
       [row.id, fromSeq],
     );
-    return { removed: result.changes };
+    return { removed: Number(result.changes) };
   }
 
   // ----------------------------------------------------------- deliveries
@@ -1512,7 +1502,7 @@ export class BusStore {
          VALUES (?,?,?,'pending',0,0,?,?,?,?,?)
          ON CONFLICT(subscription_id, message_seq) DO NOTHING`,
         [
-          uuid(),
+          rowId(),
           subscription.id,
           row.seq,
           row.available_at,
@@ -1566,11 +1556,11 @@ export class BusStore {
                 "SELECT * FROM deliveries WHERE status='leased' AND lease_until <= ?",
               )
               .all(now)
-      ) as DeliveryRow[];
+      ) as unknown as DeliveryRow[];
       for (const row of rows) {
         const subscription = this.db
           .query("SELECT * FROM subscriptions WHERE id=?")
-          .get(row.subscription_id) as SubscriptionRow;
+          .get(row.subscription_id) as unknown as SubscriptionRow;
         if (row.attempt >= subscription.max_attempts)
           this.deadLetter(row, subscription, "lease expired and attempts exhausted");
         else
@@ -1615,7 +1605,7 @@ export class BusStore {
     // is just another subscription and a replay is just another publish.
     const original = this.db
       .query("SELECT * FROM messages WHERE seq=?")
-      .get(row.message_seq) as MessageRow;
+      .get(row.message_seq) as unknown as MessageRow;
     const headers: Headers = {
       ...parse<Headers>(original.headers, {}),
       "dlq-reason": options.reasonTag ?? reason.slice(0, 500),
@@ -1632,7 +1622,7 @@ export class BusStore {
       `INSERT INTO messages (id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key, publisher, body_sha256, body_bytes, priority, available_at)
        VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,0)`,
       [
-        uuid(),
+        rowId(),
         subscription.workspace,
         subscription.dlq_subject,
         original.key,
@@ -1770,11 +1760,11 @@ export class BusStore {
     consumerId: string,
     max = 1,
   ): Promise<Envelope[]> {
-    // A follower serves reads. Leasing is a write, and a lease handed out by a
+    // A replica serves reads. Leasing is a write, and a lease handed out by a
     // replica is a promise the replica cannot keep.
     this.assertWritable();
     const started = this.now();
-    const leased = this.db.transaction(() => {
+    const { value: leased } = await this.commit(() => {
       const subscription = this.subscriptionRow(workspace, name);
       if (subscription.paused === 1) return [] as DeliveryRow[];
       this.reclaim(subscription.id);
@@ -1851,7 +1841,7 @@ export class BusStore {
            WHERE subscription_id=? AND status='pending' AND available_at<=?
            ORDER BY priority DESC, message_seq LIMIT ?`,
         )
-        .all(subscription.id, now, Math.max(budget * 4, 32)) as DeliveryRow[];
+        .all(subscription.id, now, Math.max(budget * 4, 32)) as unknown as DeliveryRow[];
 
       const head = subscription.ordered
         ? headOf([
@@ -1882,12 +1872,12 @@ export class BusStore {
         if (result.changes !== 1) continue;
         taken.push(
           this.db.query("SELECT * FROM deliveries WHERE id=?").get(row.id) as
-            DeliveryRow,
+unknown as             DeliveryRow,
         );
       }
       this.touchConsumer(workspace, consumerId);
       return taken;
-    })();
+    });
 
     const subscription = this.subscriptionRow(workspace, name);
     const hydrated = await Promise.all(
@@ -1912,14 +1902,14 @@ export class BusStore {
               checked.violations.length > 0
             ) {
               const first = checked.violations[0]!;
-              this.db.transaction(() =>
+              await this.commit(() =>
                 this.deadLetter(
                   row,
                   subscription,
                   `schema: ${first.pointer || "/"} ${first.message}`,
                   { reasonTag: "schema" },
                 ),
-              )();
+              );
               this.metrics.counter("bql-bus.schema.violations", 1, {
                 schema: checked.schema,
                 mode: "delivery",
@@ -1944,9 +1934,9 @@ export class BusStore {
           if (!(error instanceof BlobMissingError) && !(error instanceof BusError))
             throw error;
           if (error instanceof BusError && error.status !== 500) throw error;
-          this.db.transaction(() =>
+          await this.commit(() =>
             this.deadLetter(row, subscription, error.message, { dropBody: true }),
-          )();
+          );
           this.metrics.counter("bql-bus.blobs.unreadable", 1, {
             subscription: name,
             workspace,
@@ -2008,7 +1998,7 @@ export class BusStore {
     if (!row) throw new BusError("delivery not found", 404);
     const subscription = this.db
       .query("SELECT * FROM subscriptions WHERE id=?")
-      .get(row.subscription_id) as SubscriptionRow;
+      .get(row.subscription_id) as unknown as SubscriptionRow;
     if (subscription.workspace !== workspace)
       throw new BusError("delivery not found", 404);
     if (
@@ -2043,9 +2033,18 @@ export class BusStore {
     deliveryId: string,
     consumerId: string,
     generation: number,
-    options: { publish?: PublishRequest[]; effects?: EffectRecord[] } = {},
+    options: {
+      publish?: PublishRequest[];
+      effects?: EffectRecord[];
+      ack?: Ack;
+    } = {},
   ): Promise<AckResult> {
     this.assertWritable();
+    // Only an ack that publishes waits: a consumer is about to be told its
+    // output exists. A plain ack commits at the backend's local level.
+    const publishing = (options.publish ?? []).length > 0;
+    const ack = publishing ? (options.ack ?? this.storage.defaultAck) : undefined;
+    if (ack) this.assertAck(ack);
     const started = this.now();
     // Bodies are written before the transaction opens, because a transaction
     // may not await. An ack that is only a replay still pays for this, which
@@ -2054,7 +2053,7 @@ export class BusStore {
     for (const request of options.publish ?? [])
       prepared.push(await this.prepare(workspace, request));
 
-    return this.db.transaction(() => {
+    const { value, txid } = await this.commit(() => {
       const replay = this.ackReplay(workspace, deliveryId, consumerId, generation);
       if (replay) return replay;
 
@@ -2120,13 +2119,25 @@ export class BusStore {
       return {
         ...this.toDelivery(
           this.db.query("SELECT * FROM deliveries WHERE id=?").get(row.id) as
-            DeliveryRow,
+unknown as             DeliveryRow,
           subscription,
         ),
         published,
         replayed: false,
       };
-    })();
+    }, ack);
+    if (!ack || txid === undefined) return value;
+    // A replay wrote nothing, so `txid` is the current one, which covers the
+    // original ack: waiting on it is what a retry after `ACK_TIMEOUT` needs.
+    const result = value.replayed
+      ? value
+      : {
+          ...value,
+          published: value.published.map((one) => ({ ...one, txid })),
+          txid,
+        };
+    await this.awaitAck(txid, ack, { published: result.published });
+    return result;
   }
 
   /**
@@ -2150,7 +2161,7 @@ export class BusStore {
       return null;
     const subscription = this.db
       .query("SELECT * FROM subscriptions WHERE id=?")
-      .get(row.subscription_id) as SubscriptionRow;
+      .get(row.subscription_id) as unknown as SubscriptionRow;
     if (subscription.workspace !== workspace) return null;
     this.metrics.counter("bql-bus.deliveries.ack_replayed", 1, {
       subscription: subscription.name,
@@ -2268,7 +2279,9 @@ export class BusStore {
         consumerId,
         generation,
       );
-      const value = work(this.db);
+      // The writer itself, not the store's handle: the handler's statements
+      // are in this transaction on either backend.
+      const value = work(this.db.writer!);
       this.db.run(
         "UPDATE deliveries SET status='acked', lease_until=NULL, error=NULL, updated_at=? WHERE id=? AND status='leased'",
         [this.now(), row.id],
@@ -2285,7 +2298,7 @@ export class BusStore {
         value,
         delivery: this.toDelivery(
           this.db.query("SELECT * FROM deliveries WHERE id=?").get(row.id) as
-            DeliveryRow,
+unknown as             DeliveryRow,
           subscription,
         ),
       };
@@ -2332,7 +2345,7 @@ export class BusStore {
         );
       return this.toDelivery(
         this.db.query("SELECT * FROM deliveries WHERE id=?").get(row.id) as
-          DeliveryRow,
+unknown as           DeliveryRow,
         subscription,
       );
     })();
@@ -2407,7 +2420,7 @@ export class BusStore {
     if (!row) throw new BusError("delivery not found", 404);
     const subscription = this.db
       .query("SELECT * FROM subscriptions WHERE id=?")
-      .get(row.subscription_id) as SubscriptionRow;
+      .get(row.subscription_id) as unknown as SubscriptionRow;
     if (subscription.workspace !== workspace)
       throw new BusError("delivery not found", 404);
     return this.toDelivery(row, subscription);
@@ -2441,11 +2454,11 @@ export class BusStore {
          WHERE message_seq=? AND status IN ('pending','leased')`,
         [now, seq],
       );
-      this.metrics.counter("bql-bus.deliveries.cancelled", result.changes, {
+      this.metrics.counter("bql-bus.deliveries.cancelled", Number(result.changes), {
         workspace,
       });
       return {
-        cancelled: result.changes,
+        cancelled: Number(result.changes),
         alreadyCancelled: meta.cancelledAt !== null,
       };
     })();
@@ -2462,11 +2475,11 @@ export class BusStore {
          WHERE id=? AND status IN ('pending','leased')`,
         [this.now(), deliveryId],
       );
-      this.metrics.counter("bql-bus.deliveries.cancelled", result.changes, {
+      this.metrics.counter("bql-bus.deliveries.cancelled", Number(result.changes), {
         workspace,
       });
       return {
-        cancelled: result.changes,
+        cancelled: Number(result.changes),
         alreadyCancelled: delivery.status === "cancelled",
       };
     })();
@@ -2482,7 +2495,7 @@ export class BusStore {
            FROM deliveries d JOIN subscriptions s ON s.id = d.subscription_id
           WHERE s.workspace = ? ORDER BY d.updated_at DESC LIMIT ?`,
       )
-      .all(workspace, limit) as (DeliveryRow & {
+      .all(workspace, limit) as unknown as (DeliveryRow & {
       subscription_name: string;
       subscription_max: number;
     })[];
@@ -2704,138 +2717,65 @@ export class BusStore {
   }
 
   /**
-   * Write a consistent copy of the database to `path`.
+   * Delete bodies no message references any more.
    *
-   * `VACUUM INTO` rather than copying the file: it is SQLite's supported online
-   * backup, it is consistent under WAL without stopping writes, and it needs no
-   * `sqlite3` binary on the host. Copying `bus.db` alone while a WAL exists is
-   * the classic way to restore a database that is missing its last few minutes.
-   */
-  backup(path: string): void {
-    // A bound parameter, not string interpolation: `VACUUM INTO` takes an
-    // expression, so the path never has to be quoted or escaped by hand.
-    this.db.run("VACUUM INTO ?", [path]);
-  }
-
-  /**
-   * Roll the log back to a chosen point.
-   *
-   * Snapshot plus "replay to here" is what point-in-time recovery means in
-   * practice: restore last night's backup, then cut off just before the batch
-   * that went wrong. Deliveries cascade from `messages`, so a truncated
-   * message takes its unfinished deliveries with it and every subscription
-   * cursor is pulled back to the new head — a cursor past the end of the log
-   * would silently skip everything published afterwards.
-   *
-   * What this is **not**: replay from an archive of shipped log segments. The
-   * log after a snapshot lives on whatever was following the leader at the
-   * time, and `bql-bus follow` is how it gets there.
-   */
-  truncateAfter(seq: number): { removed: number; lastSeq: number } {
-    this.assertWritable();
-    return this.db.transaction(() => {
-      // Counted before the delete: `changes` after a cascading delete includes
-      // the delivery rows that went with the messages, which would report a
-      // number an operator has no way to interpret.
-      const removed = (
-        this.db
-          .query("SELECT COUNT(*) AS n FROM messages WHERE seq > ?")
-          .get(seq) as { n: number }
-      ).n;
-      this.db.run("DELETE FROM messages WHERE seq > ?", [seq]);
-      this.db.run(
-        "UPDATE subscriptions SET cursor_seq=?, updated_at=? WHERE cursor_seq > ?",
-        [seq, this.now(), seq],
-      );
-      this.db.run("UPDATE cluster SET applied_seq=? WHERE applied_seq > ?", [
-        seq,
-        seq,
-      ]);
-      return { removed, lastSeq: this.lastSeq() };
-    })();
-  }
-
-  /** The highest sequence number published at or before `at`. 0 if none. */
-  seqAt(at: number): number {
-    const row = this.db
-      .query("SELECT MAX(seq) AS seq FROM messages WHERE published_at <= ?")
-      .get(at) as { seq: number | null };
-    return row.seq ?? 0;
-  }
-
-  /**
-   * Delete blobs no message references any more.
-   *
-   * Kept off `sweep` because it is the one part that touches a filesystem, and
-   * the sweep runs every second on the same thread as every claim. A dead
-   * letter shares its original's handle, so "no message references it" is the
-   * only safe test — reference counting a two-row relationship is not worth a
-   * table.
+   * Kept off `sweep`, which runs every second on the same thread as every
+   * claim. A dead letter shares its original's handle, so "no message
+   * references it" is the only safe test.
    */
   async collectBlobs(): Promise<number> {
-    if (!this.blobs) return 0;
-    const orphans = this.db
-      .query(
-        `SELECT handle FROM blobs
-          WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.body_blob = blobs.handle)`,
-      )
-      .all() as { handle: string }[];
-    for (const { handle } of orphans) {
-      await this.blobs.delete(handle);
-      this.db.run("DELETE FROM blobs WHERE handle = ?", [handle]);
-    }
-    return orphans.length;
+    return this.db.transaction(
+      () =>
+        this.db.run(
+          `DELETE FROM blobs_data
+            WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.body_blob = blobs_data.handle)`,
+        ).changes as number,
+    )();
   }
 
   /**
-   * The reverse pass: a committed message whose blob is gone.
-   *
-   * `collectBlobs` finds files no message references. Nothing found the other
-   * direction, so a message pointing at a missing file failed every claim of it
-   * forever — a subscription stalled behind one unreadable body with no
-   * indication of why. Run at startup, where a crash between the blob write and
-   * the row commit would have shown up.
+   * The reverse pass: a committed message whose body is gone from
+   * `blobs_data`. A body and its message commit together, so this finds only
+   * rows removed by hand, but without it the claim path is the first to
+   * notice, one delivery at a time. Run at startup.
    *
    * A message with no delivery yet is left alone: the claim path dead-letters
-   * it when it gets there, and marking the log would be rewriting history for a
-   * message nobody has asked for.
+   * it when it gets there.
    */
   async reconcileBlobs(): Promise<{ missing: number; deadLettered: number }> {
-    if (!this.blobs) return { missing: 0, deadLettered: 0 };
     const referenced = this.db
       .query(
-        "SELECT DISTINCT body_blob AS handle FROM messages WHERE body_blob IS NOT NULL",
+        `SELECT DISTINCT body_blob AS handle FROM messages
+          WHERE body_blob IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM blobs_data d WHERE d.handle = messages.body_blob)`,
       )
       .all() as { handle: string }[];
-    let missing = 0;
     let deadLettered = 0;
     for (const { handle } of referenced) {
-      if (await this.blobs.has(handle)) continue;
-      missing++;
       const rows = this.db
         .query(
           `SELECT d.* FROM deliveries d
              JOIN messages m ON m.seq = d.message_seq
             WHERE m.body_blob = ? AND d.status IN ('pending','leased')`,
         )
-        .all(handle) as DeliveryRow[];
+        .all(handle) as unknown as DeliveryRow[];
       for (const row of rows) {
         const subscription = this.db
           .query("SELECT * FROM subscriptions WHERE id=?")
-          .get(row.subscription_id) as SubscriptionRow;
+          .get(row.subscription_id) as unknown as SubscriptionRow;
         this.db.transaction(() =>
           this.deadLetter(
             row,
             subscription,
-            `blob '${handle}' is missing from the blob store`,
+            `blob '${handle}' is missing from blobs_data`,
             { dropBody: true },
           ),
         )();
         deadLettered++;
       }
     }
-    this.metrics.gauge("bql-bus.blobs.missing", missing);
-    return { missing, deadLettered };
+    this.metrics.gauge("bql-bus.blobs.missing", referenced.length);
+    return { missing: referenced.length, deadLettered };
   }
 
   // ------------------------------------------------------- schema registry
@@ -2927,7 +2867,7 @@ export class BusStore {
               "SELECT * FROM schemas WHERE workspace=? AND name=? ORDER BY version",
             )
             .all(workspace, name)
-    ) as SchemaRow[];
+    ) as unknown as SchemaRow[];
     return rows.map(toSchemaVersion);
   }
 
@@ -2958,7 +2898,7 @@ export class BusStore {
       [workspace, pattern],
     );
     this.bindingGeneration++;
-    return { removed: result.changes };
+    return { removed: Number(result.changes) };
   }
 
   schemaBindings(workspace: string): SchemaBinding[] {
@@ -3159,7 +3099,7 @@ export class BusStore {
     return (
       this.db
         .query("SELECT * FROM schedules WHERE workspace=? ORDER BY name")
-        .all(workspace) as ScheduleRow[]
+        .all(workspace) as unknown as ScheduleRow[]
     ).map(toSchedule);
   }
 
@@ -3212,13 +3152,22 @@ export class BusStore {
    * action, and it should neither swallow nor be swallowed by the next
    * scheduled fire.
    */
-  async runSchedule(workspace: string, name: string): Promise<PublishResult> {
+  async runSchedule(
+    workspace: string,
+    name: string,
+    options: PublishOptions = {},
+  ): Promise<PublishResult> {
     const row = this.scheduleRow(workspace, name);
-    return this.publish(workspace, {
-      subject: row.subject,
-      body: JSON.parse(row.body) as Json,
-      headers: { ...this.scheduleHeaders(row, this.now()), "schedule-manual": "true" },
-    });
+    return this.publish(
+      workspace,
+      {
+        subject: row.subject,
+        body: JSON.parse(row.body) as Json,
+        headers: { ...this.scheduleHeaders(row, this.now()), "schedule-manual": "true" },
+      },
+      null,
+      options,
+    );
   }
 
   /**
@@ -3245,12 +3194,9 @@ export class BusStore {
   /**
    * Publish every schedule that is due. Runs from the sweep.
    *
-   * On the leader only: a follower is read-only, and so is a leader that has
-   * been fenced out. Each fire is a publish whose dedupe key is the schedule
-   * and its scheduled instant, committed in one transaction with the move to
-   * the next fire — so a double sweep finds nothing due, and a promoted
-   * follower whose schedule row lags the log it replicated re-derives the same
-   * key and gets the existing message back rather than a second one.
+   * On the primary only. Each fire is a publish whose dedupe key is the
+   * schedule and its scheduled instant, committed in one transaction with the
+   * move to the next fire, so a double sweep finds nothing due.
    */
   fireSchedules(): Promise<number> {
     this.firing ??= this.fireDue().finally(() => {
@@ -3260,7 +3206,7 @@ export class BusStore {
   }
 
   private async fireDue(): Promise<number> {
-    if (this.readOnly || this.cluster().role !== "leader") return 0;
+    if (this.notPrimary) return 0;
     const now = this.now();
     let fired = 0;
     // Batches until nothing is due. Every row a batch touches leaves the due
@@ -3275,7 +3221,7 @@ export class BusStore {
               AND (retry_at IS NULL OR retry_at <= ?1)
             ORDER BY next_at LIMIT 100`,
         )
-        .all(now) as ScheduleRow[];
+        .all(now) as unknown as ScheduleRow[];
       if (due.length === 0) break;
       fired += await this.fireBatch(due, now);
     }
@@ -3320,7 +3266,7 @@ export class BusStore {
           headers: this.scheduleHeaders(row, fireAt),
           dedupeKey: `schedule:${row.name}:${fireAt}`,
         });
-        const published = this.db.transaction(() => {
+        const { value: published } = await this.commit(() => {
           // The row may have been paused, edited or deleted while the body was
           // being written; only the version that was read gets fired.
           const moved = this.db.run(
@@ -3330,7 +3276,7 @@ export class BusStore {
           );
           if (moved.changes === 0) return null;
           return this.insert(row.workspace, prepared, null);
-        })();
+        });
         if (published && !published.duplicate) {
           fired++;
           this.metrics.counter("bql-bus.schedules.fired", 1, labels);
@@ -3354,223 +3300,51 @@ export class BusStore {
     return fired;
   }
 
-  /**
-   * Mirror the upstream's schedules for one workspace.
-   *
-   * Replicated like cursors: the row, not the fires. A promoted follower fires
-   * from the `next_at` it last saw, and the dedupe key makes any fire the old
-   * leader already published a no-op.
-   */
-  applySchedules(workspace: string, schedules: Schedule[]): void {
-    // The follower calls this every poll; an unchanged list is the common
-    // case and should not cost a write transaction.
-    if (JSON.stringify(this.schedules(workspace)) === JSON.stringify(schedules))
-      return;
-    this.db.transaction(() => {
-      const names = new Set(schedules.map((schedule) => schedule.name));
-      for (const { name } of this.db
-        .query("SELECT name FROM schedules WHERE workspace=?")
-        .all(workspace) as { name: string }[])
-        if (!names.has(name))
-          this.db.run("DELETE FROM schedules WHERE workspace=? AND name=?", [
-            workspace,
-            name,
-          ]);
-      for (const schedule of schedules)
-        this.db.run(
-          `INSERT OR REPLACE INTO schedules (workspace, name, cron, tz, subject, body, headers, next_at, last_at, catch_up, paused, last_error, retry_at, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            workspace,
-            schedule.name,
-            schedule.cron,
-            schedule.tz,
-            schedule.subject,
-            JSON.stringify(schedule.body ?? null),
-            JSON.stringify(schedule.headers ?? {}),
-            schedule.nextAt,
-            schedule.lastAt,
-            schedule.catchUp,
-            schedule.paused ? 1 : 0,
-            schedule.lastError,
-            schedule.retryAt ?? null,
-            schedule.createdAt,
-            schedule.updatedAt,
-          ],
-        );
-    })();
-  }
+  // ------------------------------------------------------------- roles
 
-  // ------------------------------------------------------------ cluster
-
-  cluster(): ClusterState {
-    const row = this.db.query("SELECT * FROM cluster WHERE id=1").get() as {
-      epoch: number;
-      role: string;
-      upstream: string | null;
-      applied_seq: number;
-    } | null;
-    return {
-      epoch: row?.epoch ?? 0,
-      role: (row?.role as "leader" | "follower") ?? "leader",
-      upstream: row?.upstream ?? null,
-      appliedSeq: row?.applied_seq ?? 0,
-      readOnly: this.readOnly,
-    };
+  /** True while bql.sh holds the bus database as a replica on this node. */
+  get isReplica(): boolean {
+    return this.notPrimary;
   }
 
   /**
-   * Take the leader role at a given epoch.
-   *
-   * The epoch comes from a lease acquired in shared storage, not from here:
-   * this only records what was won. Split brain is prevented by the fence, not
-   * by hoping the old leader is dead.
+   * This node now holds the bql.sh database as primary: bring the schema up
+   * to date, accept writes, and forget everything cached while it was a
+   * replica. Leases in `deliveries` came over with the WAL and keep their
+   * generation; the sweep reclaims the expired ones.
    */
-  promote(epoch: number): ClusterState {
-    const current = this.cluster();
-    if (epoch <= current.epoch)
-      throw new BusError(
-        `epoch ${epoch} does not advance past ${current.epoch}`,
-        409,
-      );
-    this.db.run(
-      "UPDATE cluster SET epoch=?, role='leader', upstream=NULL, updated_at=? WHERE id=1",
-      [epoch, this.now()],
-    );
-    this.readOnly = false;
-    return this.cluster();
+  becomePrimary(): void {
+    this.migrate();
+    this.notPrimary = false;
+    this.reloadCaches();
   }
 
-  /** Become a follower of `upstream`. Writes from clients are refused. */
-  demote(upstream: string): ClusterState {
-    this.db.run(
-      "UPDATE cluster SET role='follower', upstream=?, updated_at=? WHERE id=1",
-      [upstream, this.now()],
-    );
-    this.readOnly = true;
-    return this.cluster();
+  /** Another node holds the bql.sh database now. Writes answer `503 NOT_PRIMARY`. */
+  becomeReplica(): void {
+    this.notPrimary = true;
+    this.reloadCaches();
   }
 
   /**
-   * Stop accepting writes.
-   *
-   * Set when a follower is serving reads, and when a leader discovers the
-   * shared lease has moved past its epoch — the old leader refusing to write
-   * is the second half of the fence, and without it the first half is a
-   * suggestion.
+   * Drop what is cached from the tables: schema bindings, quotas, revocations,
+   * free space. A replica calls this on a timer, because rows change under it
+   * without passing through any method here.
    */
-  setReadOnly(readOnly: boolean, reason = "read-only"): void {
-    this.readOnly = readOnly;
-    this.readOnlyReason = reason;
+  reloadCaches(): void {
+    this.bindingGeneration++;
+    this.bindingCache = null;
+    this.revoked = null;
+    this.quotaCache.clear();
+    this.freeSpace = null;
   }
 
   private assertWritable(): void {
-    if (!this.readOnly) return;
+    if (!this.notPrimary) return;
     throw new BusError(
-      `this bus is not accepting writes: ${this.readOnlyReason}`,
-      409,
+      "this bus is not accepting writes: this node holds a replica of the bus database",
+      503,
+      { code: "NOT_PRIMARY" },
     );
-  }
-
-  /**
-   * Apply messages shipped from an upstream, keeping their sequence numbers.
-   *
-   * The **bus log** is what is replicated, not the SQLite WAL. The bus already
-   * is a log with a monotonic `seq`, so a follower rebuilds by reading it —
-   * which survives schema changes, needs no frame parsing, and is a hundred
-   * lines rather than a project. Delivery and lease rows are deliberately not
-   * replicated: leases are ephemeral, and a promoted follower re-materializes
-   * deliveries from cursors through the same code path a cold start uses.
-   */
-  async applyReplicated(messages: Message[]): Promise<number> {
-    let applied = this.cluster().appliedSeq;
-    for (const message of messages) {
-      const { inline, blob, sha256, bytes } = await this.writeBody(message.body);
-      this.db.transaction(() => {
-        this.db.run(
-          `INSERT INTO messages (seq, id, workspace, subject, key, headers, body, body_blob, published_at, expires_at, dedupe_key, publisher, body_sha256, body_bytes, priority, available_at, cancelled_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(seq) DO NOTHING`,
-          [
-            message.seq,
-            message.id,
-            message.workspace,
-            message.subject,
-            message.key,
-            JSON.stringify(message.headers),
-            inline,
-            blob,
-            message.publishedAt,
-            message.expiresAt,
-            message.dedupeKey,
-            message.publisher,
-            sha256,
-            bytes,
-            message.priority,
-            message.availableAt,
-            message.cancelledAt,
-          ],
-        );
-      })();
-      applied = Math.max(applied, message.seq);
-    }
-    this.db.run("UPDATE cluster SET applied_seq=?, updated_at=? WHERE id=1", [
-      applied,
-      this.now(),
-    ]);
-    return applied;
-  }
-
-  /**
-   * Mirror the upstream's subscriptions and cursors.
-   *
-   * The cursor is the only piece of consumer state a follower needs: given the
-   * log and the cursors, every delivery can be recreated. Copying leases would
-   * replicate the one thing that is meaningless on another machine.
-   */
-  applyCursors(subscriptions: Subscription[]): void {
-    this.db.transaction(() => {
-      for (const subscription of subscriptions) {
-        const existing = this.db
-          .query("SELECT id FROM subscriptions WHERE workspace=? AND name=?")
-          .get(subscription.workspace, subscription.name) as { id: string } | null;
-        if (existing) {
-          this.db.run(
-            `UPDATE subscriptions SET cursor_seq=?, ack_wait_ms=?, max_attempts=?, ordered=?,
-               dlq_subject=?, paused=?, updated_at=? WHERE id=?`,
-            [
-              subscription.cursorSeq,
-              subscription.ackWaitMs,
-              subscription.maxAttempts,
-              subscription.ordered ? 1 : 0,
-              subscription.dlqSubject,
-              subscription.paused ? 1 : 0,
-              this.now(),
-              existing.id,
-            ],
-          );
-          continue;
-        }
-        this.db.run(
-          `INSERT INTO subscriptions (id, workspace, name, pattern, cursor_seq, ack_wait_ms, max_attempts, ordered, dlq_subject, paused, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            subscription.id,
-            subscription.workspace,
-            subscription.name,
-            subscription.pattern,
-            subscription.cursorSeq,
-            subscription.ackWaitMs,
-            subscription.maxAttempts,
-            subscription.ordered ? 1 : 0,
-            subscription.dlqSubject,
-            subscription.paused ? 1 : 0,
-            subscription.createdAt,
-            subscription.updatedAt,
-          ],
-        );
-      }
-    })();
   }
 
   // -------------------------------------------------- tenancy and audit
@@ -3760,29 +3534,18 @@ export class BusStore {
 
   /** Bytes of the database file, its WAL, and free space on the filesystem. */
   sizes(): { dbBytes: number; walBytes: number; freeBytes: number } {
-    const size = (path: string) => {
-      try {
-        return Bun.file(path).size;
-      } catch {
-        return 0;
-      }
-    };
-    return {
-      dbBytes: this.path === ":memory:" ? 0 : size(this.path),
-      walBytes: this.path === ":memory:" ? 0 : size(`${this.path}-wal`),
-      freeBytes: this.freeBytes(0),
-    };
+    return { ...this.storage.sizes(), freeBytes: this.freeBytes(0) };
   }
 
   /** Free bytes on the database's filesystem, cached for `maxAgeMs`. */
   private freeBytes(maxAgeMs = 1000): number {
-    if (this.path === ":memory:") return Number.MAX_SAFE_INTEGER;
+    const path = this.storage.path;
     const now = this.now();
     if (this.freeSpace && now - this.freeSpace.at < maxAgeMs)
       return this.freeSpace.bytes;
     let bytes = Number.MAX_SAFE_INTEGER;
     try {
-      const stats = statfsSync(this.path);
+      const stats = statfsSync(path);
       bytes = Number(stats.bsize) * Number(stats.bavail);
     } catch {
       // A filesystem that will not answer is not evidence of a full one.
@@ -3806,22 +3569,6 @@ export class BusStore {
       freeBytes,
       minFreeBytes: this.minFreeBytes,
     };
-  }
-
-  /**
-   * Truncate the WAL once it grows past the configured ceiling.
-   *
-   * `TRUNCATE` rather than `PASSIVE` because the point is to give the space
-   * back, and best-effort because a long-lived reader will block it — that
-   * reader is the whole reason the file grew, and blocking *it* to reclaim
-   * space would trade a disk problem for a correctness-shaped one.
-   */
-  private checkpoint(): void {
-    if (this.walCheckpointBytes <= 0 || this.path === ":memory:") return;
-    if (this.sizes().walBytes < this.walCheckpointBytes) return;
-    try {
-      this.db.run("PRAGMA wal_checkpoint(TRUNCATE)");
-    } catch {}
   }
 
   /**
@@ -3866,7 +3613,6 @@ export class BusStore {
       now,
     ]);
     this.revoked = null;
-    this.checkpoint();
     // Async because a fire is a publish; the sweep's timer does not wait on
     // it, and a pass still running when the next tick lands is shared.
     void this.fireSchedules().catch(() => {});

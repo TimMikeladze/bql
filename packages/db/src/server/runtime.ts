@@ -27,6 +27,7 @@ import {
   AckTimeout,
   AckTracker,
   generationId,
+  loadGenerationLedger,
   NoReplicas,
   ReplicaClient,
   type ReplicaMode,
@@ -34,6 +35,7 @@ import {
   type ReplicaView,
   ReplicationServer,
   type ShardHost,
+  saveGenerationLedger,
 } from "../replication/index.ts"
 import {
   AuthorizerHub,
@@ -48,6 +50,7 @@ import { parseRetentionMs, S3Store, ShipperPool } from "../storage/index.ts"
 import { OutboxRelay } from "../outbox/index.ts"
 import {
   type AckLevel,
+  type CreateOptions,
   type ReaderLease,
   type ReadTx,
   type Tenant,
@@ -113,6 +116,8 @@ export interface BeginTxOptions {
   rows?: "array" | "object"
   /** The replica node that forwarded this transaction (R2). */
   origin?: string
+  /** What the commit does locally: `"local"` or an fsync. Default `[durability] defaultAck`. */
+  ack?: AckLevel
 }
 
 /** One transaction waiting for a database's writer. */
@@ -206,6 +211,15 @@ export class ServerRuntime {
    */
   replica: ReplicaClient | null = null
   /**
+   * The generation ledger: for each copy this node received as a replica, the id it was
+   * bootstrapped under. Node-level and owned here rather than by a client, because a promotion
+   * makes the follow planner drop the upstream the copy came from, and the id has to outlive that
+   * client: a promoted node that forgot it would re-mint the database's identity, and every other
+   * replica would trash its copy and bootstrap again. Every client on this thread shares the map.
+   * A worker's is pushed down from the router.
+   */
+  readonly generations: Map<string, string>
+  /**
    * C3b: every upstream this node follows, by its `/v1/replication` URL. A node with
    * `[replication] primary` and no cluster has exactly one entry and behaves as it always did.
    */
@@ -218,6 +232,7 @@ export class ServerRuntime {
   #shard: { index: number; workers: number } | null = null
   /** C4d: where a worker reports a role flip, since the router's catalog read cannot see it. */
   #onRoleChanged: ((db: string, role: NodeRole) => void) | null = null
+  #roleListeners = new Set<(db: string, role: NodeRole) => void>()
   /** C4e: how the router asks the workers which databases are open. Null on every other thread. */
   #openStates: (() => Promise<Map<string, bigint>>) | null = null
   /** C3b: told when an upstream client is created, so a router can wire its `FollowHost`. */
@@ -313,6 +328,10 @@ export class ServerRuntime {
     this.#onTenantOpen = options.onTenantOpen ?? null
     this.storage = buildShipperPool(options.config, this.registry, this.#onError)
     this.replicationMode = options.replicationMode ?? "own"
+    this.generations =
+      this.replicationMode === "hosted"
+        ? new Map()
+        : loadGenerationLedger(path.join(this.registry.dir, "bootstrap"), this.#onError)
     this.outbox =
       options.config.outbox.rules.length > 0 && this.replicationMode !== "none"
         ? new OutboxRelay(
@@ -360,7 +379,7 @@ export class ServerRuntime {
             // identity it was bootstrapped under rather than one derived from a catalog row this
             // node wrote itself. Without this, promoting a node re-mints the database's identity and
             // every other replica trashes its copy and bootstraps again.
-            generationOf: (db) => this.replica?.generationOf(db) ?? null,
+            generationOf: (db) => this.generations.get(db) ?? null,
             onError: this.#onError,
           })
         : null
@@ -402,6 +421,26 @@ export class ServerRuntime {
     return this.promoter.nodeRole
   }
 
+  /**
+   * Create a database the way `POST /v1/db` does, for every caller: the HTTP route, the embedded
+   * `bq.create`, a restore into a new name. On a statically configured replica it is
+   * `NOT_PRIMARY`. In a cluster, placement's create gate runs first (`NOT_PRIMARY` naming the home
+   * node when it is not this one) unless `gate` is false (a restore lands beside its source), and
+   * the answer waits until this node holds the new database's lease, so the caller's first write
+   * is not refused.
+   */
+  async createDatabase(
+    name: string,
+    options: CreateOptions = {},
+    { gate = true }: { gate?: boolean } = {},
+  ): Promise<Tenant> {
+    if (this.role === "replica") throw BqlError.notPrimary(this.primaryUrl ?? undefined)
+    if (gate) this.promoter.assertMayCreate(name)
+    const tenant = await this.registry.create(name, options)
+    await this.promoter.ensureLease(tenant.name)
+    return tenant
+  }
+
   /** The live role for one database. Every per-database gate reads this rather than `role`. */
   roleFor(db: string): NodeRole {
     return this.promoter.roleFor(db)
@@ -417,7 +456,7 @@ export class ServerRuntime {
    * of it would see a generation change, run R7's unfollow, and trash a perfectly good copy.
    */
   generationOf(db: string): string | null {
-    const held = this.replica?.generationOf(db)
+    const held = this.generations.get(db)
     if (held) return held
     const row = this.registry.list().find((one) => one.name === db)
     return row ? generationId(row) : null
@@ -610,6 +649,7 @@ export class ServerRuntime {
     }
     if (event.kind === "delete") {
       this.acks.forget(event.name)
+      this.#forgetGeneration(event.name)
       void this.outbox?.forget(event.name).catch((err) => this.#onError(err))
       // A deleted database keeps whatever is already in the bucket — design §6.5 says the log and
       // the snapshots are retained per `retention` — but nothing more is shipped for it.
@@ -619,6 +659,24 @@ export class ServerRuntime {
     // about the whole node and only the router can assemble it. Every other caller of `announce()`
     // — C2's promotion among them — is carried across the same way, without a second hook.
     this.replication?.announce()
+  }
+
+  /**
+   * A database deleted on this node takes its ledger entry with it, so a later database created
+   * here under the same name is not announced under the old one's id. An unfollow has already
+   * dropped it; this is for a copy that was promoted here and then deleted as a primary.
+   */
+  #forgetGeneration(db: string): void {
+    if (!this.generations.has(db)) return
+    const client = this.#clients.values().next().value
+    if (client) {
+      client.forgetGeneration(db)
+      return
+    }
+    this.generations.delete(db)
+    if (this.replicationMode !== "hosted") {
+      saveGenerationLedger(path.join(this.registry.dir, "bootstrap"), this.generations, this.#onError)
+    }
   }
 
   /**
@@ -763,6 +821,7 @@ export class ServerRuntime {
       this.replicationMode === "hosted" ? "hosted" : this.#shards ? "routed" : "own"
     return new ReplicaClient({
       registry: this.registry,
+      generations: this.generations,
       primary: url,
       secret: section.secret,
       node: this.node,
@@ -879,9 +938,28 @@ export class ServerRuntime {
     this.#onRoleChanged = handler
   }
 
+  /**
+   * Every role flip on this thread, for in-process code that has to follow one: the embedded
+   * `bq.on("role")`. Unlike `setRoleHandler`, which is the worker's one slot, any number listen.
+   */
+  onRoleChange(listener: (db: string, role: NodeRole) => void): () => void {
+    this.#roleListeners.add(listener)
+    return () => {
+      this.#roleListeners.delete(listener)
+    }
+  }
+
   /** Called by `Promoter.#flip`, the one place a database's role changes. */
   roleChanged(db: string, role: NodeRole): void {
     this.#onRoleChanged?.(db, role)
+    for (const listener of [...this.#roleListeners]) {
+      try {
+        listener(db, role)
+      } catch (err) {
+        // A listener that throws is its own problem; the flip has already happened.
+        this.#onError(err)
+      }
+    }
   }
 
   /** C4e: where the router learns which databases its workers hold open. */
@@ -972,10 +1050,16 @@ export class ServerRuntime {
     const lease: ReaderLease = tenant.acquireReader()
     try {
       applyPolicy(lease.db, this.hubFor(lease.db), principal, tenant.name, { queryOnly: true })
-      return fn(lease.db)
+      const result = fn(lease.db)
+      // A bare `BEGIN` or `SAVEPOINT` classifies as read-only and lands here. `releaseReader` rolls
+      // it back so the next borrower does not inherit the snapshot; the caller is told why.
+      if (!lease.db.inTransaction) return result
     } finally {
       tenant.releaseReader(lease)
     }
+    throw BqlError.badRequest(
+      "BEGIN and SAVEPOINT cannot run as a statement of their own; use a transaction (`POST /v1/db/{db}/tx`, `db.transaction`)",
+    )
   }
 
   // ── realtime (design §4.6) ───────────────────────────────────────────────────────────────────
@@ -1183,7 +1267,7 @@ export class ServerRuntime {
       ...(options.mode ? { mode: options.mode } : {}),
       idleTimeoutMs: this.config.limits.txIdleTimeoutMs,
       onExpire: () => this.#forgetTx(session),
-      ack: this.config.durability.defaultAck,
+      ack: options.ack ?? this.config.durability.defaultAck,
     })
     this.#tx.set(baton, session)
     this.#txByDb.set(tenant.name, session)

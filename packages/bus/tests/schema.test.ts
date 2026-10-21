@@ -7,6 +7,7 @@
  * broke it. Both are the difference between a registry and paperwork.
  */
 import { expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import {
   assertSupported,
   breaking,
@@ -19,7 +20,7 @@ import type { Json } from "../src/shared/protocol";
 
 const W = "default";
 let clock = 1_000_000;
-const store = () => new BusStore(":memory:", { now: () => clock });
+const store = () => testStore({ now: () => clock });
 
 const order: Json = {
   type: "object",

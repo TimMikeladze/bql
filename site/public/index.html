@@ -358,7 +358,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 }).start();</code></pre></div>
 </div>
 </section>
-<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2><div class="figures"><div class="fig" data-source="repo count: testFiles"><b>199</b><span>test files</span></div><div class="fig" data-source="repo count: runtimeDependencies"><b>0</b><span>runtime dependencies</span></div><div class="fig" data-source="db README /~(\d+k) writes\/s at 64/"><b>49k</b><span>writes/s, 64 clients</span></div><div class="fig" data-source="db README /a point read is\s+(\d+ \u00B5s)/"><b>54 µs</b><span>point read over HTTP</span></div></div></div></section>
+<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2><div class="figures"><div class="fig" data-source="repo count: testFiles"><b>205</b><span>test files</span></div><div class="fig" data-source="repo count: runtimeDependencies"><b>0</b><span>runtime dependencies</span></div><div class="fig" data-source="db README /~(\d+k) writes\/s at 64/"><b>49k</b><span>writes/s, 64 clients</span></div><div class="fig" data-source="db README /a point read is\s+(\d+ \u00B5s)/"><b>54 µs</b><span>point read over HTTP</span></div></div></div></section>
 <section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
 <div>
 <h2 id="showcase-h">One engine, four ways in</h2>
@@ -455,9 +455,12 @@ db.exec(<span class="t-s">&quot;create table t(id integer primary key, v text)&q
 db.prepare(<span class="t-s">&quot;insert into t(v) values (?)&quot;</span>).run(<span class="t-s">&quot;hello&quot;</span>)
 db.prepare(<span class="t-s">&quot;select * from t where id = ?&quot;</span>).get(<span class="t-n">1</span>)   <span class="t-c">// { id: 1, v: &quot;hello&quot; }</span>
 db.onUpdate((op, dbName, table, rowid) =&gt; console.log(op, table, rowid))
-db.close()</code></pre></div></div><div class="tabpanel p-3"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bus.ts</span><button type="button" class="copy" data-copy="import { createBus } from &quot;bql.sh/bus&quot;;
+db.close()</code></pre></div></div><div class="tabpanel p-3"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bus.ts</span><button type="button" class="copy" data-copy="import { Bql } from &quot;bql.sh&quot;;
+import { createBus, ensureBusDatabase } from &quot;bql.sh/bus&quot;;
 
-const bus = createBus({ path: &quot;./data/bus.db&quot;, blobDirectory: &quot;./data/blobs&quot; });
+const bq = await Bql.open({ dir: &quot;./data&quot; });
+await ensureBusDatabase(bq);
+const bus = createBus({ bql: bq });
 bus.store.raw().run(&quot;CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)&quot;);
 
 bus.consumeTransactional({
@@ -467,9 +470,12 @@ bus.consumeTransactional({
   handle: (envelope, db) =&gt; {
     db.run(&quot;INSERT INTO processed (seq) VALUES (?)&quot;, [envelope.message.seq]);
   },
-});" aria-label="Copy bus.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-k">import</span> { createBus } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus&quot;</span>;
+});" aria-label="Copy bus.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-k">import</span> { Bql } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh&quot;</span>;
+<span class="t-k">import</span> { createBus, ensureBusDatabase } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus&quot;</span>;
 
-<span class="t-k">const</span> bus = createBus({ path: <span class="t-s">&quot;./data/bus.db&quot;</span>, blobDirectory: <span class="t-s">&quot;./data/blobs&quot;</span> });
+<span class="t-k">const</span> bq = <span class="t-k">await</span> Bql.open({ dir: <span class="t-s">&quot;./data&quot;</span> });
+<span class="t-k">await</span> ensureBusDatabase(bq);
+<span class="t-k">const</span> bus = createBus({ bql: bq });
 bus.store.raw().run(<span class="t-s">&quot;CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)&quot;</span>);
 
 bus.consumeTransactional({
@@ -702,7 +708,7 @@ orders.&gt;                 matches both
 </div></section>
 <section class="section cap" id="schedules" aria-labelledby="schedules-h"><div class="shell">
 <div class="sec-head"><h2 id="schedules-h">Cron, as ordinary messages</h2>
-<p class="explain"><code>bql bus schedule add</code> fires on the leader, one deduplicated publish per slot, DST-correct in any IANA zone.</p></div>
+<p class="explain"><code>bql bus schedule add</code> fires on the primary, one deduplicated publish per slot, DST-correct in any IANA zone.</p></div>
 <div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus schedule add nightly '30 2 * * *' reports.nightly '{&quot;kind&quot;:&quot;daily&quot;}' --tz America/New_York</span><span class="chip">captured output</span></div><pre><code>bql bus schedule add nightly <span class="t-s">'30 2 * * *'</span> reports.nightly <span class="t-s">'{&quot;kind&quot;:&quot;daily&quot;}'</span> --tz America/New_York
 bql bus schedule list            <span class="t-c"># --json for machines</span>
 bql bus schedule run nightly     <span class="t-c"># fire once now; does not move the next fire</span>
@@ -762,7 +768,7 @@ ok   a repeated dedupe key does not publish twice</code></pre></div></div>
 <section class="section" id="boundaries" aria-labelledby="boundaries-h"><div class="shell">
 <div class="sec-head"><h2 id="boundaries-h">Boundaries</h2>
 <p class="explain">What is proven, what is chosen, what is missing. <a href="/reference#bus-boundaries">The bus's boundaries</a> in full.</p></div>
-<div class="demo bounds"><div><h3>What holds<span>3</span></h3><ul><li>A restore reproduces the target txid checksum for checksum, or fails loudly.</li><li><code>ack: &quot;replica&quot;</code> makes failover lossless; the old primary is fenced by epoch.</li><li>The bus survives SIGKILL mid-flight in <code>bun run soak</code>, nothing lost.</li></ul></div><div><h3>What is a judgement<span>3</span></h3><ul><li>Default <code>ack: &quot;fsync&quot;</code> costs ~2.7x on one write against <code>ack: &quot;local&quot;</code>.</li><li>Bus replication is asynchronous: failover RPO is tens of messages.</li><li>Ordering is off by default; it costs throughput.</li></ul></div><div><h3>What is not here yet<span>3</span></h3><ul><li>CI gates on Linux only; macOS and Windows legs stopped 2026-09-26.</li><li>The bus still runs on <code>bun:sqlite</code>, not <code>bql.sh/sqlite</code>.</li><li>Kysely's <code>.stream()</code> is not implemented.</li></ul></div></div>
+<div class="demo bounds"><div><h3>What holds<span>4</span></h3><ul><li>A restore reproduces the target txid checksum for checksum, or fails loudly.</li><li><code>ack: &quot;replica&quot;</code> makes failover lossless; the old primary is fenced by epoch.</li><li>The bus survives SIGKILL mid-flight in <code>bun run soak</code>, nothing lost.</li><li>A clustered bus fails over with zero acknowledged publishes lost at <code>ack: &quot;replica&quot;</code>.</li></ul></div><div><h3>What is a judgement<span>3</span></h3><ul><li>Default <code>ack: &quot;fsync&quot;</code> costs ~2.7x on one write against <code>ack: &quot;local&quot;</code>.</li><li>The bus has one writer: a cluster adds copies and reads, not publish throughput.</li><li>Ordering is off by default; it costs throughput.</li></ul></div><div><h3>What is not here yet<span>2</span></h3><ul><li>CI gates on Linux only; macOS and Windows legs stopped 2026-09-26.</li><li>Kysely's <code>.stream()</code> is not implemented.</li></ul></div></div>
 </div></section>
 <section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
 <div class="sec-head"><h2 id="start-h">Two commands to start</h2>
@@ -780,9 +786,9 @@ bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts</code></pre></div></di
 <div class="demo guides"><a class="guide" href="https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/exactly-once.md" rel="noopener"><span class="gt">Exactly-once, in three tiers<span class="ext" aria-hidden="true">↗</span></span><span class="gb">What each tier guarantees and where the last stops.</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">soak.sh</span></span><pre><code>bun run soak
 bun run soak --ordered
 bun run soak --kill-bus --repeat <span class="t-n">10</span>
+bun run soak --ack local --kill-bus    <span class="t-c"># the faster ack; a process kill loses nothing here either</span>
 bun run soak --poison <span class="t-n">0.05</span>              <span class="t-c"># backoff bounds the retry rate; nothing hot-loops</span>
 bun run soak --ordered --poison <span class="t-n">0.05</span>    <span class="t-c"># a dead key blocks, and nothing overtakes it</span>
-bun run soak --fault blob-write         <span class="t-c"># crash between the blob write and the row commit</span>
 bun run soak --fault mid-txn            <span class="t-c"># crash inside the publish transaction</span>
 bun run soak --fault post-ack           <span class="t-c"># crash after the ack commits, before the response</span></code></pre></span></a><a class="guide" href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md" rel="noopener"><span class="gt">The cluster and its leases<span class="ext" aria-hidden="true">↗</span></span><span class="gb">Two primaries are impossible by the guard margin.</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bql.toml</span></span><pre><code>[cluster]
 enabled = false        <span class="t-c"># peers alone turn it on</span>

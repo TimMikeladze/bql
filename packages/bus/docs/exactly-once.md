@@ -9,7 +9,7 @@ the ledger for a call it has to make to someone else.
 
 | Tier | Guarantee | Requires |
 | --- | --- | --- |
-| 1 — transactional ack | **Exactly-once processing.** The handler's writes and the ack commit or roll back together. | Embedded mode, a synchronous handler, state in the bus's own SQLite file |
+| 1 — transactional ack | **Exactly-once processing.** The handler's writes and the ack commit or roll back together. | Embedded mode, a synchronous handler, state in the bus's own database |
 | 2 — atomic read-process-write | **Exactly-once within the bus.** The ack and the messages it produced commit together. | Nothing — it is an option on `ack` |
 | 3 — fenced, ledgered effects | **Tight effectively-once** against the outside world, with the remaining window named below. | A destination that supports a conditional write, or an idempotent one |
 
@@ -17,13 +17,17 @@ the ledger for a call it has to make to someone else.
 
 ## Tier 1 — transactional ack
 
-The handler runs in the bus's own process and writes to the same SQLite file, so there is one
-transaction and nothing to reconcile. No two-phase commit, no idempotency key, no compensation.
+The handler runs in the bus's own process and writes to the same database (bql.sh database
+`bus`), so there is one transaction and nothing to reconcile. No two-phase commit, no idempotency
+key, no compensation.
 
 ```ts
-import { createBus } from "bql.sh/bus";
+import { Bql } from "bql.sh";
+import { createBus, ensureBusDatabase } from "bql.sh/bus";
 
-const bus = createBus({ path: "./data/bus.db", blobDirectory: "./data/blobs" });
+const bq = await Bql.open({ dir: "./data" });
+await ensureBusDatabase(bq);
+const bus = createBus({ bql: bq });
 bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");
 bus.store.subscribe("default", { name: "work", pattern: "work.>" });
 

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { CronError, nextFire, parseCron } from "../src/bus/cron";
-import { follow } from "../src/bus/replication";
 import { createServer } from "../src/bus/server";
 import { BusStore } from "../src/bus/store";
 import { generateKey, mint } from "../src/bus/tokens";
@@ -146,7 +146,7 @@ describe("DST in America/New_York", () => {
 
 describe("store", () => {
   let clock = at("2026-01-01T00:00:30Z");
-  const bus = () => new BusStore(":memory:", { now: () => clock });
+  const bus = () => testStore({ now: () => clock });
   const W = "default";
   const fired = (store: BusStore) =>
     store.log(W, 0, 100, { subject: "tick" });
@@ -277,34 +277,26 @@ describe("store", () => {
     store.close();
   });
 
-  test("a promoted follower with a stale schedule row does not double-fire", async () => {
+  test("a replica never fires; the node that becomes primary does, once", async () => {
     clock = at("2026-01-01T00:00:30Z");
-    const leader = bus();
-    leader.upsertSchedule(W, { name: "tick", cron: "* * * * *", subject: "tick" });
-    const follower = bus();
-    // The follower mirrored the row before the fire…
-    follower.applySchedules(W, leader.schedules(W));
-    follower.demote("http://leader");
-    expect(await follower.fireSchedules()).toBe(0); // read-only: never fires
-
+    const store = bus();
+    store.upsertSchedule(W, { name: "tick", cron: "* * * * *", subject: "tick" });
+    store.becomeReplica();
     clock = at("2026-01-01T00:01:10Z");
-    expect(await leader.fireSchedules()).toBe(1);
-    // …and the log after it, then the leader died and the follower won.
-    await follower.applyReplicated(await leader.log(W, 0, 100));
-    follower.promote(1);
-    expect(await follower.fireSchedules()).toBe(0);
-    expect(await fired(follower)).toHaveLength(1);
-    // The row moved on regardless, so the next slot fires normally.
-    expect(follower.schedule(W, "tick").nextAt).toBe(at("2026-01-01T00:02:00Z"));
-    leader.close();
-    follower.close();
+    expect(await store.fireSchedules()).toBe(0);
+    store.becomePrimary();
+    expect(await store.fireSchedules()).toBe(1);
+    expect(await store.fireSchedules()).toBe(0);
+    expect(await fired(store)).toHaveLength(1);
+    expect(store.schedule(W, "tick").nextAt).toBe(at("2026-01-01T00:02:00Z"));
+    store.close();
   });
 });
 
 describe("HTTP", () => {
   const signingKey = generateKey();
   const adminToken = generateKey();
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const server = createServer({
     store,
     signingKey,
@@ -396,24 +388,6 @@ describe("HTTP", () => {
     expect(await status(reader.runSchedule("ping"))).toBe(401);
   });
 
-  test("a follower mirrors schedule rows, including removals", async () => {
-    await admin.putSchedule({ name: "mirrored", cron: "@daily", subject: "a.b" });
-    const replica = new BusStore(":memory:");
-    const follower = follow({ store: replica, upstream: admin, upstreamUrl: url, idleMs: 10 });
-    const until = async (check: () => boolean) => {
-      for (let tries = 0; tries < 200 && !check(); tries++) await Bun.sleep(10);
-      expect(check()).toBe(true);
-    };
-    await until(() => replica.schedules("default").some((s) => s.name === "mirrored"));
-    expect(replica.schedule("default", "mirrored").nextAt).toBe(
-      (await admin.schedule("mirrored")).nextAt,
-    );
-    await admin.deleteSchedule("mirrored");
-    await until(() => !replica.schedules("default").some((s) => s.name === "mirrored"));
-    await follower.stop();
-    replica.close();
-  });
-
   test("a workspace-pinned token sees only its own schedules", async () => {
     await admin.putSchedule({ name: "ours", cron: "@daily", subject: "a.b" });
     const elsewhere = new BusClient({
@@ -428,11 +402,11 @@ describe("HTTP", () => {
   });
 });
 
-describe("replication and limits", () => {
+describe("limits", () => {
   const signingKey = generateKey();
   const adminToken = generateKey();
   let clock = at("2026-01-01T00:00:30Z");
-  const leader = new BusStore(":memory:", { now: () => clock });
+  const leader = testStore({ now: () => clock });
   const server = createServer({
     store: leader,
     signingKey,
@@ -446,74 +420,6 @@ describe("replication and limits", () => {
   afterAll(() => {
     server.stop(true);
     leader.close();
-  });
-
-  test("a follower pinned to another workspace still deletes removed schedules", async () => {
-    leader.upsertSchedule("other", { name: "gone", cron: "@daily", subject: "a.b" });
-    // The token pins `other`; the client itself asks for nothing, so its own
-    // idea of the workspace is the default one.
-    const upstream = new BusClient({
-      url,
-      token: mint(
-        { sub: "replica", scope: "reader", workspace: "other", publish: [], subscribe: [], exp: 0 },
-        signingKey,
-      ),
-    });
-    const replica = new BusStore(":memory:");
-    const follower = follow({ store: replica, upstream, upstreamUrl: url, idleMs: 10 });
-    const until = async (check: () => boolean) => {
-      for (let tries = 0; tries < 200 && !check(); tries++) await Bun.sleep(10);
-      expect(check()).toBe(true);
-    };
-    await until(() => replica.schedules("other").length === 1);
-    leader.deleteSchedule("other", "gone");
-    await until(() => replica.schedules("other").length === 0);
-    await follower.stop();
-    replica.close();
-  });
-
-  test("a mirrored schedule row never runs ahead of the log", async () => {
-    clock = at("2026-01-01T00:00:30Z");
-    leader.upsertSchedule("default", { name: "tick", cron: "* * * * *", subject: "tick" });
-    let fireAfterLog = true;
-    // The leader fires between the follower's two reads.
-    const upstream = new BusClient({
-      url,
-      token: adminToken,
-      fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
-        const response = await fetch(input, init);
-        if (fireAfterLog && String(input).includes("/api/log")) {
-          fireAfterLog = false;
-          clock = at("2026-01-01T00:01:05Z");
-          expect(await leader.fireSchedules()).toBe(1);
-        }
-        return response;
-      }) as typeof fetch,
-    });
-    const replica = new BusStore(":memory:");
-    // A holder rather than a `let`, so the check below is not narrowed to null.
-    const seen: { snapshot?: { lastAt: number | null; messages: number } } = {};
-    const follower = follow({
-      store: replica,
-      upstream,
-      upstreamUrl: url,
-      idleMs: 10,
-      onLag: () => {
-        if (seen.snapshot) return;
-        const row = replica.schedules("default").find((s) => s.name === "tick");
-        const { n } = replica
-          .raw()
-          .query("SELECT count(*) AS n FROM messages WHERE subject = 'tick'")
-          .get() as { n: number };
-        seen.snapshot = { lastAt: row?.lastAt ?? null, messages: n };
-      },
-    });
-    for (let tries = 0; tries < 200 && !seen.snapshot; tries++) await Bun.sleep(10);
-    await follower.stop();
-    // The row was read before the fire, so it may not claim the fire while
-    // the fire's message is missing — here, it has seen neither.
-    expect(seen.snapshot).toEqual({ lastAt: null, messages: 0 });
-    replica.close();
   });
 
   test("running a schedule is charged to the publish rate limit", async () => {

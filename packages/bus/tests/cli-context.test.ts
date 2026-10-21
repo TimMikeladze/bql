@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { mkdtemp, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ContextStore } from "../../db/src/context/store.ts";
 import { createServer } from "../src/bus/server";
-import { BusStore } from "../src/bus/store";
 import { generateKey } from "../src/bus/tokens";
 const CLI = resolve(import.meta.dir, "../../db/src/cli.ts"),
   dirs: string[] = [];
@@ -52,7 +52,7 @@ async function fixture() {
 }
 test("bus commands use endpoint-specific bus auth and bypass; legacy direct mode still works", async () => {
   const f = await fixture(),
-    store = new BusStore(":memory:"),
+    store = testStore(),
     key = generateKey(),
     server = createServer({
       store,
@@ -130,7 +130,7 @@ test("bus commands use endpoint-specific bus auth and bypass; legacy direct mode
       1,
     );
     await expect(
-      access(join(f.cwd, ".bql-bus", "admin-token")),
+      access(join(f.cwd, ".bql-bus", "bus", "admin-token")),
     ).rejects.toThrow();
     expect(
       (
@@ -147,9 +147,9 @@ test("bus commands use endpoint-specific bus auth and bypass; legacy direct mode
     store.close();
   }
 });
-test("consumer requests and follower replication share selected protected bus transport", async () => {
+test("consumer requests share the selected protected bus transport", async () => {
   const f = await fixture(),
-    store = new BusStore(":memory:"),
+    store = testStore(),
     key = generateKey(),
     server = createServer({
       store,
@@ -257,23 +257,6 @@ test("consumer requests and follower replication share selected protected bus tr
     expect(reply.code).toBe(0);
     expect(JSON.parse(reply.out)).toEqual({ answer: 42 });
     expect(consumer.exitCode).toBeNull();
-    const replicaDir = join(f.cwd, "replica"),
-      follower = start(["follow", "--data", replicaDir, "--idle-ms", "20"]);
-    const deadline = Date.now() + 3000;
-    let replicated = 0;
-    while (Date.now() < deadline) {
-      try {
-        await access(join(replicaDir, "bus.db"));
-        const replica = new BusStore(join(replicaDir, "bus.db"));
-        replicated = replica.lastSeq();
-        replica.close();
-        if (replicated >= store.lastSeq()) break;
-      } catch {}
-      await Bun.sleep(30);
-    }
-    expect(follower.exitCode).toBeNull();
-    expect(replicated).toBeGreaterThanOrEqual(store.lastSeq());
-    expect(replicated).toBeGreaterThan(0);
   } finally {
     for (const p of processes) p.kill();
     await Promise.all(processes.map((p) => p.exited));

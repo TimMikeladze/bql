@@ -1,4 +1,5 @@
 import type {
+  Ack,
   AckResult,
   AuditEntry,
   BlockedKey,
@@ -38,12 +39,23 @@ import { DEFAULT_WORKSPACE } from "../shared/protocol";
  */
 
 export interface ClientOptions {
-  url: string;
+  /**
+   * The bus, or every node of a clustered one. With several, a request that
+   * cannot connect goes to the next, and a `503 NOT_PRIMARY` goes where its
+   * `BQL-Primary` header points.
+   */
+  url: string | string[];
   token: string;
   workspace?: string;
   fetchImpl?: typeof fetch;
   /** Per-request timeout. Long-polling calls add their wait on top. */
   timeoutMs?: number;
+  /**
+   * How long one call keeps looking for a primary across `NOT_PRIMARY`,
+   * refused connections and `NO_REPLICAS`, which covers an election and the
+   * moment after it. Default 15000. 0 retries nothing.
+   */
+  failoverMs?: number;
 }
 
 /**
@@ -88,18 +100,56 @@ export class LocalValidationError extends Error {
 }
 
 export class BusRequestError extends Error {
+  /** bql.sh's error code, when the bus passed one on: `NO_REPLICAS`, `ACK_TIMEOUT`, `BUSY`. */
+  readonly code?: string;
   constructor(
     message: string,
     readonly status: number,
+    /**
+     * Everything else in the error body. On `ACK_TIMEOUT` that is what
+     * committed: `seq` (or `results`, `published`), `txid`, `acks`, `needed`.
+     */
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message);
+    if (typeof details.code === "string") this.code = details.code;
   }
 }
 
+/** True for a fetch that failed before any byte of the request was sent. */
+function refused(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === "ConnectionRefused" || code === "ECONNREFUSED";
+}
+
+/**
+ * True for a connection that broke or timed out, where the request may have
+ * reached the server. Anything else (a refused redirect, a TLS failure) is
+ * an answer about this request, not about the node, and is thrown.
+ */
+function cutOff(error: unknown): boolean {
+  const { code, name } = (error ?? {}) as { code?: string; name?: string };
+  return (
+    name === "TimeoutError" ||
+    code === "ECONNRESET" ||
+    code === "ConnectionClosed" ||
+    code === "EPIPE" ||
+    code === "ETIMEDOUT"
+  );
+}
+
 export class BusClient {
-  private readonly base: string;
+  /** Every node this client knows of; `BQL-Primary` adds the ones it learns. */
+  private readonly urls: string[];
+  /** The node requests go to first: the last one that answered. */
+  private current = 0;
   private readonly doFetch: typeof fetch;
   private readonly timeoutMs: number;
+
+  /** Where the next request goes. */
+  get url(): string {
+    return this.urls[this.current]!;
+  }
 
   /** The workspace this client asks for; the token may pin another. */
   get workspace(): string {
@@ -107,11 +157,24 @@ export class BusClient {
   }
 
   constructor(private readonly options: ClientOptions) {
-    this.base = options.url.replace(/\/$/, "");
+    const urls = (Array.isArray(options.url) ? options.url : options.url.split(","))
+      .map((one) => one.trim().replace(/\/+$/, ""))
+      .filter(Boolean);
+    if (urls.length === 0) throw new Error("BusClient needs a url");
+    this.urls = urls;
     this.doFetch = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 15_000;
   }
 
+  /**
+   * One request, moved between nodes when that is safe.
+   *
+   * Only two answers are retried on another node: `503 NOT_PRIMARY`, which
+   * every node gives before writing anything, and a connection refused before
+   * the request was sent. A request cut off mid-flight is retried only when
+   * `idempotent` (a GET, or a publish whose every message has a `dedupeKey`);
+   * anything else, `ACK_TIMEOUT` included, may have committed and is thrown.
+   */
   async call<T>(
     path: string,
     body?: unknown,
@@ -119,11 +182,96 @@ export class BusClient {
       method,
       extraWaitMs = 0,
       signal,
-    }: { method?: string; extraWaitMs?: number; signal?: AbortSignal } = {},
+      idempotent,
+    }: {
+      method?: string;
+      extraWaitMs?: number;
+      signal?: AbortSignal;
+      idempotent?: boolean;
+    } = {},
   ): Promise<T> {
+    const verb = method ?? (body === undefined ? "GET" : "POST");
+    const safe = idempotent ?? verb === "GET";
+    // Bounded by time, so an election (a lease TTL plus a little) is waited
+    // out, and by count, so two nodes naming each other cannot loop.
+    const deadline = Date.now() + (this.options.failoverMs ?? 15_000);
+    for (let hop = 0; ; hop++) {
+      const last = hop >= 64 || Date.now() >= deadline;
+      let response: globalThis.Response;
+      try {
+        response = await this.attempt(path, body, verb, extraWaitMs, signal);
+      } catch (error) {
+        if (last || signal?.aborted) throw error;
+        if (!refused(error) && !(safe && cutOff(error))) throw error;
+        this.rotate();
+        if (hop >= this.urls.length - 1) await Bun.sleep(Math.min(250, 25 * 2 ** hop));
+        continue;
+      }
+      if (response.status === 503 && !last) {
+        const payload = (await response
+          .clone()
+          .json()
+          .catch(() => ({}))) as { code?: string };
+        if (payload.code === "NOT_PRIMARY") {
+          const primary = response.headers.get("bql-primary");
+          if (primary && this.follow(primary)) continue;
+          // Nobody holds it yet (an election), or the header names this node.
+          this.rotate();
+          await Bun.sleep(Math.min(250, 25 * 2 ** hop));
+          continue;
+        }
+        // Refused before writing. Right after a failover the surviving
+        // replicas take a moment to follow the new primary, and a single URL
+        // pointing at the node that was promoted sees exactly that window. A
+        // bus with no replica at all answers this until `failoverMs` runs out.
+        if (payload.code === "NO_REPLICAS") {
+          await Bun.sleep(Math.min(250, 25 * 2 ** hop));
+          continue;
+        }
+      }
+      return this.parse<T>(response);
+    }
+  }
+
+  /** Point at `url`, adding it to the list. False when it is already current. */
+  private follow(url: string): boolean {
+    const target = url.replace(/\/+$/, "");
+    if (target === this.url) return false;
+    let at = this.urls.indexOf(target);
+    if (at < 0) at = this.urls.push(target) - 1;
+    this.current = at;
+    return true;
+  }
+
+  private rotate(): void {
+    this.current = (this.current + 1) % this.urls.length;
+  }
+
+  private async parse<T>(response: globalThis.Response): Promise<T> {
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+    };
+    if (!response.ok) {
+      const { error, ...details } = payload;
+      throw new BusRequestError(
+        error ?? `HTTP ${response.status}`,
+        response.status,
+        details,
+      );
+    }
+    return payload as T;
+  }
+
+  private attempt(
+    path: string,
+    body: unknown,
+    method: string,
+    extraWaitMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<globalThis.Response> {
     const timeout = AbortSignal.timeout(this.timeoutMs + extraWaitMs);
-    const response = await this.doFetch(`${this.base}${path}`, {
-      method: method ?? (body === undefined ? "GET" : "POST"),
+    return this.doFetch(`${this.url}${path}`, {
+      method,
       headers: {
         Authorization: `Bearer ${this.options.token}`,
         ...(this.options.workspace
@@ -137,15 +285,6 @@ export class BusClient {
       // slow should still end eventually.
       signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
     });
-    const payload = (await response.json().catch(() => ({}))) as {
-      error?: string;
-    };
-    if (!response.ok)
-      throw new BusRequestError(
-        payload.error ?? `HTTP ${response.status}`,
-        response.status,
-      );
-    return payload as T;
   }
 
   /**
@@ -164,17 +303,23 @@ export class BusClient {
       const result = await schema["~standard"].validate(rest.body ?? null);
       if (result.issues) throw new LocalValidationError(result.issues);
     }
-    return this.call<PublishResult>("/api/publish", rest);
+    return this.call<PublishResult>("/api/publish", rest, {
+      idempotent: Boolean(rest.dedupeKey),
+    });
   }
 
   /**
    * Publish up to 1000 messages in one request and one bus transaction — all
-   * of them or none. Dedupe applies per message.
+   * of them or none. Dedupe applies per message. `ack` covers the whole batch.
    */
-  async publishBatch(messages: PublishRequest[]): Promise<PublishResult[]> {
+  async publishBatch(
+    messages: PublishRequest[],
+    options: { ack?: Ack } = {},
+  ): Promise<PublishResult[]> {
     const { results } = await this.call<{ results: PublishResult[] }>(
       "/api/publish/batch",
-      { messages },
+      { messages, ...(options.ack ? { ack: options.ack } : {}) },
+      { idempotent: messages.every((one) => Boolean(one.dedupeKey)) },
     );
     return results;
   }
@@ -312,7 +457,7 @@ export class BusClient {
   ack(
     delivery: Delivery,
     consumer: string,
-    options: { publish?: PublishRequest[]; effects?: EffectRecord[] } = {},
+    options: { publish?: PublishRequest[]; effects?: EffectRecord[]; ack?: Ack } = {},
   ): Promise<AckResult> {
     return this.call<AckResult>(`/api/deliveries/${delivery.id}/ack`, {
       consumer,
@@ -492,7 +637,7 @@ export interface BusApi {
   ack(
     delivery: Delivery,
     consumer: string,
-    options?: { publish?: PublishRequest[]; effects?: EffectRecord[] },
+    options?: { publish?: PublishRequest[]; effects?: EffectRecord[]; ack?: Ack },
   ): Promise<AckResult>;
   nack(
     delivery: Delivery,

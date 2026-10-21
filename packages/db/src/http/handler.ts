@@ -406,7 +406,7 @@ function serialise(
   // A declared non-JSON content type with a body this module can hand over as it is. Anything
   // else falls back to JSON rather than stringifying an object into "[object Object]".
   if (typeof result === "string" || result instanceof Uint8Array) {
-    return new Response(result, { status, headers: { "content-type": contentType } })
+    return new Response(result as ConstructorParameters<typeof Response>[0], { status, headers: { "content-type": contentType } })
   }
   return new Response(JSON.stringify(encode(result)) ?? "null", {
     status,

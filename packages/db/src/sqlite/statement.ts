@@ -51,6 +51,19 @@ export interface ProgramFacts {
   readonly inserts: boolean
   /** The program calls `last_insert_rowid()`, so the connection's counter is an input to it. */
   readonly readsLastInsertRowid: boolean
+  /**
+   * The transaction-control, pragma, `ATTACH` and `DETACH` actions the program performs, or null
+   * for the ordinary statement that has none. `Database.prepare` re-asks the connection's guard
+   * about them on a cache hit, because a cached statement is never compiled again.
+   */
+  readonly guarded?: readonly GuardedAction[] | null
+}
+
+/** One authorizer action `ProgramFacts.guarded` keeps, with the arguments the guard is asked. */
+export interface GuardedAction {
+  readonly action: number
+  readonly arg1: string | null
+  readonly arg2: string | null
 }
 
 export const NO_PROGRAM_FACTS: ProgramFacts = { inserts: false, readsLastInsertRowid: false }
@@ -196,6 +209,11 @@ export class Statement {
   /** True when the program calls `last_insert_rowid()` and so reads the connection's counter. */
   get readsLastInsertRowid(): boolean {
     return this.#facts.readsLastInsertRowid
+  }
+
+  /** The guarded actions the program performs (`ProgramFacts.guarded`), or null. */
+  get guarded(): readonly GuardedAction[] | null {
+    return this.#facts.guarded ?? null
   }
 
   /**

@@ -11,6 +11,8 @@
 // own fetch wrapper and its own copies of the response types until `docs/m9-client-admin.md`;
 // there is now one implementation of these routes, and it is the one the tests exercise.
 
+import fs from "node:fs"
+import path from "node:path"
 import { CONTEXT_HELP, contextOptions, runContextCommand } from "./cli/context.ts"
 import { DEPLOY_HELP, runDeployCommand } from "./deploy/cli.ts"
 import { resolveContext } from "./context/index.ts"
@@ -41,6 +43,7 @@ bql — SQLite as a multi-tenant database server (design §9.3)
               [--replica-of wss://primary/v1/replication] [--cluster-secret S] [--follow a,b]
               [--cluster-peers a=ws://a:4321,b=ws://b:4321] [--advertise ws://me:4321] [--zone z]
               [--s3 s3://bucket/prefix] [--s3-endpoint URL] [--s3-region R]
+              [--bus]   also serve the message bus under /bus ([bus] in bql.toml)
   bql cloud init --deployment-id ID [--config bql.toml] [--s3 s3://bucket]
   bql db create <name> [--from <db>[@<txid|time>]] [--page-size N] [--quota-bytes N]
   bql db list
@@ -111,6 +114,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         "clear-bus-token",
         "clear-bus-vercel-bypass",
         "clear-bus",
+        "bus",
       ].includes(body)
     ) {
       flags[body] = true
@@ -237,6 +241,11 @@ function out(remote: Remote, payload: unknown, line: string): void {
 // ── commands ───────────────────────────────────────────────────────────────────────────────────
 
 function startupConfig(args: ParsedArgs, initialize = false) {
+  return loadConfig(startupInputs(args, initialize))
+}
+
+/** What `loadConfig` is given for `serve`, so `--bus` can hand the same to `Bql.open`. */
+function startupInputs(args: ParsedArgs, initialize = false) {
   const file = str(args, "config") ?? process.env.BQL_CONFIG ?? "bql.toml"
   const overrides: ServerConfigInput = {}
   const dir = str(args, "dir")
@@ -315,16 +324,82 @@ function startupConfig(args: ParsedArgs, initialize = false) {
     }
   }
 
-  return loadConfig({
+  return {
     file,
     required: Boolean(str(args, "config")),
     overrides,
     // A flag the operator typed beats a variable the shell happened to carry.
     env: { ...process.env, ...envSuppressions(overrides) },
+  }
+}
+
+/** `[bus]` in bql.toml, which `loadConfig` does not read. `--bus` turns it on. */
+interface BusSection {
+  enabled?: boolean
+  database?: string
+  ack?: string
+  /** The bus's keys: `keys.json` and `admin-token`. Default `<data>/bus`. */
+  data?: string
+}
+
+function busSection(args: ParsedArgs, file: string): BusSection {
+  let section: BusSection = {}
+  if (fs.existsSync(file)) {
+    const parsed = Bun.TOML.parse(fs.readFileSync(file, "utf8")) as { bus?: BusSection }
+    section = parsed.bus ?? {}
+  }
+  return args.flags.bus === true ? { ...section, enabled: true } : section
+}
+
+/**
+ * `bql serve --bus`: the same node, opened through the embedded API so the bus store and the
+ * `bus` tenant share a thread, with the bus mounted under `/bus` on this listener. One worker.
+ */
+async function serveWithBus(args: ParsedArgs, bus: BusSection): Promise<void> {
+  const inputs = startupInputs(args)
+  const config = loadConfig(inputs)
+  if (config.data.storageMode === "object") throw new CliError("--bus needs [data] storageMode = \"disk\"")
+  const ack = bus.ack
+  if (ack !== undefined && !["local", "fsync", "replica", "quorum"].includes(ack)) {
+    throw new CliError(`[bus] ack must be local, fsync, replica or quorum, got ${JSON.stringify(ack)}`)
+  }
+  const { Bql } = await import("./embedded.ts")
+  const { serveBus } = await import("../../bus/src/cli/cluster.ts")
+  const { createLogger } = await import("../../bus/src/bus/log.ts")
+  const bq = await Bql.open({
+    ...inputs.overrides,
+    ...(fs.existsSync(inputs.file) ? { config: inputs.file } : {}),
+    env: inputs.env as Record<string, string>,
+    onError: (err) => console.error("bql:", err),
   })
+  const served = await serveBus(bq, {
+    data: bus.data ?? path.join(config.data.dir, "bus"),
+    ...(bus.database ? { database: bus.database } : {}),
+    ...(ack ? { ack: ack as "local" | "fsync" | "replica" | "quorum" } : {}),
+    logger: createLogger({ level: "info", format: "text" }),
+  })
+  console.log(
+    `bql ${served.handle.url}  node=${config.server.node}  data=${config.data.dir}\n` +
+      `bql: bus ${served.url}, database ${bus.database ?? "bus"}, ${served.node.role}`,
+  )
+  let stopping = false
+  const stop = (signal: string): void => {
+    if (stopping) return
+    stopping = true
+    console.log(`bql: ${signal}, shutting down`)
+    void served.close().then(() => process.exit(0))
+  }
+  process.on("SIGINT", () => stop("SIGINT"))
+  process.on("SIGTERM", () => stop("SIGTERM"))
 }
 
 async function serve(args: ParsedArgs): Promise<void> {
+  const bus = busSection(args, startupInputs(args).file)
+  if (bus.enabled) {
+    await serveWithBus(args, bus)
+    serving = true
+    return
+  }
   const config = startupConfig(args)
   if (config.data.storageMode === "object") {
     await serveObjectProcess(config)

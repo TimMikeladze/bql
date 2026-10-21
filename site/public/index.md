@@ -10,7 +10,7 @@ bun add bql.sh
 
 ## By the numbers
 
-- **199** test files
+- **205** test files
 - **0** runtime dependencies
 - **49k** writes/s, 64 clients
 - **54 µs** point read over HTTP
@@ -93,9 +93,12 @@ db.close()
 ### Transactional ack
 
 ```ts
-import { createBus } from "bql.sh/bus";
+import { Bql } from "bql.sh";
+import { createBus, ensureBusDatabase } from "bql.sh/bus";
 
-const bus = createBus({ path: "./data/bus.db", blobDirectory: "./data/blobs" });
+const bq = await Bql.open({ dir: "./data" });
+await ensureBusDatabase(bq);
+const bus = createBus({ bql: bq });
 bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");
 
 bus.consumeTransactional({
@@ -396,7 +399,7 @@ async handle({ message }, api) {
 
 ## Cron, as ordinary messages
 
-`bql bus schedule add` fires on the leader, one deduplicated publish per slot, DST-correct in any IANA zone.
+`bql bus schedule add` fires on the primary, one deduplicated publish per slot, DST-correct in any IANA zone.
 
 ```sh
 bql bus schedule add nightly '30 2 * * *' reports.nightly '{"kind":"daily"}' --tz America/New_York
@@ -484,17 +487,17 @@ ok   a repeated dedupe key does not publish twice
 - A restore reproduces the target txid checksum for checksum, or fails loudly.
 - `ack: "replica"` makes failover lossless; the old primary is fenced by epoch.
 - The bus survives SIGKILL mid-flight in `bun run soak`, nothing lost.
+- A clustered bus fails over with zero acknowledged publishes lost at `ack: "replica"`.
 
 ### What is a judgement
 
 - Default `ack: "fsync"` costs ~2.7x on one write against `ack: "local"`.
-- Bus replication is asynchronous: failover RPO is tens of messages.
+- The bus has one writer: a cluster adds copies and reads, not publish throughput.
 - Ordering is off by default; it costs throughput.
 
 ### What is not here yet
 
 - CI gates on Linux only; macOS and Windows legs stopped 2026-09-26.
-- The bus still runs on `bun:sqlite`, not `bql.sh/sqlite`.
 - Kysely's `.stream()` is not implemented.
 
 ## Two commands to start

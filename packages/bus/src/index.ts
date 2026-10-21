@@ -4,9 +4,19 @@ export {
   MIGRATIONS,
   SCHEMA_VERSION,
   type Migration,
+  type PublishOptions,
   type StoreOptions,
 } from "./bus/store";
 export { createServer, type BusServer, type ServerOptions } from "./bus/server";
+export {
+  bqlStorage,
+  ensureBusDatabase,
+  isContention,
+  retryContention,
+  StorageError,
+  type BqlStorageOptions,
+  type BusStorage,
+} from "./bus/storage";
 export { CronError, nextFire, parseCron, type Cron } from "./bus/cron";
 export {
   createBus,
@@ -49,7 +59,7 @@ export {
   narrowingGlob,
   SubjectError,
 } from "./bus/subjects";
-export { fileBlobs, BlobMissingError, type BlobStore } from "./bus/blobs";
+export { BlobMissingError } from "./bus/blobs";
 export {
   BusClient,
   BusConsumer,

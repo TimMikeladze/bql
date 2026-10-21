@@ -1,13 +1,17 @@
-# fly.toml — one machine, one volume. bql.sh/bus is single-writer by design.
+# fly.toml: one machine, one volume, a single-node bus. For more than one node see
+# `bql bus serve --cluster` in docs/operations.md.
 app = "bql-bus-demo"
 primary_region = "sjc"
 
+# Deploy from the repository root: `fly deploy . --config packages/bus/fly.toml`. The image
+# builds bql.sh's libsqlite3 from packages/db, so packages/bus alone is not enough context.
 [build]
   dockerfile = "Dockerfile"
+  ignorefile = "Dockerfile.dockerignore"
 
 [env]
   PORT = "4317"
-  BUS_STATE = "/data"
+  BUS_DATA = "/data"
   BUS_HOST = "0.0.0.0"
   BUS_LOG_FORMAT = "json"
   BUS_LOG_LEVEL = "info"
@@ -15,21 +19,25 @@ primary_region = "sjc"
 # BUS_SIGNING_KEY and BUS_ADMIN_TOKEN are secrets, never [env]:
 #   fly secrets set BUS_SIGNING_KEY=$(openssl rand -base64 32) \
 #                   BUS_ADMIN_TOKEN=$(openssl rand -base64 32)
-# Without them the bus generates both into /data at mode 0600 on first boot,
-# which works and persists — but then the only way to read the admin token is
-# to shell into the machine, so set them.
+# Without them the bus generates both into /data/bus at mode 0600 on first
+# boot, which works and persists, but then the only way to read the admin token
+# is to shell into the machine, so set them.
+#
+# Continuous backup of database `bus` to a bucket is bql.sh's S3 shipping, also
+# secrets:
+#   fly secrets set BQL_S3_URL=s3://bucket/bus BQL_S3_ENDPOINT=https://… \
+#                   BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…
 
 [[mounts]]
   source = "bql_bus_data"
   destination = "/data"
-  # A single SQLite file with no replication has exactly one backup story
-  # beyond `bql bus backup`: volume snapshots. See docs/operations.md.
+  # Volume snapshots, beside S3 shipping. See docs/operations.md.
   snapshot_retention = 5
 
 [deploy]
   # One machine on one volume cannot run two copies, so this is stop-then-start
-  # with a short outage — which is correct here. The alternative would put two
-  # processes on one SQLite file, the one thing the design rules out.
+  # with a short outage. Two processes on one data directory is the one thing
+  # the design rules out.
   strategy = "immediate"
 
 [http_service]

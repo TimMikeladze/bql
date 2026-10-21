@@ -407,6 +407,10 @@ system.
   worth it; `mmap_size` is the read lever instead (E).
 - **zstd level 1 instead of 3.** Same 4.3x ratio, 1 µs cheaper. Not worth a format decision — if
   compression is to be changed, change *when* it runs, not how hard it tries (C).
+  **Reversed 2026-10-21.** It is not a format decision: `decode` reads any level. And on records
+  bigger than one page the gap is not 1 µs. A bus publish is a five-page, 18 KB body: 17 µs at
+  level 1 against 25 µs at level 3, same 3.5x ratio; text-heavy pages lose about 1.5% of ratio.
+  `RECORD_ZSTD_LEVEL` in `src/wal/record.ts`. The bus spec's "Write-path profile" has the rest.
 
 ## 7. SQLite's own settings — what bql.sh sets, and what it inherits
 

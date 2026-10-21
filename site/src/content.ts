@@ -249,7 +249,7 @@ export const site = {
       id: "schedules",
       chapter: "bus",
       title: "Cron, as ordinary messages",
-      body: "`bql bus schedule add` fires on the leader, one deduplicated publish per slot, DST-correct in any IANA zone.",
+      body: "`bql bus schedule add` fires on the primary, one deduplicated publish per slot, DST-correct in any IANA zone.",
       demo: {
         kind: "pair",
         items: [
@@ -308,13 +308,14 @@ export const site = {
         "A restore reproduces the target txid checksum for checksum, or fails loudly.",
         "`ack: \"replica\"` makes failover lossless; the old primary is fenced by epoch.",
         "The bus survives SIGKILL mid-flight in `bun run soak`, nothing lost.",
+        "A clustered bus fails over with zero acknowledged publishes lost at `ack: \"replica\"`.",
       ],
     },
     {
       title: "What is a judgement",
       items: [
         "Default `ack: \"fsync\"` costs ~2.7x on one write against `ack: \"local\"`.",
-        "Bus replication is asynchronous: failover RPO is tens of messages.",
+        "The bus has one writer: a cluster adds copies and reads, not publish throughput.",
         "Ordering is off by default; it costs throughput.",
       ],
     },
@@ -322,7 +323,6 @@ export const site = {
       title: "What is not here yet",
       items: [
         "CI gates on Linux only; macOS and Windows legs stopped 2026-09-26.",
-        "The bus still runs on `bun:sqlite`, not `bql.sh/sqlite`.",
         "Kysely's `.stream()` is not implemented.",
       ],
     },

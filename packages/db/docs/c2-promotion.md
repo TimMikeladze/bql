@@ -80,6 +80,13 @@ Refusals, in the order they are checked:
 | `ALREADY_PRIMARY` | this node already authors transactions for it and (in a cluster) holds a live lease | a no-op that would otherwise bump the epoch and re-snapshot every replica |
 | `BEHIND` | another node has acked a higher txid | promoting here throws away transactions the cluster knows exist |
 
+The leader's automatic failover judges `BEHIND` **without the lapsed primary's own position**. A
+primary that died with a commit in flight reported a txid no replica has; counted, it blocked every
+failover until an operator forced one. Every replica still counts, reachable or not: an unreachable
+replica ahead of the candidate may hold the only copy of a write acknowledged at `replica`, so the
+failover waits for it instead of losing that write. An operator's `promote` still compares against
+every node.
+
 `force: true` overrides `STREAM_LIVE`, `LEASE_HELD` and `BEHIND`, and nothing else — the other two
 are not about whether promotion is safe but about whether it is possible at all.
 
@@ -197,6 +204,18 @@ fix is that a copy this node *received* keeps the id it was bootstrapped under:
 both the replication announcement and the control-plane claim read it. This also fixes chained
 replication, where the same re-minting made every hop a fresh bootstrap — and it is why
 `GET /v1/cluster` shows the same `generation` before and after a failover.
+
+That fix kept the id on the client, which was not enough once placement chose upstreams. After a
+promotion the follow planner drops the upstream the copy came from (`dropUpstream`), the client
+goes with it, and with no client left `generationOf` fell back to the catalog row: the same
+re-minting, one step later. The surviving replica logged `ReplicaUnfollowed: … was re-created …
+generation X -> Y`, moved its copy to `trash/` and bootstrapped a full snapshot from the new
+primary. The ledger is now node-level: `ServerRuntime.generations` is loaded from
+`<dataDir>/bootstrap/generations.json` when the runtime is built and shared by every client on the
+thread, so the id outlives the client and a restart. A database deleted on the node drops its
+entry. `test/embedded/cluster.test.ts` runs three placement-only nodes (`rf = 3`, no static
+upstream), kills the primary, and checks the winner announces the original generation and the
+other replica applies the new primary's next write without an unfollow.
 
 **3. C1's lease arithmetic was off by the commit latency.** The header claimed the holder's
 deadline was already earlier than the leader's "because the grant had to commit and reach it",

@@ -10,6 +10,7 @@
     "build:dashboard": "bun --bun vite build",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
+    "bench": "bun scripts/bench.ts",
     "test:e2e": "bun scripts/e2e.ts",
     "soak": "bun scripts/soak.ts",
     "build:binary": "bun scripts/build-binary.ts",

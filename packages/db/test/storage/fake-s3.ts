@@ -245,7 +245,9 @@ export class FakeS3 {
       etag: object.etag,
       "last-modified": new Date(object.lastModified).toUTCString(),
     }
-    return new Response(headOnly ? null : object.body, { status: 200, headers })
+    // The cast is for a DOM-lib tsconfig (the bus's drill imports this file); Bun's own accepts it.
+    const body = (headOnly ? null : object.body) as ConstructorParameters<typeof Response>[0]
+    return new Response(body, { status: 200, headers })
   }
 
   #delete(key: string): Response {

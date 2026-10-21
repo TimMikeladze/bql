@@ -17,10 +17,10 @@ function injectReaderToken(): Plugin {
     transformIndexHtml(html) {
       let key: string;
       try {
-        key = readFileSync(
-          process.env.BUS_STATE ?? ".bql-bus/signing-key",
-          "utf8",
-        ).trim();
+        // `scripts/dev.ts` passes the key in the environment and keeps a copy here.
+        key =
+          process.env.BUS_SIGNING_KEY ??
+          readFileSync(".bql-bus/bus/signing-key", "utf8").trim();
       } catch {
         return html; // No local bus yet; the page will report 401 plainly.
       }

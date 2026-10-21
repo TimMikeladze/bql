@@ -1674,11 +1674,21 @@ await bq.restore("acme", { at: 4800, into: "acme-recovered" })   // into a new d
 bq.checkpoint("acme", "TRUNCATE")   // → { mode, busy, log, checkpointed, walBytes, txid }
 bq.tenantOf("acme")                 // the Tenant itself, for code that wants the driver
 bq.on("commit", ({ db, txid }) => …)   // every durable commit on every database this process opened
+bq.on("role", ({ db, role }) => …)     // this node became "primary" or "replica" for db
+bq.role("acme")                        // → "primary" | "replica", right now
+bq.assertReplicas("acme", "replica")   // throws NO_REPLICAS when no replica could ack
+await bq.replicated("acme", txid, { ack: "replica" })   // resolves once the ack level covers txid
 
 const handle = await bq.serve({ port: 4321, host: "0.0.0.0" })   // the same engine over HTTP/WS/SSE
 await handle.close()
 await bq.close()
 ```
+
+`create` (and `fork`) run what `POST /v1/db` runs. On a clustered node that is not the name's home,
+placement refuses with `NOT_PRIMARY` and `primary` set to the home node's URL; on the home node the
+promise resolves once this node holds the new database's lease, so the first write is not refused.
+`restore` claims the lease the same way, and is not placement-gated: the copy lands beside its
+source.
 
 `snapshot`, `restore` and `checkpoint` are the node-local three, with the shapes the routes answer.
 Restoring from an S3 bucket stays on the server route, which is where the store is built; an
@@ -1696,8 +1706,106 @@ db.sync.sql`insert into t(v) values (${"x"})`.run()
 db.sync.execute("select 1")
 db.sync.batch([db.stmt`…`])
 db.sync.transaction((tx) => { tx.sql`…`.run() })
+db.sync.commit((tx) => { … }, { ack: "fsync" })   // → { value, txid }
+db.sync.write((d) => { … }, { ack: "fsync" })     // d is the writer Database; → { value, txid }
+db.sync.read((d) => { … })                        // d is a pooled read-only Database; → value
 db.tenant()                                  // the Tenant behind this handle
 ```
+
+`sync.commit` is `sync.transaction` plus the txid the commit was assigned. A transaction that wrote
+nothing answers the database's current txid. `ack` decides what the commit does locally (`"local"`
+or an fsync); `"replica"` and `"quorum"` are checked before `BEGIN` and refused with `NO_REPLICAS`
+when nothing could ack, but not waited for, since a synchronous call can't wait on the network.
+`bq.replicated(db, txid, { ack })` does the waiting: `"local"` resolves at once, `"fsync"` fsyncs
+the log and the WAL unless the commit already did, and `"replica"` / `"quorum"` add the replica
+acks. It rejects with `ACK_TIMEOUT` (`txid`, `acks`, `needed`) after `[replication] ackTimeoutMs`,
+or `NO_REPLICAS` when none is attached and `ackWithoutReplicas` is `"error"`. Neither undoes the
+commit. The async `db.transaction(fn, { ack })` does both steps for you.
+
+Transactions don't nest: a second `sync.commit`, or a `sync.sql` write, while one is open throws
+`TX_BUSY`. Inside the callback, `tx.sql` runs on the writer and sees the transaction's own writes;
+`db.sync.sql` reads from a pooled reader and does not.
+
+### sync.write and sync.read
+
+`sync.write` lends the callback the database's writer connection, the `bql.sh/sqlite` `Database`,
+inside `BEGIN IMMEDIATE`, then commits and records the commit in the log the same way every other
+write is recorded. It skips the per-statement work of `sync.sql` (`Result` building, options,
+classification), so a callback can keep its own cached statements.
+
+```ts
+import type { Database } from "bql.sh/sqlite"
+
+const { value, txid } = db.sync.write((d: Database) => {
+  const insert = d.query("insert into jobs (queue, body) values (?, ?)")   // cached on the writer
+  insert.run("mail", "a")
+  d.transaction(() => insert.run("mail", "b"))()   // nests as a SAVEPOINT
+  return d.query("select count(*) as n from jobs").get()   // sees this transaction's writes
+}, { ack: "fsync" })
+await bq.replicated("acme", txid, { ack: "replica" })
+
+const n = db.sync.read((d) => d.query("select count(*) as n from jobs").get())
+```
+
+`ack` works as it does on `sync.commit`: `"fsync"` fsyncs before `write` returns, `"replica"` and
+`"quorum"` are checked first (`NO_REPLICAS`) and waited for with `bq.replicated`. Before taking the
+writer, `write` checks the cluster lease (`NOT_PRIMARY` on a node that does not hold it) and the ack
+level. A throw from the callback rolls the transaction back and comes out as the callback threw it,
+for example a `SqliteError` with `code: "SQLITE_CONSTRAINT_UNIQUE"`; everything else is a
+`BqlClientError`. The callback must be synchronous, and `d` must not be used after it returns.
+
+The callback can't end the tenant's transaction or change the connection under it. `BEGIN`,
+`COMMIT`, `ROLLBACK`, `ATTACH`, `DETACH` and any pragma that sets something are refused with
+`NOT_AUTHORIZED`, checked when the statement is compiled and again when a cached one is reused.
+Allowed pragmas: `table_info`, `table_xinfo`, `table_list`, `index_list`, `index_info`,
+`index_xinfo`, `foreign_key_list`, `foreign_key_check`, `integrity_check`, `quick_check`,
+`defer_foreign_keys`, `user_version`, and the reading form of `journal_mode`, `page_size`,
+`page_count`, `freelist_count`, `schema_version`, `data_version` and `compile_options`. `VACUUM`
+fails on its own inside a transaction. The tenant checkpoints by itself (`[durability]
+checkpointWalBytes`, or `bq.checkpoint`), durability is the ack level, and foreign keys are the
+per-database setting (`[sqlite] foreignKeys`).
+
+`write` does not wait for the writer. It throws at once:
+
+| Code | When |
+| --- | --- |
+| `TX_BUSY` | an interactive transaction (`db.transaction`, `POST /v1/db/{db}/tx`, `sync.commit`) holds the writer |
+| `BUSY` | a snapshot holds it (a replica bootstrapping takes one), or a `sync.write` is already running, e.g. one nested in another |
+
+Both are momentary. Retry after yielding to the event loop, or use the async `db.transaction`,
+which queues for the writer.
+
+`sync.read` runs the callback on a pooled reader. `d.transaction()` there reads one snapshot across
+several statements. A transaction still open when the callback returns is rolled back and reported
+as `BAD_REQUEST`, and the same pragmas are refused as in `write`.
+
+A bare `BEGIN` or `SAVEPOINT` through `sync.execute`, `sync.sql` or `POST /v1/db/{db}/query` is
+refused with `BAD_REQUEST`; it used to leave a pooled reader inside an open transaction.
+
+### Roles and serve
+
+`bq.on("role")` fires on every promotion, demotion and fencing of a database on this node.
+`bq.serve()` starts what `bql serve` starts once it is listening: the Raft node and promoter when
+`[cluster] enabled`, the replication client when `[replication] primary` is set, and the S3 shipper
+and outbox relay when they are configured. `bq.close()` drains the shipper and stops all of them.
+An embedded node always runs one thread and ignores `[server] workers`, so the tenants stay beside
+the `db.sync` handles.
+
+```ts
+const bq = await Bql.open({
+  dir: "./data",
+  server: { port: 4321, node: "n2" },
+  replication: { secret, primary: "ws://n1:4321/v1/replication" },
+  cluster: { enabled: true, id: "n2", advertise: "ws://n2:4321", peers: ["n1=ws://n1:4321", "n3=ws://n3:4321"], bootstrap: true },
+})
+await bq.serve()
+bq.on("role", ({ db, role }) => {
+  if (db === "bus" && role === "primary") startWorkers()   // writes to bus succeed from here on
+})
+```
+
+A flip evicts and reopens the tenant, so look it up per call with `bq.db(name)` rather than keeping
+`db.tenant()` across one.
 
 Every read and write is synchronous underneath; the async surface wraps the same call in
 `Promise.resolve`, so the two cannot drift. The embedded API runs as the admin principal — it is

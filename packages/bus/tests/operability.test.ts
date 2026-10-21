@@ -1,15 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { afterAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { createLogger } from "../src/bus/log";
 import { prometheusMetrics } from "../src/bus/metrics";
 import { createServer } from "../src/bus/server";
-import { BusStore } from "../src/bus/store";
 import { generateKey, mint } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
-
-const scratch = await mkdtemp(`${tmpdir()}/bql-bus-ops-`);
-afterAll(() => rm(scratch, { recursive: true, force: true }));
 
 // ------------------------------------------------------------------ logging
 
@@ -48,7 +43,7 @@ test("the logger filters by level and renders both formats", () => {
 
 test("metrics counters and gauges reach the scrape, and it needs a read token", async () => {
   const metrics = prometheusMetrics();
-  const store = new BusStore(":memory:", { metrics });
+  const store = testStore({ metrics });
   const signingKey = generateKey();
   const adminToken = generateKey();
   const server = createServer({
@@ -160,7 +155,7 @@ test("metrics counters and gauges reach the scrape, and it needs a read token", 
 // ----------------------------------------------------------------- shutdown
 
 test("shutdown drains parked long polls instead of cutting them off", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const adminToken = generateKey();
   const server = createServer({
     store,
@@ -193,34 +188,8 @@ test("shutdown drains parked long polls instead of cutting them off", async () =
   store.close();
 });
 
-// ------------------------------------------------------------------- backup
-
-test("a backup is a consistent copy that opens on its own", async () => {
-  const path = `${scratch}/live.db`;
-  const store = new BusStore(path);
-  store.subscribe("default", { name: "work", pattern: "work.>" });
-  const first = await store.publish("default", { subject: "work.a", body: 1 });
-
-  const into = `${scratch}/backup/bus.db`;
-  await Bun.write(`${scratch}/backup/.keep`, "");
-  store.backup(into);
-
-  // The live database keeps taking writes after the backup is taken.
-  const second = await store.publish("default", { subject: "work.b", body: 2 });
-  expect(second.seq).toBeGreaterThan(first.seq);
-
-  const restored = new BusStore(into);
-  const log = await restored.log("default");
-  expect(log.map((message) => message.subject)).toEqual(["work.a"]);
-  // And it is a real database, not a file: the subscription still works.
-  const claimed = await restored.claim("default", "work", "worker-1", 5);
-  expect(claimed).toHaveLength(1);
-  restored.close();
-  store.close();
-});
-
 test("shutdown ends an open SSE stream instead of waiting for it forever", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const adminToken = generateKey();
   const server = createServer({
     store,
@@ -252,7 +221,7 @@ test("shutdown ends an open SSE stream instead of waiting for it forever", async
 });
 
 test("shutdown is idempotent, and still drains after a bare stop()", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const server = createServer({
     store,
     signingKey: generateKey(),
@@ -271,7 +240,7 @@ test("shutdown is idempotent, and still drains after a bare stop()", async () =>
 
 test("a gauge for a deleted subscription does not linger in the scrape", async () => {
   const metrics = prometheusMetrics();
-  const store = new BusStore(":memory:", { metrics });
+  const store = testStore({ metrics });
   const adminToken = generateKey();
   const server = createServer({
     store,

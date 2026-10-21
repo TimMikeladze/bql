@@ -6,6 +6,7 @@
  * depend on anything having gone wrong.
  */
 import { expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { gate, tokenBucket } from "../src/bus/limits";
 import { createServer } from "../src/bus/server";
 import { BusStore } from "../src/bus/store";
@@ -52,7 +53,7 @@ test("a rotated key verifies old tokens until the old key is retired", () => {
 // ----------------------------------------------------------- revocation
 
 test("a revoked token is refused, and the revocation expires with it", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const signingKey = generateKey();
   const adminToken = generateKey();
   const server = createServer({
@@ -115,7 +116,7 @@ test("a token bucket refills over time and says how long to wait", () => {
 });
 
 test("publishing over the limit answers 429 with Retry-After", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const adminToken = generateKey();
   const signingKey = generateKey();
   const server = createServer({
@@ -160,7 +161,7 @@ test("a gate caps concurrent holders per key", () => {
 // --------------------------------------------------------------- quotas
 
 test("a workspace over its quota is refused, and other workspaces are not", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   store.setQuota("tight", { maxMessages: 2 });
   await store.publish("tight", { subject: "work.a", body: 1 });
   await store.publish("tight", { subject: "work.a", body: 2 });
@@ -181,7 +182,7 @@ test("a workspace over its quota is refused, and other workspaces are not", asyn
 // ----------------------------------------------------------- audit trail
 
 test("operator actions are recorded against the token that took them", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const adminToken = generateKey();
   const server = createServer({
     store,
@@ -208,7 +209,7 @@ test("operator actions are recorded against the token that took them", async () 
 });
 
 test("a consumer token cannot reach another workspace's audit trail", async () => {
-  const store = new BusStore(":memory:");
+  const store = testStore();
   const signingKey = generateKey();
   const adminToken = generateKey();
   const server = createServer({

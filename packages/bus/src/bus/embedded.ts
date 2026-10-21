@@ -1,4 +1,5 @@
-import type { Database } from "bun:sqlite";
+import type { Bql } from "../../../db/src/embedded.ts";
+import type { Database } from "../../../db/src/sqlite/index.ts";
 import type {
   AckResult,
   Consumer,
@@ -15,20 +16,27 @@ import type {
 } from "../shared/protocol";
 import { DEFAULT_WORKSPACE } from "../shared/protocol";
 import type { BusApi } from "../client/bus";
-import { fileBlobs } from "./blobs";
+import {
+  type Ack,
+  bqlStorage,
+  isContention,
+  retryContention,
+} from "./storage";
 import { BusStore, type StoreOptions } from "./store";
 
 /**
  * The bus, in your own process.
  *
  * Everything the HTTP client does, minus the HTTP: no loopback socket, no
- * serialisation, no token. It exists for one reason that is not performance —
- * a handler running here writes to the *same SQLite file* the bus owns, which
- * is what makes `consumeTransactional` a genuine exactly-once guarantee rather
- * than a careful approximation of one.
+ * serialisation, no token. It exists for one reason that is not performance:
+ * a handler running here writes to the *same database* the bus keeps its
+ * tables in, which is what makes `consumeTransactional` a genuine
+ * exactly-once guarantee rather than a careful approximation of one.
  *
  * ```ts
- * const bus = createBus({ path: "./data/bus.db" });
+ * const bq = await Bql.open({ dir: "./data" });
+ * await ensureBusDatabase(bq);
+ * const bus = createBus({ bql: bq });
  * bus.store.subscribe("default", { name: "work", pattern: "work.>" });
  * await bus.client.publish({ subject: "work.do", body: { id: 1 } });
  *
@@ -41,8 +49,7 @@ import { BusStore, type StoreOptions } from "./store";
  * ```
  *
  * The handler's `INSERT` and the ack are one transaction. Kill the process
- * anywhere inside it and you get both or neither — never a row written twice
- * because the ack did not survive.
+ * anywhere inside it and you get both or neither.
  */
 export interface EmbeddedBus {
   store: BusStore;
@@ -56,20 +63,28 @@ export interface EmbeddedBus {
 }
 
 export interface EmbeddedBusOptions extends StoreOptions {
-  /** Database file. `:memory:` — the default — is for tests. */
-  path?: string;
-  /** Blob directory. Without one, oversized bodies are refused with 413. */
-  blobDirectory?: string;
+  /**
+   * The engine holding the bus tables. The database has to exist first:
+   * `await ensureBusDatabase(bq)`. Closing the bus leaves the engine open.
+   */
+  bql: Bql;
+  /** The bql.sh database. Default `bus`. */
+  database?: string;
+  /** Publish durability when a publish names none. Default `fsync`. */
+  ack?: Ack;
   workspace?: string;
 }
 
-export function createBus(options: EmbeddedBusOptions = {}): EmbeddedBus {
-  const { path = ":memory:", blobDirectory, workspace: ws, ...rest } = options;
+export function createBus(options: EmbeddedBusOptions): EmbeddedBus {
+  const { workspace: ws, bql, database, ack, ...rest } = options;
   const workspace = ws ?? DEFAULT_WORKSPACE;
-  const store = new BusStore(path, {
-    ...rest,
-    ...(blobDirectory ? { blobs: fileBlobs(blobDirectory) } : {}),
-  });
+  const store = new BusStore(
+    bqlStorage(bql, {
+      ...(database ? { database } : {}),
+      ...(ack ? { ack } : {}),
+    }),
+    rest,
+  );
   const client = new DirectClient(store, workspace);
   return {
     store,
@@ -130,7 +145,7 @@ export class DirectClient implements BusApi {
   ack(
     delivery: Delivery,
     consumer: string,
-    options: { publish?: PublishRequest[]; effects?: EffectRecord[] } = {},
+    options: { publish?: PublishRequest[]; effects?: EffectRecord[]; ack?: Ack } = {},
   ): Promise<AckResult> {
     return this.store.ack(
       this.workspace,
@@ -146,21 +161,25 @@ export class DirectClient implements BusApi {
     consumer: string,
     options: { error?: string; fatal?: boolean; delayMs?: number } = {},
   ): Promise<Delivery> {
-    return this.store.nack(
-      this.workspace,
-      delivery.id,
-      consumer,
-      delivery.generation,
-      options,
+    return retryContention(() =>
+      this.store.nack(
+        this.workspace,
+        delivery.id,
+        consumer,
+        delivery.generation,
+        options,
+      ),
     );
   }
 
   async extend(delivery: Delivery, consumer: string): Promise<ExtendResult> {
-    return this.store.extend(
-      this.workspace,
-      delivery.id,
-      consumer,
-      delivery.generation,
+    return retryContention(() =>
+      this.store.extend(
+        this.workspace,
+        delivery.id,
+        consumer,
+        delivery.generation,
+      ),
     );
   }
 
@@ -182,20 +201,26 @@ export class DirectClient implements BusApi {
       },
       this.publisher,
     );
-    this.store.respond(this.workspace, correlation, result.seq, body, headers);
+    await retryContention(() =>
+      this.store.respond(this.workspace, correlation, result.seq, body, headers),
+    );
     return result;
   }
 
   async register(input: RegisterConsumer): Promise<Consumer> {
-    return this.store.register(this.workspace, input);
+    return retryContention(() => this.store.register(this.workspace, input));
   }
 
   async claimEffect(key: string, fence?: string): Promise<EffectClaim> {
-    return this.store.claimEffect(this.workspace, key, fence ?? null);
+    return retryContention(() =>
+      this.store.claimEffect(this.workspace, key, fence ?? null),
+    );
   }
 
   async recordEffect(key: string, result: Json): Promise<{ ok: true }> {
-    this.store.recordEffect(this.workspace, { key, result });
+    await retryContention(() =>
+      this.store.recordEffect(this.workspace, { key, result }),
+    );
     return { ok: true };
   }
 }
@@ -262,21 +287,28 @@ export function consumeTransactional(
       }
       for (const envelope of envelopes) {
         try {
-          store.ackTransactional(
-            workspace,
-            envelope.delivery.id,
-            id,
-            envelope.delivery.generation,
-            (db) => options.handle(envelope, db),
+          // bql.sh refuses the write before the handler runs while a snapshot
+          // holds its writer, so a refusal is retried, not nacked.
+          await retryContention(() =>
+            store.ackTransactional(
+              workspace,
+              envelope.delivery.id,
+              id,
+              envelope.delivery.generation,
+              (db) => options.handle(envelope, db),
+            ),
           );
         } catch (error) {
           options.onError?.(error, envelope);
-          store.nack(
-            workspace,
-            envelope.delivery.id,
-            id,
-            envelope.delivery.generation,
-            { error: String(error instanceof Error ? error.message : error) },
+          if (isContention(error)) continue;
+          await retryContention(() =>
+            store.nack(
+              workspace,
+              envelope.delivery.id,
+              id,
+              envelope.delivery.generation,
+              { error: String(error instanceof Error ? error.message : error) },
+            ),
           );
         }
       }

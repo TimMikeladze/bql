@@ -784,6 +784,32 @@ export interface StartOptions {
   log?: (message: string) => void
   /** Called for every tenant the registry opens, when this call builds the runtime. */
   onTenantOpen?: (tenant: Tenant) => void
+  /**
+   * Handlers mounted under a path prefix on the same listener, such as the bus under `/bus`. A
+   * request whose path is the prefix or starts with `prefix/` goes to `fetch` unchanged; nothing
+   * on bql.sh's own route table is reachable under a mounted prefix.
+   */
+  mount?: Mount[]
+}
+
+export interface Mount {
+  /** `/bus`: leading slash, no trailing one. */
+  prefix: string
+  fetch(request: Request, server: Bun.Server<SocketData>): Response | Promise<Response>
+}
+
+/** Bun's `routes` match first, so a mount is reached only from the `fetch` fallback. */
+function withMounts(fallback: App["fetch"], mounts: Mount[] | undefined): App["fetch"] {
+  if (!mounts || mounts.length === 0) return fallback
+  return (request, server) => {
+    const pathname = new URL(request.url).pathname
+    for (const mount of mounts) {
+      if (pathname === mount.prefix || pathname.startsWith(`${mount.prefix}/`)) {
+        return mount.fetch(request, server as Bun.Server<SocketData>)
+      }
+    }
+    return fallback(request, server)
+  }
 }
 
 export interface RuntimeBundle {
@@ -932,7 +958,7 @@ export async function startServer(
     port: config.server.port,
     hostname: config.server.host,
     routes: app.routes as never,
-    fetch: app.fetch as never,
+    fetch: withMounts(app.fetch, options.mount) as never,
     websocket: app.websocket as never,
     development: false,
   }) as unknown as Bun.Server<SocketData>

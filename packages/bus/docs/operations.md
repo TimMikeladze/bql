@@ -1,6 +1,31 @@
 # Running bql.sh/bus
 
-One process owns one SQLite file. Everything below follows from that.
+The bus keeps its tables in one bql.sh database, `bus`, under `--data`. One node writes it: the
+only node on a single-node bus, the primary of `bus` on a cluster. Everything below follows from
+that.
+
+## Data layout
+
+`--data` (`BUS_DATA`, default `.bql-bus`) is bql.sh's data directory. The bus keeps its own keys
+in `bus/` inside it:
+
+```
+/data
+  _system.db              bql.sh's catalog
+  keys.json               bql.sh's own keys
+  dbs/…/bus/              database "bus": main.db, its WAL, its log
+  bus/keys.json           the bus's signing keyring (0600)
+  bus/admin-token         the bus's admin token (0600)
+```
+
+`bql bus serve`, `bql bus serve --cluster` and `bql serve --bus` all use it. `--database` (or
+`BUS_DATABASE`) names another database than `bus`. `BUS_SIGNING_KEY` and `BUS_ADMIN_TOKEN`
+override the two files. `--config bql.toml` hands any other bql.sh setting to the engine, such as
+`[s3]`.
+
+A single node (`bql bus serve --data /data --port 4317`) opens no bql.sh listener: the bus is the
+only thing serving, at the root of `--port`, and the only thing writing database `bus`.
+`--ack` sets what a publish waits for, `fsync` by default.
 
 ## Metrics
 
@@ -49,7 +74,6 @@ reported.
 | `bql_bus_consumers` · `_consumers_live` | gauge | `workspace` |
 | `bql_bus_db_bytes` · `_wal_bytes` · `_disk_free_bytes` · `_writable` | gauge | — (admin scrape only) |
 | `bql_bus_blobs_missing` | gauge | |
-| `bql_bus_replication_lag_seq` · `_lag_ms` | gauge | — (on a follower) |
 
 Counters reset when the process restarts, as Prometheus counters are meant to — use `rate()`.
 
@@ -62,8 +86,8 @@ The alerts worth having, in the order you will want them:
    attempt.
 3. `bql_bus_writable == 0` or `bql_bus_disk_free_bytes` near the watermark. Publishes are
    already being refused with 507 at that point.
-4. `bql_bus_replication_lag_seq` above the RPO you are willing to state. That gauge *is* the
-   promise.
+4. On a cluster, bql.sh's own replication metrics on the node holding `bus` (its `/metrics`):
+   a replica falling behind is what turns `ack: "replica"` publishes into `ACK_TIMEOUT`.
 5. `bql_bus_subscription_lag` climbing without bound — nothing is consuming.
 
 Summaries carry `_count`, `_sum`, `_min` and `_max` rather than buckets. Bucket boundaries depend
@@ -74,7 +98,7 @@ should pass its own `MetricsSink` to `BusStore`.
 
 | | |
 | --- | --- |
-| `GET /health` | the process is answering. `{ok, draining}` |
+| `GET /health` | the process is answering. `{ok, draining, role}`, `role` being `primary` or `replica` |
 | `GET /ready` | it is answering **and** a consumer has checked in recently, and it is not draining |
 
 Neither needs a token.
@@ -116,65 +140,68 @@ redelivered once their lease expires — at-least-once, working as designed.
 
 ## Backup and restore
 
-```sh
-bql bus backup /backups/bql-bus-$(date +%F)
-```
+The bus has no backup command of its own. Database `bus` is a bql.sh database, so it is backed up
+by bql.sh's S3 shipping and restored by `bql restore`.
 
-`VACUUM INTO` plus a copy of the blob directory, taken from a second connection **while the bus
-keeps serving**. Copying `bus.db` on its own is the classic way to restore a database missing its
-last few minutes, because the WAL holds them; `VACUUM INTO` is SQLite's supported online backup
-and needs no `sqlite3` binary on the host.
-
-Restoring is stop → replace → start, and that ordering is not negotiable: a single-writer design
-cannot make a restore under a running process safe.
+**Shipping.** Name a bucket in `--config` (`[s3]`) or in the environment, and the bus ships every
+commit to it as it happens, with snapshots on bql.sh's schedule:
 
 ```sh
-systemctl stop bql-bus                 # or: fly machine stop
-bql bus restore /backups/2026-09-13 --data /data
-systemctl start bql-bus
+export BQL_S3_URL=s3://backups/bus BQL_S3_ENDPOINT=https://s3.example.com BQL_S3_REGION=auto
+export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…   # or Bun's AWS_* / S3_*
+bql bus serve --data /data
 ```
 
-`restore` does the whole thing — copies the snapshot and the blob directory, removes the `-wal`
-and `-shm` left over from the *old* database (which SQLite would otherwise try to apply to the
-restored one), and then **opens the result** and reports what it found. A snapshot that cannot be
-migrated, or a blob directory that did not come along, fails here rather than during an incident.
-It refuses to overwrite a database that is already there unless you pass `--force`.
+SIGTERM ships whatever is outstanding before the process exits. Large bodies are rows in
+`blobs_data`, so they go with everything else; there is no second directory to copy. On a cluster
+the primary of `bus` ships; put the same `[s3]` on every node so whichever holds it does.
 
-```
-$ bql bus restore /backups/2026-09-13 --data /data
-{"data":"/data","lastSeq":48213,"messages":48213,"subscriptions":4,"blobsMissing":0}
-```
-
-**Point in time.** A restore can stop short of the end of the snapshot's log, which is what you
-want when the thing to undo is a batch somebody published rather than a disk that died:
+**Restoring** goes into an empty data directory, through a bql.sh node that reads the bucket and
+does not ship to it:
 
 ```sh
-bql bus restore /backups/2026-09-13 --data /data --until-seq 48120
-bql bus restore /backups/2026-09-13 --data /data --until-time '2026-09-13T09:15:00Z'
+BQL_S3_ENABLED=false BQL_S3_URL=s3://backups/bus BQL_S3_ENDPOINT=https://s3.example.com \
+  bql serve --dir /restored --port 4500 --admin-key "$KEY" &
+bql restore bus --from s3://backups/bus --into bus --url http://127.0.0.1:4500 --token "$KEY"
+# restored bus from s3://backups/bus into bus at txid 29 (29 record(s) from 2 object(s))
+kill %1
+bql bus serve --data /restored
 ```
 
-Messages past the cut are removed, their unfinished deliveries go with them, and every
-subscription cursor is pulled back to the new head — a cursor past the end of the log would
-silently skip everything published after the recovery point.
+`--at <txid|time>` on `bql restore` stops short of the end, for when the thing to undo is a batch
+somebody published rather than a disk that died. Messages past that point are not in the restored
+database, and their deliveries and cursor moves are not either, because every table was restored
+to the same transaction.
 
-What this is *not*: replay from an archive of shipped log segments. The log written after a
-snapshot lives on whatever was following the leader at the time, which is what
-`bql bus follow` is for.
+**Point in time without a bucket.** `bql restore --at` without `--from` reads the local log, so
+it reaches back only as far as the log bql.sh still holds. Stop the bus, restore into a second
+database beside the first, and serve that one:
 
-`bun run drill:restore` is the check, and it is the reason any of this is believable: it
-publishes — including a body large enough to go to a blob — backs up, **wipes the data
-directory**, restores, and compares the log, the cursors and the blob bytes. A backup nobody has
-restored is a file, not a backup.
+```sh
+bql serve --dir /data --port 4500 --admin-key "$KEY" &
+bql restore bus --at '2026-09-13T09:15:00Z' --into bus-restored --url http://127.0.0.1:4500 --token "$KEY"
+kill %1
+bql bus serve --data /data --database bus-restored
+```
+
+`bql backup status bus` and `bql backup verify bus` need a bql.sh listener, which `bql serve --bus`
+has and a single-node `bql bus serve` does not; run them against a `bql serve` on the same
+directory while the bus is stopped, or run the bus under `bql serve --bus`.
+
+`bun run drill:restore` is the check: it publishes twenty messages (one with a 200 KB body),
+moves a cursor, stops the bus so it ships, restores into an empty directory with the commands
+above, starts the bus there and compares the log, the cursor, the acked count and the large body.
+It uses an in-process fake bucket unless `BQL_S3_URL` and its credentials are set; it has been run
+against RustFS.
 
 **What the fleet does afterwards.** Consumers do not need to be restarted and should not be.
 
 - A consumer holding a lease the restored database has never heard of gets `stale lease` on its
-  next ack. The message is redelivered from the restored state and handled again — at-least-once,
+  next ack. The message is redelivered from the restored state and handled again: at-least-once,
   which is the contract, and the reason `idempotencyKey` is on every envelope.
-- Work published after the backup is gone. That is what "restore" means; the window is the
-  backup interval, so pick it to match what you are willing to redo.
-- A subscription's cursor goes back to where it was at backup time, so messages between then and
-  now are re-examined. Deliveries already settled at backup time stay settled.
+- Work published after the restore point is gone. That is what "restore" means.
+- A subscription's cursor goes back to where it was at the restore point, so messages between
+  then and now are re-examined. Deliveries already settled at that point stay settled.
 
 A message handled twice is normal here. A consumer whose effects are not idempotent is the thing
 to fix before the restore, not during it.
@@ -182,14 +209,25 @@ to fix before the restore, not during it.
 ## Deploying
 
 A `Dockerfile` and a `fly.toml` are in the repo. The image bakes the dashboard in, runs as an
-unprivileged user, and takes SIGTERM as a drain signal.
+unprivileged user, and takes SIGTERM as a drain signal. It also builds the pinned libsqlite3 the
+store opens its database through (`bun run db sqlite:build`, in the build stage), so it does not
+depend on the base image having one.
+
+Both build from the **repository root**, not from `packages/bus`, because the SQLite driver and
+its build script live in `packages/db`. `packages/bus/Dockerfile.dockerignore` keeps the context
+to what the image needs.
+
+```sh
+docker build -f packages/bus/Dockerfile -t bql-bus .
+docker run -p 4317:4317 -v bql-bus-data:/data bql-bus
+```
 
 ```sh
 fly apps create my-bus
 fly volumes create bql_bus_data --size 1 --region sjc --app my-bus
 fly secrets set BUS_SIGNING_KEY=$(openssl rand -base64 32) \
                 BUS_ADMIN_TOKEN=$(openssl rand -base64 32) --app my-bus
-fly deploy --app my-bus
+fly deploy . --config packages/bus/fly.toml --app my-bus   # from the repository root
 ```
 
 Two things about the posture are deliberate.
@@ -199,13 +237,14 @@ anything at all, so the image sets `BUS_HOST=0.0.0.0` explicitly and the platfor
 in front of it. Running the binary outside a container gets the safe default.
 
 **One machine, one volume, `strategy = "immediate"`.** A rolling deploy would briefly run two
-processes against one SQLite file, which is the one thing the design rules out. The cost is a
+processes against one data directory, which is the one thing the design rules out. The cost is a
 few seconds of downtime per deploy; consumers reconnect on their own, since a failed claim is
 retried a second later.
 
 Secrets, not `[env]`: without them the bus generates a signing key and admin token into
-`BUS_STATE` at mode 0600 on first boot, which works and persists on the volume — but then the
-only way to read the admin token is to shell into the machine.
+`/data/bus` at mode 0600 on first boot, which works and persists on the volume, but then the only
+way to read the admin token is to shell into the machine. The `BQL_S3_*` settings above go in as
+secrets too.
 
 A remote consumer needs only the URL and a scoped token:
 
@@ -215,53 +254,114 @@ BUS_TOKEN=$(bql bus token --consumer laptop-1 --subscribe rpc) \
   bql bus consume rpc --exec ./handle.sh
 ```
 
-## Continuity
+## A three-node bus
+
+Every node runs the same command with its own `--node`, `--port`, `--data` and the other two as
+`--peers`. The keys **must** be identical on every node, or a token minted on one is a 401 on the
+next; a clustered node generates none and refuses to start without them.
 
 ```sh
-# on the replica
-bql bus follow https://bus.internal:4317 --data /replica --port 4317
+export BUS_CLUSTER_SECRET=$(openssl rand -base64 32)   # bql.sh node-to-node: Raft and WAL shipping
+export BUS_SIGNING_KEY=$(openssl rand -base64 32)      # bus tokens
+export BUS_ADMIN_TOKEN=$(openssl rand -base64 32)
+
+# on 10.0.0.1
+bql bus serve --cluster --node n1 --host 0.0.0.0 --port 4321 --data /data \
+  --advertise ws://10.0.0.1:4321 --ack replica \
+  --peers n2=ws://10.0.0.2:4321,n3=ws://10.0.0.3:4321
+# on 10.0.0.2 and 10.0.0.3: --node n2 / n3, their own --advertise, the other two as --peers
 ```
 
-A follower pulls `/api/log?after=N` and the subscription cursors and applies them, keeping the
-original sequence numbers. It serves **reads** and refuses writes — being a follower is recorded
-in the database, not in a flag that can disagree with it, so it survives a restart.
+Instead of the environment, `keys.json` and `admin-token` can be copied into every node's
+`<data>/bus/`. `--config bql.toml` passes any other bql.sh setting through: lease timings
+under `[cluster]`, S3 shipping under `[s3]`. `--rf` is how many nodes hold a copy, every node by
+default; a node with no copy answers `NOT_PRIMARY` and points at the primary. Bodies over 64 KiB
+live in `blobs_data`, so they replicate with everything else.
 
-What is replicated is the **bus log**, not the SQLite WAL. The bus already is a log with a
-monotonic `seq`, so this survives a schema change on either side, needs no frame parsing, and is
-a file rather than a project. Delivery and lease rows are deliberately *not* replicated: leases
-are ephemeral and meaningless on another machine, and a promoted follower re-materializes
-deliveries from the cursors through the same code path a cold start uses.
+The same node from bql.sh's side, with the bus keys in `<data>/bus/` unless `[bus] data` says
+otherwise:
 
-**Failover is fenced.** Both nodes must be able to see one lease object:
+```toml
+# bql.toml
+[server]
+port = 4321
+node = "n1"
+
+[replication]
+secret = "${BQL_CLUSTER_SECRET}"
+
+[cluster]
+enabled = true
+id = "n1"
+advertise = "ws://10.0.0.1:4321"
+peers = ["n2=ws://10.0.0.2:4321", "n3=ws://10.0.0.3:4321"]
+bootstrap = true
+rf = 3
+
+[bus]
+enabled = true
+ack = "replica"
+```
 
 ```sh
-bql bus serve  --data /data     --lease /shared/bql-bus.lease   # the leader
-bql bus promote --data /replica --lease /shared/bql-bus.lease   # the new one
+bql serve --config bql.toml          # or --bus without the [bus] table
 ```
 
-`promote` acquires the lease, and the epoch it grants is stamped into the replica's database. The
-old leader — running with the same `--lease` — polls it, sees the epoch has moved past its own,
-and **stops accepting writes**, saying so loudly. It does not exit: a process that vanishes takes
-its in-flight acks with it. Split brain is prevented by the fence, not by hoping the old node is
-dead.
+### Startup
 
-The file lease is compare-and-set over read-then-write, which is correct on a filesystem both
-machines genuinely share. For object storage, implement the `Lease` interface with a conditional
-put — the seam is the point.
+Nodes can start in any order. Each waits until all three have joined the Raft group, then the node
+placement names creates `bus`, claims its lease and runs the migrations; the others wait for their
+copy to arrive and open it read-only. Until a node's bus is open it answers `NOT_PRIMARY`. A
+publish at `ack: "replica"` in the first second or two can answer `NO_REPLICAS`: the database
+exists before a replica is streaming it.
 
-**The RPO is a number.** Replication is asynchronous, so a failover loses up to the current lag:
+### Which node is primary
 
-| | |
-| --- | --- |
-| `bql_bus_replication_lag_seq` | messages the replica has not applied |
-| `bql_bus_replication_lag_ms` | how old the newest applied message is |
+```sh
+curl -s http://10.0.0.2:4321/bus/health
+# {"ok":true,"draining":false,"role":"replica"}
+bql cluster --url http://10.0.0.2:4321      # bql.sh's view: primary, replicas, acked txids, lease
+```
 
-`bun run drill:failover` promotes under continuous publish and prints the RPO it measured; on a
-laptop that is **tens of messages**. Alert on the gauges. Whatever number you tolerate is the
-promise you are making to whoever publishes.
+A replica answers every write with `503 {"code":"NOT_PRIMARY","primary":"http://10.0.0.1:4321/bus"}`
+and the same URL in `BQL-Primary`. Point clients at all three (`BusClient({ url: [...] })`,
+`--url a,b,c`); they follow the header. A load balancer in front should send everything to any
+healthy node: reads are answered locally, writes are redirected.
 
-This buys continuity and read scale-out. It does **not** buy write scale-out — there is still one
-writer — and it is not consensus.
+### When the primary dies
+
+Nothing to do. Its bql.sh lease lapses after `[cluster] leaseTtlMs` (3 s by default), the Raft
+leader grants it to the replica with the most applied (judged among every node but the lapsed
+primary, whose last commit may never have left it), and that node's bus migrates,
+starts the sweep and the scheduler and reloads its caches. Leases taken on the old primary keep
+their generation: a consumer's renew or ack lands on the new primary. Expired ones are reclaimed
+by the sweep. A long poll parked on the old primary answers `NOT_PRIMARY` and the client asks
+again. The other replicas keep their copies and follow the new primary from their own position;
+nothing re-snapshots `bus`.
+
+What a client sees during it: requests to the dead node are refused and move on; a `replica`
+publish in the few milliseconds before the other survivor follows the new primary is
+`NO_REPLICAS`, which the client waits out for up to `failoverMs` (15 s), with one URL or several; a request that was
+in flight when it died fails (`ECONNRESET`) and is not resent unless it is a read or a publish with
+a `dedupeKey`. With `--ack replica` every publish answered 2xx is on a replica, so the RPO is 0.
+`ACK_TIMEOUT` means the message committed on the primary but no replica confirmed it in
+`[replication] ackTimeoutMs`; it is in the log unless that primary dies before shipping it.
+
+`bun run drill:failover` does this with three processes and a SIGKILL and prints the numbers:
+2 to 3.4 s from the kill to the first acknowledged publish, and zero acknowledged publishes lost
+in every run so far.
+
+### Bringing the old node back
+
+Start it with the same command. It rejoins Raft, finds another node holding `bus`, and follows it:
+bql.sh fences the old copy by epoch and re-snapshots it if it diverged. It does not take the
+primary back.
+
+### Limits
+
+One writer: publish throughput is one node's. A node that loses its disk is a node to re-add, not
+to restore; S3 shipping (`[s3]` in `--config`) is the backup. `bql bus keys rotate` writes the
+local `keys.json` only, so rotate on every node, or manage keys through `BUS_SIGNING_KEY`.
 
 ## Running out of disk
 
@@ -276,10 +376,9 @@ settable with `--min-free-bytes`:
 
 Losing writes loudly beats a crash loop. `bql_bus_writable` is the gauge.
 
-The WAL has a ceiling too: `wal_autocheckpoint`, plus a `wal_checkpoint(TRUNCATE)` on the sweep
-once `-wal` passes `--wal-checkpoint-bytes` (8 MiB by default). The truncate is best-effort — a
-long-lived reader will block it, and that reader is the reason the file grew; blocking *it* would
-trade a disk problem for a correctness-shaped one.
+The WAL is bql.sh's: the tenant checkpoints its own, and `bql_bus_db_bytes` / `_wal_bytes` report
+database `bus`'s `main.db` and `main.db-wal` under `<data>/dbs/`. The log beside them is trimmed
+by bql.sh once a snapshot (and, with `[s3]`, the bucket) covers it.
 
 ## Rate limits and quotas
 
@@ -312,9 +411,10 @@ token it names would have expired anyway.
 
 ## Capacity, honestly
 
-One writer, one file. Right for a fleet; for infrastructure a dozen services depend on it is a
-deliberate trade — asynchronous replication, an RPO you have to state, and a failover that needs
-a fence. The store sits behind a seam so replacing it is a swap rather than a rewrite.
+One writer. A cluster adds copies, automatic failover and reads on every node, not write
+throughput: every publish, claim and ack is a commit on the node holding `bus`. Each commit is
+also captured into bql.sh's log, so a single-row write costs more than it would on a plain SQLite
+file; `publishBatch` is one commit for the whole batch.
 
 Two settings are worth knowing:
 

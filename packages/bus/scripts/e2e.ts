@@ -100,12 +100,8 @@ try {
   spawn("bus", [
     "src/cli/index.ts",
     "serve",
-    "--state",
-    scratch,
-    "--db",
-    `${scratch}/bus.db`,
-    "--blobs",
-    `${scratch}/blobs`,
+    "--data",
+    `${scratch}/data`,
     "--port",
     String(port),
   ]);

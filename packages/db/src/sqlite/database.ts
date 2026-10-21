@@ -25,9 +25,14 @@ import {
   SQLITE_OPEN_READWRITE,
   SQLITE_OPEN_URI,
   SQLITE_PREPARE_PERSISTENT,
+  SQLITE_ATTACH,
+  SQLITE_AUTH,
+  SQLITE_DETACH,
   SQLITE_FUNCTION,
   SQLITE_INSERT,
+  SQLITE_PRAGMA,
   SQLITE_ROW,
+  SQLITE_TRANSACTION,
   type CheckpointMode,
   type FileControlName,
   type LimitName,
@@ -37,6 +42,7 @@ import { capabilityDetail, cbuf, cstr, sqlite, type SqliteLibrary } from "./lib.
 import {
   prepareStatement,
   Statement,
+  type GuardedAction,
   type ProgramFacts,
   type RunResult,
   type StatementHost,
@@ -194,6 +200,7 @@ export class Database implements StatementHost {
   #onRollback: RollbackHook | null = null
   #onWal: WalHook | null = null
   #onAuth: Authorizer | null = null
+  #guard: Authorizer | null = null
   #deadlineAt = Infinity
   #sessions = new Set<number>()
 
@@ -201,6 +208,7 @@ export class Database implements StatementHost {
   #probing = false
   #probeInserts = false
   #probeReadsRowid = false
+  #probeGuarded: GuardedAction[] | null = null
 
   private constructor(
     handle: number,
@@ -328,6 +336,8 @@ export class Database implements StatementHost {
     this.#assertOpen()
     const hit = this.#cache.get(sql)
     if (hit && !hit.finalized) {
+      // A cached statement is never compiled again, so the guard is asked here instead.
+      if (this.#guard !== null && hit.guarded !== null) this.#recheckGuard(hit.guarded)
       // Refresh recency.
       this.#cache.delete(sql)
       this.#cache.set(sql, hit)
@@ -338,6 +348,7 @@ export class Database implements StatementHost {
     this.#probing = true
     this.#probeInserts = false
     this.#probeReadsRowid = false
+    this.#probeGuarded = null
     let stmt: Statement
     try {
       stmt = prepareStatement(this, sql, SQLITE_PREPARE_PERSISTENT)
@@ -498,6 +509,26 @@ export class Database implements StatementHost {
     const s = this.lib.symbols
     this.#authCb ??= new JSCallback(
       (_ctx: number, action: number, a1: number, a2: number, a3: number, a4: number) => {
+        const guard = this.#guard
+        const guarded =
+          action === SQLITE_TRANSACTION ||
+          action === SQLITE_PRAGMA ||
+          action === SQLITE_ATTACH ||
+          action === SQLITE_DETACH
+        if (guarded && (guard !== null || this.#probing)) {
+          const arg1 = cstr(a1)
+          const arg2 = cstr(a2)
+          if (this.#probing) (this.#probeGuarded ??= []).push({ action, arg1, arg2 })
+          if (guard !== null) {
+            let rc: number
+            try {
+              rc = guard(action, arg1, arg2, cstr(a3), cstr(a4)) | 0
+            } catch {
+              rc = 1
+            }
+            if (rc !== SQLITE_OK) return rc
+          }
+        }
         if (this.#probing) {
           // The compile-time facts of design §6.1's `lastInsertRowid`. `cstr` is skipped unless
           // the action can carry one of them, so a connection with no authorizer of its own
@@ -531,7 +562,38 @@ export class Database implements StatementHost {
    */
   takeProgramFacts(): ProgramFacts {
     this.#probing = false
-    return { inserts: this.#probeInserts, readsLastInsertRowid: this.#probeReadsRowid }
+    const guarded = this.#probeGuarded
+    this.#probeGuarded = null
+    return guarded === null
+      ? { inserts: this.#probeInserts, readsLastInsertRowid: this.#probeReadsRowid }
+      : { inserts: this.#probeInserts, readsLastInsertRowid: this.#probeReadsRowid, guarded }
+  }
+
+  /**
+   * Sets a guard over transaction control, pragmas, `ATTACH` and `DETACH`, or clears it with null.
+   * It is asked about exactly those actions, before the authorizer, whenever a statement is
+   * compiled, and again on every `prepare()` cache hit for a statement whose program has any of
+   * them, so it can be switched on and off around a callback without expiring the cache the way
+   * `authorizer()` does. A non-OK answer refuses the statement with `SQLITE_AUTH`.
+   *
+   * A `Statement` object the caller kept from before the guard went on is not re-checked.
+   */
+  guard(cb: Authorizer | null): void {
+    this.#assertOpen()
+    this.#guard = cb
+  }
+
+  #recheckGuard(actions: readonly GuardedAction[]): void {
+    const guard = this.#guard as Authorizer
+    for (const one of actions) {
+      let rc: number
+      try {
+        rc = guard(one.action, one.arg1, one.arg2, null, null) | 0
+      } catch {
+        rc = 1
+      }
+      if (rc !== SQLITE_OK) throw new SqliteError("not authorized", SQLITE_AUTH)
+    }
   }
 
   /** Fires once per inserted, updated or deleted row, after the change, in rowid tables. */

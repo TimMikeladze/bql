@@ -242,7 +242,8 @@ async function importOrFail(
       src(bytes),
       ED25519,
       true,
-      usages,
+      // node:crypto and the DOM lib each declare KeyUsage; the strings are the same.
+      usages as never,
     )) as CryptoKey
   } catch {
     throw BqlError.badRequest(`not a usable Ed25519 ${format} key`)
@@ -801,7 +802,7 @@ const DDL_ACTIONS: ReadonlySet<number> = new Set([
 ])
 
 /** Pragmas whose argument names a table rather than setting a value: always a read. */
-const PRAGMA_SUBJECT: ReadonlySet<string> = new Set([
+export const PRAGMA_SUBJECT: ReadonlySet<string> = new Set([
   "table_info",
   // The same description plus hidden and generated columns; `diffSchema` reads it.
   "table_xinfo",
@@ -813,7 +814,7 @@ const PRAGMA_SUBJECT: ReadonlySet<string> = new Set([
 ])
 
 /** Pragmas allowed only in their reading form, i.e. with no value after `=`. */
-const PRAGMA_READ: ReadonlySet<string> = new Set([
+export const PRAGMA_READ: ReadonlySet<string> = new Set([
   "user_version",
   "schema_version",
   "journal_mode",

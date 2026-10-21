@@ -154,7 +154,7 @@ export function pageHash(pgno: number, page: Uint8Array): bigint {
 export interface EncodeOptions {
   /**
    * Compress the body with zstd, which is what every record has done since phase 0 and what
-   * `FLAG_ZSTD` in the header says. `false` writes the pages plain — 4.3x larger and ~9.5 µs a
+   * `FLAG_ZSTD` in the header says. `false` writes the pages plain — 4.3x larger and ~8.5 µs a
    * record cheaper, which is a third of a single-row write (`docs/performance.md` §1).
    *
    * The flag is per record, and `decode` has always honoured it, so a log, a replica stream and a
@@ -163,6 +163,14 @@ export interface EncodeOptions {
    */
   compress?: boolean
 }
+
+/**
+ * Level 1, not 3. On B-tree pages the two give the same ratio (3.5x on a five-page bus publish,
+ * 4.3x on a single-row insert) and level 1 costs a third less: 17 µs against 25 µs for an 18 KB
+ * body. Text-heavy pages lose about 1.5% of ratio. `decode` reads any level, so records written
+ * at 3 stay readable and nothing about the format changes.
+ */
+const RECORD_ZSTD_LEVEL = 1
 
 /** Serialises a record. Pages are written in ascending page-number order. */
 export function encode(record: TxnRecordInput, options: EncodeOptions = {}): Uint8Array {
@@ -198,7 +206,7 @@ export function encode(record: TxnRecordInput, options: EncodeOptions = {}): Uin
   const body =
     (flags & FLAG_ZSTD) === 0
       ? plain
-      : new Uint8Array(Bun.zstdCompressSync(plain, { level: 3 }))
+      : new Uint8Array(Bun.zstdCompressSync(plain, { level: RECORD_ZSTD_LEVEL }))
 
   const out = new Uint8Array(RECORD_HEADER_SIZE + body.byteLength)
   const view = new DataView(out.buffer)

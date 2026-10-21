@@ -120,6 +120,51 @@ export interface ClientSocket {
 
 export type SocketFactory = (url: string) => ClientSocket
 
+/**
+ * The generation ledger on disk: `<bootstrapDir>/generations.json`, database name to the id its
+ * copy was bootstrapped under. Best effort: a ledger that cannot be read leaves this node
+ * protected by name alone.
+ */
+export function loadGenerationLedger(
+  bootstrapDir: string,
+  onError: (err: unknown) => void = () => {},
+): Map<string, string> {
+  const out = new Map<string, string>()
+  let raw: string
+  try {
+    raw = fs.readFileSync(path.join(bootstrapDir, GENERATIONS_FILE), "utf8")
+  } catch {
+    return out
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    for (const [db, generation] of Object.entries(parsed)) {
+      if (typeof generation === "string" && generation.length > 0) out.set(db, generation)
+    }
+  } catch (err) {
+    onError(err)
+  }
+  return out
+}
+
+/** Temp file then rename, so a crash mid-write leaves the previous ledger rather than none. */
+export function saveGenerationLedger(
+  bootstrapDir: string,
+  generations: Map<string, string>,
+  onError: (err: unknown) => void = () => {},
+): void {
+  const file = path.join(bootstrapDir, GENERATIONS_FILE)
+  const temp = `${file}.${process.pid}.tmp`
+  try {
+    fs.mkdirSync(bootstrapDir, { recursive: true })
+    fs.writeFileSync(temp, `${JSON.stringify(Object.fromEntries(generations), null, 2)}\n`)
+    fs.renameSync(temp, file)
+  } catch (err) {
+    fs.rmSync(temp, { force: true })
+    onError(err)
+  }
+}
+
 export interface ReplicaClientOptions {
   registry: TenantRegistry
   /** `wss://primary/v1/replication`. */
@@ -134,6 +179,12 @@ export interface ReplicaClientOptions {
   heartbeatMs?: number
   /** Where snapshot temp files go. Defaults to `<dataDir>/bootstrap`. */
   bootstrapDir?: string
+  /**
+   * The node's generation ledger, shared by every client on this thread. The runtime owns it, so
+   * a client that is stopped (the follow planner dropping an upstream after a promotion) does not
+   * take the ids of the copies it bootstrapped with it. Loaded from `bootstrapDir` when not given.
+   */
+  generations?: Map<string, string>
   onError?: (err: unknown) => void
   /** Injectable for the tests; defaults to the global `WebSocket`. */
   factory?: SocketFactory
@@ -420,7 +471,8 @@ export class ReplicaClient {
     // A hosted client keeps no ledger of its own: the router holds the one file with the one
     // writer and pushes its contents down (§3.2), so reading it here would be a second reader of a
     // file this thread must never write.
-    if (this.mode !== "hosted") this.#loadGenerations()
+    if (options.generations) this.#generations = options.generations
+    else if (this.mode !== "hosted") this.#loadGenerations()
   }
 
   // ── C4c: the two seams ───────────────────────────────────────────────────────────────────────
@@ -491,7 +543,9 @@ export class ReplicaClient {
 
   /** `"hosted"`: the generation ledger, so a chained replica announces the ids it was given. */
   generations(entries: [string, string][]): void {
-    this.#generations = new Map(entries)
+    // In place: the map may be the runtime's, shared with this thread's other clients.
+    this.#generations.clear()
+    for (const [db, generation] of entries) this.#generations.set(db, generation)
   }
 
   /** `"routed"`: a shard asking for one forwarded write over the one upstream socket (R2). */
@@ -553,31 +607,12 @@ export class ReplicaClient {
 
   // ── generation ledger ────────────────────────────────────────────────────────────────────────
 
-  #generationsPath(): string {
-    return path.join(this.bootstrapDir, GENERATIONS_FILE)
-  }
-
-  /** Best effort: a ledger that cannot be read leaves this node protected by name alone. */
   #loadGenerations(): void {
-    let raw: string
-    try {
-      raw = fs.readFileSync(this.#generationsPath(), "utf8")
-    } catch {
-      return
-    }
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>
-      for (const [db, generation] of Object.entries(parsed)) {
-        if (typeof generation === "string" && generation.length > 0) {
-          this.#generations.set(db, generation)
-        }
-      }
-    } catch (err) {
-      this.#onError(err)
+    for (const [db, generation] of loadGenerationLedger(this.bootstrapDir, this.#onError)) {
+      this.#generations.set(db, generation)
     }
   }
 
-  /** Temp file then rename, so a crash mid-write leaves the previous ledger rather than none. */
   #saveGenerations(): void {
     // C4c: a hosted client holds a read-only copy pushed down from the router, which owns the one
     // file and the one writer. Writing here would be a second writer of a node-level file.
@@ -585,16 +620,7 @@ export class ReplicaClient {
     // Every shard gets the new ledger, so a *chained* sharded replica announces to its own
     // downstream replicas the ids it was given rather than minting fresh ones from its catalog.
     this.#shards?.generations([...this.#generations])
-    const file = this.#generationsPath()
-    const temp = `${file}.${process.pid}.tmp`
-    try {
-      fs.mkdirSync(this.bootstrapDir, { recursive: true })
-      fs.writeFileSync(temp, `${JSON.stringify(Object.fromEntries(this.#generations), null, 2)}\n`)
-      fs.renameSync(temp, file)
-    } catch (err) {
-      fs.rmSync(temp, { force: true })
-      this.#onError(err)
-    }
+    saveGenerationLedger(this.bootstrapDir, this.#generations, this.#onError)
   }
 
   #recordGeneration(db: string, generation: string | null): void {
@@ -619,6 +645,11 @@ export class ReplicaClient {
   #forgetGeneration(db: string): void {
     if (!this.#generations.delete(db)) return
     this.#saveGenerations()
+  }
+
+  /** The database is gone from this node (deleted here, as its primary): its id goes with it. */
+  forgetGeneration(db: string): void {
+    this.#forgetGeneration(db)
   }
 
   /** Forwarded writes waiting on the primary right now. */

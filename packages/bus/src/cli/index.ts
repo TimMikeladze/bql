@@ -1,15 +1,27 @@
 #!/usr/bin/env bun
 import { resolveBusConnection } from "./connection";
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, resolve } from "node:path";
-import { fileBlobs } from "../bus/blobs";
+import { resolve } from "node:path";
 import { createLogger, isLogLevel, type LogLevel } from "../bus/log";
 import { prometheusMetrics } from "../bus/metrics";
 import { createServer } from "../bus/server";
 import { BusStore } from "../bus/store";
-import { fenceWatcher, fileLease, follow, promote } from "../bus/replication";
-import { generateKey, type Keyring, keyring, mint, singleKey } from "../bus/tokens";
+import {
+  bqlStorage,
+  ensureBusDatabase,
+  isAck,
+  isContention,
+} from "../bus/storage";
+import { generateKey, mint } from "../bus/tokens";
+import {
+  clusterSecretsIn,
+  keyringIn,
+  type KeyringFile,
+  loadOrCreate,
+  secretsIn,
+  writeKeyring,
+} from "./secrets";
 import { otlpExporter } from "../bus/trace";
 import { BusClient, BusConsumer } from "../client/bus";
 import { clickhouseSink, s3Sink, SinkRunner, webhookSink } from "../sinks";
@@ -48,17 +60,11 @@ function pairs(name: string): Record<string, string> {
   return out;
 }
 
-// One data directory: signing key, admin token, database, WAL and blobs. A
-// binary plus a directory is the whole deployment, and a container can
-// relocate all of it onto its volume with one flag. `--state` is the older
-// spelling of the same thing and still works.
-const stateDir = flag(
-  "data",
-  flag(
-    "state",
-    process.env.BUS_DATA ?? process.env.BUS_STATE ?? ".bql-bus",
-  ),
-) as string;
+// One data directory. It is bql.sh's: database `bus` lives under `dbs/`, and
+// the bus keeps its own keys (`keys.json`, `admin-token`) in `bus/` beside it,
+// the same place `bql serve --bus` keeps them.
+const stateDir = flag("data", process.env.BUS_DATA ?? ".bql-bus") as string;
+const keysDir = `${stateDir}/bus`;
 const workspace = flag("workspace", DEFAULT_WORKSPACE) as string;
 
 const level = flag("log-level", process.env.BUS_LOG_LEVEL ?? "info") as string;
@@ -71,58 +77,8 @@ const logger = createLogger({
     : "text") as "json" | "text",
 });
 
-/** Secrets live in a 0600 file, not in argv where `ps` would show them. */
-async function loadOrCreate(path: string): Promise<string> {
-  const file = Bun.file(path);
-  if (await file.exists()) return (await file.text()).trim();
-  const value = generateKey();
-  await mkdir(dirname(resolve(path)), { recursive: true });
-  await writeFile(path, value, { mode: 0o600 });
-  return value;
-}
-interface KeyringFile {
-  active: string;
-  keys: Record<string, string>;
-}
-
-/**
- * The signing keyring.
- *
- * Two keys live at once during a rotation, which is what makes rotating
- * possible without invalidating every token in the fleet at the same moment.
- * A bus that has only ever had one key adopts it as `k1` rather than being
- * told its existing tokens are now invalid.
- */
-async function keyringFor(): Promise<Keyring> {
-  // An explicit environment key means the operator is managing keys
-  // themselves; rotation is theirs to do, so there is one and no file.
-  if (process.env.BUS_SIGNING_KEY) return singleKey(process.env.BUS_SIGNING_KEY);
-  const path = `${stateDir}/keys.json`;
-  const file = Bun.file(path);
-  if (await file.exists()) {
-    const parsed = JSON.parse(await file.text()) as KeyringFile;
-    return keyring(parsed.keys, parsed.active);
-  }
-  const legacy = await loadOrCreate(`${stateDir}/signing-key`);
-  await writeKeyring(path, { active: "k1", keys: { k1: legacy } });
-  return keyring({ k1: legacy }, "k1");
-}
-
-async function writeKeyring(path: string, value: KeyringFile) {
-  await mkdir(dirname(resolve(path)), { recursive: true });
-  await writeFile(path, JSON.stringify(value, null, 2), { mode: 0o600 });
-}
-
-async function secrets() {
-  return {
-    signingKey:
-      process.env.BUS_SIGNING_KEY ??
-      (await loadOrCreate(`${stateDir}/signing-key`)),
-    adminToken:
-      process.env.BUS_ADMIN_TOKEN ??
-      (await loadOrCreate(`${stateDir}/admin-token`)),
-  };
-}
+const keyringFor = () => keyringIn(keysDir);
+const secrets = () => secretsIn(keysDir);
 
 async function connectionOptions(url?: string) {
   return {
@@ -147,25 +103,82 @@ function shutdown(stop: () => void | Promise<void>) {
 
 switch (command) {
   case "serve": {
+    const ack = flag("ack", process.env.BUS_ACK);
+    if (ack !== undefined && !isAck(ack))
+      throw new Error("--ack wants local, fsync, replica or quorum");
+    const database = flag("database", process.env.BUS_DATABASE ?? "bus") as string;
+    await mkdir(resolve(stateDir), { recursive: true });
+    // A node of a clustered bus: bql.sh on <data> with [cluster] on, its
+    // listener on --port, the bus mounted under /bus on it.
+    if (has("cluster") || has("peers")) {
+      const node = required(flag("node", process.env.BUS_NODE), "--node <id>");
+      const peers = list("peers");
+      if (peers.length === 0)
+        throw new Error("--cluster needs --peers id=ws://host:port,…");
+      const secret = flag("cluster-secret", process.env.BUS_CLUSTER_SECRET);
+      if (!secret)
+        throw new Error("--cluster needs BUS_CLUSTER_SECRET (or --cluster-secret)");
+      const port = Number(required(flag("port", process.env.PORT), "--port"));
+      const host = flag("host", process.env.BUS_HOST ?? "127.0.0.1") as string;
+      const advertise = flag(
+        "advertise",
+        `ws://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`,
+      ) as string;
+      const { Bql } = await import("../../../db/src/embedded.ts");
+      const { serveBus } = await import("./cluster");
+      const bq = await Bql.open({
+        dir: stateDir,
+        // Lease timings, S3 shipping and anything else bql.sh takes.
+        ...(flag("config") ? { config: flag("config") as string } : {}),
+        env: process.env as Record<string, string>,
+        server: { port, host, node },
+        replication: { secret },
+        cluster: {
+          enabled: true,
+          id: node,
+          advertise,
+          peers,
+          bootstrap: true,
+          // One database: every node holds a copy unless told otherwise.
+          rf: Number(flag("rf", String(peers.length + 1))),
+        },
+        sqlite: { foreignKeys: true },
+        // Fencing notices, reconnects: the bus logs its own role changes.
+        onError: (error) => logger.debug("bql.sh", { error: String(error) }),
+      });
+      const served = await serveBus(bq, {
+        data: keysDir,
+        database,
+        ...(ack ? { ack } : {}),
+        logger,
+        assets: flag("assets", "dist/dashboard") as string,
+      });
+      logger.info("listening", { url: served.url, node, role: served.node.role });
+      console.log(`bql bus ${served.url}  node=${node}  role=${served.node.role}`);
+      shutdown(() => served.close());
+      break;
+    }
     const { adminToken } = await secrets();
     const keys = await keyringFor();
-    const db = flag("db", `${stateDir}/bus.db`) as string;
-    await mkdir(dirname(resolve(db)), { recursive: true });
+    // A single node: bql.sh on <data>, no cluster and no bql.sh listener, so
+    // nothing but the bus writes database `bus`. `--config` takes any other
+    // bql.sh setting, such as [s3] shipping.
+    const { Bql } = await import("../../../db/src/embedded.ts");
+    const bq = await Bql.open({
+      dir: stateDir,
+      ...(flag("config") ? { config: flag("config") as string } : {}),
+      env: process.env as Record<string, string>,
+      onError: (error) => logger.debug("bql.sh", { error: String(error) }),
+    });
+    await ensureBusDatabase(bq, database);
     const metrics = prometheusMetrics();
-    const store = new BusStore(db, {
-      blobs: fileBlobs(flag("blobs", `${stateDir}/blobs`) as string),
+    const store = new BusStore(bqlStorage(bq, { database, ...(ack ? { ack } : {}) }), {
       metrics,
       ...(has("retention-ms")
         ? { retentionMs: Number(flag("retention-ms")) }
         : {}),
-      ...(flag("synchronous")?.toUpperCase() === "NORMAL"
-        ? { synchronous: "NORMAL" as const }
-        : {}),
       ...(has("min-free-bytes")
         ? { minFreeBytes: Number(flag("min-free-bytes")) }
-        : {}),
-      ...(has("wal-checkpoint-bytes")
-        ? { walCheckpointBytes: Number(flag("wal-checkpoint-bytes")) }
         : {}),
       // Spans go out over `fetch` as OTLP/HTTP JSON. Without an endpoint the
       // trace context still travels in message headers — the part a consumer
@@ -183,10 +196,11 @@ switch (command) {
           }
         : {}),
     });
-    // The reverse of the orphan sweep, and the right moment for it: a crash
-    // between writing a blob and committing the row that names it shows up
-    // here, once, instead of as a subscription that has quietly stalled.
+    // A body removed from `blobs_data` by hand shows up here, once, instead of
+    // as a subscription that has quietly stalled.
     const reconciled = await store.reconcileBlobs();
+    // `[s3]` (or BQL_S3_URL): ship database `bus` to the bucket. Nothing when unset.
+    bq.startShipping();
     if (reconciled.missing > 0)
       logger.warn("messages reference blobs that are gone", reconciled);
     const server = createServer({
@@ -223,19 +237,17 @@ switch (command) {
         ? { assets: flag("assets") as string }
         : { assets: "dist/dashboard" }),
     });
-    // The other half of the promotion fence: a leader that has been
-    // superseded stops writing. Without this, the epoch is a number nobody
-    // acts on.
-    const fence = has("lease")
-      ? fenceWatcher({
-          store,
-          lease: fileLease(flag("lease") as string),
-          logger,
-        })
-      : null;
-    const sweep = setInterval(() => store.sweep(), 1000);
-    // Blob collection touches a filesystem, so it runs on its own slower
-    // interval rather than on the path every claim shares.
+    const sweep = setInterval(() => {
+      try {
+        store.sweep();
+      } catch (error) {
+        // A snapshot holding the writer: the next tick sweeps.
+        if (isContention(error)) return;
+        logger.warn("the sweep failed", { error: String(error) });
+      }
+    }, 1000);
+    // Blob collection scans every body, so it runs on its own slower interval
+    // rather than on the path every claim shares.
     const collect = setInterval(() => {
       void store.collectBlobs().catch((error: unknown) => {
         logger.warn("blob collection failed", { error: String(error) });
@@ -243,98 +255,21 @@ switch (command) {
     }, 60_000);
     logger.info("listening", {
       url: `http://${server.hostname}:${server.port}`,
-      db,
-      adminToken: `${stateDir}/admin-token`,
+      data: resolve(stateDir),
+      database,
+      adminToken: `${keysDir}/admin-token`,
     });
     console.log(`bql bus http://${server.hostname}:${server.port}`);
-    console.log(`admin token  ${stateDir}/admin-token`);
+    console.log(`admin token  ${keysDir}/admin-token`);
     shutdown(async () => {
-      fence?.stop();
       clearInterval(sweep);
       clearInterval(collect);
       // Drain before closing: a consumer's long poll should return empty, not
       // be cut off, and the store must outlive the requests still using it.
       await server.shutdown();
       store.close();
+      await bq.close();
     });
-    break;
-  }
-
-  // A backup is `VACUUM INTO` plus the blob directory, taken from a *second*
-  // connection to the same file while the bus keeps serving. Copying `bus.db`
-  // on its own is the classic way to restore a database missing its last few
-  // minutes, because the WAL holds them.
-  case "backup": {
-    const target = flag("into", argv[1]);
-    if (!target) throw new Error("backup wants a directory: bql bus backup <dir>");
-    const into = resolve(target);
-    await mkdir(into, { recursive: true });
-    const store = new BusStore(flag("db", `${stateDir}/bus.db`) as string);
-    store.backup(`${into}/bus.db`);
-    store.close();
-    const blobs = flag("blobs", `${stateDir}/blobs`) as string;
-    await cp(blobs, `${into}/blobs`, { recursive: true }).catch(() => {});
-    console.log(into);
-    break;
-  }
-
-  /**
-   * The other half of `backup`, and the reason it is worth anything.
-   *
-   * A backup nobody has restored is a file, not a backup. This copies the
-   * `VACUUM INTO` snapshot and the blob directory into a data directory, then
-   * *opens* the result — so a snapshot that cannot be migrated, or a blob
-   * directory that did not come along, fails here rather than during an
-   * incident.
-   */
-  case "restore": {
-    const source = flag("from", argv[1]);
-    if (!source)
-      throw new Error("restore wants a directory: bql bus restore <dir> --data <dir>");
-    const from = resolve(source);
-    if (!(await Bun.file(`${from}/bus.db`).exists()))
-      throw new Error(`${from}/bus.db does not exist`);
-    const db = flag("db", `${stateDir}/bus.db`) as string;
-    const blobs = flag("blobs", `${stateDir}/blobs`) as string;
-    if ((await Bun.file(db).exists()) && !has("force"))
-      throw new Error(
-        `${db} already exists — restoring over a live database is how two histories become one, so pass --force if that is really what you want`,
-      );
-    await mkdir(dirname(resolve(db)), { recursive: true });
-    await cp(`${from}/bus.db`, db);
-    // A snapshot is self-contained, so any WAL left beside the target belongs
-    // to the database that was just replaced and would be replayed onto the
-    // new one.
-    await rm(`${db}-wal`, { force: true });
-    await rm(`${db}-shm`, { force: true });
-    await rm(blobs, { recursive: true, force: true });
-    await cp(`${from}/blobs`, blobs, { recursive: true }).catch(() => {});
-    const store = new BusStore(db, { blobs: fileBlobs(blobs) });
-    // Point-in-time: restore the snapshot, then cut the log off just before
-    // whatever went wrong. `--until-time` takes anything `Date.parse` accepts.
-    let truncated: { removed: number; lastSeq: number } | null = null;
-    if (has("until-seq") || has("until-time")) {
-      const until = has("until-seq")
-        ? Number(flag("until-seq"))
-        : store.seqAt(Date.parse(flag("until-time") as string));
-      if (!Number.isInteger(until) || until < 0)
-        throw new Error("--until-seq wants a sequence number, --until-time a date");
-      truncated = store.truncateAfter(until);
-    }
-    const missing = await store.reconcileBlobs();
-    const stats = store.stats(workspace);
-    store.close();
-    console.log(
-      JSON.stringify({
-        data: resolve(stateDir),
-        lastSeq: stats.lastSeq,
-        messages: stats.messages,
-        subscriptions: stats.subscriptions.length,
-        blobsMissing: missing.missing,
-        ...(truncated ? { truncated: truncated.removed } : {}),
-      }),
-    );
-    if (missing.missing > 0) process.exit(1);
     break;
   }
 
@@ -361,11 +296,10 @@ switch (command) {
    * anything, which is why it is separate.
    */
   case "keys": {
-    const path = `${stateDir}/keys.json`;
-    const file = Bun.file(path);
-    const current: KeyringFile = (await file.exists())
-      ? (JSON.parse(await file.text()) as KeyringFile)
-      : { active: "k1", keys: { k1: await loadOrCreate(`${stateDir}/signing-key`) } };
+    const path = `${keysDir}/keys.json`;
+    // Writes `keys.json` with one key when there is none yet.
+    await keyringFor();
+    const current = JSON.parse(await Bun.file(path).text()) as KeyringFile;
     const action = argv[1] ?? "list";
     if (action === "rotate") {
       const kid =
@@ -518,110 +452,6 @@ switch (command) {
       console.log(
         `${new Date(entry.at).toISOString()} ${entry.actor.padEnd(20)} ${entry.action.padEnd(24)} ${entry.target ?? ""}`,
       );
-    break;
-  }
-
-  // ---------------------------------------------------------- continuity
-  /**
-   * Follow an upstream bus, applying its log and cursors.
-   *
-   * What is replicated is the *bus log*, not the SQLite WAL: the bus already is
-   * a log with a monotonic sequence number, so this survives a schema change
-   * and needs no frame parsing. Leases are deliberately not replicated — a
-   * promoted follower re-materializes deliveries from cursors, through the same
-   * code path a cold start already uses.
-   */
-  case "follow": {
-    const explicitUpstream = flag("upstream", argv[1]?.startsWith("--") ? undefined : argv[1]);
-    const upstreamOptions = await connectionOptions(explicitUpstream);
-    const upstreamUrl = upstreamOptions.url;
-    const db = flag("db", `${stateDir}/bus.db`) as string;
-    await mkdir(dirname(resolve(db)), { recursive: true });
-    const metrics = prometheusMetrics();
-    const store = new BusStore(db, {
-      blobs: fileBlobs(flag("blobs", `${stateDir}/blobs`) as string),
-      metrics,
-    });
-    const upstream = new BusClient({
-      ...upstreamOptions,
-      timeoutMs: 30_000,
-    });
-    const follower = follow({
-      store,
-      upstream,
-      upstreamUrl,
-      logger,
-      ...(has("idle-ms") ? { idleMs: Number(flag("idle-ms")) } : {}),
-      onLag: ({ seqBehind, ms }) => {
-        // Replication is asynchronous, so a failover can lose up to this.
-        // Publishing it is what makes the RPO a number rather than a hope.
-        metrics.gauge("bql-bus.replication.lag_seq", seqBehind);
-        metrics.gauge("bql-bus.replication.lag_ms", ms);
-      },
-    });
-    // A follower serves reads. The store refuses writes on its own — being a
-    // follower is recorded in the database, not in a flag that can disagree
-    // with it — so this is the same server, not a second one.
-    const replica = has("port")
-      ? createServer({
-          store,
-          signingKey: await keyringFor(),
-          adminToken: (await secrets()).adminToken,
-          metrics,
-          logger,
-          port: Number(flag("port")),
-          hostname: flag("host", process.env.BUS_HOST ?? "127.0.0.1") as string,
-        })
-      : null;
-    logger.info("following", {
-      upstream: upstreamUrl,
-      data: resolve(stateDir),
-      ...(replica ? { url: `http://${replica.hostname}:${replica.port}` } : {}),
-    });
-    console.log(
-      `following ${upstreamUrl} into ${resolve(stateDir)}${
-        replica ? ` — reads on http://${replica.hostname}:${replica.port}` : ""
-      }`,
-    );
-    shutdown(async () => {
-      await follower.stop();
-      if (replica) await replica.shutdown();
-      store.close();
-    });
-    await follower.done;
-    break;
-  }
-
-  /**
-   * Take the leader role, fenced by a lease in shared storage.
-   *
-   * The lease is acquired first and the epoch it grants is what gets stamped
-   * into the database — recording a new epoch locally and then losing the race
-   * would leave a node that believes it is the leader. The old leader, if it is
-   * still running with `--lease`, sees the epoch move and stops writing.
-   */
-  case "promote": {
-    const leasePath = flag("lease");
-    if (!leasePath)
-      throw new Error(
-        "promote wants --lease <path> in storage both nodes can see: the fence is the point",
-      );
-    const db = flag("db", `${stateDir}/bus.db`) as string;
-    const store = new BusStore(db, {
-      blobs: fileBlobs(flag("blobs", `${stateDir}/blobs`) as string),
-    });
-    const holder = flag("holder", hostname()) as string;
-    const won = await promote(store, fileLease(leasePath), holder);
-    const state = store.cluster();
-    store.close();
-    console.log(JSON.stringify({ ...won, ...state }));
-    break;
-  }
-
-  case "cluster": {
-    const store = new BusStore(flag("db", `${stateDir}/bus.db`) as string);
-    console.log(JSON.stringify(store.cluster()));
-    store.close();
     break;
   }
 
@@ -1092,12 +922,6 @@ switch (command) {
   revoke      <jti>                       revoke one token by its id
   quota       [set --messages --bytes]    per-workspace ceilings
   audit       who did what, most recent first
-  follow      <upstream>                  replicate the log into --data
-  promote     --lease <path>              take the leader role, fenced by an epoch
-  cluster     role, epoch and replication lag
-  backup      <dir>                       consistent copy of the database and blobs
-  restore     <dir> --data <dir>          restore that copy, and prove it opens
-              --until-seq N | --until-time  point-in-time: cut the log off there
   schedule    add <name> <cron> <subject> [json]   publish on a cron schedule
               --tz <iana> --catch-up latest|none --headers k=v --paused
               list · show · remove · pause · resume · run <name>   (--json)
@@ -1110,23 +934,26 @@ Common flags:
   --config-dir <dir>  private BQL connection registry
   --vercel-bypass <secret>  protection bypass override (BUS_VERCEL_BYPASS in direct mode)
   --token <token>     per-command bus token override
-  --url <url>          bus base URL (BUS_URL)
-  --state <dir>        signing key and admin token (default .bql-bus)
+  --url <url>          bus base URL (BUS_URL); a,b,c names every node of a cluster
   --workspace <name>   tenancy (default "default")
-  --port --host --db --blobs           serve
+  --port --host        serve
+  --cluster            serve: one node of a clustered bus on bql.sh, mounted at /bus
+  --node <id> --peers id=ws://host:port,…  serve --cluster: this node and the others
+  --advertise <ws-url> serve --cluster: how peers reach this node (default ws://host:port)
+  --rf <n>             serve --cluster: copies of the bus database (default every node)
+  --config <bql.toml>  serve: any other bql.sh setting ([s3] shipping, lease timings)
+  --database <name>    serve: the bql.sh database holding the bus (default bus) (BUS_DATABASE)
+  --ack <level>        serve: publish durability, local|fsync (default)|replica|quorum (BUS_ACK)
   --log-level <level>  debug|info|warn|error|silent (BUS_LOG_LEVEL)
   --log-format <fmt>   text|json (BUS_LOG_FORMAT)
   --publish a.b,c.>    token: subject patterns it may publish to
   --subscribe name     token: subscriptions it may claim from
-  --data <dir>         one directory: keys, database, WAL and blobs
-  --lease <path>       serve: stop writing once another node wins this lease
+  --data <dir>         bql.sh's data directory; the bus keys go in <data>/bus (BUS_DATA, default .bql-bus)
   --otlp-endpoint <u>  serve: export spans as OTLP/HTTP
   --publish-rate <n>   serve: publishes per token per second (0 is off)
   --claim-rate <n>     serve: claims per token per second (0 is off)
   --max-polls <n>      serve: concurrent long polls one token may hold
   --min-free-bytes <n> serve: refuse publishes (507) below this much free disk
-  --wal-checkpoint-bytes <n>  serve: truncate the WAL once it passes this
-  --synchronous <mode> serve: FULL (default) or NORMAL — see the soak note
 
 Examples:
   bql bus subscribe work 'work.>' --ordered

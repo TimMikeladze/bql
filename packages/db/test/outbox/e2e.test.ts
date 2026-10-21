@@ -7,6 +7,7 @@
 // compiler options would be checking it against rules it was not written for.
 
 import { afterAll, describe, expect, test } from "bun:test"
+import { Bql } from "../../src/embedded.ts"
 import { createDb, startTestServer, stopAll, tempDataDir } from "../server/harness.ts"
 
 afterAll(stopAll)
@@ -18,7 +19,9 @@ interface Message {
   body: { db: string; table: string; op: string; txid: number; row?: { v: string } }
 }
 interface BusModule {
-  BusStore: new (path: string) => { close(): void }
+  BusStore: new (storage: unknown) => { close(): void }
+  bqlStorage(bq: unknown): unknown
+  ensureBusDatabase(bq: unknown): Promise<void>
   createServer(options: Record<string, unknown>): { port: number; stop(force?: boolean): void }
   generateKey(): string
   BusClient: new (options: { url: string; token: string }) => {
@@ -44,7 +47,11 @@ describe("outbox end to end", () => {
   test("committed rows reach a bus subject once each, and a webhook sink after it", async () => {
     const bus = (await import(BUS_ENTRY)) as BusModule
     const adminToken = bus.generateKey()
-    const store = new bus.BusStore(":memory:")
+    // The bus keeps its tables in a bql.sh database of its own engine, apart
+    // from the server under test.
+    const busEngine = await Bql.open({ dir: tempDataDir() })
+    await bus.ensureBusDatabase(busEngine)
+    const store = new bus.BusStore(bus.bqlStorage(busEngine))
     const busServer = bus.createServer({
       store,
       signingKey: bus.generateKey(),
@@ -146,6 +153,7 @@ describe("outbox end to end", () => {
       hook.stop(true)
       busServer.stop(true)
       store.close()
+      await busEngine.close()
     }
   }, 30_000)
 })

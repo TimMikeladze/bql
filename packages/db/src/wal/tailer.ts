@@ -62,6 +62,9 @@ export type RestoreOutcome =
   /** There is no WAL yet. */
   | "absent"
 
+/** Most bytes one `poll` reads per `readSync`; at least one frame whatever the page size. */
+const READ_BYTES = 256 * 1024
+
 export class WalTailer {
   readonly path: string
 
@@ -73,6 +76,8 @@ export class WalTailer {
   #running: Checksum = [0, 0]
   #sawReset = false
   #scratch: Uint8Array = new Uint8Array(0)
+  /** Frames the next poll reads in its first run. */
+  #lastRun = 8
   /** Reused across polls: the header is 32 bytes and is re-read on every one of them. */
   #headerScratch: Uint8Array = new Uint8Array(WAL_HEADER_SIZE)
 
@@ -112,8 +117,6 @@ export class WalTailer {
     const { header, size } = state
 
     const frameSize = walFrameSize(header.pageSize)
-    if (this.#scratch.byteLength !== frameSize) this.#scratch = new Uint8Array(frameSize)
-    const frame = this.#scratch
 
     const txns: TxnFrames[] = []
     // Scanning always starts from the last confirmed commit, never from wherever the previous
@@ -125,17 +128,41 @@ export class WalTailer {
     let pendingFrames = 0
     let afterReset = this.#sawReset
 
+    // Frames are read in runs rather than one `readSync` each: a five-page commit was six
+    // syscalls. Every frame is still verified on its own, so a run that ends in a torn or stale
+    // frame stops at exactly the frame the one-at-a-time read stopped at. The file size is no
+    // guide to how much is new, because after a checkpoint SQLite reuses the WAL from frame 1 and
+    // the file keeps its old length, stale frames and all. So the first run is as long as the last
+    // poll's, and each further run doubles, up to `READ_BYTES`.
+    const maxRun = Math.max(1, Math.floor(READ_BYTES / frameSize))
+    let run = Math.min(maxRun, Math.max(1, this.#lastRun))
+    let buf = this.#scratch
+    let bufStart = offset
+    let bufEnd = offset
+    const startIndex = index
     while (offset + frameSize <= size) {
-      const read = fs.readSync(fd, frame, 0, frameSize, offset)
-      if (read < frameSize) break
-      const check = checkFrameFast(frame, 0, header, running)
+      if (offset + frameSize > bufEnd) {
+        const frames = Math.min(run, Math.floor((size - offset) / frameSize))
+        run = Math.min(maxRun, run * 2)
+        const want = frames * frameSize
+        if (buf.byteLength < want) {
+          buf = new Uint8Array(want)
+          this.#scratch = buf
+        }
+        const read = fs.readSync(fd, buf, 0, want, offset)
+        if (read < frameSize) break
+        bufStart = offset
+        bufEnd = offset + read
+      }
+      const at = offset - bufStart
+      const check = checkFrameFast(buf, at, header, running)
       if (!check.valid) break
 
       running = check.next
       offset += frameSize
       index += 1
       pendingFrames += 1
-      pending.set(check.header.pgno, frame.slice(WAL_FRAME_HEADER_SIZE))
+      pending.set(check.header.pgno, buf.slice(at + WAL_FRAME_HEADER_SIZE, at + frameSize))
 
       if (check.header.commitSize !== 0) {
         const pages = [...pending.keys()].sort((a, b) => a - b)
@@ -160,6 +187,9 @@ export class WalTailer {
     }
 
     if (txns.length > 0) this.#sawReset = false
+    // One more than this poll's frames, so a commit of the same size next time ends its run on
+    // the frame that fails to verify instead of needing a second read to find it.
+    if (index > startIndex) this.#lastRun = index - startIndex + 1
     return txns
   }
 

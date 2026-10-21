@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
+import { testStore } from "./helpers";
 import { BusStore } from "../src/bus/store";
 
 let clock = 1_000_000;
 const now = () => clock;
-const bus = () => new BusStore(":memory:", { now });
+const bus = () => testStore({ now });
 const W = "default";
 
 const sub = (
@@ -304,32 +305,6 @@ test("stats report lag, depth and dead letters", async () => {
   store.close();
 });
 
-test("a body larger than the inline limit goes to the blob store", async () => {
-  const blobs = new Map<string, string>();
-  const store = new BusStore(":memory:", {
-    now,
-    inlineMaxBytes: 64,
-    blobs: {
-      put: async (key, data) => {
-        blobs.set(key, data);
-        return key;
-      },
-      get: async (handle) => blobs.get(handle)!,
-      has: async (handle) => blobs.has(handle),
-      delete: async (handle) => {
-        blobs.delete(handle);
-      },
-    },
-  });
-  sub(store, "work", "work.>");
-  const big = "x".repeat(500);
-  await store.publish(W, { subject: "work.do", body: { big } });
-  expect(blobs.size).toBe(1);
-  const envelope = (await store.claim(W, "work", "c1", 1))[0]!;
-  expect(envelope.message.body).toEqual({ big });
-  store.close();
-});
-
 test("a subscription's pattern is immutable", () => {
   const store = bus();
   sub(store, "work", "work.>");
@@ -372,7 +347,7 @@ test("a deduplicated request keeps the original correlation", async () => {
 });
 
 test("retention never deletes a message whose delivery is unfinished", async () => {
-  const store = new BusStore(":memory:", { now, retentionMs: 1000 });
+  const store = testStore({ now, retentionMs: 1000 });
   store.subscribe(W, {
     name: "work",
     pattern: "work.>",
@@ -398,7 +373,7 @@ test("retention never deletes a message whose delivery is unfinished", async () 
 });
 
 test("retention does collect messages every subscription has settled", async () => {
-  const store = new BusStore(":memory:", { now, retentionMs: 1000 });
+  const store = testStore({ now, retentionMs: 1000 });
   store.subscribe(W, {
     name: "work",
     pattern: "work.>",
@@ -416,7 +391,7 @@ test("retention does collect messages every subscription has settled", async () 
 });
 
 test("a ttl does not delete a message a consumer is holding", async () => {
-  const store = new BusStore(":memory:", { now, retentionMs: 0 });
+  const store = testStore({ now, retentionMs: 0 });
   store.subscribe(W, {
     name: "work",
     pattern: "work.>",
@@ -437,23 +412,9 @@ test("a ttl does not delete a message a consumer is holding", async () => {
 });
 
 test("blobs are collected once no message references them", async () => {
-  const blobs = new Map<string, string>();
-  const store = new BusStore(":memory:", {
-    now,
-    inlineMaxBytes: 32,
-    retentionMs: 1000,
-    blobs: {
-      put: async (key, data) => {
-        blobs.set(key, data);
-        return key;
-      },
-      get: async (handle) => blobs.get(handle)!,
-      has: async (handle) => blobs.has(handle),
-      delete: async (handle) => {
-        blobs.delete(handle);
-      },
-    },
-  });
+  const store = testStore({ now, inlineMaxBytes: 32, retentionMs: 1000 });
+  const blobs = () =>
+    (store.raw().query("SELECT COUNT(*) AS n FROM blobs_data").get() as { n: number }).n;
   store.subscribe(W, {
     name: "work",
     pattern: "work.>",
@@ -461,7 +422,7 @@ test("blobs are collected once no message references them", async () => {
     deliverFrom: "beginning",
   });
   await store.publish(W, { subject: "work.do", body: { big: "x".repeat(200) } });
-  expect(blobs.size).toBe(1);
+  expect(blobs()).toBe(1);
 
   // Still referenced while the message lives.
   expect(await store.collectBlobs()).toBe(0);
@@ -472,12 +433,12 @@ test("blobs are collected once no message references them", async () => {
   store.sweep();
 
   expect(await store.collectBlobs()).toBe(1);
-  expect(blobs.size).toBe(0);
+  expect(blobs()).toBe(0);
   store.close();
 });
 
 test("a ttl collects a message nobody ever consumed", async () => {
-  const store = new BusStore(":memory:", { now, retentionMs: 0 });
+  const store = testStore({ now, retentionMs: 0 });
   store.subscribe(W, {
     name: "work",
     pattern: "work.>",
@@ -496,7 +457,7 @@ test("a ttl collects a message nobody ever consumed", async () => {
 
 test("a match is found across many scan batches, not just the first", async () => {
   // scanBatch is deliberately tiny so the cursor has to walk the log in steps.
-  const store = new BusStore(":memory:", { now, scanBatch: 10 });
+  const store = testStore({ now, scanBatch: 10 });
   store.subscribe(W, {
     name: "rare",
     pattern: "rare.event",

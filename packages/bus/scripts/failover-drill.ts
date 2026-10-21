@@ -1,27 +1,38 @@
 #!/usr/bin/env bun
 /**
- * Failover, under load, with the fence doing the work.
+ * Failover of a three-node clustered bus, under load.
  *
- * The three things worth proving, and the only three this claims:
- *   · a follower rebuilt from the **bus log** matches the leader's log
- *   · promotion is fenced — the old leader stops writing once the epoch moves
- *   · the replication lag at the moment of failover is a number, and it is the
- *     RPO. Replication is asynchronous; anything published inside that window
- *     is lost, and this prints how much it was.
+ * Three `bql bus serve --cluster` processes form one bql.sh Raft group with
+ * database `bus` on every node. A producer publishes at `ack: "replica"`
+ * through one multi-URL client while two consumers claim and ack. The primary
+ * is SIGKILLed, a replica is promoted, and the work carries on. At the end:
  *
- *   bun scripts/failover-drill.ts
+ *   · every publish answered 2xx is in the new primary's log (RPO 0 at `replica`)
+ *   · every one of them was processed at least once
+ *   · the failover time: from the kill to the first publish the new primary
+ *     acknowledged, as the producer saw it
+ *
+ *   bun scripts/failover-drill.ts [--seconds 4]
+ *
+ * `BQL_BUS_BIN=./dist/bql` runs the compiled binary instead of the source.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { generateKey } from "../src/bus/tokens";
 import { BusClient, BusRequestError } from "../src/client/bus";
+import type { Message } from "../src/shared/protocol";
 
 const root = resolve(import.meta.dir, "..");
-const scratch = await mkdtemp(`${tmpdir()}/bql-bus-failover-`);
+const scratch = await mkdtemp(`${tmpdir()}/bql-bus-cluster-drill-`);
 const signingKey = generateKey();
 const adminToken = generateKey();
-const lease = `${scratch}/lease.json`;
+const clusterSecret = generateKey();
+/** bql.sh's own admin key, the same on every node, for `GET /v1/cluster` when something fails. */
+const bqlAdminKey = generateKey();
+const seconds = Number(
+  process.argv[process.argv.indexOf("--seconds") + 1] ?? 4,
+) || 4;
 
 const failures: string[] = [];
 const check = (label: string, ok: boolean, detail = "") => {
@@ -30,7 +41,7 @@ const check = (label: string, ok: boolean, detail = "") => {
 };
 
 async function freePort(start: number): Promise<number> {
-  for (let candidate = start; candidate < start + 200; candidate++) {
+  for (let candidate = start; candidate < start + 500; candidate++) {
     try {
       const probe = Bun.listen({
         hostname: "127.0.0.1",
@@ -44,9 +55,38 @@ async function freePort(start: number): Promise<number> {
   throw new Error(`no free port from ${start}`);
 }
 
+const ids = ["n1", "n2", "n3"];
+const ports = new Map<string, number>();
+let next = 4850;
+for (const id of ids) {
+  const port = await freePort(next);
+  ports.set(id, port);
+  next = port + 1;
+}
+const busUrl = (id: string) => `http://127.0.0.1:${ports.get(id)}/bus`;
 const children = new Map<string, ReturnType<typeof Bun.spawn>>();
 const binary = process.env.BQL_BUS_BIN;
-const spawn = (name: string, args: string[]) => {
+
+function spawn(id: string) {
+  const args = [
+    "serve",
+    "--cluster",
+    "--node",
+    id,
+    "--port",
+    String(ports.get(id)),
+    "--peers",
+    ids
+      .filter((peer) => peer !== id)
+      .map((peer) => `${peer}=ws://127.0.0.1:${ports.get(peer)}`)
+      .join(","),
+    "--data",
+    `${scratch}/${id}`,
+    "--ack",
+    "replica",
+    "--log-level",
+    "warn",
+  ];
   const child = Bun.spawn(
     binary ? [binary, "bus", ...args] : [process.execPath, "src/cli/index.ts", ...args],
     {
@@ -55,196 +95,211 @@ const spawn = (name: string, args: string[]) => {
         ...process.env,
         BUS_SIGNING_KEY: signingKey,
         BUS_ADMIN_TOKEN: adminToken,
+        BUS_CLUSTER_SECRET: clusterSecret,
+        BQL_ADMIN_KEY: bqlAdminKey,
       },
       stdout: "ignore",
       stderr: "inherit",
     },
   );
-  children.set(name, child);
-  return child;
-};
+  children.set(id, child);
+}
 
-const waitUp = async (url: string) => {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      if ((await fetch(`${url}/health`)).ok) return;
-    } catch {}
-    await Bun.sleep(100);
+async function health(id: string): Promise<{ role?: string } | null> {
+  try {
+    const response = await fetch(`${busUrl(id)}/health`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    return response.ok ? ((await response.json()) as { role?: string }) : null;
+  } catch {
+    return null;
   }
-  throw new Error(`${url} never came up`);
+}
+
+async function until<T>(what: string, check: () => Promise<T | null | false>, ms = 60_000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(50);
+  }
+}
+
+const primaryId = async (among = ids): Promise<string | null> => {
+  for (const id of among) if ((await health(id))?.role === "primary") return id;
+  return null;
 };
 
 try {
-  const leaderPort = await freePort(4840);
-  const replicaPort = await freePort(leaderPort + 1);
-  const leaderUrl = `http://127.0.0.1:${leaderPort}`;
-  const replicaUrl = `http://127.0.0.1:${replicaPort}`;
+  for (const id of ids) spawn(id);
+  await until("three nodes serving the bus", async () =>
+    (await Promise.all(ids.map(health))).every((one) => one?.role),
+  );
+  const first = (await until("a bus primary", () => primaryId())) as string;
+  console.log(`nodes  ${ids.map((id) => `${id}=${busUrl(id)}`).join("  ")}`);
+  console.log(`primary ${first}`);
 
-  spawn("leader", [
-    "serve",
-    "--data",
-    `${scratch}/leader`,
-    "--port",
-    String(leaderPort),
-    "--lease",
-    lease,
-    "--log-level",
-    "error",
-  ]);
-  await waitUp(leaderUrl);
-
-  const leader = new BusClient({ url: leaderUrl, token: adminToken });
-  await leader.subscribe({
-    name: "work",
-    pattern: "work.>",
-    deliverFrom: "beginning",
+  const urls = ids.map(busUrl);
+  const client = () => new BusClient({ url: urls, token: adminToken, timeoutMs: 10_000 });
+  const producer = client();
+  await producer.subscribe({ name: "drill", pattern: "drill.>", deliverFrom: "beginning" });
+  // `replica` needs a replica streaming; right after start that can take a moment.
+  await until("a replica to ack", async () => {
+    try {
+      await producer.publish({ subject: "warmup.x", ack: "replica" });
+      return true;
+    } catch {
+      return false;
+    }
   });
 
-  // Load, and keep it running across the promotion: a drill on a quiet bus
-  // proves the easy half.
-  let published = 0;
-  let stopPublishing = false;
-  const publisher = (async () => {
-    while (!stopPublishing) {
+  /** Message id → the seq its 2xx named. Seqs can be reused after a failover; ids cannot. */
+  const acked = new Map<number, number>();
+  const refused = new Map<string, number>();
+  const processed = new Set<number>();
+  let publishing = true;
+  let consuming = true;
+  let killedAt = 0;
+  let firstAfterKill = 0;
+  let counter = 0;
+
+  const publishLoop = (async () => {
+    while (publishing) {
+      const id = ++counter;
+      const startedAt = Date.now();
       try {
-        await leader.publish({ subject: "work.do", body: { n: published } });
-        published++;
-      } catch {
-        // Expected once the leader is fenced out.
+        const result = await producer.publish({
+          subject: "drill.work",
+          body: { id },
+          ack: "replica",
+        });
+        acked.set(id, result.seq);
+        // Only a publish sent after the kill counts; one in flight across it
+        // may have been answered by the old primary.
+        if (killedAt && startedAt > killedAt && !firstAfterKill) firstAfterKill = Date.now();
+      } catch (error) {
+        const code =
+          error instanceof BusRequestError
+            ? (error.code ?? String(error.status))
+            : ((error as { code?: string }).code ?? "error");
+        refused.set(code, (refused.get(code) ?? 0) + 1);
+        await Bun.sleep(20);
       }
-      await Bun.sleep(2);
     }
   })();
 
-  await Bun.sleep(500);
-  spawn("replica", [
-    "follow",
-    leaderUrl,
-    "--data",
-    `${scratch}/replica`,
-    "--port",
-    String(replicaPort),
-    "--idle-ms",
-    "100",
-    "--log-level",
-    "error",
-  ]);
-  await waitUp(replicaUrl);
-  const replica = new BusClient({ url: replicaUrl, token: adminToken });
+  const consumeLoop = (name: string) =>
+    (async () => {
+      const consumer = client();
+      while (consuming) {
+        try {
+          const envelopes = await consumer.claim("drill", name, 25, 500);
+          for (const envelope of envelopes) {
+            processed.add((envelope.message.body as { id: number }).id);
+            await consumer.ack(envelope.delivery, name).catch(() => {});
+          }
+        } catch {
+          await Bun.sleep(100);
+        }
+      }
+    })();
+  const consumers = [consumeLoop("c1"), consumeLoop("c2")];
 
-  // Let it catch up under load.
-  await Bun.sleep(2000);
-  const beforeLeader = await leader.stats();
-  const beforeReplica = await replica.stats();
-  const lagAtFailover = beforeLeader.lastSeq - beforeReplica.lastSeq;
-  check(
-    "the replica tracked the leader's log",
-    beforeReplica.lastSeq > 0 && lagAtFailover >= 0,
-    `replica at ${beforeReplica.lastSeq}, leader at ${beforeLeader.lastSeq}`,
-  );
-
-  // A replica is read-only, and says so rather than accepting a write it
-  // cannot keep.
-  let refused = false;
-  try {
-    await replica.publish({ subject: "work.do", body: "should not land" });
-  } catch (error) {
-    refused = error instanceof BusRequestError && error.status === 409;
-  }
-  check("a follower refuses writes", refused);
-
-  // ---- promote ----
-  children.get("replica")?.kill("SIGTERM");
-  await children.get("replica")?.exited;
-
-  const promotion = Bun.spawn(
-    binary
-      ? [binary, "promote", "--data", `${scratch}/replica`, "--lease", lease, "--holder", "replica"]
-      : [
-          process.execPath,
-          "src/cli/index.ts",
-          "promote",
-          "--data",
-          `${scratch}/replica`,
-          "--lease",
-          lease,
-          "--holder",
-          "replica",
-        ],
-    { cwd: root, env: { ...process.env, BUS_SIGNING_KEY: signingKey, BUS_ADMIN_TOKEN: adminToken }, stdout: "pipe", stderr: "inherit" },
-  );
-  const promoted = JSON.parse(await new Response(promotion.stdout).text()) as {
-    epoch: number;
-    role: string;
-  };
-  check(
-    "promotion advanced the epoch and took the leader role",
-    promoted.epoch >= 1 && promoted.role === "leader",
-    `epoch ${promoted.epoch}, role ${promoted.role}`,
-  );
-
-  // ---- the fence ----
-  // The old leader polls the lease and stops writing. This is the half that
-  // makes the epoch mean something: without it, both nodes accept writes.
-  let fenced = false;
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline && !fenced) {
-    try {
-      await leader.publish({ subject: "work.do", body: "after the fence" });
-    } catch (error) {
-      fenced = error instanceof BusRequestError && error.status === 409;
+  await Bun.sleep(seconds * 1000);
+  const before = acked.size;
+  const victim = (await primaryId()) as string;
+  killedAt = Date.now();
+  children.get(victim)?.kill("SIGKILL");
+  console.log(`killed ${victim} (SIGKILL) after ${before} acknowledged publishes`);
+  const survivors = ids.filter((id) => id !== victim);
+  const promoted = (await until("a survivor to take the primary", () =>
+    primaryId(survivors),
+  ).catch(async (error) => {
+    for (const id of survivors) {
+      const view = await fetch(`http://127.0.0.1:${ports.get(id)}/v1/cluster`, {
+        headers: { authorization: `Bearer ${bqlAdminKey}` },
+      })
+        .then((response) => response.text())
+        .catch(String);
+      console.error(`${id} bus ${JSON.stringify(await health(id))}\n${id} /v1/cluster ${view}`);
     }
-    await Bun.sleep(250);
-  }
-  stopPublishing = true;
-  await publisher;
-  check("the old leader stopped writing once it was fenced out", fenced);
+    throw error;
+  })) as string;
+  const promotedAt = Date.now();
+  await until("a publish acknowledged after the kill", async () => firstAfterKill > 0, 60_000);
+  await Bun.sleep(seconds * 1000);
+  publishing = false;
+  await publishLoop;
 
-  // ---- what the failover cost ----
-  const promotedBus = spawn("promoted", [
-    "serve",
-    "--data",
-    `${scratch}/replica`,
-    "--port",
-    String(replicaPort),
-    "--lease",
-    lease,
-    "--log-level",
-    "error",
-  ]);
-  void promotedBus;
-  await waitUp(replicaUrl);
-  const after = await replica.stats();
-  check(
-    "the promoted node serves writes",
-    (await replica.publish({ subject: "work.do", body: "new leader" })).seq > 0,
+  // Drain: every acknowledged message processed at least once.
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline && [...acked.keys()].some((id) => !processed.has(id)))
+    await Bun.sleep(100);
+  consuming = false;
+  await Promise.all(consumers);
+
+  // Everything acknowledged is in the new primary's log.
+  const reader = new BusClient({ url: busUrl(promoted), token: adminToken });
+  const log = new Map<number, Message>();
+  for (let after = 0; ; ) {
+    const page = await reader.log(after, 1000, { subject: "drill.work" });
+    if (page.length === 0) break;
+    for (const message of page) log.set(message.seq, message);
+    after = page.at(-1)!.seq;
+  }
+  const lost = [...acked].filter(
+    ([id, seq]) => (log.get(seq)?.body as { id?: number } | undefined)?.id !== id,
   );
-  check(
-    "the new leader kept the subscription and its cursor",
-    after.subscriptions.some((s) => s.name === "work"),
-    `${after.subscriptions.length} subscription(s)`,
-  );
-  // The RPO is the lag **at the moment of promotion**, not the difference
-  // between the two nodes afterwards — the old leader goes on accepting writes
-  // until the fence reaches it, and counting those as "lost" would conflate
-  // two different things. What was lost is what the replica had not yet
-  // applied when it took over.
+  const unprocessed = [...acked.keys()].filter((id) => !processed.has(id));
+
+  console.log(`promoted ${promoted}`);
   console.log(
-    `\nRPO at this failover: ${lagAtFailover} message(s).\n` +
-      `Replication is asynchronous, so a failover loses up to the current lag.\n` +
-      `bql-bus.replication.lag_seq and lag_ms are the gauges that carry it;\n` +
-      `alert on them, because this number is the promise you are making.`,
+    `failover  ${promotedAt - killedAt} ms to a new primary, ${firstAfterKill - killedAt} ms to the first acknowledged publish`,
   );
+  console.log(
+    `publishes ${acked.size} acknowledged, ${[...refused].map(([code, n]) => `${n} ${code}`).join(", ") || "none refused"}`,
+  );
+  console.log(`RPO       ${lost.length} acknowledged publishes lost`);
+  check("every acknowledged publish is in the new primary's log", lost.length === 0, `${lost.length} missing`);
+  check(
+    "every acknowledged publish was processed at least once",
+    unprocessed.length === 0,
+    `${unprocessed.length} unprocessed`,
+  );
+  check("work continued after the failover", acked.size > before, `${acked.size - before} after the kill`);
+
+  // The old primary comes back as a replica of the new one and catches up.
+  spawn(victim);
+  const lastSeq = Math.max(...acked.values());
+  const rejoined = await until(
+    `${victim} to rejoin as a replica with the whole log`,
+    async () => {
+      if ((await health(victim))?.role !== "replica") return false;
+      try {
+        const stats = await new BusClient({ url: busUrl(victim), token: adminToken }).stats();
+        return stats.lastSeq >= lastSeq;
+      } catch {
+        return false;
+      }
+    },
+  ).then(
+    () => true,
+    () => false,
+  );
+  check(`${victim} rejoined as a replica and caught up`, rejoined);
+  check("the new primary kept the primary", (await health(promoted))?.role === "primary");
+} catch (error) {
+  failures.push(String(error));
+  console.error(error);
 } finally {
-  for (const child of children.values()) child.kill("SIGTERM");
-  await Bun.sleep(500);
-  for (const child of children.values())
-    if (child.exitCode === null) child.kill("SIGKILL");
+  for (const child of children.values()) child.kill("SIGKILL");
+  await Promise.all([...children.values()].map((child) => child.exited));
   await rm(scratch, { recursive: true, force: true });
 }
 
 if (failures.length > 0) {
-  console.error(`\n${failures.length} failure(s): ${failures.join(", ")}`);
+  console.log(`\n${failures.length} failed`);
   process.exit(1);
 }
 console.log("\nfailover drill passed");

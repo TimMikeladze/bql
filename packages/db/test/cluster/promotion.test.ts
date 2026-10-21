@@ -12,6 +12,7 @@ import {
   pickFailover,
   type PromotionInput,
 } from "../../src/cluster/promotion.ts"
+import { ackedWithout } from "../../src/cluster/node.ts"
 
 function facts(over: Partial<ClusterFacts> = {}): ClusterFacts {
   return {
@@ -282,5 +283,36 @@ describe("pickFailover", () => {
     const tied = { ...base, lease: null, acked: { n2: "99", n3: "99" } }
     expect(pickFailover(tied)).toEqual({ node: "n2", applied: "99" })
     expect(pickFailover({ ...tied, replicas: ["n3", "n2"] })).toEqual({ node: "n2", applied: "99" })
+  })
+})
+
+describe("automatic failover past a primary that died mid-commit", () => {
+  // The dead primary reported txid 738; both replicas 737. Txid 738 reached no replica, so no
+  // client was told `replica` or `quorum` for it. Judged with the dead primary it blocks the
+  // failover for ever; judged without it, it does not. An unreachable replica still counts.
+  const acked = { n1: "738", n2: "737", n3: "737" }
+  const reachable = new Set(["n2", "n3"])
+
+  test("judged among every node the best replica is BEHIND the dead primary", () => {
+    const decision = decidePromotion(input({ node: "n2", applied: "737", cluster: facts({ acked }) }))
+    expect(decision.ok).toBe(false)
+  })
+
+  test("judged without the dead primary it is promoted", () => {
+    const pick = pickFailover({ db: "acme", primary: "n1", replicas: ["n2", "n3"], lease: null, acked, reachable, nowMs: 10_000 })
+    expect(pick).toEqual({ node: "n2", applied: "737" })
+    const decision = decidePromotion(
+      input({ node: "n2", applied: "737", cluster: facts({ acked: ackedWithout(acked, "n1") }) }),
+    )
+    expect(decision.ok).toBe(true)
+  })
+
+  test("an unreachable replica ahead of the best reachable one blocks the failover", () => {
+    // n3 confirmed 738, so a client may have been told `replica` for it; n2 has 737.
+    const ahead = { n1: "738", n2: "737", n3: "738" }
+    const decision = decidePromotion(
+      input({ node: "n2", applied: "737", cluster: facts({ acked: ackedWithout(ahead, "n1") }) }),
+    )
+    expect(decision.ok).toBe(false)
   })
 })

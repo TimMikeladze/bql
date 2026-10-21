@@ -2,7 +2,7 @@ import {
   resolveContext,
   type ResolveOptions,
 } from "../../../db/src/context/index.ts";
-import { validateHttpCredential } from "../../../db/src/context/model.ts";
+import { serviceUrl, validateHttpCredential } from "../../../db/src/context/model.ts";
 import { cliFetch } from "../../../db/src/cli/transport.ts";
 import type { ClientOptions } from "../client/bus";
 /** Share workstation selection without importing the executable database CLI. */
@@ -26,6 +26,12 @@ export async function resolveBusConnection(options: {
     }
     return undefined;
   };
+  // `--url a,b,c`: every node of a clustered bus. The first resolves the
+  // context; the client gets all of them.
+  const urls = (options.url ?? flag("url"))
+    ?.split(",")
+    .map((one) => one.trim())
+    .filter(Boolean);
   const input: ResolveOptions = {
     service: "bus",
     env: options.env,
@@ -34,7 +40,7 @@ export async function resolveBusConnection(options: {
     org: flag("org"),
     project: flag("project"),
     endpoint: flag("endpoint"),
-    url: options.url ?? flag("url"),
+    url: urls?.[0],
     token: flag("token"),
     vercelBypass: flag("vercel-bypass"),
   };
@@ -52,5 +58,9 @@ export async function resolveBusConnection(options: {
     },
     { preconnect: fetch.preconnect },
   );
-  return { url: context.url, token, fetchImpl };
+  return {
+    url: urls && urls.length > 1 ? urls.map(serviceUrl) : context.url,
+    token,
+    fetchImpl,
+  };
 }

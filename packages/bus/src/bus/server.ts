@@ -16,6 +16,14 @@ import { gate, type RateLimit, tokenBucket } from "./limits";
 import { type Logger, silentLogger } from "./log";
 import { type PrometheusMetrics, prometheusMetrics } from "./metrics";
 import { BusError, BusStore } from "./store";
+import { BqlClientError } from "../../../db/src/client/errors.ts";
+import {
+  type Ack,
+  attempts,
+  isAck,
+  isContention,
+  StorageError,
+} from "./storage";
 import { SubjectError } from "./subjects";
 import { type CompatMode, SchemaError, SUPPORTED_KEYWORDS } from "./schema";
 import {
@@ -66,6 +74,18 @@ export interface ServerOptions {
   claimRate?: RateLimit;
   /** Concurrent parked long polls one token may hold. 0 disables. */
   maxParkedPerToken?: number;
+  /**
+   * `false` builds the handler without a listener; mount `fetch` on another
+   * server (`bql serve --bus`, `bql bus serve --cluster`). Default `true`.
+   */
+  listen?: boolean;
+  /** A path prefix the routes are mounted under, such as `/bus`. */
+  basePath?: string;
+  /**
+   * The bus URL of the node that holds the primary, for `BQL-Primary` on a
+   * `503 NOT_PRIMARY`. Null while nobody holds it.
+   */
+  primaryUrl?: () => string | null;
 }
 
 export interface BusServer {
@@ -85,6 +105,15 @@ export interface BusServer {
   shutdown(options?: { timeoutMs?: number }): Promise<void>;
   /** True once `shutdown` has begun. `/ready` reports it. */
   readonly draining: boolean;
+  /** The handler, for mounting on a server this one did not start. */
+  fetch(req: Request, server?: Bun.Server<unknown>): Promise<Response>;
+}
+
+/** `NOT_PRIMARY` from the store, bql.sh's write gate, or a storage wait. */
+function notPrimaryCode(error: unknown): boolean {
+  if (error instanceof BusError || error instanceof StorageError)
+    return error.details.code === "NOT_PRIMARY";
+  return error instanceof BqlClientError && error.code === "NOT_PRIMARY";
 }
 
 /** The wire protocol this build speaks. `/api/v1/...` is the explicit spelling. */
@@ -127,6 +156,13 @@ function headerMap(value: unknown, field: string): Headers {
     out[key.toLowerCase()] = str(entry, `${field}.${key}`, 1000);
   }
   return out;
+}
+/** A request's `ack`, or undefined for the bus's default. */
+function ackOf(value: unknown): Ack | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isAck(value))
+    throw new BusError("ack must be local, fsync, replica or quorum", 400);
+  return value;
 }
 /**
  * Refuse a write when the disk is nearly full.
@@ -282,6 +318,8 @@ export function createServer(options: ServerOptions): BusServer {
     claims: TokenClaims,
     cost = 1,
   ) => {
+    // A request run again after a contended write was already charged.
+    if (attempts.getStore()?.retry) return;
     const decision = bucket.take(identity(claims), cost);
     if (decision.ok) return;
     throw new RateLimited(decision.retryAfterMs);
@@ -394,12 +432,24 @@ export function createServer(options: ServerOptions): BusServer {
       keys,
     );
 
-  const server = Bun.serve({
-    hostname: options.hostname ?? "127.0.0.1",
-    port: options.port ?? 4317,
-    idleTimeout: 120,
-    maxRequestBodySize: 16 * 1024 * 1024,
-    async fetch(req) {
+  /** The body, read once: a request that is run again reads it again. */
+  const bodies = new WeakMap<Request, Promise<Record<string, unknown>>>();
+  const bodyOf = (req: Request): Promise<Record<string, unknown>> => {
+    let body = bodies.get(req);
+    if (!body) {
+      body = req
+        .json()
+        .then(record)
+        .catch(() => {
+          throw new BusError("expected a JSON object", 400);
+        });
+      bodies.set(req, body);
+    }
+    return body;
+  };
+
+  const routes = {
+    async fetch(req: Request): Promise<Response> {
       const url = new URL(req.url);
       // A versioned wire protocol, so a broker and its clients can skew during
       // a rolling deploy instead of having to move in lockstep. `/api/v1/x` is
@@ -419,7 +469,12 @@ export function createServer(options: ServerOptions): BusServer {
             },
             400,
           );
-        if (path === "/health") return json({ ok: true, draining });
+        if (path === "/health")
+          return json({
+            ok: true,
+            draining,
+            role: store.isReplica ? "replica" : "primary",
+          });
         if (path === "/ready") {
           // Draining is deliberately *not* ready: a load balancer should stop
           // routing here before the process stops answering.
@@ -460,20 +515,18 @@ export function createServer(options: ServerOptions): BusServer {
           });
         }
         if (!path.startsWith("/api/"))
-          return serveAsset(options.assets, path, () =>
-            readerToken(DEFAULT_WORKSPACE),
+          return serveAsset(
+            options.assets,
+            path,
+            () => readerToken(DEFAULT_WORKSPACE),
+            basePath,
           );
 
         const claims = authenticate(req, url);
         const workspace = workspaceFor(claims, req, url);
         const body =
           req.method === "POST" || req.method === "PUT"
-            ? await req
-                .json()
-                .then(record)
-                .catch(() => {
-                  throw new BusError("expected a JSON object", 400);
-                })
+            ? await bodyOf(req)
             : {};
 
         // --------------------------------------------------------- publish
@@ -482,11 +535,13 @@ export function createServer(options: ServerOptions): BusServer {
           authorizePublish(claims, subject);
           limit(publishes, claims);
           requireRoom(store);
+          const ack = ackOf(body.ack);
           const result = await store.publish(
             workspace,
             {
               subject,
               body: (body.body ?? null) as Json,
+              ...(ack ? { ack } : {}),
               key: optionalStr(body.key, "key", 200),
               headers: headerMap(body.headers, "headers"),
               dedupeKey: optionalStr(body.dedupeKey, "dedupeKey", 400),
@@ -547,10 +602,12 @@ export function createServer(options: ServerOptions): BusServer {
             );
           limit(publishes, claims, messages.length);
           requireRoom(store);
+          const ack = ackOf(body.ack);
           const results = await store.publishBatch(
             workspace,
             messages,
             claims.sub,
+            ack ? { ack } : {},
           );
           return json({ results }, 201);
         }
@@ -647,6 +704,11 @@ export function createServer(options: ServerOptions): BusServer {
                 // the consumer simply asks again — somewhere else, once this
                 // process is out of rotation.
                 if (draining) return json([]);
+                // Primary lost while parked: the next claim goes elsewhere.
+                if (store.isReplica)
+                  throw new BusError("this node is no longer the primary", 503, {
+                    code: "NOT_PRIMARY",
+                  });
                 const now = Date.now();
                 const seq = store.lastSeq();
                 if (seq !== seenSeq || now >= nextRetry) {
@@ -772,7 +834,11 @@ export function createServer(options: ServerOptions): BusServer {
             limit(publishes, claims);
             requireRoom(store);
             audit(claims, "schedule.run", name);
-            return json(await store.runSchedule(workspace, name), 201);
+            const ack = ackOf(body.ack);
+            return json(
+              await store.runSchedule(workspace, name, ack ? { ack } : {}),
+              201,
+            );
           }
         }
 
@@ -810,8 +876,10 @@ export function createServer(options: ServerOptions): BusServer {
             // same grant and the same disk check as one on its own.
             const publish = publishList(body.publish, claims);
             if (publish.length > 0) requireRoom(store);
+            const ack = ackOf(body.ack);
             const acked = await store.ack(workspace, id, consumer, generation, {
               ...(publish.length > 0 ? { publish } : {}),
+              ...(ack ? { ack } : {}),
               ...(body.effects ? { effects: effectList(body.effects) } : {}),
             });
             // Committed, not yet answered: the window a consumer's retried ack
@@ -881,11 +949,13 @@ export function createServer(options: ServerOptions): BusServer {
             maxWaitMs,
             Math.max(0, int(body.waitMs, "waitMs", 0)),
           );
+          const ack = ackOf(body.ack);
           const published = await store.publish(
             workspace,
             {
               subject,
               body: (body.body ?? null) as Json,
+              ...(ack ? { ack } : {}),
               key: optionalStr(body.key, "key", 200),
               headers: headerMap(body.headers, "headers"),
               dedupeKey: optionalStr(body.dedupeKey, "dedupeKey", 400),
@@ -1159,8 +1229,32 @@ export function createServer(options: ServerOptions): BusServer {
 
         return json({ error: "not found" }, 404);
       } catch (error) {
+        if (isContention(error)) throw error;
+        if (notPrimaryCode(error)) {
+          const primary = options.primaryUrl?.() ?? null;
+          return new Response(
+            JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              code: "NOT_PRIMARY",
+              ...(primary ? { primary } : {}),
+            }),
+            {
+              status: 503,
+              headers: {
+                "Content-Type": "application/json",
+                ...(primary ? { "BQL-Primary": primary } : {}),
+              },
+            },
+          );
+        }
         if (error instanceof BusError)
-          return json({ error: error.message }, error.status);
+          return json({ error: error.message, ...error.details }, error.status);
+        if (error instanceof StorageError)
+          return json({ error: error.message, ...error.details }, error.status);
+        // bql.sh refusing a write (a guarded statement, a quota) keeps its
+        // own code and status.
+        if (error instanceof BqlClientError && error.status >= 400)
+          return json({ error: error.message, code: error.code }, error.status);
         if (error instanceof TokenError)
           return json({ error: error.message }, 401);
         // A malformed subject is the caller's mistake, not a server fault.
@@ -1209,20 +1303,77 @@ export function createServer(options: ServerOptions): BusServer {
         return json({ error: "the bus could not commit the operation" }, 500);
       }
     },
-  });
+  };
+
+  /**
+   * bql.sh refuses a write while a snapshot (or an interactive transaction)
+   * holds its writer instead of waiting, and a synchronous store call cannot
+   * wait. A request whose refused write was its first is run again after a
+   * short sleep. One that had already committed something answers 503 BUSY:
+   * running it again would repeat that write.
+   */
+  const basePath = options.basePath?.replace(/\/+$/, "") ?? "";
+  const answer = async (
+    original: Request,
+    host?: Bun.Server<unknown>,
+  ): Promise<Response> => {
+    let req = original;
+    if (basePath) {
+      const url = new URL(original.url);
+      if (url.pathname === basePath || url.pathname.startsWith(`${basePath}/`)) {
+        url.pathname = url.pathname.slice(basePath.length) || "/";
+        req = new Request(url.toString(), original);
+      }
+      // A long poll outlives the host server's default idle timeout.
+      host?.timeout(original, 120);
+    }
+    const deadline = Date.now() + 5000;
+    for (let attempt = 0; ; attempt++) {
+      const scope = { commits: 0, retry: attempt > 0 };
+      try {
+        return await attempts.run(scope, () => routes.fetch(req));
+      } catch (error) {
+        if (!isContention(error)) throw error;
+        if (scope.commits > 0 || Date.now() >= deadline)
+          return new Response(
+            JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              code: "BUSY",
+            }),
+            {
+              status: 503,
+              headers: { "Content-Type": "application/json", "Retry-After": "1" },
+            },
+          );
+        await Bun.sleep(Math.min(50, 2 ** attempt));
+      }
+    }
+  };
+
+  const server =
+    options.listen === false
+      ? null
+      : Bun.serve({
+          hostname: options.hostname ?? "127.0.0.1",
+          port: options.port ?? 4317,
+          idleTimeout: 120,
+          maxRequestBodySize: 16 * 1024 * 1024,
+          fetch: (req) => answer(req),
+        });
 
   return {
     // Bun types these as optional because a unix-socket server has neither;
     // this one always listens on TCP.
-    hostname: server.hostname ?? "127.0.0.1",
-    port: server.port ?? 0,
+    hostname: server?.hostname ?? options.hostname ?? "127.0.0.1",
+    port: server?.port ?? 0,
     get draining() {
       return draining;
     },
+    fetch: answer,
     stop(force = false) {
       draining = true;
       for (const close of [...streams]) close();
-      void server.stop(force);
+      void server?.stop(force);
     },
     shutdown({ timeoutMs = 15_000 } = {}) {
       // Idempotent, and correct even after `stop()` has already set `draining`
@@ -1240,7 +1391,7 @@ export function createServer(options: ServerOptions): BusServer {
         // `stop(false)` lets requests already in flight finish; `true` would
         // cut an ack off at the socket, which is the one thing worth waiting
         // for.
-        await server.stop(false);
+        await server?.stop(false);
         log.info("stopped");
       })();
       return shuttingDown;
@@ -1267,8 +1418,8 @@ function renderMetrics(
   only?: string,
 ): string {
   const gauges = prometheusMetrics();
-  // Install-wide, so they carry no workspace label: one process owns one file,
-  // and the disk it is on is not any tenant's property. A tenant scrape does
+  // Install-wide, so they carry no workspace label: one database holds every
+  // workspace, and the disk it is on is not any tenant's property. A tenant scrape does
   // not get them, for the same reason.
   if (only === undefined) {
     const sizes = store.sizes();
@@ -1375,10 +1526,25 @@ function stream(
   });
 }
 
+/**
+ * The page with its reader token, and with its absolute `/assets/` links and
+ * API calls moved under `base` when the bus is mounted under a prefix.
+ */
+function pageWith(html: string, readerToken: string, base: string): string {
+  const page = base ? html.replaceAll('"/assets/', `"${base}/assets/`) : html;
+  return page.replace(
+    "</head>",
+    `<script>window.__BUS_TOKEN=${JSON.stringify(readerToken)}${
+      base ? `;window.__BUS_BASE=${JSON.stringify(base)}` : ""
+    }</script></head>`,
+  );
+}
+
 async function serveAsset(
   root: string | undefined,
   path: string,
   readerToken: () => string,
+  mountedAt = "",
 ) {
   // A compiled binary carries the dashboard inside it. `Bun.file` on an
   // embedded path works in the compiled build and on disk in a checkout, so
@@ -1389,10 +1555,7 @@ async function serveAsset(
   if (embedded !== undefined) {
     const file = Bun.file(embedded);
     if (path.startsWith("/assets/")) return new Response(file);
-    const html = (await file.text()).replace(
-      "</head>",
-      `<script>window.__BUS_TOKEN=${JSON.stringify(readerToken())}</script></head>`,
-    );
+    const html = pageWith(await file.text(), readerToken(), mountedAt);
     return new Response(html, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
@@ -1410,10 +1573,7 @@ async function serveAsset(
       status: 404,
     });
   if (isAsset) return new Response(file);
-  const html = (await file.text()).replace(
-    "</head>",
-    `<script>window.__BUS_TOKEN=${JSON.stringify(readerToken())}</script></head>`,
-  );
+  const html = pageWith(await file.text(), readerToken(), mountedAt);
   return new Response(html, {
     headers: { "Content-Type": "text/html; charset=utf-8" },
   });

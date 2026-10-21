@@ -30,8 +30,12 @@ import type {
 declare global {
   interface Window {
     __BUS_TOKEN?: string;
+    /** The prefix the bus is mounted under on a clustered node, such as `/bus`. */
+    __BUS_BASE?: string;
   }
 }
+
+const base = () => window.__BUS_BASE ?? "";
 
 const token = () =>
   window.__BUS_TOKEN ??
@@ -39,7 +43,7 @@ const token = () =>
   "";
 
 async function read<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(`${base()}${path}`, {
     headers: { Authorization: `Bearer ${token()}` },
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -77,7 +81,7 @@ function useOperator() {
 }
 
 async function act(path: string, operator: string, body: unknown = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(`${base()}${path}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${operator}`,
@@ -405,7 +409,7 @@ export function App() {
     void refresh();
     // SSE is a refresh signal, not a subscription: when the sequence moves we
     // re-read, because the read is the only thing that is authoritative.
-    const source = new EventSource(`/api/stream?token=${token()}`);
+    const source = new EventSource(`${base()}/api/stream?token=${token()}`);
     source.addEventListener("update", () => {
       clearTimeout(timer.current);
       timer.current = setTimeout(() => void refresh(), 120);

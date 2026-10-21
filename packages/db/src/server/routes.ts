@@ -810,9 +810,8 @@ export const createDb: Handler = async (ctx) => {
   // node computes the same answer from the same replicated membership — so two nodes cannot both
   // create `acme`, and the one that may not is told which node may. No quorum on the create path:
   // it is a hash per member and a loop. `docs/c3-placement.md` §3.2.
-  ctx.runtime.promoter.assertMayCreate(body.name)
   try {
-    const tenant = await ctx.runtime.registry.create(body.name, {
+    const tenant = await ctx.runtime.createDatabase(body.name, {
       ...(body.pageSize !== undefined ? { pageSize: body.pageSize } : {}),
       ...(body.quotaBytes !== undefined ? { quotaBytes: body.quotaBytes } : {}),
       ...(body.from
@@ -826,11 +825,9 @@ export const createDb: Handler = async (ctx) => {
           }
         : {}),
     })
-    // In a cluster the database is not writable until this node holds its lease, and the claim is
-    // what makes the cluster *know* the database at all — so a create that returned before the
-    // grant committed would be followed by a `503 NOT_PRIMARY` on the caller's very next
-    // statement. Bounded by the control plane's own propose timeout.
-    await ctx.runtime.promoter.ensureLease(tenant.name)
+    // `createDatabase` waits for this node to hold the lease: the claim is what makes the cluster
+    // *know* the database at all, so a create that returned before the grant committed would be
+    // followed by a `503 NOT_PRIMARY` on the caller's very next statement.
     ctx.txid = Number(tenant.txid)
     return json(statsOf(ctx.runtime, tenant), 201)
   } catch (err) {
@@ -1061,8 +1058,11 @@ export const restoreDb: Handler = async (ctx) => {
   const into = body.into ?? `${name}-restore-${at}`.slice(0, 64)
   assertValidName(into)
   try {
-    const created = await ctx.runtime.registry.create(into, { from: { db: name, at } })
-    await ctx.runtime.promoter.ensureLease(created.name)
+    const created = await ctx.runtime.createDatabase(
+      into,
+      { from: { db: name, at } },
+      { gate: false },
+    )
     ctx.txid = Number(created.txid)
     return json({ name: into, txid: Number(created.txid), from: name, at: Number(at) }, 201)
   } catch (err) {

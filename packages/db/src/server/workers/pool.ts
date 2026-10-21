@@ -688,7 +688,7 @@ export class WorkerPool {
         if (!pending) return
         this.#pending.delete(message.id)
         pending.resolve(
-          new Response(message.body ?? null, {
+          new Response((message.body ?? null) as ConstructorParameters<typeof Response>[0], {
             status: message.status,
             headers: unflattenHeaders(message.headers),
           }),

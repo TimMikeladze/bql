@@ -21,6 +21,7 @@ import {
 } from "./client/feed.ts"
 import { BqlClientError } from "./client/errors.ts"
 import type {
+  Ack,
   Args,
   ChangeEvent,
   CheckpointMode,
@@ -55,13 +56,16 @@ import type {
   TransactionOptions,
   Tx,
 } from "./client/index.ts"
-import { createRuntime, startServer, type ServerHandle } from "./server/app.ts"
+import { createRuntime, startServer, type Mount, type ServerHandle } from "./server/app.ts"
 import { ADMIN } from "./server/auth.ts"
 import { loadConfig, type ServerConfig, type ServerConfigInput } from "./server/config.ts"
 import { mapError } from "./server/errors.ts"
 import { executeBatch, executeInTx, executeStatement, resolveOptions } from "./server/exec.ts"
+import { guarded } from "./server/guard.ts"
 import { lineageOf, resolveAt, statsOf } from "./server/routes.ts"
+import type { NodeRole } from "./server/promote.ts"
 import { mapTenantError, type ServerRuntime, type TxSession } from "./server/runtime.ts"
+import type { Database } from "./sqlite/index.ts"
 import { assertValidName, type CommitEvent, type Tenant, type TenantRow } from "./tenant/index.ts"
 
 export interface OpenOptions extends ServerConfigInput {
@@ -90,6 +94,8 @@ export interface ServeOptions {
   host?: string
   /** Where the first-start admin key notice goes. */
   log?: (message: string) => void
+  /** Handlers served under a path prefix on the same listener; see `StartOptions.mount`. */
+  mount?: Mount[]
 }
 
 export interface DatabaseInfo {
@@ -111,6 +117,30 @@ export interface DatabaseInfo {
 /** What `bq.on("commit", …)` is handed (design §9.2). */
 export interface EmbeddedCommit {
   db: string
+  txid: number
+}
+
+/** What `bq.on("role", …)` is handed: this node now holds `db` as `role`. */
+export interface EmbeddedRole {
+  db: string
+  role: NodeRole
+}
+
+/** What `db.sync.write` takes. */
+export interface SyncWriteOptions {
+  /**
+   * What the commit does locally, as `sync.commit` takes it: `"local"`, or an fsync of the log and
+   * the WAL before `write` returns for anything stronger. `"replica"` and `"quorum"` are only
+   * pre-checked here (`NO_REPLICAS` before anything runs); await `bq.replicated(db, txid, { ack })`
+   * for the replicas. Default `[durability] defaultAck`.
+   */
+  ack?: Ack
+}
+
+/** What `db.sync.commit` and `db.sync.write` answer with. */
+export interface SyncCommit<T> {
+  value: T
+  /** The txid the commit was assigned, or the database's current txid when it wrote nothing. */
   txid: number
 }
 
@@ -137,6 +167,22 @@ export interface SyncDb {
   execute(sql: string, args?: QueryArgs, options?: StatementOptions): SyncQuery
   batch(items: BatchItem[], options?: BatchOptions): Result<JsRow>[]
   transaction<T>(fn: (tx: SyncTx) => T, options?: TransactionOptions): T
+  /** `transaction`, plus the txid it committed at, for `bq.replicated`. */
+  commit<T>(fn: (tx: SyncTx) => T, options?: TransactionOptions): SyncCommit<T>
+  /**
+   * Runs `fn` on the database's writer connection inside `BEGIN IMMEDIATE`, commits, and records
+   * the commit in the log like any other write. `d` is the `bql.sh/sqlite` driver: cached
+   * `d.query()` statements, `d.transaction()` nesting as a SAVEPOINT, and reads that see this
+   * transaction's own writes. `BEGIN`/`COMMIT`/`ROLLBACK`, `ATTACH`/`DETACH` and connection
+   * pragmas are refused with `NOT_AUTHORIZED`. Do not keep `d` after `fn` returns.
+   */
+  write<T>(fn: (d: Database) => T, options?: SyncWriteOptions): SyncCommit<T>
+  /**
+   * Runs `fn` on a pooled read-only connection. `d.transaction()` gives a consistent snapshot
+   * across several statements; a transaction still open when `fn` returns is rolled back and
+   * reported as `BAD_REQUEST`. Pragmas and `ATTACH` are refused as in `write`.
+   */
+  read<T>(fn: (d: Database) => T): T
 }
 
 /** The embedded `Db`: everything the client's has, plus `sync`. */
@@ -144,6 +190,17 @@ export interface EmbeddedDb extends Db {
   readonly sync: SyncDb
   /** The tenant behind this handle, for code that wants the driver itself. */
   tenant(): Tenant
+}
+
+/** No error thrown yet; `undefined` is a value a callback can throw. */
+const NOTHING: unique symbol = Symbol("nothing")
+
+function isThenable(value: unknown): boolean {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
+  )
 }
 
 /** Every failure crosses this boundary as the error the client SDK would have thrown. */
@@ -222,14 +279,20 @@ class LocalDb implements EmbeddedDb {
     options: TransactionOptions = {},
   ): Promise<T> {
     const session = this.#begin(options)
+    let value: T
+    let txid: bigint
     try {
-      const value = await fn(this.#tx(session) as Tx)
-      this.#end(session, "commit")
-      return value
+      value = await fn(this.#tx(session) as Tx)
+      txid = this.#end(session, "commit")
     } catch (err) {
       this.#end(session, "rollback")
       throw err
     }
+    // `replica` and `quorum` are waited for here, outside the transaction, as the routes do.
+    if (options.ack === "replica" || options.ack === "quorum") {
+      await this.#owner.replicated(this.name, txid, { ack: options.ack })
+    }
+    return value
   }
 
   /** The change feed of design §6.4, straight off the realtime bus — no HTTP in the middle. */
@@ -319,20 +382,28 @@ class LocalDb implements EmbeddedDb {
   }
 
   #begin(options: TransactionOptions): TxSession {
+    const runtime = this.#owner.runtime
     try {
-      return this.#owner.runtime.beginTx(this.tenant(), ADMIN, {
+      const tenant = this.tenant()
+      // An ack level this node cannot answer is refused before anything is written, as the
+      // routes refuse it.
+      if (options.ack) runtime.assertAckAvailable(tenant.name, options.ack)
+      return runtime.beginTx(tenant, ADMIN, {
         ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.ack ? { ack: options.ack } : {}),
       })
     } catch (err) {
       throw toClientError(err)
     }
   }
 
-  #end(session: TxSession, how: "commit" | "rollback"): void {
+  /** The txid the commit was assigned; for a rollback, the database's current one. */
+  #end(session: TxSession, how: "commit" | "rollback"): bigint {
     try {
-      this.#owner.runtime.endTx(session, how)
+      return this.#owner.runtime.endTx(session, how)
     } catch (err) {
       if (how === "commit") throw toClientError(err)
+      return session.tenant.txid
     }
   }
 
@@ -392,6 +463,80 @@ class LocalDb implements EmbeddedDb {
 
   #syncSurface(): SyncDb {
     const db = this
+    const commit = <T>(fn: (tx: SyncTx) => T, options: TransactionOptions = {}): SyncCommit<T> => {
+      const session = db.#begin(options)
+      let value: T
+      try {
+        value = fn(db.#txSync(session))
+      } catch (err) {
+        db.#end(session, "rollback")
+        throw err
+      }
+      return { value, txid: Number(db.#end(session, "commit")) }
+    }
+    const write = <T>(fn: (d: Database) => T, options: SyncWriteOptions = {}): SyncCommit<T> => {
+      const owner = db.#owner
+      const runtime = owner.runtime
+      // `fn`'s own failure goes back to the caller untouched, as the driver threw it; everything
+      // the engine raises around it becomes the `BqlClientError` the rest of the API throws.
+      let thrown: unknown = NOTHING
+      try {
+        const tenant = db.tenant()
+        const ack = options.ack ?? owner.config.durability.defaultAck
+        // The same checks `executeStatement` makes before it takes the writer: the cluster lease
+        // (a fenced node must not write) and an ack level this node could not answer.
+        runtime.assertWritable(tenant.name)
+        runtime.assertAckAvailable(tenant.name, ack)
+        const written = tenant.write(
+          (writer) => {
+            try {
+              return guarded(writer, { transactions: false }, () => {
+                let value: T
+                try {
+                  value = fn(writer)
+                } catch (err) {
+                  thrown = err
+                  throw err
+                }
+                if (isThenable(value)) {
+                  throw BqlClientError.client(
+                    "sync.write takes a synchronous callback; the transaction cannot stay open across an await",
+                  )
+                }
+                return value
+              })
+            } finally {
+              // The realtime statement boundary: the whole callback is one statement to the feed.
+              runtime.markStatement(tenant.name)
+            }
+          },
+          { ack },
+        )
+        return { value: written.result, txid: Number(written.txid) }
+      } catch (err) {
+        if (err === thrown || err instanceof BqlClientError) throw err
+        throw toClientError(err)
+      }
+    }
+    const read = <T>(fn: (d: Database) => T): T => {
+      let thrown: unknown = NOTHING
+      try {
+        const tenant = db.tenant()
+        return db.#owner.runtime.withReader(tenant, ADMIN, (reader) =>
+          guarded(reader, { transactions: true }, () => {
+            try {
+              return fn(reader)
+            } catch (err) {
+              thrown = err
+              throw err
+            }
+          }),
+        )
+      } catch (err) {
+        if (err === thrown || err instanceof BqlClientError) throw err
+        throw toClientError(err)
+      }
+    }
     const query = (request: StatementRequest, options?: StatementOptions): SyncQuery =>
       db.#syncQuery((rows) => db.#step(request, rows, options), request.sql)
     return {
@@ -399,17 +544,11 @@ class LocalDb implements EmbeddedDb {
         query(fromTemplate(strings, values))) as SyncSqlTag,
       execute: (sql, args, options) => query(fromArgs(sql, args), options),
       batch: (items, options = {}) => db.#batchSync(items, options),
-      transaction<T>(fn: (tx: SyncTx) => T, options: TransactionOptions = {}): T {
-        const session = db.#begin(options)
-        try {
-          const value = fn(db.#txSync(session))
-          db.#end(session, "commit")
-          return value
-        } catch (err) {
-          db.#end(session, "rollback")
-          throw err
-        }
-      },
+      transaction: <T>(fn: (tx: SyncTx) => T, options: TransactionOptions = {}): T =>
+        commit(fn, options).value,
+      commit,
+      write,
+      read,
     }
   }
 
@@ -463,8 +602,13 @@ export class Bql {
 
   #dbs = new Map<string, LocalDb>()
   #commitListeners = new Set<(event: EmbeddedCommit) => void>()
+  #roleUnhooks = new Set<() => void>()
   #unhook = new Map<string, () => void>()
   #served: ServerHandle | null = null
+  /** True once `serve()` has started the cluster, replication and storage background parts. */
+  #background = false
+  /** `startShipping()` ran: the S3 shipper and outbox relay are up without a listener. */
+  #shipping = false
   #closed = false
 
   private constructor(init: {
@@ -531,9 +675,14 @@ export class Bql {
     }
   }
 
+  /**
+   * What `POST /v1/db` does, through the same `runtime.createDatabase`: in a cluster, placement's
+   * create gate refuses with `NOT_PRIMARY` (and `primary`, the home node's URL) on a node that is
+   * not the name's home, and on the home node this resolves once the node holds the lease.
+   */
   async create(name: string, options: CreateOptions = {}): Promise<EmbeddedDb> {
     try {
-      await this.runtime.registry.create(name, {
+      await this.runtime.createDatabase(name, {
         ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),
         ...(options.quotaBytes !== undefined ? { quotaBytes: options.quotaBytes } : {}),
         ...(options.from
@@ -603,7 +752,7 @@ export class Bql {
     const into = options.into ?? `${name}-restore-${at}`.slice(0, 64)
     try {
       assertValidName(into)
-      await this.runtime.registry.create(into, { from: { db: name, at } })
+      await this.runtime.createDatabase(into, { from: { db: name, at } }, { gate: false })
     } catch (err) {
       throw toClientError(err)
     }
@@ -676,16 +825,83 @@ export class Bql {
     return statsOf(this.runtime, this.tenantOf(name))
   }
 
-  /** Every durable commit on every database this process opened (design §9.2). */
-  on(event: "commit", listener: (event: EmbeddedCommit) => void): () => void {
-    if (event !== "commit") throw BqlClientError.client(`unknown event ${JSON.stringify(event)}`)
-    this.#commitListeners.add(listener)
-    return () => {
-      this.#commitListeners.delete(listener)
+  /**
+   * Resolves once `ack` covers `txid` on `name`: at once for `"local"`, after an fsync of the log
+   * and the WAL for `"fsync"` (skipped when the commit already did one), and after the fsync plus
+   * enough replica acks for `"replica"` / `"quorum"`. Rejects with the errors the routes answer:
+   * `ACK_TIMEOUT` after `[replication] ackTimeoutMs` (with `txid`, `acks`, `needed`), and
+   * `NO_REPLICAS` when none is attached and `ackWithoutReplicas` is `"error"`. Neither undoes the
+   * commit. `ack` defaults to `[durability] defaultAck`.
+   */
+  async replicated(
+    name: string,
+    txid: number | bigint,
+    options: { ack?: Ack } = {},
+  ): Promise<void> {
+    const ack = options.ack ?? this.config.durability.defaultAck
+    if (ack === "local") return
+    const tenant = this.tenantOf(name)
+    const at = BigInt(txid)
+    try {
+      tenant.syncDurable(at)
+      await this.runtime.awaitDurable(name, at, ack)
+    } catch (err) {
+      throw toClientError(err)
     }
   }
 
-  /** Mounts the HTTP, WebSocket and SSE surface over this engine (design §9.2). */
+  /**
+   * Throws `NO_REPLICAS` when this node could not answer `ack` for `name` right now: the check
+   * the routes make before a write runs, so a refusal leaves no committed transaction behind.
+   */
+  assertReplicas(name: string, ack: Ack): void {
+    try {
+      this.runtime.assertAckAvailable(name, ack)
+    } catch (err) {
+      throw toClientError(err)
+    }
+  }
+
+  /** Whether this node holds `name` as primary or replica, right now. */
+  role(name: string): NodeRole {
+    return this.runtime.roleFor(name)
+  }
+
+  /** Every durable commit on every database this process opened (design §9.2). */
+  on(event: "commit", listener: (event: EmbeddedCommit) => void): () => void
+  /**
+   * Every role flip on this node: a promotion, a demotion, a fencing. A flip the Raft control
+   * plane decides needs it running, which `serve()` does when `[cluster]` is enabled.
+   */
+  on(event: "role", listener: (event: EmbeddedRole) => void): () => void
+  on(
+    event: "commit" | "role",
+    listener: ((event: EmbeddedCommit) => void) | ((event: EmbeddedRole) => void),
+  ): () => void {
+    if (event === "role") {
+      const notify = listener as (event: EmbeddedRole) => void
+      const off = this.runtime.onRoleChange((db, role) => notify({ db, role }))
+      this.#roleUnhooks.add(off)
+      return () => {
+        off()
+        this.#roleUnhooks.delete(off)
+      }
+    }
+    if (event !== "commit") throw BqlClientError.client(`unknown event ${JSON.stringify(event)}`)
+    const commit = listener as (event: EmbeddedCommit) => void
+    this.#commitListeners.add(commit)
+    return () => {
+      this.#commitListeners.delete(commit)
+    }
+  }
+
+  /**
+   * Mounts the HTTP, WebSocket and SSE surface over this engine (design §9.2), then starts what
+   * `bql serve` starts once it listens: the Raft node and promoter when `[cluster]` is enabled,
+   * the replication client when `[replication] primary` is set, and the S3 shipper and outbox
+   * relay when they are configured. Always one thread: `[server] workers` is ignored, because the
+   * tenants have to live on the thread that holds the `db.sync` handles.
+   */
   async serve(options: ServeOptions = {}): Promise<ServerHandle> {
     if (this.#served) return this.#served
     const config: ServerConfig = {
@@ -700,9 +916,34 @@ export class Bql {
       runtime: this.runtime,
       adminKey: this.adminKey,
       ...(options.log ? { log: options.log } : { log: () => {} }),
+      ...(options.mount ? { mount: options.mount } : {}),
     })
     this.#served = handle
+    // `startServer` starts these only for a runtime it built. In the same order it uses: Raft
+    // needs the listener (its socket is mounted on it), and a replica follows only once it can
+    // answer its own `/v1/replication`.
+    try {
+      await this.runtime.startCluster()
+      this.runtime.startReplication()
+      if (!this.#shipping) this.runtime.startStorage()
+      this.#background = true
+    } catch (err) {
+      this.#served = null
+      await handle.close()
+      throw err
+    }
     return handle
+  }
+
+  /**
+   * Starts the S3 shipper (`[s3]`) and the outbox relay (`[outbox]`) without a listener, for a
+   * process that embeds the engine and never calls `serve()`. Each is a no-op when it is not
+   * configured. `close()` ships what is outstanding before it closes the logs.
+   */
+  startShipping(): void {
+    if (this.#shipping || this.#background) return
+    this.runtime.startStorage()
+    this.#shipping = true
   }
 
   /** Stops the listener, if there is one, and closes the engine. */
@@ -712,9 +953,13 @@ export class Bql {
     const served = this.#served
     this.#served = null
     if (served) await served.close()
+    // Everything committed before the listener stopped is shipped before the logs close.
+    if (this.#background || this.#shipping) await this.runtime.closeStorage()
     for (const off of this.#unhook.values()) off()
     this.#unhook.clear()
     this.#commitListeners.clear()
+    for (const off of this.#roleUnhooks) off()
+    this.#roleUnhooks.clear()
     this.runtime.close()
   }
 
@@ -753,4 +998,4 @@ export type {
   TransactionOptions,
   Tx,
 } from "./client/index.ts"
-export type { ServerHandle } from "./server/app.ts"
+export type { Mount, ServerHandle } from "./server/app.ts"

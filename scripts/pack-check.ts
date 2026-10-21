@@ -194,12 +194,18 @@ console.log(run([process.execPath, "run", deploySmoke], consumer, "deployment wo
 const busSmoke = join(consumer, "bus-smoke.ts")
 writeFileSync(
   busSmoke,
-  `import { BusStore, createServer, generateKey } from "bql.sh/bus"
+  `import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Bql } from "bql.sh"
+import { BusStore, bqlStorage, createServer, ensureBusDatabase, generateKey } from "bql.sh/bus"
 import { BusClient } from "bql.sh/bus/client"
 
 const signingKey = generateKey()
 const adminToken = generateKey()
-const store = new BusStore(":memory:")
+const bq = await Bql.open({ dir: mkdtempSync(join(tmpdir(), "bql-bus-smoke-")) })
+await ensureBusDatabase(bq)
+const store = new BusStore(bqlStorage(bq))
 const server = createServer({ store, signingKey, adminToken, port: 0, hostname: "127.0.0.1" })
 const client = new BusClient({ url: \`http://127.0.0.1:\${server.port}\`, token: adminToken })
 await client.subscribe({ name: "work", pattern: "work.>" })
@@ -209,6 +215,7 @@ if (envelope?.message.seq !== published.seq) throw new Error("the claim did not 
 await client.ack(envelope.delivery, "consumer-1")
 await server.shutdown()
 store.close()
+await bq.close()
 console.log("bus smoke ok")
 `,
 )

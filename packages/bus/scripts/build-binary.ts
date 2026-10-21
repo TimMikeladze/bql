@@ -13,9 +13,22 @@
  *   bun scripts/build-binary.ts                    the host platform
  *   bun scripts/build-binary.ts --all              every supported target
  *   bun scripts/build-binary.ts --target bun-linux-x64
+ *
+ * The other awkward part is SQLite. bql.sh's driver loads libsqlite3 at runtime
+ * and looks for the vendored build relative to its own source, which a compiled
+ * binary does not have on disk; it would fall back to whatever the system has,
+ * which on Linux may be nothing at all and is never the pinned build. So the
+ * host target embeds the library `sqlite:build` produces and points
+ * `BQL_SQLITE_LIB` at it, the same library bql.sh's own image ships beside its
+ * source. Only the host target: the library is compiled for the machine that
+ * builds it. A cross-compiled binary carries no library and needs
+ * `BQL_SQLITE_LIB` or a system libsqlite3 where it runs. The assignment rides
+ * in the dashboard manifest because that is the one generated module the bus
+ * imports, so it covers `bql bus …`; `bql serve` in the same binary does not
+ * import the bus and still searches the usual way.
  */
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 const argv = process.argv.slice(2);
 const has = (name: string) => argv.includes(`--${name}`);
@@ -54,10 +67,28 @@ async function assets(directory: string, prefix = ""): Promise<string[]> {
   return out;
 }
 
-async function writeManifest() {
+/** Builds the pinned libsqlite3 for this machine if it is missing, and returns its path. */
+async function hostLibrary(): Promise<string> {
+  const child = Bun.spawn(
+    ["bun", "run", `${root}/../db/scripts/sqlite.ts`, "--quiet"],
+    { cwd: root, stdout: "pipe", stderr: "inherit" },
+  );
+  const out = await new Response(child.stdout).text();
+  if ((await child.exited) !== 0) throw new Error("sqlite:build failed");
+  return out.trim().split("\n").pop() as string;
+}
+
+async function writeManifest(sqliteLibrary: string | null) {
   const files = await assets(dashboard);
   const imports: string[] = [];
   const entries: string[] = [];
+  if (sqliteLibrary) {
+    imports.push(
+      `import sqliteLibrary from ${JSON.stringify(relative(dirname(generated), sqliteLibrary))} with { type: "file" };`,
+      "// The embedded libsqlite3, loaded before anything opens a database. An explicit BQL_SQLITE_LIB still wins.",
+      "process.env.BQL_SQLITE_LIB ??= sqliteLibrary;",
+    );
+  }
   files.forEach((file, index) => {
     const name = `asset${index}`;
     imports.push(
@@ -80,15 +111,19 @@ try {
   if (!(await Bun.file(`${dashboard}/index.html`).exists()))
     await run(["bun", "run", "build"], "bun run build");
 
-  const embedded = await writeManifest();
-  console.log(`embedding ${embedded} dashboard files`);
   await mkdir(outDir, { recursive: true });
 
-  const targets = has("all")
-    ? [...TARGETS]
-    : [flag("target") ?? `bun-${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`];
+  const host = `bun-${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+  const targets = has("all") ? [...TARGETS] : [flag("target") ?? host];
+  const library = targets.includes(host) ? await hostLibrary() : null;
 
   for (const target of targets) {
+    const embedded = await writeManifest(target === host ? library : null);
+    console.log(
+      `${target}: embedding ${embedded} dashboard files${
+        target === host ? ` and ${library}` : ", no libsqlite3 (not the host target)"
+      }`,
+    );
     const outfile = `${outDir}/bql-${target.replace(/^bun-/, "")}`;
     await run(
       [

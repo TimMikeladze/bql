@@ -9,6 +9,14 @@ export type Json =
   | { [key: string]: Json };
 export type Headers = Record<string, string>;
 
+/**
+ * How durable a publish is before it is answered, as bql.sh names it:
+ * `local` (committed), `fsync` (on this machine's disk), `replica` (and on at
+ * least one replica), `quorum` (on a majority). `replica` and `quorum` need
+ * a replica of database `bus` attached.
+ */
+export type Ack = "local" | "fsync" | "replica" | "quorum";
+
 export const DEFAULT_WORKSPACE = "default";
 
 export interface Message {
@@ -72,6 +80,8 @@ export interface PublishRequest {
   delayMs?: number;
   /** Absolute epoch ms alternative to `delayMs`. The later of the two wins. */
   deliverAt?: number;
+  /** Durability to wait for before answering. Default: the bus's `--ack`. */
+  ack?: Ack;
 }
 
 export interface PublishResult {
@@ -79,6 +89,8 @@ export interface PublishResult {
   id: string;
   duplicate: boolean;
   correlation: string | null;
+  /** The bql.sh transaction the message committed in. */
+  txid?: number;
 }
 
 export type DeliverFrom = "new" | "beginning" | number;
@@ -201,6 +213,8 @@ export interface AckRequest {
    * other did not.
    */
   publish?: PublishRequest[];
+  /** Durability to wait for when `publish` is non-empty. Default: the bus's `--ack`. */
+  ack?: Ack;
   /** Effect-ledger results to record with the ack. See `effects`. */
   effects?: EffectRecord[];
 }
@@ -227,6 +241,8 @@ export interface EffectClaim {
 /** What an ack answers: the delivery, plus anything that committed with it. */
 export interface AckResult extends Delivery {
   published: PublishResult[];
+  /** The bql.sh transaction of an ack that published. */
+  txid?: number;
   /**
    * True when this ack had already been recorded by the same consumer and
    * generation. A retried ack after a lost response is a success, not a 409.
@@ -411,17 +427,6 @@ export interface AuditEntry {
   action: string;
   target: string | null;
   at: number;
-}
-
-// ----------------------------------------------------------- replication
-
-export interface ClusterState {
-  epoch: number;
-  role: "leader" | "follower";
-  upstream: string | null;
-  /** Highest upstream sequence number this replica has applied. */
-  appliedSeq: number;
-  readOnly: boolean;
 }
 
 // ------------------------------------------------------------- schedules

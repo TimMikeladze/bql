@@ -517,6 +517,8 @@ export class Tenant {
   #drainScheduled = false
   #waiters: Waiter[] = []
   #walFd: number | null = null
+  /** Highest txid `#syncDurable` has made durable, so `syncDurable(txid)` can skip a repeat. */
+  #durableTxid = 0n
   #writing = false
   #txOpen = false
   #txAck: AckLevel = "local"
@@ -1215,6 +1217,17 @@ export class Tenant {
   // writer for as long as it is open, which is why there is at most one and why it is leashed by
   // an idle timer rather than by the client's goodwill.
 
+  /**
+   * `ack: "fsync"` after the fact, for a transaction committed at `"local"`: files anything P5
+   * deferred and fsyncs the log and the WAL. A no-op when an earlier sync already covered `txid`.
+   */
+  syncDurable(txid: bigint = this.txid): void {
+    this.#assertOpen()
+    if (txid <= this.#durableTxid) return
+    this.flushPending()
+    this.#syncDurable()
+  }
+
   /** True while an interactive transaction holds the writer. */
   get txOpen(): boolean {
     return this.#txOpen
@@ -1501,6 +1514,18 @@ export class Tenant {
   releaseReader(lease: ReaderLease): void {
     this.#leased -= 1
     this.#lastActivityMs = Date.now()
+    // A borrower that left a transaction open (a bare `BEGIN` through the query path, a callback
+    // that returned mid-transaction) must not hand its snapshot to the next one. A connection
+    // that will not roll back is closed rather than pooled.
+    if (lease.pooled && !this.#closed && lease.db.inTransaction) {
+      try {
+        lease.db.exec("rollback")
+      } catch {
+        lease.db.close()
+        this.#openReaders -= 1
+        return
+      }
+    }
     if (!lease.pooled || this.#closed) {
       lease.db.close()
       if (lease.pooled) this.#openReaders -= 1
@@ -2161,6 +2186,7 @@ export class Tenant {
    * pager-internal opcode — and switching `synchronous` per commit costs two extra statements.
    */
   #syncDurable(): void {
+    const at = this.position.txid
     this.log.flush()
     const walPath = `${this.dbPath}-wal`
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -2168,11 +2194,13 @@ export class Tenant {
         try {
           this.#walFd = fs.openSync(walPath, "r+")
         } catch {
+          this.#durableTxid = at
           return // No WAL on disk: nothing committed through it yet.
         }
       }
       try {
         fs.fdatasyncSync(this.#walFd)
+        this.#durableTxid = at
         return
       } catch {
         // A TRUNCATE checkpoint can replace the file underneath the descriptor; reopen once.

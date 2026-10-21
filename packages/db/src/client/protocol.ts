@@ -227,6 +227,10 @@ export interface ErrorInfo {
   failedIndex?: number
   /** Where to go instead, for `NOT_PRIMARY`. */
   primary?: string
+  /** Distinct replicas that acked in time, for `ACK_TIMEOUT`. */
+  acks?: number
+  /** How many were needed, for `ACK_TIMEOUT`. */
+  needed?: number
   /**
    * Seconds to wait before retrying, for a refusal that can say — `WRITE_QUEUE_FULL` derives it
    * from the database's measured drain rate. Mirrors the `Retry-After` header, and is how a

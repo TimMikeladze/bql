@@ -786,7 +786,12 @@ export class ClusterNode implements ClusterLink {
         applied: pick.applied,
         localEpoch: entry.epoch,
         streamLive: false,
-        cluster: this.#factsFor(db, now),
+        // `BEHIND` judged without the lapsed primary. Its own `acked` is how far it wrote, not what a
+        // replica confirmed: a commit in flight when it died would otherwise block every failover
+        // until an operator forced one. Every replica's position still counts, reachable or not,
+        // because an unreachable replica may hold the only copy of a write acknowledged at
+        // `replica`; promoting past it would lose that write, so the failover waits for it.
+        cluster: { ...this.#factsFor(db, now), acked: ackedWithout(entry.acked, entry.primary) },
         force: false,
       })
       if (!decision.ok) continue
@@ -1023,4 +1028,14 @@ function commandForConfigChange(data: Uint8Array, state: ClusterState): Command 
     zone: change.zone ?? known?.zone ?? "",
     status: change.status ?? "voter",
   }
+}
+
+/** `acked` without `node`'s own entry. */
+export function ackedWithout(
+  acked: Record<NodeId, string>,
+  node: NodeId | null | undefined,
+): Record<NodeId, string> {
+  const out: Record<NodeId, string> = {}
+  for (const [id, txid] of Object.entries(acked)) if (id !== node) out[id] = txid
+  return out
 }

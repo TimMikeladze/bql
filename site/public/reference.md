@@ -125,7 +125,6 @@ bql endpoint update preview --bus-url https://your-bus.example --prompt-bus-toke
 # Add --prompt-bus-vercel-bypass if that service is also protected.
 bql bus stats --endpoint preview
 bql bus publish work.hello '{"hello":"world"}' --endpoint preview
-bql bus follow --endpoint preview --data ./replica
 ```
 
 Missing bus settings fail explicitly; database credentials are never reused for the bus.
@@ -302,19 +301,29 @@ At-least-once by default, with three named tiers of exactly-once on top — a tr
 embedded mode, atomic read-process-write inside the bus, and fenced ledgered effects against the
 outside world. Fan-out happens on pull rather than on publish, so publishing is O(1) in the number
 of subscriptions and a subscription created today can read last week. A JSON Schema registry with
-computed compatibility checks, scoped tokens with affordable revocation, W3C `traceparent` end to
-end, and epoch-fenced promotion over asynchronous log replication. Cron schedules
-(`bql bus schedule add nightly '30 2 * * *' reports.nightly --tz America/New_York`) fire on the
-leader as ordinary deduplicated publishes, DST-correct in any IANA zone.
+computed compatibility checks, scoped tokens with affordable revocation, and W3C `traceparent` end
+to end. Cron schedules (`bql bus schedule add nightly '30 2 * * *' reports.nightly --tz
+America/New_York`) fire on the primary as ordinary deduplicated publishes, DST-correct in any IANA
+zone.
+
+The bus keeps its tables in a bql.sh database, `bus`, under `--data`. Replication, failover and
+backup are bql.sh's: nodes started with `bql bus serve --cluster` (or `bql serve --bus`) WAL-ship
+database `bus` (the log, deliveries, leases, cursors and large bodies alike), promote a replica
+automatically when the primary's Raft lease lapses, and answer a publish at `ack: "replica"` only
+once a replica has it. The failover drill has lost zero acknowledged publishes in every run.
+Backup is bql.sh's S3 shipping (`BQL_S3_URL`, or `[s3]` in `--config`) and restore is
+`bql restore bus --from s3://…`. Still one writer: the cluster adds copies and reads, not write
+throughput.
 [packages/bus/README.md](packages/bus/README.md) is the real documentation.
 
 ## Together
 
-Neither half imports the other's source. The coupling is the work after the move, in the order the
-value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then the database as a
-transactional outbox, then the bus's own replication and backup giving way to WAL shipping.
-[docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the sequence and why each step is
-independently revertable.
+The coupling is the work after the move, in the order the value landed: the bus swapping
+`bun:sqlite` for `bql.sh/sqlite`, then the database as a transactional outbox, then the bus's own
+replication and backup giving way to WAL shipping. All three are done. The bus now runs inside the
+bql.sh engine (`Bql.open`, or mounted under `/bus` on a `bql serve` node), so it imports bql.sh;
+bql.sh still does not import the bus except to start it from `bql serve --bus` and `bql bus …`.
+[docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the sequence.
 
 **The outbox has landed.** A database server with `[outbox]` rules tails each matching database's
 log and publishes every committed row change to a bus subject over HTTP, with a dedupe key per
@@ -930,6 +939,43 @@ start applying at `serve()`. The lifecycle calls are here too — `bq.create`, `
 `client.admin` answers. Restoring from an S3 bucket stays on the server route, which is where the
 store is built.
 
+A synchronous write can't wait on a network ack, so replica durability is two calls: commit, then
+wait outside the transaction.
+
+```ts
+bq.assertReplicas("acme", "replica")                 // NO_REPLICAS now, before anything is written
+const { value, txid } = db.sync.commit((tx) => {
+  tx.sql`insert into todos(title) values (${"acked"})`.run()
+  return tx.sql`select count(*) as n from todos`.get()
+}, { ack: "fsync" })
+await bq.replicated("acme", txid, { ack: "replica" })  // ACK_TIMEOUT / NO_REPLICAS, as the routes answer
+```
+
+The commit has happened by the time `replicated` rejects; the error says the ack didn't arrive in
+`[replication] ackTimeoutMs`, not that the write was lost.
+
+`db.sync.write` hands the callback the writer connection itself, the `bql.sh/sqlite` `Database`,
+for code that wants its own cached statements. The commit still goes through the log and
+replicates like any other write.
+
+```ts
+const { txid } = db.sync.write((d) => {
+  const insert = d.query("insert into todos(title) values (?)")   // stays cached on the writer
+  insert.run("one")
+  d.transaction(() => insert.run("two"))()                         // a SAVEPOINT
+  return d.query("select count(*) as n from todos").get()          // sees both
+}, { ack: "fsync" })
+const n = db.sync.read((d) => d.query("select count(*) as n from todos").get())
+```
+
+`BEGIN`/`COMMIT`/`ROLLBACK`, `ATTACH` and connection pragmas are refused inside the callback with
+`NOT_AUTHORIZED`. While another transaction holds the writer, `write` throws `TX_BUSY` (or `BUSY`
+during a snapshot) instead of waiting.
+
+`bq.serve()` also starts the Raft node, the replication client and the S3 shipper when the config
+asks for them, so `Bql.open({ cluster: { enabled: true, … } })` plus `serve()` is a full cluster
+node. `bq.on("role", ({ db, role }) => …)` fires when it takes over or loses a database.
+
 ## ORMs
 
 `bql.sh/kysely` is a Kysely dialect, `bql.sh/drizzle` a Drizzle driver. Both take a client `Db`, an
@@ -1369,6 +1415,61 @@ for (const txn of recorder.poll()) {
 }
 ```
 
+### How it works
+
+```
+PRIMARY (one writer per database)
+
+  BEGIN IMMEDIATE … COMMIT
+          │
+          ▼
+  main.db ◄── checkpoint ── -wal  [hdr|f1|f2|f3*|f4|f5*| …]      * = commit frame
+                                   │ wal_hook, after commit
+                                   ▼
+                          tailer.ts     resume at last commit frame, check salts and the
+                                        checksum chain, keep the last version of each page,
+                                        cut at the commit frame; new salts = WAL reset, frame 1
+                                   │
+                                   ▼
+                          primary.ts    TxnRecord: txid = last + 1, epoch,
+                                        pre/postChecksum (chk ^= H(old page) ^ H(new page))
+                                   │
+                                   ▼
+                          log.ts        [seg 0001][seg 0002][seg 0003 ►   append-only, zstd,
+                                        rotate at 16 MB
+                                   │
+            ┌──────────────────────┼──────────────────────┐
+            ▼                      ▼                      ▼
+     replica streams          S3 shipper            realtime (published after the append)
+     /v1/replication          snapshots + segments
+            │                      │
+            │  TXN ▼   ▲ ACK        ▼
+            │                 bucket: restore = snapshot ≤ target + replay to txid/time
+            ▼
+REPLICA  applier.ts
+  prevTxid == local txid?  epoch ≥ local epoch?  postChecksum matches?
+     no  ─► PositionMismatch / EpochRegression / ChecksumMismatch, nothing written
+     yes ─┬─► A "pages" (default): take WAL locks via xShmLock, pwrite pages into main.db,
+          │   ftruncate, rewrite the 136-byte -shm header; readers drop their page cache
+          └─► B "wal" (fallback): append frames to its own -wal, fsync, zero the -shm header;
+              the next reader rebuilds the wal-index
+  reader holding a snapshot ─► SQLITE_BUSY ─► wait applyBusyMs ─► ApplyBusy, the client retries
+```
+
+The tailer only moves its position at a commit frame. Inside an open transaction SQLite rewrites
+frame slots on rollback and recomputes their checksums, so a frame that verified a moment ago can
+hold different bytes now.
+
+Only the tenant checkpoints; SQLite's autocheckpoint is off. `PASSIVE` runs once the WAL passes
+`checkpointWalBytes` (4 MB), `TRUNCATE` once the tenant has been idle for `idleCheckpointMs`
+(1000 ms) and no reader holds a lease. Both flush pending records into the log first, so no frame
+leaves the WAL before a record explains it.
+
+A replica that subscribes with a `fromTxid` still in the log gets records from there; otherwise it
+gets a snapshot (a reflink taken right after a `TRUNCATE`) and the records after it. On open, the
+primary runs the applier against itself: a log ahead of the database applies its last record, a
+database ahead of the log has its extra WAL frames tailed into new records.
+
 Byte layouts are in [docs/m3-wal.md](docs/m3-wal.md).
 
 ## Measured
@@ -1644,23 +1745,100 @@ the log cannot be un-published, so a delivery that fails an enforced schema **de
 
 Full details, including the keyword list: [docs/schemas.md](docs/schemas.md).
 
+## Storage
+
+The bus keeps its tables in one bql.sh database, `bus`. `--data` is bql.sh's data directory, and
+the bus keeps its own keys in `bus/` inside it:
+
+```
+.bql-bus/                 --data (BUS_DATA), default .bql-bus
+  _system.db              bql.sh's catalog
+  keys.json               bql.sh's own keys
+  dbs/…/bus/              database "bus": main.db, its WAL, its log
+  bus/keys.json           the bus's signing keyring (0600)
+  bus/admin-token         the bus's admin token (0600)
+```
+
+`bql bus serve`, `bql bus serve --cluster` and `bql serve --bus` all use this layout. `--database`
+(or `BUS_DATABASE`) names another database than `bus`:
+
+```sh
+bql bus serve --data ./bus-data
+bql bus serve --data ./bus-data --database orders-bus
+```
+
+Every write the bus makes (publish, claim, ack, renew, the sweep, the scheduler, migrations)
+commits through the tenant's write path and lands in its log, which is what replication, S3
+shipping and point-in-time restore read. The tenant owns checkpoints, and foreign keys are
+switched on for the database when the bus opens it. Bodies over 64 KiB go to a `blobs_data`
+table in the same database, written in the same transaction as the message row, so a replica and
+a backup carry them. The schema is versioned in `schema_version`; a database written by a newer
+build is refused rather than guessed at.
+
+A single node runs `Bql.open` on `--data` and serves only the bus, at the root of `--port`; no
+bql.sh listener is opened, so nothing else writes database `bus`. `--config bql.toml` passes any
+other bql.sh setting, such as `[s3]`.
+
+Embedded, pass the engine:
+
+```ts
+import { Bql } from "bql.sh"
+import { createBus, ensureBusDatabase } from "bql.sh/bus"
+
+const bq = await Bql.open({ dir: "./data" })
+await ensureBusDatabase(bq)                 // creates "bus" if missing, foreign keys on
+const bus = createBus({ bql: bq })          // { database: "bus", ack: "fsync" } are the defaults
+```
+
+`consumeTransactional` commits the handler's writes and the ack as one bql.sh write. Inside the
+handler bql.sh refuses `BEGIN`/`COMMIT`/`ROLLBACK`, connection pragmas and `ATTACH`;
+`db.transaction()` still nests as a savepoint. bql.sh answers a write that arrives while a
+snapshot holds its writer with `BUSY` rather than waiting, so the bus retries it after a short
+sleep (publish, claim and ack inside the store, every other route at the HTTP boundary). A request
+that had already committed a write before hitting `BUSY` answers `503 {"code":"BUSY"}` with
+`Retry-After: 1` instead of running twice.
+
+A single-row write costs more here than it did on a plain SQLite file, because every commit is
+captured into the replicated log. `publishBatch` is one commit and one log record for the whole
+batch, which is the lever for publish-heavy producers.
+
 ## Durability
 
-- **Blob writes are atomic and fsynced** — temporary file, `fsync`, `rename`, `fsync` the
-  directory — and the row records `body_sha256` and `body_bytes`, verified on read. A truncated
-  blob is an error naming the handle, never a half-message handed to a handler.
-- **A message whose blob is gone dead-letters** instead of failing every claim forever. The
+- **Publishes take an ack level**, bql.sh's four: `local` (committed), `fsync` (on this machine's
+  disk, the default), `replica` (and on at least one replica), `quorum` (on a majority). Set the
+  server default with `--ack` (or `BUS_ACK`) and override it per request:
+
+  ```sh
+  curl -X POST localhost:4317/api/publish -H "Authorization: Bearer $ADMIN" \
+    -d '{"subject":"orders.eu.created","body":{"id":1},"ack":"fsync"}'
+  # {"seq":1,"id":"…","duplicate":false,"correlation":null,"txid":12}
+  ```
+
+  `client.publish({ …, ack })`, `client.publishBatch(messages, { ack })` and an ack that publishes
+  (`ack(delivery, id, { publish, ack })`) take it too. The answer carries the bql.sh `txid` the
+  message committed in. `replica` and `quorum` are checked before anything is
+  written: with no replica attached the publish answers `503 {"code":"NO_REPLICAS"}` and nothing
+  is in the log. `503 {"code":"ACK_TIMEOUT","seq":…,"txid":…,"acks":…,"needed":…}` means the
+  message committed and is durable here but the replicas didn't ack in time; publishing it again
+  would publish it twice, so read it back by `seq` or use a `dedupeKey`. Plain acks, nacks and
+  renewals wait for nothing beyond their own commit (`local` under `--ack local`, `fsync`
+  otherwise). A single node has no replica, so `replica` and `quorum` there are always
+  `NO_REPLICAS`.
+- **Large bodies are checked on read.** A body in `blobs_data` has `body_sha256` and `body_bytes`
+  on its message row. A body that does not match is an error naming the handle, never a
+  half-message handed to a handler.
+- **A message whose body is gone dead-letters** instead of failing every claim forever. The
   startup scan reports how many; the claim path handles the rest.
-- **The WAL has a ceiling**: `wal_autocheckpoint`, plus a `wal_checkpoint(TRUNCATE)` on the sweep
-  once it passes a threshold. `bql_bus_wal_bytes` and `bql_bus_db_bytes` are gauges.
+- **The WAL is bql.sh's to checkpoint.** `bql_bus_wal_bytes` and `bql_bus_db_bytes` are gauges.
 - **A nearly full disk is a policy, not undefined behaviour.** Below the watermark `/api/publish`
   answers **507** with a machine-readable reason and `/ready` goes 503 — while claims and acks keep
   working, because a full disk is exactly when consumers need to drain.
-- **A backup is not a backup until it has been restored.** `bql bus restore <dir> --data <dir>`
-  restores and then *opens* the result; `bun run drill:restore` does the whole round trip and
-  compares the log, the cursors and the blob bytes. `--until-seq` / `--until-time` stop the
-  restore short of the end, for when the thing to undo is a batch somebody published rather than
-  a disk that died.
+- **Backup is bql.sh's S3 shipping, restore is `bql restore`.** With `[s3]` in `--config` or
+  `BQL_S3_URL` in the environment, `bql bus serve` ships database `bus` to the bucket as it
+  commits, and SIGTERM ships what is outstanding before it exits. `bql restore bus --from s3://…
+  --at <txid|time>` rebuilds it into another data directory; [docs/operations.md](docs/operations.md#backup-and-restore)
+  has the commands. `bun run drill:restore` does the whole round trip and compares the log, the
+  cursor and a large body.
 
 ## Observability
 
@@ -1730,12 +1908,15 @@ Set `handlerTimeoutMs` (or `--exec-timeout`) on anything that could hang. The lo
 If the message carried a `reply-to`, whatever the handler returns becomes its response — an RPC consumer is an ordinary consumer that happens to return a value.
 
 **Embedded mode** is the other direction: the bus in your own process, no socket, and the handler
-writing to the same SQLite file — which is what makes the ack genuinely transactional.
+writing to the same database as the ack, which is what makes the ack transactional.
 
 ```ts
-import { createBus } from "bql.sh/bus";
+import { Bql } from "bql.sh";
+import { createBus, ensureBusDatabase } from "bql.sh/bus";
 
-const bus = createBus({ path: "./data/bus.db", blobDirectory: "./data/blobs" });
+const bq = await Bql.open({ dir: "./data" });
+await ensureBusDatabase(bq);
+const bus = createBus({ bql: bq });
 bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");
 
 bus.consumeTransactional({
@@ -1811,8 +1992,7 @@ await new SinkRunner({
 | `bql bus schema register <name> <file>` · `check` · `bind` · `list` | the registry |
 | `bql bus keys rotate` · `keys retire <kid>` | signing keys, with an overlap window |
 | `bql bus revoke <jti>` · `quota [set]` · `audit` | tenant safety |
-| `bql bus follow <upstream>` · `promote --lease <path>` · `cluster` | continuity |
-| `bql bus backup <dir>` · `restore <dir> --data <dir>` | a consistent copy, and the proof it restores |
+| `bql bus serve --cluster --node n1 --peers n2=ws://…,n3=ws://… --port 4321` | one node of a clustered bus, under `/bus` ([Boundaries](#boundaries)) |
 | `bql bus tail` · `stats` | follow the log; subscriptions, consumers, lag |
 
 ## HTTP API
@@ -1851,9 +2031,8 @@ rather than moving in lockstep. A client asking for a version this broker does n
 how a backup is taken and restored, and what the fleet does afterwards. The short version:
 
 ```sh
-bql bus serve --log-level info --log-format json
+BQL_S3_URL=s3://backups/bus bql bus serve --log-level info --log-format json
 curl -H "Authorization: Bearer $ADMIN" localhost:4317/metrics
-bql bus backup /backups/$(date +%F)
 ```
 
 **SIGTERM drains.** The bus stops handing out work first — a claim answers empty rather than
@@ -1879,7 +2058,7 @@ deliveries would keep reporting whatever it last reported.
 
 **Tenancy is enforced, not decorative.** `workspace` is a mandatory filter on every query, and a non-admin token is pinned to its own: it cannot name another one in a header.
 
-**The signing key and admin token live in `.bql-bus/` at mode 0600**, not in argv where `ps` would show them.
+**The signing keyring and admin token live in `<data>/bus/` at mode 0600**, not in argv where `ps` would show them.
 
 **Transport is the operator's job.** A bearer token must not cross an untrusted network in plaintext: terminate TLS or use a tunnel. The bundled `Dockerfile` and `fly.toml` do exactly that — the platform terminates TLS, and the bus binds `0.0.0.0` only because a container must, never as a changed default. See [docs/operations.md](docs/operations.md#deploying).
 
@@ -1890,20 +2069,26 @@ instead.
 
 ```sh
 bun run typecheck
-bun test tests           # 137 across 13 files
+bun test tests           # 172 across 18 files, every one on a bql.sh database
 bun run build
 bun run test:e2e
-bun run verify-pack
 bun run build:binary      # one file per target, plus checksums
 bun run test:compiled     # the same e2e, against the compiled binary
-bun run drill:restore     # publish → backup → wipe → restore → compare
-bun run drill:failover    # promote under load; the old leader is fenced out
+bun run drill:restore     # publish, ship to a bucket, bql restore into an empty dir, compare
+bun run drill:failover    # three clustered nodes, SIGKILL the primary, count what was lost
 ```
 
-`verify-pack` is the one that catches what the others cannot: it packs the tarball, installs it
-into an empty directory, imports every advertised entry point and starts a bus from the installed
-copy. A bundler can drop a module and still emit its name in the export list — that failure would
-otherwise surface in someone else's install.
+`build:binary` embeds the libsqlite3 that `bun run db sqlite:build` produces (and runs that build
+first if it is missing, which needs a C compiler), so the binary for the machine you build on
+needs no SQLite where it runs. Bun writes the embedded library to `$TMPDIR` to load it, so a
+`noexec` temp directory breaks it; set `BQL_SQLITE_LIB` there. The other targets in `--all` are
+cross-compiled and carry no library: they load `BQL_SQLITE_LIB`, else the system libsqlite3. Build
+each one on its own platform when that matters.
+
+`bun run pack:check`, from the repository root, catches what the others cannot: it packs the
+tarball, installs it into an empty directory, imports every advertised entry point and starts a bus
+from the installed copy. A bundler can drop a module and still emit its name in the export list,
+and that failure would otherwise surface in someone else's install.
 
 The end-to-end check is real processes and no mocks — competing consumers, fan-out, a consumer **SIGKILLed mid-message**, a poison message, and a request answered from another process:
 
@@ -1926,9 +2111,9 @@ And `bun run soak` is the contention check the unit tests cannot be: eight consu
 bun run soak
 bun run soak --ordered
 bun run soak --kill-bus --repeat 10
+bun run soak --ack local --kill-bus    # the faster ack; a process kill loses nothing here either
 bun run soak --poison 0.05              # backoff bounds the retry rate; nothing hot-loops
 bun run soak --ordered --poison 0.05    # a dead key blocks, and nothing overtakes it
-bun run soak --fault blob-write         # crash between the blob write and the row commit
 bun run soak --fault mid-txn            # crash inside the publish transaction
 bun run soak --fault post-ack           # crash after the ack commits, before the response
 ```
@@ -1959,33 +2144,62 @@ That package lives in dagr's repository and depends on this one. **The bus has n
 
 ## Boundaries
 
-One process owns one SQLite file in WAL mode. Consumers never open it; they hold leases over HTTP, and every claim is a conditional `UPDATE` that only transitions *out of* `pending`, so two consumers racing for one delivery is safe rather than merely unlikely.
+One node writes. Consumers never open the database; they hold leases over HTTP, and every claim is a conditional `UPDATE` that only transitions *out of* `pending`, so two consumers racing for one delivery is safe rather than merely unlikely.
 
-**Continuity, and what it is not.** `bql bus follow <upstream> --data ./replica` replicates the
-**bus log** — not the SQLite WAL — so a follower rebuilds from `/api/log?after=N` plus the
-subscription cursors. It survives a schema change, needs no frame parsing, and is one ~220-line
-file rather than a project. Leases are deliberately *not* replicated: they are ephemeral, and a
-promoted follower re-materializes deliveries from cursors through the same code path a cold start
-already uses.
+**Continuity is a clustered bus.** Three `bql bus serve --cluster` nodes form one bql.sh Raft
+group and hold database `bus` on every node:
 
-`bql bus promote --lease <path>` acquires a lease in storage both nodes can see and stamps an
-incrementing **epoch**. The old leader, running with the same `--lease`, sees the epoch move and
-**stops accepting writes**. Split brain is prevented by the fence, not by hoping the old node is
-dead.
+```sh
+export BUS_CLUSTER_SECRET=… BUS_SIGNING_KEY=… BUS_ADMIN_TOKEN=…   # the same on every node
+bql bus serve --cluster --node n1 --port 4321 --data /data/n1 --ack replica \
+  --peers n2=ws://10.0.0.2:4321,n3=ws://10.0.0.3:4321
+# the same on n2 and n3, each naming the other two
+```
 
-Replication is **asynchronous**, so a failover loses up to the current lag. That is a number, not
-a hope: `bql-bus.replication.lag_seq` and `lag_ms` are gauges, `bun run drill:failover` prints
-the RPO it measured, and on a laptop under continuous publish it lands in the **tens of
-messages**. Alert on the gauges; the number you tolerate is the promise you are making.
+Each node serves bql.sh on `--port` and the bus under `/bus` on the same listener
+(`http://10.0.0.1:4321/bus`). The node holding the primary of `bus` publishes, claims, acks and
+runs the sweep and the scheduler. The others serve reads (the log, stats, messages,
+subscriptions, the dashboard) from their copy and answer every write with
+`503 {"code":"NOT_PRIMARY"}` plus `BQL-Primary: http://10.0.0.1:4321/bus`. `bql serve --bus` (or
+`[bus] enabled = true` in `bql.toml`) runs the same thing from bql.sh's own command.
+
+Replication is bql.sh's WAL shipping, so every table travels: deliveries and leases included. When
+the primary dies its Raft lease lapses and the leader promotes the replica with the most applied.
+The new primary migrates, starts the sweep and the scheduler and reloads its caches; a lease that
+was live keeps its generation, so the consumer's renew or ack lands on the new primary as if
+nothing happened, and an expired one is reclaimed by the ordinary sweep. A long poll parked on a
+node that stops being primary answers `NOT_PRIMARY`. The other replicas keep their copies and
+follow the new primary from their own position; nothing re-snapshots `bus`.
+
+`BusClient` takes every node and follows the header:
+
+```ts
+const bus = new BusClient({
+  url: ["http://10.0.0.1:4321/bus", "http://10.0.0.2:4321/bus", "http://10.0.0.3:4321/bus"],
+  token,
+})
+```
+
+It moves a request to another node only when that cannot repeat a write: a `NOT_PRIMARY` (refused
+before anything ran) or a connection refused before the request went out. A request cut off
+mid-flight is retried only if it is a read or a publish whose every message has a `dedupeKey`.
+`ACK_TIMEOUT` is never retried: the message committed. Elections are waited out for up to
+`failoverMs` (15 s), and so is `NO_REPLICAS`, with one URL or several: right after a promotion
+the surviving replica takes a few milliseconds to follow the new primary. A bus with no replica
+at all therefore answers a `replica` publish with `NO_REPLICAS` only once `failoverMs` has run
+out; `failoverMs: 0` retries nothing. `BusConsumer` and the sinks go through the same client,
+and the CLI takes `--url a,b,c`.
+
+What `bun run drill:failover` measured over 17 runs on an 18-core laptop at load 2 to 9 (three
+processes, continuous publishing at `ack: "replica"`, two consumers, the primary SIGKILLed):
+2.1 to 3.4 s from the kill to the first publish the new primary acknowledged, which is mostly
+bql.sh's default 3 s lease TTL, and **zero** acknowledged publishes lost in every run. The RPO is 0
+at `replica` and `quorum`. At `fsync` and `local` it is whatever had not reached a replica when
+the primary died.
 
 Still one writer. This buys continuity and read scale-out, **not** write scale-out.
 
-The honest ceiling: this is right for a fleet, and for infrastructure a dozen services depend on
-it is a deliberate trade — one writer, asynchronous replication, an RPO you have to state. Raft,
-multi-writer and synchronous replication are out of scope on purpose. The store sits behind a
-seam so a different backend is a swap rather than a rewrite.
-
-Also not implemented: consensus, active/active, or exactly-once against an arbitrary external
+Also not implemented: multi-writer, or exactly-once against an arbitrary external
 system — [Tier 3's window](docs/exactly-once.md#the-window-this-does-not-close) is the floor, not
 a temporary state.
 
@@ -1996,5 +2210,6 @@ a temporary state.
 - [Production bql.sh/bus](docs/superpowers/specs/2026-09-13-production.md) — schemas, exactly-once, durability and continuity: the plan, and what landed against it.
 - [Exactly-once, in three tiers](docs/exactly-once.md) — what each tier guarantees, what it costs, and where the last one stops.
 - [Schemas](docs/schemas.md) — the supported JSON Schema subset, and why an unsupported keyword is an error.
+- [The bus on a bql.sh database](docs/superpowers/specs/2026-10-21-bus-on-bql.md): moving the tables, replication and backup onto bql.sh, and what it costs.
 - [Running it](docs/operations.md) — metrics, logging, shutdown, backup and restore.
 - [What was verified](docs/FINISHING-REPORT.md) — how each claim was checked, and what still is not.

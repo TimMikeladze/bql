@@ -8,7 +8,9 @@ import { mkdir } from "node:fs/promises";
 import { generateKey, mint } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
 
-const state = ".bql-bus";
+// The keys `bql bus serve --data .bql-bus` would use, kept here and passed in
+// the environment so the consumers below can mint tokens with them.
+const state = ".bql-bus/bus";
 await mkdir(state, { recursive: true });
 
 const read = async (path: string) => {

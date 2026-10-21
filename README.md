@@ -123,7 +123,6 @@ bql endpoint update preview --bus-url https://your-bus.example --prompt-bus-toke
 # Add --prompt-bus-vercel-bypass if that service is also protected.
 bql bus stats --endpoint preview
 bql bus publish work.hello '{"hello":"world"}' --endpoint preview
-bql bus follow --endpoint preview --data ./replica
 ```
 
 Missing bus settings fail explicitly; database credentials are never reused for the bus.
@@ -300,19 +299,29 @@ At-least-once by default, with three named tiers of exactly-once on top — a tr
 embedded mode, atomic read-process-write inside the bus, and fenced ledgered effects against the
 outside world. Fan-out happens on pull rather than on publish, so publishing is O(1) in the number
 of subscriptions and a subscription created today can read last week. A JSON Schema registry with
-computed compatibility checks, scoped tokens with affordable revocation, W3C `traceparent` end to
-end, and epoch-fenced promotion over asynchronous log replication. Cron schedules
-(`bql bus schedule add nightly '30 2 * * *' reports.nightly --tz America/New_York`) fire on the
-leader as ordinary deduplicated publishes, DST-correct in any IANA zone.
+computed compatibility checks, scoped tokens with affordable revocation, and W3C `traceparent` end
+to end. Cron schedules (`bql bus schedule add nightly '30 2 * * *' reports.nightly --tz
+America/New_York`) fire on the primary as ordinary deduplicated publishes, DST-correct in any IANA
+zone.
+
+The bus keeps its tables in a bql.sh database, `bus`, under `--data`. Replication, failover and
+backup are bql.sh's: nodes started with `bql bus serve --cluster` (or `bql serve --bus`) WAL-ship
+database `bus` (the log, deliveries, leases, cursors and large bodies alike), promote a replica
+automatically when the primary's Raft lease lapses, and answer a publish at `ack: "replica"` only
+once a replica has it. The failover drill has lost zero acknowledged publishes in every run.
+Backup is bql.sh's S3 shipping (`BQL_S3_URL`, or `[s3]` in `--config`) and restore is
+`bql restore bus --from s3://…`. Still one writer: the cluster adds copies and reads, not write
+throughput.
 [packages/bus/README.md](packages/bus/README.md) is the real documentation.
 
 ## Together
 
-Neither half imports the other's source. The coupling is the work after the move, in the order the
-value lands: the bus swapping `bun:sqlite` for `bql.sh/sqlite`, then the database as a
-transactional outbox, then the bus's own replication and backup giving way to WAL shipping.
-[docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the sequence and why each step is
-independently revertable.
+The coupling is the work after the move, in the order the value landed: the bus swapping
+`bun:sqlite` for `bql.sh/sqlite`, then the database as a transactional outbox, then the bus's own
+replication and backup giving way to WAL shipping. All three are done. The bus now runs inside the
+bql.sh engine (`Bql.open`, or mounted under `/bus` on a `bql serve` node), so it imports bql.sh;
+bql.sh still does not import the bus except to start it from `bql serve --bus` and `bql bus …`.
+[docs/monorepo.md](docs/monorepo.md#the-work-after-this) has the sequence.
 
 **The outbox has landed.** A database server with `[outbox]` rules tails each matching database's
 log and publishes every committed row change to a bus subject over HTTP, with a dedupe key per

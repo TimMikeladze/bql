@@ -8,6 +8,9 @@ The bus moves into this repository. Two source trees under one root, one lockfil
 
 ## Why
 
+This section describes the two trees as they were at the move. Step 3 of
+[The work after this](#the-work-after-this) has since resolved the overlap it lists.
+
 The two projects were solving overlapping problems in parallel and neither could use the
 other's answer:
 
@@ -26,7 +29,7 @@ None of that is worth a cross-repository dependency with a version skew between 
 repository it is worth it, and the first consumer of `bql.sh` is `bql.sh/bus`.
 
 **This move does not itself couple them.** No source file changes in this restructuring beyond
-package metadata and config. The bus still opens `bun:sqlite` when this lands. The coupling is
+package metadata and config. The bus still opened `bun:sqlite` when the move landed. The coupling is
 the next piece of work, and it is easier to do — and to revert — once both trees are in one
 place.
 
@@ -136,16 +139,31 @@ In the order the value lands, each independently revertable:
    instead of `bun:sqlite`. The shape matches deliberately — bql.sh's `Database` carries `open`,
    `exec`, `prepare`, `query`, `run`, `transaction` under the `bun:sqlite` spelling. This buys the
    bus commit hooks for its SSE stream, a real `walCheckpoint` result for its WAL ceiling, and a
-   statement deadline for a query that will not end.
+   statement deadline for a query that will not end. **Landed**, and then folded into step 3.
 2. **The change feed as an outbox.** A bql.sh commit hook publishing to a bus subject is a
    transactional outbox with no dual-write window, because the feed is post-commit and carries the
    txid. **Landed as X6** (`packages/db/docs/x6-outbox.md`), reading the durable
    log rather than the in-memory feed: a post-commit hook still loses the event if the process dies
    before it publishes, and the log does not.
 3. **Delete `packages/bus/src/bus/replication.ts`** in favour of WAL shipping, and the bus's
-   bespoke backup/restore with it.
+   bespoke backup/restore with it. **Landed**, further than planned: the bus no longer has a
+   storage of its own. Its tables live in bql.sh database `bus`, and every write goes through
+   `db.sync.write`, so it lands in the tenant's log. `--data` is bql.sh's data directory, with the
+   bus keys in `<data>/bus/`. Deleted: the file backend and `--storage`, file blobs (bodies over
+   64 KiB are rows in `blobs_data`), the bus's WAL checkpointing and pragmas, `replication.ts`
+   (`follow`, `promote --lease`, the lease-file fence), the `cluster` table, and the CLI's `follow`,
+   `promote`, `cluster`, `backup` and `restore`. The schema was squashed to one migration; the old
+   file format is not read. Replication is WAL shipping with automatic, epoch-fenced promotion
+   (`bql bus serve --cluster`, `bql serve --bus`), publishes take `ack: "replica"` / `"quorum"`,
+   backup is S3 shipping (`bq.startShipping()` on a single node) and restore is `bql restore`. A
+   bus write costs more than it did on a bare file, because each commit is captured into the
+   log. bql.sh gained what the bus needed: `db.sync.write` / `sync.read`, `bq.replicated`,
+   `bq.on("role")`, mounts on `bq.serve()`, `bq.create` through the cluster's create gate, a
+   node-level generation ledger so a replica keeps its copy across a failover, and
+   `bq.startShipping()`. The decisions and measurements are in
+   `packages/bus/docs/superpowers/specs/2026-10-21-bus-on-bql.md`.
 4. **The bus as bql.sh's own job layer** — backup shipping, retention, compaction and replication
    retries are durable work with leases and a dead-letter path, which is what the bus is.
 
-Steps 1 and 2 are additive. Steps 3 and 4 make the two packages genuinely one product, and should
-be decided as that rather than arrived at.
+Steps 1 and 2 were additive. Step 3 made the bus a bql.sh application rather than a neighbour.
+Step 4 is open, and should be decided rather than arrived at.

@@ -125,6 +125,7 @@ export const SQLITE_LOCKED = 6
 export const SQLITE_NOMEM = 7
 export const SQLITE_INTERRUPT = 9
 export const SQLITE_MISUSE = 21
+export const SQLITE_AUTH = 23
 export const SQLITE_ROW = 100
 export const SQLITE_DONE = 101
 

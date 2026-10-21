@@ -205,6 +205,43 @@ start applying at `serve()`. The lifecycle calls are here too — `bq.create`, `
 `client.admin` answers. Restoring from an S3 bucket stays on the server route, which is where the
 store is built.
 
+A synchronous write can't wait on a network ack, so replica durability is two calls: commit, then
+wait outside the transaction.
+
+```ts
+bq.assertReplicas("acme", "replica")                 // NO_REPLICAS now, before anything is written
+const { value, txid } = db.sync.commit((tx) => {
+  tx.sql`insert into todos(title) values (${"acked"})`.run()
+  return tx.sql`select count(*) as n from todos`.get()
+}, { ack: "fsync" })
+await bq.replicated("acme", txid, { ack: "replica" })  // ACK_TIMEOUT / NO_REPLICAS, as the routes answer
+```
+
+The commit has happened by the time `replicated` rejects; the error says the ack didn't arrive in
+`[replication] ackTimeoutMs`, not that the write was lost.
+
+`db.sync.write` hands the callback the writer connection itself, the `bql.sh/sqlite` `Database`,
+for code that wants its own cached statements. The commit still goes through the log and
+replicates like any other write.
+
+```ts
+const { txid } = db.sync.write((d) => {
+  const insert = d.query("insert into todos(title) values (?)")   // stays cached on the writer
+  insert.run("one")
+  d.transaction(() => insert.run("two"))()                         // a SAVEPOINT
+  return d.query("select count(*) as n from todos").get()          // sees both
+}, { ack: "fsync" })
+const n = db.sync.read((d) => d.query("select count(*) as n from todos").get())
+```
+
+`BEGIN`/`COMMIT`/`ROLLBACK`, `ATTACH` and connection pragmas are refused inside the callback with
+`NOT_AUTHORIZED`. While another transaction holds the writer, `write` throws `TX_BUSY` (or `BUSY`
+during a snapshot) instead of waiting.
+
+`bq.serve()` also starts the Raft node, the replication client and the S3 shipper when the config
+asks for them, so `Bql.open({ cluster: { enabled: true, … } })` plus `serve()` is a full cluster
+node. `bq.on("role", ({ db, role }) => …)` fires when it takes over or loses a database.
+
 ## ORMs
 
 `bql.sh/kysely` is a Kysely dialect, `bql.sh/drizzle` a Drizzle driver. Both take a client `Db`, an

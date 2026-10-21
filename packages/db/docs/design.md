@@ -259,7 +259,7 @@ write to a fresh path.
    uncommitted transaction and recomputes their checksums at commit. A salt change means the
    WAL was reset (salt-1 increments, salt-2 is random): restart at frame 1.
 3. Assign `txid = last + 1` (per-database monotonic u64), stamp `epoch` (leadership term).
-4. Append TxnRecord to the tenant log segment (zstd level 3 by default; pages compress 3×).
+4. Append TxnRecord to the tenant log segment (zstd level 1 by default; pages compress 3×).
 5. Fan out: replica streams, S3 shipper, realtime (realtime actually fires from hooks during
    step 1 and is published after step 4 so subscribers never see a txid that isn't durable).
 6. Respond to the client with `txid`. If the request asked `ack: "replica"`, respond after ≥1

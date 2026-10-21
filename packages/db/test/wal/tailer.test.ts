@@ -160,6 +160,40 @@ describe("polling", () => {
   })
 })
 
+describe("reading frames in runs", () => {
+  test("a commit longer than one read, then a short one over the stale frames it left", () => {
+    const dir = tempDir()
+    const { db, dbPath } = openPrimary(dir)
+    db.exec("create table t(id integer primary key, v blob)")
+    const tailer = new WalTailer(`${dbPath}-wal`)
+    tailer.poll()
+
+    // About 200 pages in one commit: more than one 256 KiB run at 4 KiB pages.
+    const insert = db.prepare("insert into t(v) values (?)")
+    db.transaction(() => {
+      for (let i = 0; i < 200; i++) insert.run(new Uint8Array(3000).fill(i))
+    })()
+    const big = tailer.poll()
+    expect(big.length).toBe(1)
+    expect(big[0]?.frameCount).toBeGreaterThan(150)
+    expect(tailer.position.frame).toBe(big[0]?.walEndFrame ?? 0)
+
+    // RESTART keeps the file at its length, so the next commit is followed by the big one's
+    // frames from the old generation. They must not verify, and must not be read as new.
+    db.walCheckpoint("RESTART")
+    db.transaction(() => insert.run(new Uint8Array(10)))()
+    const small = tailer.poll()
+    expect(small.length).toBe(1)
+    expect(small[0]?.afterReset).toBe(true)
+    expect(small[0]?.frameCount).toBeLessThan(5)
+    expect(tailer.position.frame).toBe(small[0]?.walEndFrame ?? 0)
+    expect(tailer.poll().length).toBe(0)
+
+    db.close()
+    tailer.close()
+  })
+})
+
 describe("wal reset", () => {
   test("a RESTART checkpoint is followed without a gap", () => {
     const dir = tempDir()

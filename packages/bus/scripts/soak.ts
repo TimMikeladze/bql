@@ -13,13 +13,14 @@
  *   · nothing is left pending or leased
  *   · nothing dead-lettered that was not meant to
  *   · with --ordered, per-key FIFO held under kills
- *   · with --kill-bus, WAL recovery lost nothing
+ *   · with --kill-bus, recovery lost nothing
  *
  *   bun scripts/soak.ts
  *   bun scripts/soak.ts --ordered
  *   bun scripts/soak.ts --kill-bus
  *   bun scripts/soak.ts --term-bus
  *   bun scripts/soak.ts --repeat 10
+ *   bun scripts/soak.ts --ack local --kill-bus
  */
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,11 +50,11 @@ interface Options {
   killBus: boolean;
   /** SIGTERM the bus mid-flight instead of SIGKILLing it: the deploy case. */
   termBus: boolean;
-  /** A deterministic crash point inside the bus: blob-write, mid-txn, post-ack. */
+  /** A deterministic crash point inside the bus: mid-txn, post-ack. */
   fault: string | null;
   faultAfter: number;
-  /** `full` or `normal`. See the note where this is reported. */
-  sync: string;
+  /** `fsync` or `local`: what `bql bus serve --ack` gets. See the note where this is reported. */
+  ack: string;
   /** Fraction of messages that always fail, to exercise backoff and the DLQ. */
   poison: number;
   quiet: boolean;
@@ -72,12 +73,14 @@ const options: Options = {
   termBus: has("term-bus"),
   fault: has("fault") ? flag("fault", "") : null,
   faultAfter: num("fault-after", 50),
-  sync: flag("sync", "full"),
+  ack: flag("ack", "fsync"),
   poison: has("poison") ? Number(flag("poison", "0.02")) : 0,
   quiet: has("quiet"),
 };
-if (options.fault && !["blob-write", "mid-txn", "post-ack"].includes(options.fault))
-  throw new Error("--fault wants blob-write, mid-txn or post-ack");
+if (options.fault && !["mid-txn", "post-ack"].includes(options.fault))
+  throw new Error("--fault wants mid-txn or post-ack");
+if (options.ack !== "fsync" && options.ack !== "local")
+  throw new Error("--ack wants fsync or local: a single node has no replica");
 
 async function freePort(start: number): Promise<number> {
   for (let candidate = start; candidate < start + 400; candidate++) {
@@ -146,18 +149,14 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
   const busArgs = [
     "src/cli/index.ts",
     "serve",
-    "--state",
-    scratch,
-    "--db",
-    `${scratch}/bus.db`,
-    "--blobs",
-    `${scratch}/blobs`,
+    "--data",
+    `${scratch}/data`,
     "--port",
     String(port),
     "--log-level",
     "error",
-    "--synchronous",
-    options.sync,
+    "--ack",
+    options.ack,
   ];
 
   /** Start the bus and wait for it to answer. Retries a port still in TIME_WAIT. */
@@ -274,8 +273,6 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
     // ---- publish, kill, and (optionally) kill the bus, all at once ----
     const published = new Set<number>();
     const poisonSeqs = new Set<number>();
-    const bulky = options.fault === "blob-write";
-    const bulk = bulky ? "x".repeat(80_000) : "";
     const keyOf = (index: number) =>
       options.ordered ? `k${index % options.keys}` : null;
     // Deterministic rather than random, so a failure is reproducible and the
@@ -292,11 +289,7 @@ async function runOnce(label: string, options: Options): Promise<string[]> {
         const task = retry(async () => {
           const result = await admin.publish({
             subject: "soak.work",
-            // `--fault blob-write` only means anything if a blob is written,
-            // so that run sends bodies past the 64 KiB inline limit.
-            body: poisoned(index)
-              ? { index, poison: true, ...(bulky ? { bulk } : {}) }
-              : { index, ...(bulky ? { bulk } : {}) },
+            body: poisoned(index) ? { index, poison: true } : { index },
             // Killing the broker mid-publish can lose the *response* to a
             // request that already committed, and the retry below would then
             // publish a second copy — 5001 messages for 5000 intended, which
@@ -673,26 +666,23 @@ for (let run = 1; run <= repeat; run++) {
       options.termBus ? ", SIGTERMing the bus" : ""
     }${options.fault ? `, fault '${options.fault}' after ${options.faultAfter}` : ""}${
       options.poison > 0 ? `, ${Math.round(options.poison * 100)}% poison` : ""
-    }${options.sync !== "full" ? `, synchronous=${options.sync.toUpperCase()}` : ""}`,
+    }${options.ack !== "fsync" ? `, ack ${options.ack}` : ""}`,
   );
   allFailures.push(...(await runOnce(label, options)));
   console.log(`   ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
 
-if (options.sync.toLowerCase() === "normal") {
-  // Said plainly rather than dressed up as a passing durability test. A
-  // SIGKILL takes the *process*; the page cache belongs to the kernel and
-  // survives it, so `synchronous=NORMAL` loses nothing here. The loss it
-  // permits is on machine failure — power loss, a kernel panic, a yanked
-  // volume — which this harness cannot simulate. What the run does show is the
-  // cost of the default, and that the cost is real is why the default is worth
-  // stating.
+if (options.ack === "local") {
+  // A SIGKILL takes the process; the page cache belongs to the kernel and
+  // survives it, so `ack: "local"` loses nothing here. The loss it permits is
+  // on machine failure (power loss, a kernel panic, a yanked volume), which
+  // this harness cannot simulate.
   console.log(
-    "\nnote: synchronous=NORMAL survived this run, and that is expected.\n" +
-      "A process kill cannot demonstrate the loss it permits — only machine\n" +
+    "\nnote: ack local survived this run, and that is expected.\n" +
+      "A process kill cannot demonstrate the loss it permits; only machine\n" +
       "failure can, because the page cache outlives the process. Compare the\n" +
-      "elapsed time above against a --sync full run: that difference is what\n" +
-      "synchronous=FULL costs, and machine-failure durability is what it buys.",
+      "elapsed time above against an --ack fsync run: that difference is what\n" +
+      "fsync costs, and machine-failure durability is what it buys.",
   );
 }
 

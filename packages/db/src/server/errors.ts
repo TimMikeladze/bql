@@ -312,7 +312,7 @@ export function mapError(err: unknown, details?: ErrorDetails): { status: number
 /** The same mapping as an HTTP response, with the headers §6.6 asks for. */
 export function errorResponse(err: unknown, details?: ErrorDetails, extra?: Bun.HeadersInit): Response {
   const { status, body } = mapError(err, details)
-  const headers = new Headers(extra)
+  const headers = new Headers(extra as ConstructorParameters<typeof Headers>[0])
   headers.set("content-type", "application/json; charset=utf-8")
   if (body.error.txid !== undefined) headers.set(HEADERS.txid, String(body.error.txid))
   if (body.error.primary !== undefined) headers.set(HEADERS.primary, body.error.primary)

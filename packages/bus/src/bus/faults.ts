@@ -2,8 +2,8 @@
  * Deterministic crash points.
  *
  * `--kill-bus` in the soak kills at a random moment, which proves the bus
- * survives *a* crash but never proves it survives *the* crash — the one in the
- * window between writing a blob and committing the row that names it. These
+ * survives *a* crash but never proves it survives *the* crash: one inside the
+ * publish transaction, or between an ack committing and its answer. These
  * are those windows, named, and armed only by an environment variable the soak
  * sets. Unset, each call is a string comparison against `undefined`.
  *
@@ -13,8 +13,6 @@
  */
 
 export type FaultPoint =
-  /** Blob bytes are on disk; the message row has not been inserted. */
-  | "blob-write"
   /** Inside the publish transaction, after the row insert, before commit. */
   | "mid-txn"
   /** The ack is committed; the HTTP response has not been written. */

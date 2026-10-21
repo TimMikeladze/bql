@@ -59,6 +59,8 @@ export {
   type ClientSocket,
   ForwardError,
   type ForwardRequest,
+  loadGenerationLedger,
+  saveGenerationLedger,
   type LinkState,
   ReplicaClient,
   type ReplicaClientOptions,

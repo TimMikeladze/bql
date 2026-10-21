@@ -390,7 +390,7 @@ export class Promoter {
     if (already && (epoch === null || epoch <= tenantEpoch)) return
 
     this.runtime.evict(db)
-    if (role === "primary") this.runtime.replica?.detach(db)
+    if (role === "primary") this.runtime.replicaFor(db)?.detach(db)
     registry.release(db)
     catalog.setRole(db, role)
     if (epoch !== null && epoch > tenantEpoch) catalog.setEpoch(db, epoch)

@@ -14,6 +14,8 @@ export interface ClientErrorInit {
   txid?: number
   failedIndex?: number
   primary?: string
+  acks?: number
+  needed?: number
   /** Every schema problem the server found, for a `BAD_REQUEST` core refused. */
   problems?: ErrorProblem[]
   cause?: unknown
@@ -28,6 +30,10 @@ export class BqlClientError extends Error {
   readonly failedIndex?: number
   /** Where to go instead, for `NOT_PRIMARY`. */
   readonly primary?: string
+  /** Distinct replicas that acked in time, for `ACK_TIMEOUT`. */
+  readonly acks?: number
+  /** How many were needed, for `ACK_TIMEOUT`. */
+  readonly needed?: number
   /**
    * Every way the request failed the schema the route publishes, not only the first. Present when
    * the server's validator refused it; a caller can point at each field rather than re-guess.
@@ -43,6 +49,8 @@ export class BqlClientError extends Error {
     if (init.txid !== undefined) this.txid = init.txid
     if (init.failedIndex !== undefined) this.failedIndex = init.failedIndex
     if (init.primary !== undefined) this.primary = init.primary
+    if (init.acks !== undefined) this.acks = init.acks
+    if (init.needed !== undefined) this.needed = init.needed
     if (init.problems !== undefined) this.problems = init.problems
   }
 
@@ -56,6 +64,8 @@ export class BqlClientError extends Error {
       ...(info.txid !== undefined ? { txid: info.txid } : {}),
       ...(info.failedIndex !== undefined ? { failedIndex: info.failedIndex } : {}),
       ...(info.primary !== undefined ? { primary: info.primary } : {}),
+      ...(info.acks !== undefined ? { acks: info.acks } : {}),
+      ...(info.needed !== undefined ? { needed: info.needed } : {}),
       ...(info.problems !== undefined ? { problems: info.problems } : {}),
     })
   }
