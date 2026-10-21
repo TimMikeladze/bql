@@ -644,6 +644,61 @@ for (const txn of recorder.poll()) {
 }
 ```
 
+### How it works
+
+```
+PRIMARY (one writer per database)
+
+  BEGIN IMMEDIATE … COMMIT
+          │
+          ▼
+  main.db ◄── checkpoint ── -wal  [hdr|f1|f2|f3*|f4|f5*| …]      * = commit frame
+                                   │ wal_hook, after commit
+                                   ▼
+                          tailer.ts     resume at last commit frame, check salts and the
+                                        checksum chain, keep the last version of each page,
+                                        cut at the commit frame; new salts = WAL reset, frame 1
+                                   │
+                                   ▼
+                          primary.ts    TxnRecord: txid = last + 1, epoch,
+                                        pre/postChecksum (chk ^= H(old page) ^ H(new page))
+                                   │
+                                   ▼
+                          log.ts        [seg 0001][seg 0002][seg 0003 ►   append-only, zstd,
+                                        rotate at 16 MB
+                                   │
+            ┌──────────────────────┼──────────────────────┐
+            ▼                      ▼                      ▼
+     replica streams          S3 shipper            realtime (published after the append)
+     /v1/replication          snapshots + segments
+            │                      │
+            │  TXN ▼   ▲ ACK        ▼
+            │                 bucket: restore = snapshot ≤ target + replay to txid/time
+            ▼
+REPLICA  applier.ts
+  prevTxid == local txid?  epoch ≥ local epoch?  postChecksum matches?
+     no  ─► PositionMismatch / EpochRegression / ChecksumMismatch, nothing written
+     yes ─┬─► A "pages" (default): take WAL locks via xShmLock, pwrite pages into main.db,
+          │   ftruncate, rewrite the 136-byte -shm header; readers drop their page cache
+          └─► B "wal" (fallback): append frames to its own -wal, fsync, zero the -shm header;
+              the next reader rebuilds the wal-index
+  reader holding a snapshot ─► SQLITE_BUSY ─► wait applyBusyMs ─► ApplyBusy, the client retries
+```
+
+The tailer only moves its position at a commit frame. Inside an open transaction SQLite rewrites
+frame slots on rollback and recomputes their checksums, so a frame that verified a moment ago can
+hold different bytes now.
+
+Only the tenant checkpoints; SQLite's autocheckpoint is off. `PASSIVE` runs once the WAL passes
+`checkpointWalBytes` (4 MB), `TRUNCATE` once the tenant has been idle for `idleCheckpointMs`
+(1000 ms) and no reader holds a lease. Both flush pending records into the log first, so no frame
+leaves the WAL before a record explains it.
+
+A replica that subscribes with a `fromTxid` still in the log gets records from there; otherwise it
+gets a snapshot (a reflink taken right after a `TRUNCATE`) and the records after it. On open, the
+primary runs the applier against itself: a log ahead of the database applies its last record, a
+database ahead of the log has its extra WAL frames tailed into new records.
+
 Byte layouts are in [docs/m3-wal.md](docs/m3-wal.md).
 
 ## Measured
