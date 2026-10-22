@@ -19,20 +19,35 @@
 // budget is a WARN and the exit code stays 0 — the one hard gate is `bench/driver.ts`'s own
 // point-read target, which it enforces itself.
 //
+// Rounds are what make a run repeatable (docs/bench-repeatable.md). The suite runs round-robin, so
+// drift during the run spreads over every benchmark, and each leg is the median of its per-round
+// values with the spread printed next to it. `bun run bench:compare old.json new.json` reads two
+// saved runs and marks every change that sits inside the noise.
+//
 // Two tables come out: design §10's budget, which is the contract, and the phase-1 legs, which
 // design §10 never budgeted — routing, durability levels, the Hrana surface and the S3 shipper.
 // Those are printed with the number they should be read against rather than a verdict, because a
 // forwarded write is not slow or fast on its own, only next to the local one.
 
+import { mkdirSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { sqlite } from "../src/sqlite/index.ts"
 import { parseReport, type BenchReport } from "./report.ts"
+import { aggregate, findRunaways, NOISY, type LegRounds, type SavedRun } from "./rounds.ts"
 
 const QUICK = Bun.argv.includes("--quick")
 const JSON_OUT = Bun.argv.includes("--json")
+const SAVE = Bun.argv.includes("--save")
+const STRICT = Bun.argv.includes("--strict")
+const VERBOSE = Bun.argv.includes("--verbose")
 const onlyAt = Bun.argv.indexOf("--only")
 const ONLY = onlyAt >= 0 ? Bun.argv[onlyAt + 1] : null
+const labelAt = Bun.argv.indexOf("--label")
+const LABEL = labelAt >= 0 ? Bun.argv[labelAt + 1] : null
+const roundsAt = Bun.argv.indexOf("--rounds")
+const ROUNDS = roundsAt >= 0 ? Number(Bun.argv[roundsAt + 1]) : QUICK ? 1 : 3
+if (!Number.isInteger(ROUNDS) || ROUNDS < 1) throw new Error(`--rounds wants a positive integer`)
 
 interface BenchSpec {
   name: string
@@ -58,6 +73,13 @@ const BENCHES: BenchSpec[] = [
     name: "fsync",
     file: "fsync.ts",
     args: QUICK ? ["40", "--tenants", "1,10,100"] : ["60", "--tenants", "1,10,100,500"],
+  },
+  // The bus's publish/claim/ack throughput, on a bql.sh database. It alternates ack levels inside
+  // its own rounds, so two of those per suite round keeps either level from always going first.
+  {
+    name: "bus",
+    file: "../../bus/scripts/bench.ts",
+    args: QUICK ? ["--rounds", "1", "--messages", "500", "--http-messages", "300"] : ["--rounds", "2"],
   },
 ]
 
@@ -219,31 +241,71 @@ const PHASE1: Phase1Row[] = [
   { row: "one commit to the bucket", bench: "storage", leg: "one commit to the bucket", unit: "µs" },
 ]
 
+// ── preflight ──────────────────────────────────────────────────────────────────────────────────
+
+// docs/performance.md §8: a load above about 4 on the 18-core bench machine, or a shell left
+// spinning by an earlier session, moves every number here. Always printed and saved; --strict
+// refuses to measure.
+const loadBefore = os.loadavg()
+const ps = Bun.spawnSync(["ps", "-A", "-o", "pid=,%cpu=,etime=,comm="], { stdout: "pipe" })
+const runaways = ps.success ? findRunaways(ps.stdout.toString()) : []
+console.log(`load ${loadBefore.map((n) => n.toFixed(2)).join(" ")} · ${ROUNDS} round${ROUNDS === 1 ? "" : "s"}`)
+for (const r of runaways) {
+  console.log(`  ! runaway: pid ${r.pid} at ${r.cpu}% for ${r.elapsed}: ${r.command}`)
+}
+if (STRICT && ((loadBefore[0] ?? 0) > 4 || runaways.length > 0)) {
+  console.log("--strict: the machine is not quiet enough to measure. Exiting.")
+  process.exit(2)
+}
+
 // ── run ────────────────────────────────────────────────────────────────────────────────────────
 
-const reports = new Map<string, BenchReport>()
+const runs = new Map<string, BenchReport[]>()
 const failures: string[] = []
+const selected = BENCHES.filter((spec) => !ONLY || spec.name === ONLY)
 
-for (const spec of BENCHES) {
-  if (ONLY && spec.name !== ONLY) continue
-  const banner = `── ${spec.name} ${"─".repeat(Math.max(0, 76 - spec.name.length))}`
-  console.log(`\n${banner}\n`)
-  const started = Bun.nanoseconds()
-  const child = Bun.spawn(
-    [process.execPath, "run", path.join(import.meta.dir, spec.file), ...spec.args],
-    { stdout: "pipe", stderr: "inherit", env: { ...process.env, BQL_BENCH_JSON: "1" } },
-  )
-  const output = await new Response(child.stdout).text()
-  const code = await child.exited
-  // The `##BENCH##` line is machine-only; everything else is what a human runs the benchmark for.
-  for (const line of output.split("\n")) {
-    if (!line.startsWith("##BENCH##")) console.log(line)
+for (let round = 1; round <= ROUNDS; round++) {
+  for (const spec of selected) {
+    if (VERBOSE) {
+      const banner = `── ${spec.name}, round ${round} `
+      console.log(`\n${banner}${"─".repeat(Math.max(0, 84 - banner.length))}\n`)
+    }
+    const started = Bun.nanoseconds()
+    const child = Bun.spawn(
+      [process.execPath, "run", path.join(import.meta.dir, spec.file), ...spec.args],
+      { stdout: "pipe", stderr: VERBOSE ? "inherit" : "pipe", env: { ...process.env, BQL_BENCH_JSON: "1" } },
+    )
+    const [output, errors] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.stderr instanceof ReadableStream ? new Response(child.stderr).text() : "",
+    ])
+    const code = await child.exited
+    // The `##BENCH##` line is machine-only; everything else is what a human runs the benchmark for.
+    if (VERBOSE) {
+      for (const line of output.split("\n")) {
+        if (!line.startsWith("##BENCH##")) console.log(line)
+      }
+    }
+    const report = parseReport(output)
+    if (report) runs.set(spec.name, [...(runs.get(spec.name) ?? []), report])
+    else failures.push(`${spec.name} printed no ##BENCH## line in round ${round}`)
+    if (code !== 0) {
+      failures.push(`${spec.name} exited ${code} in round ${round}`)
+      // Without --verbose a failure would otherwise say nothing about why.
+      if (!VERBOSE) console.log(`${output}\n${errors}`.trim().split("\n").slice(-20).join("\n"))
+    }
+    console.log(
+      `round ${round}/${ROUNDS} ${spec.name.padEnd(12)} ${((Bun.nanoseconds() - started) / 1e9).toFixed(1).padStart(6)} s`,
+    )
   }
-  const report = parseReport(output)
-  if (report) reports.set(spec.name, report)
-  else failures.push(`${spec.name} printed no ##BENCH## line`)
-  if (code !== 0) failures.push(`${spec.name} exited ${code}`)
-  console.log(`(${spec.name}: ${((Bun.nanoseconds() - started) / 1e9).toFixed(1)} s)`)
+}
+
+const reports = new Map<string, BenchReport>()
+const legRounds: Record<string, Record<string, LegRounds>> = {}
+for (const [name, list] of runs) {
+  const { report, legs } = aggregate(list)
+  reports.set(name, report)
+  legRounds[name] = legs
 }
 
 // ── the §10 table ──────────────────────────────────────────────────────────────────────────────
@@ -325,6 +387,13 @@ if (warned.length === 0 && skipped.length === 0) {
 }
 for (const note of rows.filter((r) => r.note)) console.log(`  · ${note.row}: ${note.note}`)
 for (const failure of failures) console.log(`  ! ${failure}`)
+for (const row of rows) {
+  const leg = BUDGETS.find((b) => b.row === row.row)
+  const rounds = leg ? legRounds[leg.bench]?.[leg.leg] : undefined
+  if (rounds && rounds.spread > NOISY) {
+    console.log(`  ~ ${row.row}: ${(rounds.spread * 100).toFixed(0)}% spread across rounds, read the verdict loosely`)
+  }
+}
 
 // ── the phase-1 legs ───────────────────────────────────────────────────────────────────────────
 
@@ -370,6 +439,74 @@ if (phase1.some((one) => one.measured !== null)) {
   if (missing.length > 0) console.log(`not measured: ${missing.map((o) => o.row).join("; ")}`)
 }
 
+// ── every leg, with its spread ─────────────────────────────────────────────────────────────────
+
+function formatLeg(value: number, unit: LegRounds["unit"]): string {
+  if (unit === "rps" || unit === "mps" || (unit === "count" && Number.isInteger(value)) || value >= 1000) {
+    return Math.round(value).toLocaleString("en-US")
+  }
+  return value.toFixed(value < 10 ? 2 : 1)
+}
+
+console.log(`\n${"═".repeat(84)}`)
+console.log(`every leg, median of ${ROUNDS} round${ROUNDS === 1 ? "" : "s"}; spread is (max - min) / median`)
+console.log("═".repeat(84))
+const legWidth = Math.min(
+  60,
+  Math.max(...Object.values(legRounds).flatMap((legs) => Object.keys(legs).map((l) => l.length)), 10),
+)
+for (const [bench, legs] of Object.entries(legRounds)) {
+  console.log(`\n${bench}`)
+  for (const [leg, one] of Object.entries(legs)) {
+    const spread = ROUNDS === 1 ? "" : `${(one.spread * 100).toFixed(1).padStart(6)}%${one.spread > NOISY ? " noisy" : ""}`
+    console.log(`  ${leg.slice(0, legWidth).padEnd(legWidth)}  ${formatLeg(one.median, one.unit).padStart(12)} ${(one.unit ?? "").padEnd(5)} ${spread}`)
+  }
+}
+
+const loadAfter = os.loadavg()
+console.log(`\nload ${loadAfter.map((n) => n.toFixed(2)).join(" ")} after the run`)
+
+function git(...args: string[]): string {
+  const out = Bun.spawnSync(["git", ...args], { cwd: import.meta.dir, stdout: "pipe", stderr: "ignore" })
+  return out.success ? out.stdout.toString().trim() : ""
+}
+
+if (SAVE) {
+  const sha = git("rev-parse", "--short", "HEAD") || "nogit"
+  const dirty = git("status", "--porcelain").length > 0
+  const at = new Date()
+  const saved: SavedRun = {
+    machine: {
+      cpu,
+      cores: os.cpus().length,
+      platform: `${process.platform}/${process.arch}`,
+      os: os.release(),
+      memoryGb: Math.round(os.totalmem() / 1e9),
+      bun: Bun.version,
+      sqlite: lib.version,
+      sqliteLib: lib.path,
+      at: at.toISOString(),
+    },
+    git: { sha, dirty },
+    // `BQL_DEFAULT_ACK=local` and friends change what a leg measures, so they belong to the run.
+    env: Object.fromEntries(
+      Object.entries(process.env).filter(
+        (e): e is [string, string] => e[0].startsWith("BQL_") && e[1] !== undefined,
+      ),
+    ),
+    load: { before: loadBefore, after: loadAfter },
+    runaways,
+    args: Bun.argv.slice(2),
+    rounds: ROUNDS,
+    legs: legRounds,
+  }
+  const dir = path.join(import.meta.dir, "results")
+  mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, `${at.toISOString().slice(0, 10)}-${sha}${dirty ? "-dirty" : ""}${ONLY ? `-${ONLY}` : ""}${LABEL ? `-${LABEL}` : ""}.json`)
+  await Bun.write(file, `${JSON.stringify(saved, null, 2)}\n`)
+  console.log(`saved ${path.relative(process.cwd(), file)}`)
+}
+
 if (JSON_OUT) {
   console.log(
     `\n##REPORTS## ${JSON.stringify({
@@ -386,6 +523,7 @@ if (JSON_OUT) {
       budget: rows,
       phase1,
       benches: Object.fromEntries(reports),
+      rounds: legRounds,
     })}`,
   )
 }

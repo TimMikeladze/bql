@@ -473,6 +473,8 @@ Which of those are worth changing, measured:
 ## 8. Reproducing
 
 ```sh
+bun run bench --save                # every benchmark, three rounds, saved to bench/results/
+bun run bench:compare old.json new.json
 bun run bench/profile.ts [rounds]   # §1, §2's auth row, §4's group-commit table
 bun run bench:tenant                # the write path as a whole
 bun run bench:http                  # the transport legs and the mixed throughput
@@ -520,6 +522,11 @@ So, before taking a number from this file or adding one to it:
   minutes apart under load.
 - **Run the comparison interleaved, A-B-A-B**, on the same machine in the same minutes. Every
   number in §1's defaults table was taken that way, which is why three rounds of it agree.
+- **Let `bun run bench` do the first two.** It prints the load and any process that has held a
+  core for ten minutes before it starts (`--strict` refuses to run), runs the suite round-robin
+  (`--rounds`, three by default), and prints each leg's spread across rounds, flagging anything
+  above 10%. `bun run bench:compare` marks a change inside the larger spread as `~`, noise. A
+  saved run in `bench/results/` is the baseline the next one compares against.
 - **Prefer `bench/router.ts`**, which P6 built to a 4% resolution, for anything within 10%.
   Everything else in this file is a 20%-resolution instrument at best.
 

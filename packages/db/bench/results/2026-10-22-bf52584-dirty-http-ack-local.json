@@ -1,0 +1,165 @@
+{
+  "machine": {
+    "cpu": "Apple M5 Pro",
+    "cores": 18,
+    "platform": "darwin/arm64",
+    "os": "27.0.0",
+    "memoryGb": 52,
+    "bun": "1.4.0",
+    "sqlite": "3.53.4",
+    "sqliteLib": "/Users/tim/workspace/bunql/packages/db/vendor/sqlite/libsqlite3.dylib",
+    "at": "2026-10-22T00:38:07.409Z"
+  },
+  "git": {
+    "sha": "bf52584",
+    "dirty": true
+  },
+  "env": {
+    "BQL_DEFAULT_ACK": "local"
+  },
+  "load": {
+    "before": [
+      3.66552734375,
+      2.73974609375,
+      2.9365234375
+    ],
+    "after": [
+      3.61181640625,
+      2.74365234375,
+      2.9365234375
+    ]
+  },
+  "runaways": [],
+  "args": [
+    "--only",
+    "http",
+    "--save",
+    "--label",
+    "ack-local"
+  ],
+  "rounds": 3,
+  "legs": {
+    "http": {
+      "point read, HTTP keep-alive": {
+        "median": 53.625,
+        "spread": 0.009324009324009324,
+        "samples": [
+          54,
+          53.5,
+          53.625
+        ],
+        "unit": "us"
+      },
+      "single-row write, ack local, HTTP": {
+        "median": 83.709,
+        "spread": 0.015422475480533715,
+        "samples": [
+          82.834,
+          83.709,
+          84.125
+        ],
+        "unit": "us"
+      },
+      "point read, HTTP keep-alive, minted token": {
+        "median": 54.792,
+        "spread": 0.0053109943057380055,
+        "samples": [
+          55,
+          54.709,
+          54.792
+        ],
+        "unit": "us"
+      },
+      "healthz, HTTP": {
+        "median": 40.917,
+        "spread": 0.018329789574015688,
+        "samples": [
+          40.917,
+          41.041,
+          40.291
+        ],
+        "unit": "us"
+      },
+      "point read, Hrana pipeline": {
+        "median": 51.083,
+        "spread": 0.021200790869760948,
+        "samples": [
+          51.083,
+          51.625,
+          50.542
+        ],
+        "unit": "us"
+      },
+      "single-row write, ack local, Hrana pipeline": {
+        "median": 76.333,
+        "spread": 0.02565076703391716,
+        "samples": [
+          75.25,
+          76.333,
+          77.208
+        ],
+        "unit": "us"
+      },
+      "point read, WebSocket": {
+        "median": 29.458,
+        "spread": 0.05940661280467106,
+        "samples": [
+          29.458,
+          30.917,
+          29.167
+        ],
+        "unit": "us"
+      },
+      "single-row write, ack local, WebSocket": {
+        "median": 59.833,
+        "spread": 0.024367823776177,
+        "samples": [
+          59.833,
+          59.875,
+          58.417
+        ],
+        "unit": "us"
+      },
+      "write → live event on another socket": {
+        "median": 76.458,
+        "spread": 0.013628397290015455,
+        "samples": [
+          75.875,
+          76.917,
+          76.458
+        ],
+        "unit": "us"
+      },
+      "live-query invalidation → event on socket": {
+        "median": 17.042,
+        "spread": 0.11729843915033418,
+        "samples": [
+          16.042,
+          17.042,
+          18.040999999999997
+        ],
+        "unit": "us"
+      },
+      "throughput, mixed 90/10, HTTP": {
+        "median": 32442.05544752802,
+        "spread": 0.1411815062722862,
+        "samples": [
+          28622.540250447226,
+          32442.05544752802,
+          33202.75850509826
+        ],
+        "unit": "rps"
+      },
+      "throughput, mixed 90/10, WebSocket": {
+        "median": 83752.38490150531,
+        "spread": 0.1372405253122298,
+        "samples": [
+          74083.44700203552,
+          83752.38490150531,
+          85577.66830207017
+        ],
+        "unit": "mps"
+      }
+    }
+  }
+}

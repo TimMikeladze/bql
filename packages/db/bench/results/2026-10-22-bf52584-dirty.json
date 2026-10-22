@@ -1,0 +1,732 @@
+{
+  "machine": {
+    "cpu": "Apple M5 Pro",
+    "cores": 18,
+    "platform": "darwin/arm64",
+    "os": "27.0.0",
+    "memoryGb": 52,
+    "bun": "1.4.0",
+    "sqlite": "3.53.4",
+    "sqliteLib": "/Users/tim/workspace/bunql/packages/db/vendor/sqlite/libsqlite3.dylib",
+    "at": "2026-10-22T00:37:25.053Z"
+  },
+  "git": {
+    "sha": "bf52584",
+    "dirty": true
+  },
+  "load": {
+    "before": [
+      1.84521484375,
+      2.3056640625,
+      2.84423828125
+    ],
+    "after": [
+      2.97705078125,
+      2.521484375,
+      2.875
+    ]
+  },
+  "runaways": [],
+  "args": [
+    "--save"
+  ],
+  "rounds": 3,
+  "legs": {
+    "driver": {
+      "point read by primary key -> object": {
+        "median": 0.744788125,
+        "spread": 0.07079669805422857,
+        "samples": [
+          0.71559125,
+          0.744788125,
+          0.7683197900000001
+        ],
+        "unit": "us"
+      },
+      "point read, 3 columns": {
+        "median": 0.756125625,
+        "spread": 0.037313568099216404,
+        "samples": [
+          0.73841167,
+          0.756125625,
+          0.766625415
+        ],
+        "unit": "us"
+      },
+      "point read, 3 columns, values()": {
+        "median": 0.77820833,
+        "spread": 0.03649676301974315,
+        "samples": [
+          0.755609585,
+          0.78401167,
+          0.77820833
+        ],
+        "unit": "us"
+      },
+      "100-row scan -> objects": {
+        "median": 8.33085,
+        "spread": 0.03934772562223541,
+        "samples": [
+          8.33085,
+          8.571425,
+          8.243625
+        ],
+        "unit": "us"
+      },
+      "insert inside a transaction": {
+        "median": 0.24820334,
+        "spread": 0.004683659776697538,
+        "samples": [
+          0.24924207999999998,
+          0.24820334,
+          0.24807958
+        ],
+        "unit": "us"
+      },
+      "insert inside a transaction, update hook on": {
+        "median": 0.31349792,
+        "spread": 0.05291636384700748,
+        "samples": [
+          0.328985,
+          0.31349792,
+          0.31239583
+        ],
+        "unit": "us"
+      },
+      "single-row autocommit insert (WAL, synchronous=NORMAL)": {
+        "median": 5.2638584,
+        "spread": 0.05492169014272883,
+        "samples": [
+          5.5332334,
+          5.2441334,
+          5.2638584
+        ],
+        "unit": "us"
+      }
+    },
+    "wal": {
+      "primary commit": {
+        "median": 12.333,
+        "spread": 0.010135409065109867,
+        "samples": [
+          12.25,
+          12.375,
+          12.333
+        ],
+        "unit": "us"
+      },
+      "tail + checksum": {
+        "median": 4.75,
+        "spread": 0.09642105263157899,
+        "samples": [
+          4.75,
+          4.958,
+          4.5
+        ],
+        "unit": "us"
+      },
+      "encode (zstd)": {
+        "median": 10.958,
+        "spread": 0.022905639715276458,
+        "samples": [
+          10.833,
+          11.084,
+          10.958
+        ],
+        "unit": "us"
+      },
+      "log append": {
+        "median": 3.417,
+        "spread": 0.048580626280362874,
+        "samples": [
+          3.334,
+          3.5,
+          3.417
+        ],
+        "unit": "us"
+      },
+      "decode": {
+        "median": 5.292,
+        "spread": 0.0313681027966743,
+        "samples": [
+          5.292,
+          5.333,
+          5.167
+        ],
+        "unit": "us"
+      },
+      "replica apply (fdatasync)": {
+        "median": 165.958,
+        "spread": 0.011798165800985782,
+        "samples": [
+          164.75,
+          165.958,
+          166.708
+        ],
+        "unit": "us"
+      },
+      "replica read": {
+        "median": 6.334,
+        "spread": 0.039469529523208084,
+        "samples": [
+          6.208,
+          6.458,
+          6.334
+        ],
+        "unit": "us"
+      },
+      "end to end": {
+        "median": 211.709,
+        "spread": 0.015941693551053567,
+        "samples": [
+          209.417,
+          212.792,
+          211.709
+        ],
+        "unit": "us"
+      }
+    },
+    "tenant": {
+      "write, ack local": {
+        "median": 22.416,
+        "spread": 0.027881870092790865,
+        "samples": [
+          22.416,
+          22.75,
+          22.125
+        ],
+        "unit": "us"
+      },
+      "write, ack fsync": {
+        "median": 62.625,
+        "spread": 0.02261077844311372,
+        "samples": [
+          61.25,
+          62.625,
+          62.666
+        ],
+        "unit": "us"
+      },
+      "write, raw transaction only": {
+        "median": 7.209,
+        "spread": 0.011652101539741938,
+        "samples": [
+          7.208,
+          7.292,
+          7.209
+        ],
+        "unit": "us"
+      },
+      "read by primary key (readSync)": {
+        "median": 0.917,
+        "spread": 0.0010905125408942212,
+        "samples": [
+          0.916,
+          0.917,
+          0.917
+        ],
+        "unit": "us"
+      },
+      "read by primary key (await read)": {
+        "median": 0.917,
+        "spread": 0.04471101417666295,
+        "samples": [
+          0.917,
+          0.917,
+          0.958
+        ],
+        "unit": "us"
+      },
+      "cold open (LRU miss)": {
+        "median": 318.083,
+        "spread": 0.020698999946554837,
+        "samples": [
+          318.083,
+          314.5,
+          321.084
+        ],
+        "unit": "us"
+      },
+      "tenant close": {
+        "median": 118.666,
+        "spread": 0.015455143006421411,
+        "samples": [
+          117.458,
+          119.292,
+          118.666
+        ],
+        "unit": "us"
+      },
+      "tenants open per process": {
+        "median": 10000,
+        "spread": 0,
+        "samples": [
+          10000,
+          10000,
+          10000
+        ],
+        "unit": "count"
+      }
+    },
+    "http": {
+      "point read, HTTP keep-alive": {
+        "median": 54.333,
+        "spread": 0.578985147148142,
+        "samples": [
+          54.125,
+          85.583,
+          54.333
+        ],
+        "unit": "us"
+      },
+      "single-row write, ack local, HTTP": {
+        "median": 130.709,
+        "spread": 0.08511273133449113,
+        "samples": [
+          136.208,
+          130.709,
+          125.083
+        ],
+        "unit": "us"
+      },
+      "point read, HTTP keep-alive, minted token": {
+        "median": 54.75,
+        "spread": 0.09892237442922369,
+        "samples": [
+          54.75,
+          53.917,
+          59.333
+        ],
+        "unit": "us"
+      },
+      "healthz, HTTP": {
+        "median": 40.375,
+        "spread": 0.022687306501547908,
+        "samples": [
+          39.917,
+          40.375,
+          40.833
+        ],
+        "unit": "us"
+      },
+      "point read, Hrana pipeline": {
+        "median": 50.208,
+        "spread": 0.021570267686424442,
+        "samples": [
+          50.208,
+          50.625,
+          49.542
+        ],
+        "unit": "us"
+      },
+      "single-row write, ack local, Hrana pipeline": {
+        "median": 114.5,
+        "spread": 0.005091703056768545,
+        "samples": [
+          114.042,
+          114.5,
+          114.625
+        ],
+        "unit": "us"
+      },
+      "point read, WebSocket": {
+        "median": 30.209,
+        "spread": 0.009665993578072813,
+        "samples": [
+          30.209,
+          30,
+          30.292
+        ],
+        "unit": "us"
+      },
+      "single-row write, ack local, WebSocket": {
+        "median": 92.708,
+        "spread": 0.042240151874703334,
+        "samples": [
+          92.708,
+          94.333,
+          90.417
+        ],
+        "unit": "us"
+      },
+      "write → live event on another socket": {
+        "median": 117.208,
+        "spread": 0.046216981775988,
+        "samples": [
+          114.458,
+          117.208,
+          119.875
+        ],
+        "unit": "us"
+      },
+      "live-query invalidation → event on socket": {
+        "median": 22.875,
+        "spread": 0.33696174863387973,
+        "samples": [
+          21.75,
+          22.875,
+          29.458
+        ],
+        "unit": "us"
+      },
+      "throughput, mixed 90/10, HTTP": {
+        "median": 33330.87962507827,
+        "spread": 0.17262535108699711,
+        "samples": [
+          33330.87962507827,
+          34950.31978057211,
+          29196.56498325453
+        ],
+        "unit": "rps"
+      },
+      "throughput, mixed 90/10, WebSocket": {
+        "median": 61282.41230617025,
+        "spread": 0.029009757214910857,
+        "samples": [
+          62687.16428280964,
+          61282.41230617025,
+          60909.37638026357
+        ],
+        "unit": "mps"
+      }
+    },
+    "replication": {
+      "primary write (HTTP)": {
+        "median": 362.458,
+        "spread": 0.05069552886127496,
+        "samples": [
+          362.458,
+          353.792,
+          372.167
+        ],
+        "unit": "us"
+      },
+      "commit -> replica applied": {
+        "median": 252.708,
+        "spread": 0.053088940595469855,
+        "samples": [
+          252.708,
+          250.125,
+          263.541
+        ],
+        "unit": "us"
+      },
+      "write forwarded via replica": {
+        "median": 384.709,
+        "spread": 0.013649277765791744,
+        "samples": [
+          380.166,
+          385.417,
+          384.709
+        ],
+        "unit": "us"
+      },
+      "write, ack replica": {
+        "median": 366.333,
+        "spread": 0.04128757169023811,
+        "samples": [
+          358.917,
+          366.333,
+          374.042
+        ],
+        "unit": "us"
+      },
+      "write, ack quorum": {
+        "median": 359.25,
+        "spread": 0.030736256089074387,
+        "samples": [
+          348.708,
+          359.75,
+          359.25
+        ],
+        "unit": "us"
+      },
+      "records/s applied": {
+        "median": 3802,
+        "spread": 0.035507627564439766,
+        "samples": [
+          3802,
+          3814,
+          3679
+        ],
+        "unit": "rps"
+      }
+    },
+    "storage": {
+      "records shipped/s": {
+        "median": 12346,
+        "spread": 0.042604892272800905,
+        "samples": [
+          12646,
+          12120,
+          12346
+        ],
+        "unit": "rps"
+      },
+      "MiB/s to the bucket": {
+        "median": 7.4,
+        "spread": 0.040540540540540515,
+        "samples": [
+          7.5,
+          7.2,
+          7.4
+        ],
+        "unit": "count"
+      },
+      "one commit to the bucket": {
+        "median": 249.333,
+        "spread": 0.0073516141064359644,
+        "samples": [
+          249.333,
+          247.709,
+          249.542
+        ],
+        "unit": "us"
+      }
+    },
+    "fsync": {
+      "writes/s, 1 tenants": {
+        "median": 8504.50540347925,
+        "spread": 0.2169707727483333,
+        "samples": [
+          8504.50540347925,
+          6944.745865705977,
+          8789.974974941246
+        ],
+        "unit": "rps"
+      },
+      "fsyncs/s, 1 tenants": {
+        "median": 17009.0108069585,
+        "spread": 0.2169707727483333,
+        "samples": [
+          17009.0108069585,
+          13889.491731411954,
+          17579.94994988249
+        ],
+        "unit": "count"
+      },
+      "commit latency, 1 tenants": {
+        "median": 107.917,
+        "spread": 0.23474522086418265,
+        "samples": [
+          107.917,
+          127.792,
+          102.459
+        ],
+        "unit": "us"
+      },
+      "writes/s, 10 tenants": {
+        "median": 11184.657066390839,
+        "spread": 0.12468897077485523,
+        "samples": [
+          10232.665225566314,
+          11627.2686036443,
+          11184.657066390839
+        ],
+        "unit": "rps"
+      },
+      "fsyncs/s, 10 tenants": {
+        "median": 22369.314132781677,
+        "spread": 0.12468897077485523,
+        "samples": [
+          20465.330451132628,
+          23254.5372072886,
+          22369.314132781677
+        ],
+        "unit": "count"
+      },
+      "commit latency, 10 tenants": {
+        "median": 484.583,
+        "spread": 0.10085991460699198,
+        "samples": [
+          525.5,
+          476.625,
+          484.583
+        ],
+        "unit": "us"
+      },
+      "writes/s, 100 tenants": {
+        "median": 11713.137462591583,
+        "spread": 0.1220791013919245,
+        "samples": [
+          12025.177715842545,
+          11713.137462591583,
+          10595.248419929278
+        ],
+        "unit": "rps"
+      },
+      "fsyncs/s, 100 tenants": {
+        "median": 23426.274925183166,
+        "spread": 0.1220791013919245,
+        "samples": [
+          24050.35543168509,
+          23426.274925183166,
+          21190.496839858555
+        ],
+        "unit": "count"
+      },
+      "commit latency, 100 tenants": {
+        "median": 4286.5,
+        "spread": 0.10721637699755036,
+        "samples": [
+          4171.542,
+          4286.5,
+          4631.125
+        ],
+        "unit": "us"
+      },
+      "writes/s, 500 tenants": {
+        "median": 11918.208117019032,
+        "spread": 0.0654701937787673,
+        "samples": [
+          11918.208117019032,
+          12326.742077656181,
+          11546.454682739268
+        ],
+        "unit": "rps"
+      },
+      "fsyncs/s, 500 tenants": {
+        "median": 23836.416234038064,
+        "spread": 0.0654701937787673,
+        "samples": [
+          23836.416234038064,
+          24653.484155312362,
+          23092.909365478536
+        ],
+        "unit": "count"
+      },
+      "commit latency, 500 tenants": {
+        "median": 20164.333,
+        "spread": 0.06482361702715383,
+        "samples": [
+          20164.333,
+          19822.625,
+          21129.75
+        ],
+        "unit": "us"
+      }
+    },
+    "bus": {
+      "publish, in-process fsync": {
+        "median": 9028,
+        "spread": 0.003433761630482942,
+        "samples": [
+          9028,
+          9054,
+          9023
+        ],
+        "unit": "rps"
+      },
+      "claim, in-process fsync": {
+        "median": 60465,
+        "spread": 0.06061357810303481,
+        "samples": [
+          60465,
+          61046,
+          57381
+        ],
+        "unit": "rps"
+      },
+      "ack, in-process fsync": {
+        "median": 8599,
+        "spread": 0.0010466333294569135,
+        "samples": [
+          8607,
+          8599,
+          8598
+        ],
+        "unit": "rps"
+      },
+      "publish, http fsync": {
+        "median": 5954,
+        "spread": 0.07725898555592879,
+        "samples": [
+          5955,
+          5495,
+          5954
+        ],
+        "unit": "rps"
+      },
+      "claim, http fsync": {
+        "median": 51864,
+        "spread": 0.14277726361252507,
+        "samples": [
+          48862,
+          56267,
+          51864
+        ],
+        "unit": "rps"
+      },
+      "ack, http fsync": {
+        "median": 6115,
+        "spread": 0.027636958299264106,
+        "samples": [
+          6185,
+          6115,
+          6016
+        ],
+        "unit": "rps"
+      },
+      "publish, in-process local": {
+        "median": 17437,
+        "spread": 0.02609393817743878,
+        "samples": [
+          17514,
+          17059,
+          17437
+        ],
+        "unit": "rps"
+      },
+      "claim, in-process local": {
+        "median": 66411,
+        "spread": 0.054403637951544175,
+        "samples": [
+          67542,
+          66411,
+          63929
+        ],
+        "unit": "rps"
+      },
+      "ack, in-process local": {
+        "median": 15177,
+        "spread": 0.08506292416156025,
+        "samples": [
+          15177,
+          15331,
+          14040
+        ],
+        "unit": "rps"
+      },
+      "publish, http local": {
+        "median": 8222,
+        "spread": 0.0548528338603746,
+        "samples": [
+          8004,
+          8222,
+          8455
+        ],
+        "unit": "rps"
+      },
+      "claim, http local": {
+        "median": 54346,
+        "spread": 0.0553306591101461,
+        "samples": [
+          52223,
+          55230,
+          54346
+        ],
+        "unit": "rps"
+      },
+      "ack, http local": {
+        "median": 8222,
+        "spread": 0.05302846022865483,
+        "samples": [
+          7931,
+          8367,
+          8222
+        ],
+        "unit": "rps"
+      }
+    }
+  }
+}

@@ -1,38 +1,29 @@
 # Measured
 
-The numbers `bun run bench` printed, on the machine named below. One run, all six benchmarks, so
-every number here can be read against every other one. Reproduce with:
+The numbers `bun run bench --save` printed, on the machine named below: all eight benchmarks, three
+rounds run round-robin, each leg the median of its three per-round values. The run is saved as
+`bench/results/2026-10-22-bf52584-dirty.json` (the uncommitted diff was the round-robin runner
+itself, nothing measured), so the next run has something to compare against:
 
 ```sh
-bun run bench             # all six, then the design §10 table and the phase-1 table
-bun run bench --quick     # fewer rounds
-bun run bench --only wal  # one of driver | wal | tenant | http | replication | storage
-bun run bench --json      # every leg as JSON, which is where this file comes from
+bun run bench                       # all eight, three rounds, then the §10 and phase-1 tables
+bun run bench --quick               # fewer iterations and one round
+bun run bench --only wal            # driver | wal | tenant | http | replication | storage | fsync | bus
+bun run bench --rounds 5 --save     # five rounds, saved to bench/results/<date>-<sha>.json
+bun run bench --save --label ack-local    # a variant, saved under its own name
+bun run bench --strict              # exit 2 if the load is above 4 or a runaway process is found
+bun run bench:compare bench/results/old.json bench/results/new.json
 ```
 
 Each benchmark runs as its own process, and `bench/http.ts` spawns a second one for the load, so
 the client never shares an event loop with the server. A missed budget is a WARN, never a build
-failure — a benchmark measures the machine it ran on. The one hard gate is the driver's own
-point-read target, which `bench/driver.ts` enforces itself.
+failure. The one hard gate is the driver's own point-read target, which `bench/driver.ts` enforces
+itself.
 
-> **This run is from 2026-09-12 and has not been re-recorded. Three things have happened since,
-> and all three move numbers in it.** Read `docs/performance.md` §1, §5 and §8 for what is
-> currently known; this file stays as it is until a quiet machine can produce one coherent run,
-> because one run is the whole contract of the file and a table stitched from several is worse
-> than an old one.
->
-> 1. **The defaults moved (2026-09-13).** `defaultAck` is `fsync`, `groupCommit` and `deferAppend`
->    are on. A single write costs 2.7x more (23.7 µs → 62 µs) and concurrent writes cost 1.69x
->    *less* (27.7–30.4k → 46.0–53.6k writes/s at 64 clients, three interleaved rounds). Every
->    write and throughput row below is the old defaults.
-> 2. **`bench/http-client.ts` was charging its own warm-up to the first leg it measured** — 40 µs,
->    which is most of the distance between the `point read over HTTP keep-alive` row below and its
->    budget. Fixed; the row now lands at 53.7 µs. `docs/performance.md` §8.
-> 3. **There is a new leg**, `point read, HTTP keep-alive, minted token`, so the token cost is
->    measured rather than extrapolated: 58.6 µs against 53.7 for the admin key.
->
-> The one figure below that is *not* suspect is the driver's, which is in-process and does not
-> touch any of the three.
+**Spread** is `(max - min) / median` across the three rounds. Above 10% the runner flags a leg
+`noisy`, and `bench:compare` calls any change inside the larger of two runs' spreads `~` rather than
+a regression or a win. `docs/bench-repeatable.md` has the reasoning; `docs/performance.md` §8 has
+the history of this file being wrong.
 
 ## Machine
 
@@ -40,138 +31,127 @@ point-read target, which `bench/driver.ts` enforces itself.
 |---|---|
 | CPU | Apple M5 Pro, 18 cores |
 | memory | 52 GB |
-| platform | darwin/arm64 (macOS 25.6) |
+| platform | darwin/arm64 (macOS 27.0.1) |
 | filesystem | APFS |
 | Bun | 1.4.0 |
-| SQLite | 3.53.4 |
-| library | `/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib` (Homebrew) — since C6, `bun run sqlite:build` vendors one and it is what is measured now |
+| SQLite | 3.53.4, vendored by `bun run sqlite:build` |
 | `ulimit -n` | 1 048 576 |
-| recorded | 2026-09-12, end of phase 1 |
-
-Apple's system SQLite is built without the session and preupdate extensions, so a Homebrew build is
-what the realtime engine needs. `BQL_SQLITE_LIB` overrides the search.
+| load | 1.85 before, 2.98 after; no runaway processes |
+| recorded | 2026-10-22, at `bf52584` |
 
 ## Design §10 performance budget
 
-| path | measured | budget | verdict |
+| path | measured | spread | budget | verdict |
+|---|---|---|---|---|
+| point read, in process (plan M2) | 0.74 µs | 7.1% | ≤ 1.20 µs | **PASS** |
+| point read over HTTP keep-alive | 54.3 µs | 57.9% | ≤ 60 µs | **PASS**, loosely |
+| point read over WebSocket | 30.2 µs | 1.0% | ≤ 35 µs | **PASS** |
+| single-row write, `ack: local`, incl. tail+log | 22.4 µs | 2.8% | ≤ 40 µs | **PASS** |
+| write visible on a replica | 252.7 µs | 5.3% | ≤ 1 ms | **PASS** |
+| write visible on a replica, no transport | 211.7 µs | 1.6% | ≤ 1 ms | **PASS** |
+| live-query invalidation → event on socket | 22.9 µs | 33.7% | ≤ 200 µs | **PASS** |
+| tenants open per process | 10 000 | 0% | ≥ 10 000 | **PASS** |
+| throughput, mixed 90/10, HTTP | 33 331 req/s | 17.3% | ≥ 50 000 req/s | **WARN** |
+| throughput, mixed 90/10, WebSocket | 61 282 msg/s | 2.9% | ≥ 150 000 msg/s | **WARN** |
+
+What each row is:
+
+- **The write budget is the in-process path**, which is what design §10 says ("incl. tail+log"):
+  `bench/tenant.ts` through the tenant owner at `ack: "local"`. At the default `ack: "fsync"` the
+  same write is 62.6 µs.
+- **The HTTP point read's 58% spread is one round.** Rounds one and three measured 54.1 and 54.3
+  µs, round two 85.6. The median is the number, and a single run would have reported either.
+- **"Write visible on a replica" is two whole servers over a loopback socket**, and the row beneath
+  it is `bench/wal.ts`, the same path with the transport taken out.
+- **Live-query invalidation is derived**: the write-to-event round trip on a second socket minus a
+  bare write over the same socket.
+
+### The two WARNs, and why they are worse than the 2026-09-12 run
+
+That run recorded 53 752 req/s over HTTP and 130 315 msg/s on a WebSocket. Two things changed.
+
+**`bench/http.ts` measures at the server's default ack**, and the default has been `fsync` since
+2026-09-13. Its legs are still labelled "ack local", which is what they measured when they were
+named. Every write in the 90/10 mix now pays an `fdatasync`. `BQL_DEFAULT_ACK=local` puts the old
+setting back (`bench/results/2026-10-22-bf52584-dirty-http-ack-local.json`):
+
+| leg | default (`fsync`) | `BQL_DEFAULT_ACK=local` | 2026-09-12 |
 |---|---|---|---|
-| point read, in process (plan M2) | 0.77 µs | ≤ 1.20 µs | **PASS** |
-| point read over HTTP keep-alive | 48.2 µs | ≤ 60 µs | **PASS** |
-| point read over WebSocket | 28.6 µs | ≤ 35 µs | **PASS** |
-| single-row write, `ack: local`, incl. tail+log | 28.2 µs | ≤ 40 µs | **PASS** |
-| single-row write, `ack: fsync` — **the default since 2026-09-13** | 65.0 µs | — | what an `fdatasync` costs; `local` is the 2.7x opt-out |
-| write visible on a replica | 219.5 µs | ≤ 1 ms | **PASS** |
-| write visible on a replica, no transport | 291.6 µs | ≤ 1 ms | **PASS** |
-| live-query invalidation → event on socket | 17.3 µs | ≤ 200 µs | **PASS** |
-| tenants open per process | 10 000 | ≥ 10 000 | **PASS** |
-| throughput, mixed 90/10, HTTP | 53 752 req/s | ≥ 50 000 req/s | **PASS** |
-| throughput, mixed 90/10, WebSocket | 130 315 msg/s | ≥ 150 000 msg/s | **WARN** |
+| point read, HTTP keep-alive | 54.3 µs | 53.6 µs | 48.2 µs |
+| single-row write, HTTP | 130.7 µs | 83.7 µs | 78.9 µs |
+| single-row write, WebSocket | 92.7 µs | 59.8 µs | 61.3 µs |
+| throughput, mixed 90/10, HTTP | 33 331 req/s | 32 442 req/s | 53 752 req/s |
+| throughput, mixed 90/10, WebSocket | 61 282 msg/s | 83 752 msg/s | 130 315 msg/s |
 
-Four of these need their provenance stated:
-
-- **The write budget is the in-process path**, which is what design §10 says ("incl. tail+log").
-  It is measured through the tenant owner, not over HTTP. The same write costs 79 µs over HTTP and
-  61 µs over a WebSocket, which is the transport on top of these 28 µs.
-- **"Write visible on a replica" is now measured over a real socket**: two nodes, each with its own
-  data directory and listener, in one process, and the gap timed between the primary's commit
-  listener and the replica's. 219.5 µs p50. The row beneath it is `bench/wal.ts`, the same path with
-  the transport taken out (291.6 µs) — the transport one is *faster* because the WAL benchmark
-  fsyncs the replica's position on every record and the server batches that work.
-- **Live-query invalidation is derived**, not timed directly. What can be timed from outside the
-  server is the whole round trip: a write leaves the load client, commits, and the event arrives on
-  a second socket (78.6 µs p50). The invalidation leg is that minus a bare write of the same shape
-  over the same socket (61.3 µs), which is the 17.3 µs above.
-- **Tenants open per process** is a capability, not a latency: 10 000 created and held open in
-  7.5 s, with nothing evicted.
-
-**The one WARN, unchanged from phase 0.** WebSocket throughput is 130k messages a second against a
-150k target, measured with 2 000 requests in flight on one socket, 90 % point reads and 10 %
-single-row writes. The writes are the reason: they serialise on the tenant's single writer at
-~28 µs each, so 200 of the 2 000 messages cost about 5.6 ms of the ~15 ms the run takes. A
-read-only stream on the same socket clears the target; a mixed one on a single database does not,
-and would not until the single writer stops being the only write path. Batching commits or
-pipelining the write path is the fix, and it is still open.
+**The latency legs at `ack: local` are back where they were; the throughput legs are not.** HTTP
+throughput doesn't move with the ack level at all, so the ack is not what took it from 54k to 33k.
+I don't know yet what did. It is the one number in this file that needs a bisect, with
+`bun run bench --only http --rounds 5 --save` at each end and `bench:compare` between them.
 
 ## Phase 1: routing, durability, Hrana and the shipper
 
-Design §10 budgets none of these, so they are printed with the number they should be read against
-rather than a verdict. A forwarded write is not fast or slow on its own, only next to the local one.
+Design §10 budgets none of these, so they are printed with the number they should be read against.
 
-| path | measured | read against | what the difference is |
+| path | measured | read against | difference |
 |---|---|---|---|
-| write, `ack: local`, on the primary (HTTP) | 303.4 µs | — | the reference: an HTTP write on the primary, with a replica attached and streaming |
-| write forwarded through a replica | 352.8 µs | 303.4 µs | **+49 µs** for the whole round trip out to the primary and back over the replication socket |
-| write, `ack: replica` | 407.0 µs | 303.4 µs | **+104 µs**: an `fdatasync` here, plus waiting for a replica to report the record fsynced |
-| write, `ack: quorum` | 382.5 µs | 303.4 µs | **+79 µs**: one replica, so the majority is the same single ack, measured separately |
-| point read, Hrana pipeline | 49.1 µs | 48.2 µs | **+0.9 µs** over the native route for the same statement |
-| write, Hrana pipeline | 79.7 µs | 78.9 µs | **+0.8 µs** over the native route |
-| records shipped to S3 per second | 28 790 rec/s | — | commit to bucket, end to end, against the in-process fake |
-| pushed to S3 | 17.4 MiB/s | — | 633 bytes per single-row record |
-| one commit to the bucket | 200.2 µs | — | steady state, one commit at a time, `flush()` included |
+| write on the primary (HTTP) | 362.5 µs | — | the reference: a replica attached and streaming |
+| write forwarded through a replica | 384.7 µs | 362.5 µs | +22 µs for the round trip to the primary and back |
+| write, `ack: replica` | 366.3 µs | 362.5 µs | +4 µs |
+| write, `ack: quorum` | 359.3 µs | 362.5 µs | inside the 5% spread of the reference |
+| point read, Hrana pipeline | 50.2 µs | 54.3 µs | 4 µs faster than the native route, inside the native route's spread |
+| write, Hrana pipeline | 114.5 µs | 130.7 µs | 16 µs faster; I suspect the native write route does work the pipeline skips, not checked |
+| records shipped to S3 per second | 12 346 rec/s | — | commit to bucket, against the in-process fake |
+| pushed to S3 | 7.40 MiB/s | — | |
+| one commit to the bucket | 249.3 µs | — | steady state, `flush()` included |
 
-Three things worth knowing about these:
+`bench/replication.ts` runs both nodes and the client on one event loop and waits for the replica
+to apply each write before the next, so its primary write carries the replica's work. Since the
+default became `ack: "fsync"`, the primary pays an `fdatasync` on every write either way, which is
+why `ack: replica` now costs almost nothing over it. Compare inside a table, not across them.
 
-- **The primary's HTTP write is 303 µs here and 79 µs in the HTTP table.** Different benchmark,
-  different shape: `bench/replication.ts` runs both nodes and the client on one event loop and
-  waits for the replica to apply each write before starting the next, so its reference number
-  carries the replica's work. Compare inside a table, not across them.
-- **Hrana costs under a microsecond.** The compatibility layer decodes its own value encoding and
-  opens and closes a stream per request; `@libsql/client` keeps a baton alive instead, which saves
-  the close. Everything underneath is the same `exec.ts` the native route uses.
-- **The S3 numbers are against `test/storage/fake-s3.ts`**, in this process. They measure bql.sh's
-  side — batching, the segment layout, the manifest write and `Bun.S3Client`'s request path — with
-  the network taken out. A real bucket is slower and is a different question.
+The S3 rate is down from 28 790 rec/s in the 2026-09-12 run. I suspect the same default change:
+the shipper can only ship what has been committed, and `bench/storage.ts` writes through
+`tenant.write` at whatever the server's default is. Not checked with `BQL_DEFAULT_ACK=local`, since
+the benchmark passes `env: {}` to `loadConfig` and ignores it.
 
 ## Driver — `bench/driver.ts`
 
-The `bun:ffi` driver against `bun:sqlite` on the same file, same schema, same pragmas, 100 000
-rows. µs per operation.
+The `bun:ffi` driver on 100 000 rows. µs per operation, median of three rounds. The `bun:sqlite`
+column comes from three separate runs of `bun run bench:driver` straight after, since the runner
+records only bql's side.
 
-| op | bql | bun:sqlite | speedup |
-|---|---|---|---|
-| point read by primary key → object | 0.77 | 1.77 | 2.30x |
-| point read, 3 columns | 0.82 | 1.78 | 2.19x |
-| point read, 3 columns, `values()` | 0.83 | 1.83 | 2.22x |
-| 100-row scan → objects | 8.98 | 6.86 | 0.76x |
-| insert inside a transaction | 0.28 | 0.22 | 0.80x |
-| insert inside a transaction, update hook on | 0.36 | not available | — |
-| single-row autocommit insert (WAL, `synchronous=NORMAL`) | 5.09 | 5.26 | 1.03x |
+| op | bql | spread | bun:sqlite | ratio |
+|---|---|---|---|---|
+| point read by primary key → object | 0.74 | 7.1% | 0.76 – 0.80 | 1.01 – 1.09x |
+| point read, 3 columns | 0.76 | 3.7% | 0.79 – 0.84 | 1.03 – 1.11x |
+| point read, 3 columns, `values()` | 0.78 | 3.6% | 0.83 – 0.86 | 1.08 – 1.11x |
+| 100-row scan → objects | 8.33 | 3.9% | 10.75 – 11.84 | 1.30 – 1.41x |
+| insert inside a transaction | 0.25 | 0.5% | 0.24 | 0.97x |
+| insert inside a transaction, update hook on | 0.31 | 5.3% | not available | — |
+| single-row autocommit insert (WAL, `synchronous=NORMAL`) | 5.26 | 5.5% | 5.20 – 5.42 | 0.97 – 1.03x |
 
-Point reads win because the per-statement overhead is much lower. Wide scans lose because every
-column costs one extra FFI call for `sqlite3_column_type`, which bun:sqlite does in native code.
-The update hook, which bun:sqlite cannot install at all, costs 0.08 µs a row.
-
-**The authorizer trampoline is always installed** since the `lastInsertRowid` fix, because that is
-where a statement's program is read at compile time. None of the legs above moved: it costs
-nothing per step and about 0.5 µs per *prepare* (8 authorizer callbacks for a three-column select,
-measured separately), which the connection's statement cache pays once per SQL text.
+The 2.30x point-read lead of the 2026-09-12 run is gone: `bun:sqlite` went from 1.77 µs to under
+0.8 between Bun releases, while bql stayed at 0.74. The scan went the other way and is now bql's
+largest lead. The README carries these as ratio ranges.
 
 ## WAL shipping — `bench/wal.ts`
 
-500 transactions of 5 rows, primary and replica in one process with no transport between them,
-replica position fsynced on every transaction. µs.
+500 transactions of 5 rows, primary and replica in one process with no transport, replica position
+fsynced on every transaction, mechanism A (`"pages"`, the default since C5). µs.
 
-Both of design §4.5's apply mechanisms, since C5 made `"pages"` (A) the default and kept `"wal"`
-(B) behind `[replication] apply`. `bun run bench/wal.ts each pages` and `… each wal`. The tail leg
-is the P3 figure — the frame checksum in C (`docs/p3-wal-checksum.md`); with
-`BQL_WAL_NATIVE=0` it is 10.3 µs rather than 5.3.
+| leg | p50 | spread |
+|---|---|---|
+| primary commit | 12.3 | 1.0% |
+| tail + checksum chain | 4.75 | 9.6% |
+| encode, zstd level 3 | 11.0 | 2.3% |
+| log append | 3.42 | 4.9% |
+| decode | 5.29 | 3.1% |
+| replica apply, incl. `fdatasync` | 166.0 | 1.2% |
+| replica read sees the row | 6.33 | 3.9% |
+| **end to end** | **211.7** | 1.6% |
 
-| leg | A p50 | A p90 | A p99 | B p50 | B p90 | B p99 |
-|---|---|---|---|---|---|---|
-| primary commit | 11.8 | 17.3 | 45.8 | 12.0 | 18.4 | 49.5 |
-| tail + checksum chain | 5.3 | 11.8 | 43.0 | 10.3 | 17.9 | 54.0 |
-| encode, zstd level 3 | 11.7 | 16.7 | 35.8 | 11.8 | 16.2 | 41.8 |
-| log append | 2.8 | 5.8 | 11.9 | 3.0 | 6.5 | 11.2 |
-| decode | 5.3 | 8.8 | 16.2 | 5.5 | 8.1 | 15.1 |
-| replica apply, incl. `fdatasync` | **161.8** | 205.2 | 266.5 | 196.1 | 251.3 | 319.8 |
-| replica read sees the row | **6.4** | 8.8 | 12.5 | 47.2 | 74.3 | 82.5 |
-| **end to end** | **210.8** | **270.5** | **413.8** | 290.8 | 364.6 | 489.0 |
-
-Records compress 4.8x: 923 bytes on the wire for 4 440 bytes of pages. Everything bql.sh controls
-costs about 40 µs a transaction; the rest is the fsync, and — under mechanism B — the wal-index
-rebuild it forces on the next replica reader. **Mechanism A takes that read leg from 47.2 µs to
-6.4, a 7.4x cut**, and takes 34 µs off the apply because there are no WAL frames to checksum.
-`docs/c5-apply-pages.md`.
+Everything bql.sh controls costs about 40 µs a transaction; the rest is the fsync.
+`bun run bench/wal.ts each wal` measures mechanism B, which `docs/c5-apply-pages.md` compares.
 
 ## Replication over a socket — `bench/replication.ts`
 
@@ -179,103 +159,108 @@ A primary and a replica, each a whole server with its own data directory and lis
 process on loopback. 300 single-row transactions timed one at a time, then 2 000 records streamed.
 µs.
 
-| leg | p50 | p90 | p99 |
-|---|---|---|---|
-| primary write (HTTP) | 303.4 | 374.1 | 1049.1 |
-| commit → replica applied | 219.5 | 255.5 | 342.5 |
-| write forwarded via replica | 352.8 | 380.0 | 1171.1 |
-| write, `ack: replica` | 407.0 | 446.0 | 1964.3 |
-| write, `ack: quorum` | 382.5 | 409.7 | 476.9 |
+| leg | p50 | spread |
+|---|---|---|
+| primary write (HTTP) | 362.5 | 5.1% |
+| commit → replica applied | 252.7 | 5.3% |
+| write forwarded via replica | 384.7 | 1.4% |
+| write, `ack: replica` | 366.3 | 4.1% |
+| write, `ack: quorum` | 359.3 | 3.1% |
+| records applied per second, sustained | 3 802 | 3.6% |
 
-Sustained: 2 000 records applied end to end in 0.514 s, **3 894 records/s**, 2 401 KiB on the wire.
-Both nodes share one event loop, so that is the pair's combined ceiling rather than each node's.
-The checksums matched at the end, which is the benchmark's own correctness gate.
+Both nodes share one event loop, so 3 802 records/s is the pair's combined ceiling rather than each
+node's. The benchmark fails if the two checksums differ at the end.
 
 ## Shipping to S3 — `bench/storage.ts`
 
 2 000 single-row records committed while the shipper runs on its 25 ms timer, then 200 more one at
-a time with a `flush()` after each.
+a time with a `flush()` after each, against `test/storage/fake-s3.ts` in this process. That
+measures bql.sh's side (batching, the segment layout, the manifest write, `Bun.S3Client`'s request
+path) with the network taken out.
 
-| leg | value |
-|---|---|
-| records committed/s | 29 143 |
-| records shipped/s, commit to bucket | 28 790 |
-| pushed to the bucket | 17.4 MiB/s |
-| bytes pushed per record | 633 |
-| bytes retained per record | 631 |
-| one commit to the bucket, p50 | 200.2 µs |
-| one commit to the bucket, p99 | 852.5 µs |
-
-Shipping costs about 1 % of the commit rate here: 29 143 records a second committed, 28 790 of them
-committed *and* in the bucket. Pushed and retained bytes are nearly equal because a segment is
-re-uploaded only as it grows and these records are small; a workload with large transactions and a
-long segment would push more than it retains.
+| leg | value | spread |
+|---|---|---|
+| records shipped/s, commit to bucket | 12 346 | 4.3% |
+| pushed to the bucket | 7.40 MiB/s | 4.1% |
+| one commit to the bucket, p50 | 249.3 µs | 0.7% |
 
 ## Tenant write path — `bench/tenant.ts`
 
-2 000 rounds of one-row transactions through the tenant owner — the whole design §4.3 write path,
-`BEGIN IMMEDIATE` → `COMMIT` → tail → record → log append → position save. µs.
+2 000 rounds of one-row transactions through the tenant owner: `BEGIN IMMEDIATE` → `COMMIT` → tail
+→ record → log append → position save. µs.
 
-| leg | p50 | p90 | p99 | with `BQL_WAL_NATIVE=0` |
-|---|---|---|---|---|
-| `write`, `ack: "local"` | **24.0** | 29.9 | 50.8 | 28.9 |
-| `write`, `ack: "fsync"` | 63.5 | 78.2 | 109.3 | 66.1 |
-| the `BEGIN IMMEDIATE`…`COMMIT` alone | 7.7 | 8.7 | 11.5 | 7.7 |
-| `readSync`, point read by primary key | 0.9 | 1.1 | 3.7 | 0.9 |
-| `read`, the same through a promise | 1.0 | 1.4 | 3.1 | 1.0 |
+| leg | p50 | spread |
+|---|---|---|
+| `write`, `ack: "local"` | **22.4** | 2.8% |
+| `write`, `ack: "fsync"`, the default | 62.6 | 2.3% |
+| the `BEGIN IMMEDIATE`…`COMMIT` alone | 7.21 | 1.2% |
+| `readSync`, point read by primary key | 0.92 | 0.1% |
+| `read`, the same through a promise | 0.92 | 4.5% |
+| cold open (an LRU miss) | 318.1 | 2.1% |
+| close | 118.7 | 1.5% |
 
-An awaited read costs the same as the synchronous one, so the server layer can use either.
-
-The last column is the same benchmark with the WAL frame checksum back in JavaScript, which is what
-a node on a system libsqlite3 gets. **17% of a write** is the difference, and it is all in the tail:
-`docs/p3-wal-checksum.md`.
-
-Cold open (an LRU miss) is **298 µs** p50 with 6 000 records in the log, and close is 118 µs. In
-phase 0 that open was 2 517 µs, almost all of it `TxnLog.open` walking every record header; R3's
-sidecar segment index is the difference.
-
-**10 000 tenants created and held open in 7.5 s**, with the registry holding all of them (`maxOpen`
-above the target, so nothing was evicted). At roughly 7 file descriptors per open tenant this needs
-about 70 000 of the 1 048 576 this machine allows; a host with the common 1 024 soft limit reaches
-about 140 tenants before `maxOpen` has to come down, and the registry warns about exactly that at
-startup.
+**10 000 tenants created and held open**, with nothing evicted. At roughly 7 file descriptors per
+open tenant that needs about 70 000 of the 1 048 576 this machine allows; a host with the common
+1 024 soft limit reaches about 140 tenants before `maxOpen` has to come down, and the registry warns
+about exactly that at startup.
 
 ## HTTP, WebSocket and Hrana — `bench/http.ts`
 
-2 000 rounds. The server is one process; the load client is another, spawned by the benchmark, so
-the two do not share an event loop. µs unless stated.
+2 000 rounds, server and load client in separate processes, at the default `ack: "fsync"`. µs
+unless stated. The "ack local" in the leg names is stale, see above.
 
-| leg | p50 | p90 | p99 | budget |
+| leg | p50 | spread | budget |
+|---|---|---|---|
+| point read, HTTP keep-alive | 54.3 | 57.9% | ≤ 60 |
+| point read, HTTP keep-alive, minted token | 54.8 | 9.9% | — |
+| single-row write, HTTP | 130.7 | 8.5% | — |
+| `healthz`, HTTP | 40.4 | 2.3% | — |
+| point read, Hrana pipeline | 50.2 | 2.2% | — |
+| single-row write, Hrana pipeline | 114.5 | 0.5% | — |
+| point read, WebSocket | 30.2 | 1.0% | ≤ 35 |
+| single-row write, WebSocket | 92.7 | 4.2% | — |
+| write → live event on another socket | 117.2 | 4.6% | — |
+| live-query invalidation → event on socket | 22.9 | 33.7% | ≤ 200 |
+| throughput, mixed 90/10, HTTP | 33 331 req/s | 17.3% | ≥ 50 000 |
+| throughput, mixed 90/10, WebSocket | 61 282 msg/s | 2.9% | ≥ 150 000 |
+
+`healthz`, the same transport with no SQLite, is the floor of every HTTP number here. A minted
+token costs nothing measurable over the admin key. On Linux the two processes are pinned to
+different CPUs with `taskset`; macOS has no equivalent.
+
+## Many databases at once — `bench/fsync.ts`
+
+L5's instrument, at the defaults (`fsyncSweep = "per-db"`, `ack: "fsync"`). `docs/l5-fsync-sweep.md`
+reads these.
+
+| tenants | writes/s | fsyncs/s | commit latency p50 | spread |
 |---|---|---|---|---|
-| point read, HTTP keep-alive | 48.2 | 56.1 | 68.3 | ≤ 60 |
-| single-row write, `ack: local`, HTTP | 78.9 | 90.2 | 132.3 | — |
-| `healthz`, HTTP | 37.1 | 44.5 | 56.3 | — |
-| point read, Hrana pipeline | 49.1 | 57.4 | 81.5 | — |
-| single-row write, `ack: local`, Hrana pipeline | 79.7 | 91.0 | 162.8 | — |
-| point read, WebSocket | 28.6 | 33.5 | 43.3 | ≤ 35 |
-| single-row write, `ack: local`, WebSocket | 61.3 | 70.0 | 93.8 | — |
-| write → live event on another socket | 78.6 | 87.8 | 172.2 | — |
-| live-query invalidation → event on socket | 17.3 | 26.4 | — | ≤ 200 |
-| throughput, mixed 90/10, HTTP | 53 752 req/s | — | — | ≥ 50 000 |
-| throughput, mixed 90/10, WebSocket | 130 315 msg/s | — | — | ≥ 150 000 |
+| 1 | 8 505 | 17 009 | 107.9 µs | 21.7% |
+| 10 | 11 185 | 22 369 | 484.6 µs | 12.5% |
+| 100 | 11 713 | 23 426 | 4 287 µs | 12.2% |
+| 500 | 11 918 | 23 836 | 20 164 µs | 6.5% |
 
-`healthz` — the same transport with no SQLite at all — costs 37.1 µs, which is the floor of every
-number in this table. A point read adds 11 µs over HTTP and, on a socket, costs 8 µs less than the
-empty HTTP route. The Hrana pipeline legs are the same two statements through `/v2/pipeline`, one
-`execute` and one `close` per request.
+Two fsyncs per write at every rung, and the disk's barrier rate sets the ceiling: past ten tenants
+throughput stays near 12k writes/s and latency grows with the queue. The low rungs are the noisiest
+legs in the suite.
 
-`docs/m5-server.md` measured the same legs with the client on the server's own event loop and
-reported 23k–47k req/s, noting that the harness itself was the limit. Moving the client to its own
-process is what the 54k above is: the latency legs barely move, and only the throughput number
-changes. `bun run bench:http --in-process` still reproduces the old shape for comparison.
+## Bus — `packages/bus/scripts/bench.ts`
 
-On Linux the two processes are pinned to different CPUs with `taskset`. macOS has no equivalent, so
-these numbers rely on the scheduler putting two busy processes on two of the eighteen cores.
+Publish one at a time, claim 100 at a time, ack each one, on a bql.sh database. Two rounds of each
+ack level per suite round, alternating which goes first. Operations per second.
+
+| mode | ack | publish | claim | ack |
+|---|---|---|---|---|
+| in-process | `fsync` | 9 028 | 60 465 | 8 599 |
+| in-process | `local` | 17 437 | 66 411 | 15 177 |
+| HTTP | `fsync` | 5 954 | 51 864 | 6 115 |
+| HTTP | `local` | 8 222 | 54 346 | 8 222 |
+
+Every spread is under 10% except HTTP claim at `fsync` (14.3%). A claim is one transaction for 100
+messages, which is why it is six times a publish.
 
 ## Realtime fan-out
 
-Not part of `bun run bench` — it is asserted by `test/realtime/facade.test.ts`, which fails if it
-regresses. With 1 000 live subscriptions across 10 tables, one commit touching one table costs
-**0.018 ms median, 0.049 ms worst** inside `afterCommit`; flushing the 100 affected re-runs
-afterwards takes 0.50 ms, and only the subscriptions whose result actually changed emit anything.
-The plan's budget for this was 2 ms.
+Not part of `bun run bench`. It is asserted by `test/realtime/facade.test.ts`, which fails if it
+regresses: with 1 000 live subscriptions across 10 tables, one commit touching one table costs
+0.018 ms median inside `afterCommit`, against a 2 ms budget.

@@ -791,7 +791,9 @@ bun test              # 1496 across 125 files; BQL_WAL_NATIVE=0 proves the JavaS
 bun run typecheck
 bun run bytes         # no raw control bytes in source
 bun run routes:check  # docs/api.md covers every route
-bun run bench         # every benchmark, then the design §10 table (--quick for fewer rounds)
+bun run bench         # every benchmark three times, then the design §10 table (--quick: one round)
+bun run bench --save  # also write bench/results/<date>-<sha>.json
+bun run bench:compare bench/results/a.json bench/results/b.json  # what moved, and what is noise
 ```
 
 `test/e2e/scenario.test.ts` is the single-node story end to end; `test/e2e/phase1.test.ts` is the

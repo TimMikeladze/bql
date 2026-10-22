@@ -19,6 +19,7 @@ import { bqlStorage, ensureBusDatabase } from "../src/bus/storage";
 import { BusStore } from "../src/bus/store";
 import { generateKey } from "../src/bus/tokens";
 import { BusClient } from "../src/client/bus";
+import { emit } from "../../db/bench/report.ts";
 
 const argv = process.argv.slice(2);
 const num = (name: string, fallback: number) => {
@@ -156,3 +157,13 @@ for (const [key, list] of Object.entries(results)) {
   );
 }
 console.log(`load ${loadavg().map((n) => n.toFixed(2)).join(" ")}`);
+
+// For `bun run bench` in packages/db, which reads this line when BQL_BENCH_JSON=1.
+const legs: Record<string, { p50: number; value: number; unit: "rps" }> = {};
+for (const [key, list] of Object.entries(results)) {
+  for (const op of ["publish", "claim", "ack"] as const) {
+    const rate = median(list.map((r) => r[op]));
+    legs[`${op}, ${key}`] = { p50: rate, value: rate, unit: "rps" };
+  }
+}
+emit({ bench: "bus", info: { rounds, messages, httpMessages }, legs });
