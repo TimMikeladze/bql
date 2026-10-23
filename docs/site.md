@@ -41,17 +41,13 @@ The page was rebuilt around what a new reader has to do, in the order they do it
 
 ## Colour (2026-10-23)
 
-The chrome is no longer greyscale. Each area of the page has one hue, set as `--h` by an `h-*` class
-next to `hue`: hero 215, why 185, compare 300, getting started and the start band 150, showcase
-268, database 245, bus 60. From it `.hue` derives `--tint-bg`, `--tint-ink`, `--tint-line` and
-`--tint-soft`, with a light set under `[data-theme="light"]` and the `prefers-color-scheme`
-fallback. Tinted bands are full-surface backgrounds; inside an area the hue colours inline code,
-step numbers, the selected explorer item and tab, frame borders and bars, and guide cards.
-
-Colour also carries meaning: in the comparison, Yes is green, No is muted, and the bql.sh column
-sits on its own tint. Syntax colouring covers keywords, strings, numbers, comments, function calls,
-types, shell commands and flags. The ecosystem marks use their brand colours, falling back to ink
-when a mark is too dark or too light for the paper.
+A per-area rainbow was tried and read as childish; it was replaced the same day. The page now uses
+neutrals with a faint cool cast (`0.004`-`0.012` chroma at hue 265) and **one** accent, a cyan
+(`--accent`, `--accent-soft`), used sparingly: the product mark, step numbers, the selected tab's
+pager dot, the comparison's bql.sh column and the audience-switch underline. Depth comes from a soft
+radial glow and a masked 64px grid behind the hero (`.hero-wrap`, clipped so nothing overflows),
+a headline that fades slightly toward its second line, and a hairline inner highlight on frames.
+Syntax colours are low chroma. Brand marks are muted and take their own colour on hover.
 
 ## What ships
 
