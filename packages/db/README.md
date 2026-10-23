@@ -152,6 +152,9 @@ for await (const event of db.changes({ tables: ["todos"] })) {
 }
 ```
 
+`db.live` also takes a SQL string and arguments the way `execute` does:
+`db.live("select * from todos where done = :done", { done: 0 })`.
+
 A subscription is an emitter *and* an async iterable, so either style works. `db.changes()` also
 delivers a `schema` event when DDL runs — a `tables` filter does not hide it, because the shape you
 decode rows into has moved whether or not it was your table that changed.
@@ -241,6 +244,211 @@ during a snapshot) instead of waiting.
 `bq.serve()` also starts the Raft node, the replication client and the S3 shipper when the config
 asks for them, so `Bql.open({ cluster: { enabled: true, … } })` plus `serve()` is a full cluster
 node. `bq.on("role", ({ db, role }) => …)` fires when it takes over or loses a database.
+
+## Typed SQL
+
+`bql.sh/typed` types a query's rows and parameters from the SQL string itself, and completes table
+and column names inside the string. There's no generator and no build step: the type checker parses
+the schema out of your DDL strings and each query out of its string, as you type.
+
+```ts
+import { Bql } from "bql.sh"
+import { schema, type Row, type Table } from "bql.sh/typed"
+
+const app = schema(
+  "create table users(id integer primary key, name text not null, email text)",
+  "create table posts(id integer primary key, user_id integer not null references users(id), title text not null)",
+)
+
+const bq = await Bql.open({ dir: "./data" })
+const db = app.typed(await bq.create("app"))   // the first query creates the tables
+
+await db.query("insert into users(name, email) values (:name, :email)", { name: "ada", email: null }).run()
+await db.query("insert into posts(user_id, title) values (?, ?)", [1, "typed sql"]).run()
+await db.query("insert into posts(user_id, title) values (?, ?)", [2, "orphan"]).run()
+
+const rows = await db.query(
+  "select p.title, u.name, u.email from posts p left join users u on u.id = p.user_id order by p.id",
+)
+// rows: Result<{ title: string; name: string | null; email: string | null }>
+console.log(rows.map((r) => r))
+
+type User = Table<typeof app, "users">                   // { id: number; name: string; email: string | null }
+type Feed = Row<typeof app, "select id, title from posts">  // { id: number; title: string }
+```
+
+```sh
+bun typed.ts
+# [
+#   {
+#     title: "typed sql",
+#     name: "ada",
+#     email: null,
+#   }, {
+#     title: "orphan",
+#     name: null,
+#     email: null,
+#   }
+# ]
+```
+
+A wrong query fails to compile, with SQLite's wording, and the editor offers the fix:
+
+```ts
+db.query("select nme from users")
+// Argument of type '"select nme from users"' is not assignable to parameter of type
+// '"bql: no such column: nme" | "select name from users"'.
+db.query("select * from users where name = :n", { n: 1 })
+// Type 'number' is not assignable to type 'string'.
+```
+
+Completions inside the string come from the same parse. After `from ` you get the tables, after
+`select `, `where ` or a comma the columns of the tables the query names, after `u.` the columns of
+whatever `u` aliases. A misspelled table or column completes to the names that start the same way,
+wherever it is in the string. Checked on the TypeScript 7 language server and on TypeScript 5.9.
+
+### Changing the schema
+
+The schema is the `create` statements as they should be now. To change it, edit them:
+
+```ts
+const app = schema(
+  "create table users(id integer primary key, name text not null, email text, bio text)",  // bio added
+  "create index users_email on users(email)",                                              // new index
+)
+```
+
+That's the whole migration. The editor re-reads the schema as you type, so a query still using a
+column you removed is a compile error before anything runs. At runtime the first query on a typed db
+brings the database in step, once:
+
+```ts
+const db = app.typed(raw)
+await db.query("select bio from users")
+// first query on this db runs, in one transaction:
+//   alter table "users" add column bio text
+//   CREATE INDEX users_email on users(email)
+```
+
+After that, queries go straight to the database. When the database is already in step, the check is
+one read and takes no lock, so `app.typed(db)` per request or per tenant costs nothing worth
+counting. Several processes syncing the same database at once is fine: one applies the changes and
+the others wait for it (up to about 5 seconds) and find nothing to do.
+
+The sync only moves the database toward what the types need:
+
+- Missing tables, columns, indexes, triggers and views are created. A column SQLite can't add with
+  `alter table` (a primary key, `unique`, `not null` with no default) is added by rebuilding the
+  table, keeping its rows.
+- A column the schema says is `not null` but the database allows NULL in is tightened. If a row
+  holds a NULL there, the sync fails and changes nothing.
+- A changed index, trigger or view definition is replaced.
+- Columns and tables the schema doesn't have are left alone, and so is a column that's stricter
+  than the schema.
+
+That last rule is what keeps it safe while the database evolves. An instance still running older
+code, a rollback, or a tenant opened by an old build syncs its older schema and changes nothing,
+because nothing in the database is missing for its types. Old and new code don't undo each other.
+A change made outside your code (another tool, a hand-run `alter table`) is noticed too: SQLite's
+`schema_version` moves, so the next process to open the database compares again, puts back anything
+missing, and fails on anything incompatible.
+
+A change that would lose data or change a column's type isn't made implicitly. The first query fails
+instead, and so does every query after it until the database is fixed:
+
+```ts
+await db.query("select age from users")
+// Error: bql: push won't make these changes without { allowDataLoss: true }:
+//   - users.age is TEXT in the database and INTEGER in the schema
+```
+
+Run `app.push(raw, { allowDataLoss: true })` from a deploy step, once no running code needs the old
+shape. It makes the database match exactly: it converts the column, drops columns the schema no
+longer has, and loosens constraints, rebuilding each table it touches. Tables the schema doesn't
+mention are never dropped. Running code picks the fix up on its next query.
+
+Renaming a column or table looks like a drop plus an add, so say which it is:
+
+```ts
+const db = app.typed(raw, { rename: { people: "users", "people.name": "users.full_name" } })
+// alter table "people" rename to "users"
+// alter table "users" rename column "name" to "full_name"
+```
+
+A rename runs only while the old name exists and the new one doesn't, so it can stay in the code.
+`app.push(raw, { rename })` takes the same option.
+
+`app.plan(raw)` returns what a sync would run, `{ statements, blocked }`, without running it. In CI,
+`expect(await app.plan(db)).toEqual({ statements: [], blocked: [] })` checks a database is in step.
+
+What the sync needs:
+
+- DDL rights and `PRAGMA user_version`, which it owns, so the admin key or an embedded db.
+- Bun. It builds the desired schema in a scratch SQLite on the bundled driver. In a browser,
+  `typed(db)` doesn't sync, and queries run as they are.
+- With a read-only token, a database that's in step works as normal. One that isn't fails with
+  `the database isn't in step with the schema, and this token can't read or change its schema`.
+  Pass `app.typed(db, { sync: false })` to skip the check.
+- With `foreign_keys` on, it refuses to rebuild a table other tables reference, because dropping it
+  would fire their `ON DELETE` actions.
+
+### Querying
+
+`app.typed(db)` takes anything with `execute`: a client `Db`, an embedded one, or a `Tx`. The typed
+db has:
+
+- `query(sql, args)`: a `Query` with typed rows. `await` it, or call `.first()`, `.run()`,
+  `.values()`. Apart from waiting for the first sync, it's `execute(sql, args)`.
+- `live(sql, args)`: a `LiveQuery` with typed rows and diffs.
+- `transaction(fn, options)`: `fn` gets a typed `tx`.
+- `raw`: the db underneath, for the `sql` tag, `batch` and the rest.
+
+It's a call rather than the `sql` tag because TypeScript types a tag's strings as
+`TemplateStringsArray`, so the text never reaches the type checker. Values go in as `:name`, `@name`,
+`$name` or `?` placeholders, so they are still bound and never interpolated.
+
+### What it understands
+
+- `create table` (with `strict` and `without rowid`), `create view … as select`, `create virtual
+  table … using fts5(…)`, `alter table add/drop/rename column`, `alter table rename to`, `drop
+  table`. Other DDL is skipped.
+- `select` with joins, `*` and `t.*`, aliases, `with` CTEs, `union`, scalar subqueries, `case`,
+  `cast` and the common built-in functions; `insert`, `update` and `delete` with `returning`.
+- Parameters take the type of the column they're compared with, inserted into or assigned to. An
+  insert or `set` accepts `null` for a nullable column; a comparison doesn't.
+
+How the types are decided:
+
+- Declared types follow SQLite's affinity rules: INT is `number`, CHAR/CLOB/TEXT `string`, BLOB
+  `Uint8Array`, REAL `number`, a blank type any value. A NUMERIC column declared `date`,
+  `datetime`, `timestamp` or `time` is `string`, because that's how SQLite stores
+  `current_timestamp` there.
+- `integer primary key` is non-null (it's the rowid). `int primary key` is not, and neither is
+  `text primary key` unless the table is STRICT or WITHOUT ROWID: SQLite stores NULL there.
+- The right side of a `left join` is nullable. Aggregates other than `count` and `total` are
+  nullable without `group by`, since they return NULL on an empty table.
+- An unaliased column keeps its declared spelling (`select NAME` returns `Name` if the DDL says
+  `Name`). Give an expression an alias or it gets no key.
+- `cast(expr as text)` types anything the parser can't.
+
+### Limitations
+
+- It fails open. Syntax it doesn't follow gives `JsRow` rows and untyped arguments rather than an
+  error. It errors only on a table or result column that doesn't exist, or an ambiguous one.
+- The types describe the schema strings. A process that synced before a change was made outside
+  your code keeps querying until something fails; the next process to open the database notices.
+- Outside STRICT tables a declared type is a hint, and an `integer` column can hold text.
+- Integer columns are `number`, matching the default `intMode`.
+- About 1000 tokens per string, for a query or a DDL statement. Past that `tsc` stops with
+  "Type instantiation is excessively deep". A 300-column `create table` fits.
+- `--` and `/* */` comments aren't parsed, nor is `''` inside a string literal.
+- Completions see the string, not the cursor. Away from an error they complete the end of the
+  string, so going back to fill in `select  from users` gets no suggestions.
+- Dynamic SQL, like optional filters or a sort column picked at runtime, has no literal to read.
+  Use Kysely for that (below).
+
+Each query costs about 4 ms of type-check time. [docs/plan-typed-sql.md](../../docs/plan-typed-sql.md)
+is the design.
 
 ## ORMs
 

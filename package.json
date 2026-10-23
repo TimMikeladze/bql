@@ -47,6 +47,7 @@
     "./context": "./packages/db/src/context/index.ts",
     "./kysely": "./packages/db/src/kysely.ts",
     "./drizzle": "./packages/db/src/drizzle.ts",
+    "./typed": "./packages/db/src/typed/index.ts",
     "./protocol": "./packages/db/src/client/protocol.ts",
     "./server": "./packages/db/src/server/index.ts",
     "./tenant": "./packages/db/src/tenant/index.ts",

@@ -228,6 +228,7 @@ shared database `app-demo-shared` and are reachable as `db.shared.sql` and `db.s
 | `bql.sh/context` | Bun/Node resolver for saved organizations, projects, and endpoints |
 | `bql.sh/sqlite` | The `bun:ffi` driver over a pinned libsqlite3: hooks, the authorizer, killable statements, changesets |
 | `bql.sh/server` | Serve it: WAL shipping, replicas, S3 backup, a Raft control plane |
+| `bql.sh/typed` | Row and parameter types inferred from the SQL string, with no codegen |
 | `bql.sh/kysely`, `bql.sh/drizzle` | A Kysely dialect and a Drizzle driver over any of the above |
 | `bql.sh/search` | Vector ([sqlite-vec](https://github.com/asg017/sqlite-vec)), hybrid, full-text and geo search — SQL builders over any `Db` |
 | `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
