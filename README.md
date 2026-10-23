@@ -168,27 +168,35 @@ BQL_ADMIN_KEY=<the admin key> bun token.ts
 
 ### A static page with no server
 
-An app gives a page a public `pk_` key. `/v1/session` trades it, plus a visitor id the page keeps,
-for a token on that visitor's own database and one on the app's shared tables:
+An app gives a page a public `pk_` key. The page trades it for a database of its own per visitor:
 
 ```sh
-echo '{ "origins": ["http://localhost:*"], "tables": { "scores": { "mode": "a" } } }' > bql.json
+echo '{ "origins": ["http://localhost:*"] }' > bql.json
 bunx bql app create demo --config bql.json
-# demo  pk_ie1VLTyOtKmbrQ1B02WSUumbJGJiqCiJ  shared=app-demo-shared
-bunx bql exec app-demo-shared --sql "create table scores(id integer primary key, score integer)"
+# demo  pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0  shared=app-demo-shared
 ```
 
-```js
-// in the page; the server checks Origin against the app's origins
-const visitor = localStorage.bqlVisitor ??= crypto.randomUUID().replaceAll("-", "")
-const session = await fetch("http://localhost:4321/v1/session", {
-  method: "POST",
-  body: JSON.stringify({ key: "pk_ie1VLTyOtKmbrQ1B02WSUumbJGJiqCiJ", visitor }),
-}).then((r) => r.json())
-// session.private: rw on app-demo-u-<hash>, the page creates its own tables there
-// session.shared:  app-demo-shared, where `scores` is append-only
+```html
+<script type="module">
+  import { connect } from "https://cdn.jsdelivr.net/npm/bql.sh/packages/db/dist/web.js"
+
+  const db = await connect("pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0", { url: "http://localhost:4321" })
+  const todos = db.table("todos")                       // created on first use
+  await todos.insert({ title: "write it", done: false })
+  todos.where({ done: false }).orderBy("createdAt").live((rows) => render(rows))
+</script>
 ```
 
+`connect()` generates a visitor id once and keeps it in `localStorage`, so the same browser gets
+the same database (`app-demo-u-<hash>`) back. `table()` stores documents as JSON in a real SQLite
+table and returns rows as `{ ...doc, id, createdAt, updatedAt }`. `insert`, `get`,
+`update` (a JSON merge patch) and `delete` write; `where`, `orderBy`, `limit`, `list` and `live` read.
+`live` calls back with the whole ordered list now and after every commit that changes it. `db.sql`
+runs raw SQL on the same database. Tokens are refreshed before they expire, and live lists carry
+on across the refresh.
+
+Tables the app lists in its config under `tables`, with a mode each (`r`, `a`, `rw`), live in the
+shared database `app-demo-shared` and are reachable as `db.shared.sql`.
 [packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next
@@ -214,6 +222,7 @@ const session = await fetch("http://localhost:4321/v1/session", {
 | `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
+| `bql.sh/web` | For a page with no server: `connect()` with an app's `pk_` key, then `table()` and `sql` on the visitor's own database. Built to `packages/db/dist/web.js` for a script tag |
 
 Two binaries: `bql` for the database, `bql bus` for the bus. Both use `BQL_URL` for the server URL
 and `BQL_ADMIN_KEY` for its admin key (or `BQL_TOKEN` for a scoped token; it takes precedence over

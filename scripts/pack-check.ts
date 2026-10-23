@@ -82,6 +82,8 @@ for (const needed of [
   `${BUS}/src/index.ts`,
   // The bus CLI serves `dist/dashboard`; a tarball without it 404s only for whoever installed it.
   `${BUS}/dist/dashboard/index.html`,
+  // What a `<script type="module">` loads from a CDN; `prepack` builds it.
+  `${DB}/dist/web.js`,
 ]) {
   if (!existsSync(join(installed, needed))) {
     console.error(`pack-check: the tarball is missing ${needed}`)
@@ -188,6 +190,46 @@ try {
 } finally { await server?.close() }
 `)
 console.log(run([process.execPath, "run", deploySmoke], consumer, "deployment workflow smoke").trim())
+
+// `bql.sh/web` as a page gets it: the built `dist/web.js` from the tarball, not the source,
+// against a server from the same install. Bun's fetch sends no `Origin`, so the page's is added.
+const webSmoke = join(consumer, "web-smoke.ts")
+writeFileSync(
+  webSmoke,
+  `import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { loadConfig } from ${JSON.stringify(join(installed, DB, "src/server/config.ts"))}
+import { startServer } from ${JSON.stringify(join(installed, DB, "src/server/app.ts"))}
+import { connect } from ${JSON.stringify(join(installed, DB, "dist/web.js"))}
+
+const server = await startServer(loadConfig({ env: {}, overrides: {
+  server: { host: "127.0.0.1", port: 0, workers: 1 }, data: { dir: mkdtempSync(join(tmpdir(), "bql-web-smoke-")) },
+} }), { log: () => {} })
+try {
+  const created = await fetch(server.url + "/v1/apps", {
+    method: "POST",
+    headers: { authorization: "Bearer " + server.adminKey, "content-type": "application/json" },
+    body: JSON.stringify({ id: "smoke", config: { origins: ["https://page.test"] } }),
+  }).then((r) => r.json())
+  const pageFetch = (input, init = {}) => {
+    const headers = new Headers(init.headers)
+    headers.set("origin", "https://page.test")
+    return fetch(input, { ...init, headers })
+  }
+  const db = await connect(created.key, { url: server.url, visitor: "pack-check-visitor-000000", fetch: pageFetch })
+  const todos = db.table("todos")
+  const seen = new Promise((resolve) => todos.live((rows) => rows.length === 1 && resolve(rows[0].title)))
+  await todos.insert({ title: "packed", done: false })
+  const title = await Promise.race([seen, Bun.sleep(4000).then(() => "nothing")])
+  if (title !== "packed") throw new Error("the live list saw " + title)
+  db.close()
+  console.log("web smoke ok")
+} finally { await server.close() }
+`,
+)
+console.log("pack-check: web smoke")
+console.log(run([process.execPath, "run", webSmoke], consumer, "web smoke").trim())
 
 // The other half of the package. Same install, same tarball: a bus that publishes, claims and
 // acks a message from the installed copy alone.

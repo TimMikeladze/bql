@@ -14,6 +14,8 @@ packages/db/experiments/big.bin*
 packages/db/data/
 # the vendored libsqlite3 built by `bun run sqlite:build`
 packages/db/vendor/
+# bql.sh/web, built by `bun run db build:web` and by prepack
+packages/db/dist/
 
 # bql.sh/bus
 packages/bus/dist/

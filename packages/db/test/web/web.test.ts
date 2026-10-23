@@ -1,0 +1,196 @@
+// `bql.sh/web` against a real server: `connect()` with a `pk_` key, `table()` reads, writes and
+// live lists, and a session refresh carrying a live list across to new tokens.
+
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { connect, type Row, type WebDb } from "../../src/web/index.ts"
+import { compareRows, selectSql, uuidv7 } from "../../src/web/table.ts"
+import { startTestServer, stopAll, type TestServer } from "../server/harness.ts"
+
+const ORIGIN = "https://page.test"
+let server: TestServer
+let key: string
+const open: WebDb[] = []
+
+/** Bun's fetch sends no `Origin`; a browser always does. `spoil` makes the next query a 401. */
+let spoil = false
+const pageFetch = ((input: string | URL | Request, init?: RequestInit) => {
+  const headers = new Headers(init?.headers)
+  headers.set("origin", ORIGIN)
+  if (spoil && String(input).endsWith("/query")) {
+    spoil = false
+    headers.set("authorization", "Bearer spoiled")
+  }
+  return fetch(input, { ...init, headers })
+}) as typeof fetch
+
+let n = 0
+async function visit(visitor = `visitor-${String(++n).padStart(16, "0")}`): Promise<WebDb> {
+  const db = await connect(key, { url: server.url, visitor, fetch: pageFetch })
+  open.push(db)
+  return db
+}
+
+/** Resolves with the first list `live()` delivers that passes `check`. */
+function waitFor<T>(subscribe: (cb: (rows: T[]) => void) => () => void, check: (rows: T[]) => boolean): Promise<T[]> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("live list never matched")), 4000)
+    const stop = subscribe((rows) => {
+      if (!check(rows)) return
+      clearTimeout(timer)
+      queueMicrotask(() => stop())
+      resolve(rows)
+    })
+  })
+}
+
+interface Todo extends Record<string, unknown> {
+  title: string
+  done: boolean
+  rank?: number
+}
+
+beforeAll(async () => {
+  server = await startTestServer()
+  const app = await server.json<{ key: string; sharedDb: string }>("/v1/apps", {
+    method: "POST",
+    body: JSON.stringify({ id: "page", config: { origins: [ORIGIN], tables: { guestbook: { mode: "a" } } } }),
+  })
+  key = app.key
+  await server.fetch(`/v1/db/${app.sharedDb}/query`, {
+    method: "POST",
+    body: JSON.stringify({ sql: "create table guestbook(id integer primary key, message text)" }),
+  })
+})
+afterAll(async () => {
+  for (const db of open) db.close()
+  await stopAll()
+})
+
+describe("connect", () => {
+  test("the same visitor gets the same database back", async () => {
+    const first = await visit("same-visitor-0000000000")
+    await first.table<Todo>("todos").insert({ title: "write it", done: false })
+    const again = await visit("same-visitor-0000000000")
+    expect(again.db).toBe(first.db)
+    expect((await again.table<Todo>("todos").list()).map((t) => t.title)).toEqual(["write it"])
+  })
+
+  test("an origin the app does not list is refused with the server's code", async () => {
+    const otherFetch = ((input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      headers.set("origin", "https://evil.test")
+      return fetch(input, { ...init, headers })
+    }) as typeof fetch
+    const err = await connect(key, { url: server.url, visitor: "v".repeat(22), fetch: otherFetch }).catch((e) => e)
+    expect(err.code).toBe("NOT_AUTHORIZED")
+  })
+})
+
+describe("table", () => {
+  test("insert, get, update and delete", async () => {
+    const todos = (await visit()).table<Todo>("todos")
+    const made = await todos.insert({ title: "ship it", done: false })
+    expect(made.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/)
+    expect(made.createdAt).toBeGreaterThan(0)
+    expect(await todos.get(made.id)).toEqual(made)
+
+    const updated = await todos.update(made.id, { done: true })
+    expect(updated?.done).toBe(true)
+    expect(updated?.title).toBe("ship it")
+    expect(await todos.update("missing", { done: true })).toBeNull()
+
+    expect(await todos.delete(made.id)).toBe(true)
+    expect(await todos.delete(made.id)).toBe(false)
+    expect(await todos.get(made.id)).toBeNull()
+  })
+
+  test("where, orderBy and limit", async () => {
+    const todos = (await visit()).table<Todo>("todos")
+    for (const [title, done, rank] of [["c", false, 3], ["a", true, 1], ["b", false, 2], ["d", false, null]] as const) {
+      await todos.insert({ title, done, ...(rank === null ? {} : { rank }) })
+    }
+    const open = await todos.where({ done: false }).orderBy("rank", "desc").list()
+    expect(open.map((t) => t.title)).toEqual(["c", "b", "d"])
+    expect((await todos.orderBy("title").limit(2).list()).map((t) => t.title)).toEqual(["a", "b"])
+    expect((await todos.where({ rank: null }).list()).map((t) => t.title)).toEqual(["d"])
+  })
+
+  test("field names and values never reach the SQL text", async () => {
+    const todos = (await visit()).table<Todo>("todos")
+    expect(() => todos.where({ "done') or 1=1 --": true })).toThrow(TypeError)
+    const odd = await todos.insert({ title: "'); drop table todos; --", done: false })
+    expect((await todos.get(odd.id))?.title).toBe("'); drop table todos; --")
+    const { strings } = selectSql("todos", { where: [["title", "x"]], order: [["rank", "asc"]], limit: 5 })
+    expect(strings.join("?")).not.toContain("title")
+  })
+
+  test("a table name that is not an identifier is refused", async () => {
+    const db = await visit()
+    expect(() => db.table('todos"; drop')).toThrow(TypeError)
+  })
+})
+
+describe("live", () => {
+  test("delivers the list, then the list after each change, in order", async () => {
+    const todos = (await visit()).table<Todo>("todos")
+    const first = await todos.insert({ title: "b", done: false })
+    const view = todos.where({ done: false }).orderBy("title")
+    const seen: string[][] = []
+    const stop = view.live((rows) => seen.push(rows.map((r) => r.title)))
+    await waitFor<Row<Todo>>((cb) => view.live(cb), (rows) => rows.length === 1)
+
+    await todos.insert({ title: "a", done: false })
+    await todos.update(first.id, { done: true })
+    await waitFor<Row<Todo>>((cb) => view.live(cb), (rows) => rows.length === 1 && rows[0]?.title === "a")
+    await Bun.sleep(100)
+    stop()
+    expect(seen[0]).toEqual(["b"])
+    expect(seen).toContainEqual(["a", "b"])
+    expect(seen.at(-1)).toEqual(["a"])
+  })
+
+  test("keeps going across a session refresh", async () => {
+    const db = await visit()
+    const todos = db.table<Todo>("todos")
+    const lists: number[] = []
+    const stop = todos.live((rows) => lists.push(rows.length))
+    await waitFor<Row<Todo>>((cb) => todos.live(cb), () => true)
+    await db.refresh()
+    await todos.insert({ title: "after refresh", done: false })
+    await waitFor<Row<Todo>>((cb) => todos.live(cb), (rows) => rows.length === 1)
+    await Bun.sleep(150)
+    stop()
+    expect(lists.at(-1)).toBe(1)
+  })
+})
+
+describe("tokens", () => {
+  test("a 401 refreshes the session and retries once", async () => {
+    const todos = (await visit()).table<Todo>("todos")
+    await todos.list()
+    spoil = true
+    await todos.insert({ title: "after a 401", done: false })
+    expect(spoil).toBe(false)
+    expect((await todos.list()).map((t) => t.title)).toEqual(["after a 401"])
+  })
+
+  test("the shared database takes the app's modes", async () => {
+    const db = await visit()
+    if (!db.shared) throw new Error("expected shared tables")
+    await db.shared.sql`insert into guestbook(message) values (${"hello"})`
+    const err = await db.shared.sql`update guestbook set message = ${"edited"}`.catch((e) => e)
+    expect(err.code).toBe("NOT_AUTHORIZED")
+  })
+})
+
+describe("helpers", () => {
+  test("uuidv7 ids sort by time", () => {
+    expect(uuidv7(1000) < uuidv7(2000)).toBe(true)
+  })
+
+  test("compareRows orders null first, then numbers, then text, ties by creation", () => {
+    const row = (id: string, createdAt: number, v: unknown) => ({ id, createdAt, updatedAt: createdAt, v }) as Row
+    const rows = [row("a", 3, "x"), row("b", 2, 5), row("c", 1, null), row("d", 0, 5)]
+    expect(rows.sort(compareRows([["v", "asc"]])).map((r) => r.id)).toEqual(["c", "d", "b", "a"])
+  })
+})

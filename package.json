@@ -61,6 +61,7 @@
     "./search": "./packages/db/src/search/index.ts",
     "./bus": "./packages/bus/src/index.ts",
     "./bus/client": "./packages/bus/src/client/bus.ts",
+    "./web": "./packages/db/src/web/index.ts",
     "./package.json": "./package.json"
   },
   "files": [
@@ -74,6 +75,7 @@
     "packages/db/docs/api.md",
     "packages/db/docs/c6-packaging.md",
     "packages/db/docs/l7-tarball.md",
+    "packages/db/dist/web.js",
     "packages/bus/src",
     "packages/bus/dist/dashboard",
     "packages/bus/README.md"
@@ -96,7 +98,7 @@
     "site": "bun run --filter 'bql-site'",
     "site:build": "bun run --filter 'bql-site' build",
     "site:og": "bun run --filter 'bql-site' og",
-    "prepack": "bun run --filter 'bql-bus' build:dashboard",
+    "prepack": "bun run --filter 'bql-bus' build:dashboard && bun run --filter 'bql-db' build:web",
     "pack:check": "bun run scripts/pack-check.ts",
     "deploy:templates": "bun run scripts/deploy-templates.ts",
     "deploy:templates:check": "bun run scripts/deploy-templates.ts --check",

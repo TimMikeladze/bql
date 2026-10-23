@@ -24,8 +24,8 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | Append table scope (`a`) | authorizer, `sqlite3_stmt_explain` | **built**: `server/auth.ts`, `sqlite/statement.ts` |
 | Apps and `pk_` keys | catalog, token minting | **built**: catalog, `server/web.ts`, `client.admin`, `bql app` |
 | `/v1/session` | `mintToken`, create | **built**: `server/web.ts` |
-| Browser bundle | `bql.sh/client` | `packages/db/src/web/`, `packages/db/dist/web.js` |
-| `table()` and `state()` | `sql`, `db.live` | `bql.sh/web` |
+| Browser bundle | `bql.sh/client` | **built**: `packages/db/src/web/`, `packages/db/dist/web.js` |
+| `table()` and `state()` | `sql`, `db.live` | **`table()` built**: `bql.sh/web`; `state()` not yet |
 | Author column (`bql_sub()`) | new driver function binding | `sqlite/`, `server/auth.ts` |
 | SQL actions | app config, one transaction | server routes |
 | Form endpoint | `a` tables | server routes |
@@ -114,8 +114,11 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
   `packages/bus/dist/dashboard` does. Export `bql.sh/web`.
 - `connect(key, { url?, storage? })` calls `/v1/session`, refreshes both tokens before `exp`, and
   returns `{ table, state, sql, shared: { table, sql }, action, visitor }`.
-- `pack:check` grows a case: the tarball contains `dist/web.js`, it has no `node:` or `bun:`
-  import, and it loads and runs a query in a browser (the browser agent, against `bql serve`).
+- `pack:check` grows a case: the tarball contains `dist/web.js`, and the built file from the
+  install connects to a server from the same install and sees a live list change.
+  `build:web` refuses a bundle that imports `node:` or `bun:`.
+- As built: a refresh builds new clients and moves the live queries onto them, because a client's
+  token is fixed when it is built. `url` defaults to the page's origin. 33 KiB, 11 KiB gzipped.
 
 ## `table()` and `state()`
 
