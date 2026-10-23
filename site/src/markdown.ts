@@ -74,28 +74,56 @@ const KW = new Set(
   "import from export const let var await async function return if else for of in new throw type interface extends class true false null undefined as satisfies".split(" "),
 )
 
-/** A deliberately small highlighter: comments, strings, keywords, numbers. Output is escaped. */
+/**
+ * A deliberately small highlighter: comments, strings, numbers, keywords, function calls and types;
+ * in shell, the command word and its flags. Output is escaped.
+ */
 export function highlight(code: string, lang: string): string {
   const shellish = /^(sh|bash|shell|toml|yaml|http|)$/.test(lang)
-  const re = shellish
-    ? /(#[^\n]*)|("(?:[^"\\\n]|\\.)*"|'[^'\n]*')|(\b\d[\d_.]*\b)/g
-    : /(\/\/[^\n]*)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d[\d_.n]*\b)|(\b[A-Za-z_]\w*\b)/g
+  if (shellish) return code.split("\n").map((l) => shellLine(l, /^(sh|bash|shell|)$/.test(lang))).join("\n")
+  const re = /(\/\/[^\n]*)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d[\d_.n]*\b)|(\b[A-Za-z_]\w*\b)/g
   let out = ""
   let last = 0
   for (const m of code.matchAll(re)) {
     const i = m.index!
-    // In shell, `#` only starts a comment at the start of a word.
-    if (shellish && m[1] && i > 0 && !/\s/.test(code[i - 1]!)) continue
     out += esc(code.slice(last, i))
     const t = esc(m[0])
+    const next = code.slice(i + m[0].length).match(/^\s*(.)/)?.[1]
     if (m[1]) out += `<span class="t-c">${t}</span>`
     else if (m[2]) out += `<span class="t-s">${t}</span>`
     else if (m[3]) out += `<span class="t-n">${t}</span>`
     else if (m[4] && KW.has(m[4])) out += `<span class="t-k">${t}</span>`
+    else if (next === "(" || next === "`") out += `<span class="t-f">${t}</span>`
+    else if (/^[A-Z][a-z]/.test(m[4]!)) out += `<span class="t-t">${t}</span>`
     else out += t
     last = i + m[0].length
   }
   return out + esc(code.slice(last))
+}
+
+/** One shell line: leading `VAR=value` assignments, the command word, flags, strings, comments. */
+function shellLine(line: string, command: boolean): string {
+  let out = ""
+  let rest = line
+  if (command) {
+    const head = /^(\s*)((?:[A-Z_][A-Z0-9_]*=\S*\s+)*)([a-z][\w./-]*)(?=\s|$)/.exec(line)
+    if (head && !line.trimStart().startsWith("#")) {
+      out += esc(head[1]!) + (head[2] ? `<span class="t-p">${esc(head[2])}</span>` : "") + `<span class="t-f">${esc(head[3]!)}</span>`
+      rest = line.slice(head[0].length)
+    }
+  }
+  const re = /(#[^\n]*)|("(?:[^"\\\n]|\\.)*"|'[^'\n]*')|((?<=\s)--?[A-Za-z][\w-]*)|(\b\d[\d_.]*\b)/g
+  let last = 0
+  for (const m of rest.matchAll(re)) {
+    const i = m.index!
+    // `#` only starts a comment at the start of a word.
+    if (m[1] && i > 0 && !/\s/.test(rest[i - 1]!)) continue
+    out += esc(rest.slice(last, i))
+    const t = esc(m[0])
+    out += m[1] ? `<span class="t-c">${t}</span>` : m[2] ? `<span class="t-s">${t}</span>` : m[3] ? `<span class="t-p">${t}</span>` : `<span class="t-n">${t}</span>`
+    last = i + m[0].length
+  }
+  return out + esc(rest.slice(last))
 }
 
 // ---- blocks -------------------------------------------------------------------------------

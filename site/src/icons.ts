@@ -10,12 +10,20 @@ import {
 import { siAmazons3, siLinkedin } from "si-legacy"
 import type { IconName } from "./content.ts"
 
-const BRANDS: Record<IconName, { path: string }> = {
+const BRANDS: Record<IconName, { path: string; hex: string }> = {
   github: siGithub, x: siX, linkedin: siLinkedin, discord: siDiscord,
   bun: siBun, sqlite: siSqlite, drizzle: siDrizzle, turso: siTurso, graphql: siGraphql,
   openapi: siOpenapiinitiative, s3: siAmazons3, cloudflare: siCloudflare, vercel: siVercel,
   prometheus: siPrometheus, opentelemetry: siOpentelemetry, docker: siDocker, fly: siFlydotio,
   clickhouse: siClickhouse, githubactions: siGithubactions,
+}
+
+/** The brand's own colour, and whether it is too dark (or too light) to read on that theme's paper. */
+export function brandTone(name: IconName): { hex: string; tone: "dark" | "light" | "mid" } {
+  const hex = BRANDS[name].hex
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+  const l = 0.2126 * r! + 0.7152 * g! + 0.0722 * b!
+  return { hex: `#${hex}`, tone: l < 0.12 ? "dark" : l > 0.6 ? "light" : "mid" }
 }
 
 export function brand(name: IconName, size = 18): string {

@@ -220,3 +220,10 @@ test("the comparison table comes from the README and names all three options", (
   const sec = /<section[^>]*id="compare"[\s\S]*?<\/section>/.exec(index)![0]
   for (const row of m.compare.rows) expect(sec).toContain(esc(row[0]!))
 })
+
+test("each area has a hue, with tint tokens for both themes", () => {
+  for (const id of ["why", "compare", "start", "showcase", "database", "bus", "today"]) expect(index).toMatch(new RegExp(`class="[^"]*\\bhue h-\\w+[^"]*" id="${id}"`))
+  expect(CSS).toMatch(/\.hue \{\s*--tint-bg: oklch\(17%/)
+  expect(CSS).toMatch(/:root\[data-theme="light"\] \.hue \{/)
+  expect(CSS).toMatch(/@media \(prefers-color-scheme: light\) \{\s*:root:not\(\[data-theme="dark"\]\):not\(\[data-theme="light"\]\) \.hue/)
+})

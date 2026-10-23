@@ -3,7 +3,7 @@
 // markup, styles, icons and the two small scripts do.
 
 import { site, type Capability, type Chapter, type Demo, type Frame, type IconName } from "./content.ts"
-import { brand, faviconSvg, glyph, productMark } from "./icons.ts"
+import { brand, brandTone, faviconSvg, glyph, productMark } from "./icons.ts"
 import { esc, highlight, inline, renderDoc, renderTable, slug, type LinkContext } from "./markdown.ts"
 import {
   DOCS, resolveSnippet, resolveTable, resolveTerminal, source, version,
@@ -116,7 +116,9 @@ const LIGHT_VARS = `color-scheme: light;
   --line: oklch(0% 0 0 / .12); --line-soft: oklch(0% 0 0 / .06);
   --accent: oklch(52% 0.18 250);
   --add: oklch(50% 0.16 150); --del: oklch(50% 0.19 25); --warn: oklch(55% 0.13 80);
-  --t-k: oklch(48% 0.17 300); --t-s: oklch(48% 0.13 150); --t-c: oklch(55% 0 0); --t-n: oklch(52% 0.14 60);`
+  --t-k: oklch(48% 0.19 300); --t-s: oklch(47% 0.13 150); --t-c: oklch(55% 0.02 250); --t-n: oklch(54% 0.16 50);
+  --t-f: oklch(50% 0.17 250); --t-t: oklch(52% 0.13 85); --t-p: oklch(50% 0.12 200);
+  --yes: oklch(50% 0.15 150);`
 
 export const CSS = `
 :root {
@@ -133,7 +135,9 @@ export const CSS = `
   --add: oklch(72% 0.17 150);
   --del: oklch(68% 0.19 20);
   --warn: oklch(78% 0.15 85);
-  --t-k: oklch(74% 0.14 300); --t-s: oklch(76% 0.13 150); --t-c: oklch(58% 0 0); --t-n: oklch(80% 0.12 60);
+  --t-k: oklch(76% 0.15 305); --t-s: oklch(80% 0.14 150); --t-c: oklch(60% 0.02 250); --t-n: oklch(80% 0.14 55);
+  --t-f: oklch(78% 0.13 245); --t-t: oklch(85% 0.13 90); --t-p: oklch(80% 0.1 200);
+  --yes: oklch(78% 0.16 150);
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -210,7 +214,43 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--raise); border: 1px solid var(--line); }
 .chip { margin-left: auto; flex: none; font: .7rem/1 var(--mono); color: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .5rem; }
 .frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.6 var(--mono); color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
-.t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); } .t-n { color: var(--t-n); }
+.t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); font-style: italic; } .t-n { color: var(--t-n); }
+.t-f { color: var(--t-f); } .t-t { color: var(--t-t); } .t-p { color: var(--t-p); }
+
+/* hues: each area of the page has one, used for its tinted band and its accents */
+.h-hero { --h: 215; } .h-why { --h: 185; } .h-compare { --h: 300; } .h-start { --h: 150; }
+.h-show { --h: 268; } .h-db { --h: 245; } .h-bus { --h: 60; } .h-today { --h: 150; }
+.hue {
+  --tint-bg: oklch(17% 0.028 var(--h)); --tint-ink: oklch(82% 0.13 var(--h));
+  --tint-line: oklch(72% 0.12 var(--h) / .32); --tint-soft: oklch(72% 0.12 var(--h) / .13);
+}
+:root[data-theme="light"] .hue {
+  --tint-bg: oklch(97.2% 0.022 var(--h)); --tint-ink: oklch(47% 0.16 var(--h));
+  --tint-line: oklch(55% 0.14 var(--h) / .32); --tint-soft: oklch(55% 0.14 var(--h) / .1);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) .hue {
+    --tint-bg: oklch(97.2% 0.022 var(--h)); --tint-ink: oklch(47% 0.16 var(--h));
+    --tint-line: oklch(55% 0.14 var(--h) / .32); --tint-soft: oklch(55% 0.14 var(--h) / .1);
+  }
+}
+.section.tinted { background: var(--tint-bg); border-block: 1px solid var(--tint-soft); }
+.hue .explain code, .hue .lede code, .hue .principles code { color: var(--tint-ink); background: var(--tint-soft); }
+.hue .explain a { text-decoration-color: var(--tint-line); }
+.hue .explain a:hover { text-decoration-color: var(--tint-ink); }
+.hue .frame { border-color: var(--tint-line); }
+.hue .bar { background: color-mix(in oklab, var(--band) 88%, var(--tint-ink)); border-bottom-color: var(--tint-soft); }
+.hue .cell .run { background: color-mix(in oklab, var(--band) 94%, var(--tint-ink)); border-top-color: var(--tint-soft); }
+.hue .run-bar { color: var(--tint-ink); }
+.h-hero .mark { color: var(--tint-ink); background: var(--tint-soft); border-color: var(--tint-line); }
+.h-hero .pill { border-color: var(--tint-line); }
+.h-hero .pill .prompt { color: var(--tint-ink); }
+#aud-h:checked ~ .aud-tabs label[for="aud-h"], #aud-a:checked ~ .aud-tabs label[for="aud-a"] { text-decoration: underline; text-decoration-color: var(--tint-ink); text-underline-offset: .4em; text-decoration-thickness: 2px; }
+.principles > div { padding: 1.4rem; border-radius: .8rem; background: var(--tint-soft); border: 1px solid var(--tint-line); }
+.principles h3 { color: var(--tint-ink); }
+.principles p { color: var(--body); }
+.h-start .step { border-top-color: var(--tint-soft); }
+.h-start .step-n { background: var(--tint-soft); border-color: var(--tint-line); color: var(--tint-ink); }
 .prompt-line::before { content: "$ "; color: var(--soft); }
 .out-line { color: var(--ink); }
 .cont-line::before { content: "  "; }
@@ -227,8 +267,11 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .compare th:not(:first-child), .compare td:not(:first-child) { width: 27%; }
 .compare tbody th { text-align: left; font: 500 .92rem/1.5 var(--sans); color: var(--body); text-transform: none; letter-spacing: 0; padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
 .compare td:first-of-type { font-family: var(--sans); font-size: .92rem; color: var(--body); }
-.compare td:last-child, .compare th:last-child { color: var(--ink); }
-.compare th:last-child { font-weight: 700; }
+.compare td:last-child, .compare th:last-child { color: var(--ink); background: var(--tint-soft); }
+.compare th:last-child { font-weight: 700; color: var(--tint-ink); border-radius: .5rem .5rem 0 0; }
+.compare td, .compare thead th { padding-inline: .8rem; }
+.compare .yes { color: var(--yes); font-weight: 600; }
+.compare .no { color: var(--soft); }
 
 /* getting started */
 .sec-intro { max-width: 46rem; }
@@ -246,7 +289,8 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .explorer { margin-top: 2.5rem; display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 2.5rem; }
 .ex-nav { position: sticky; top: 5rem; align-self: start; display: flex; flex-direction: column; gap: .15rem; }
 .ex-nav a { padding: .5rem .75rem; border-radius: .5rem; color: var(--soft); text-decoration: none; font-size: .92rem; border: 1px solid transparent; transition: color .14s ease, background .14s ease; }
-.ex-nav a:hover { color: var(--ink); }
+.ex-nav a:hover { color: var(--tint-ink); }
+.panel h3 { color: var(--ink); }
 .panel { min-width: 0; scroll-margin-top: 5rem; }
 .panel h3 { font-size: 1.45rem; letter-spacing: -.025em; }
 .panel .explain { margin-top: .6rem; }
@@ -255,7 +299,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 @supports selector(:has(*)) {
   .panel { display: none; }
   .panel:target, .explorer:not(:has(.panel:target)) .panel:first-child { display: block; }
-  .explorer:not(:has(.panel:target)) .ex-nav a:first-child { color: var(--ink); background: var(--raise); border-color: var(--line); }
+  .explorer:not(:has(.panel:target)) .ex-nav a:first-child { color: var(--tint-ink); background: var(--tint-soft); border-color: var(--tint-line); }
 }
 
 /* sections */
@@ -277,8 +321,11 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .eco h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.04em; }
 .eco .explain { color: var(--soft); max-width: 60ch; }
 .marks { margin-top: 2.4rem; display: flex; flex-wrap: wrap; justify-content: center; gap: 2.5rem; }
-.marks a { color: var(--soft); transition: color .14s ease; }
-.marks a:hover { color: var(--ink); }
+/* the one place brand marks keep their colours; a mark too dark or too light for the paper uses ink */
+.marks a { color: var(--brand); transition: opacity .14s ease; }
+.marks a:hover { opacity: .75; }
+:root:not([data-theme="light"]) .marks a.tone-dark { color: var(--ink); }
+:root[data-theme="light"] .marks a.tone-light { color: var(--ink); }
 
 .why .centre .explain { color: var(--body); }
 .principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem; }
@@ -332,8 +379,9 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 
 .guides { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; }
 .guide { display: block; border: 1px solid var(--line); border-radius: .5rem; background: var(--band); overflow: hidden; text-decoration: none; height: 19rem; position: relative; transition: border-color .14s ease; }
-.guide:hover { border-color: color-mix(in oklab, var(--ink) 30%, transparent); }
-.guide .gt { display: block; padding: 1.2rem 1.2rem 0; font-size: 1rem; color: var(--ink); font-weight: 550; }
+.guide:hover { border-color: var(--tint-line); }
+.guide .tilt { border-color: var(--tint-line); }
+.guide .gt { display: block; padding: 1.2rem 1.2rem 0; font-size: 1rem; color: var(--tint-ink); font-weight: 550; }
 .guide .gb { display: block; padding: .3rem 1.2rem 0; font-size: .88rem; color: var(--soft); }
 .guide .tilt { position: absolute; left: 1.2rem; top: 7.5rem; width: 130%; transform: rotate(-3deg) translate(1rem, .5rem); border: 1px solid var(--line); border-radius: .6rem; background: var(--paper); overflow: hidden; }
 .guide .tilt pre { margin: 0; padding: .9rem 1rem; font: .75rem/1.6 var(--mono); white-space: pre; color: var(--body); height: 14rem; }
@@ -411,12 +459,12 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 /** The explorer nav marks the targeted panel's link; one rule per panel. */
 export const EXPLORER_CSS = `@supports selector(:has(*)) {${site.capabilities
   .filter((c) => c.chapter !== "start")
-  .map((c) => `.explorer:has(#${c.id}:target) .ex-nav a[href="#${c.id}"]{color:var(--ink);background:var(--raise);border-color:var(--line)}`)
+  .map((c) => `.explorer:has(#${c.id}:target) .ex-nav a[href="#${c.id}"]{color:var(--tint-ink);background:var(--tint-soft);border-color:var(--tint-line)}`)
   .join("")}}`
 
 /** Radio-driven tabs need one rule set per tab; generated from the model's tab count. */
 export const TAB_CSS = site.showcase.tabs
-  .map((_, i) => `#tab-${i}:checked ~ .tabrow label[for="tab-${i}"]{background:var(--raise);color:var(--ink)}#tab-${i}:checked ~ .p-${i}{display:block}#tab-${i}:focus-visible ~ .tabrow label[for="tab-${i}"]{outline:2px solid var(--accent)}#tab-${i}:checked ~ .pager i:nth-child(${i + 1}){background:var(--ink)}`)
+  .map((_, i) => `#tab-${i}:checked ~ .tabrow label[for="tab-${i}"]{background:var(--tint-soft);color:var(--tint-ink);box-shadow:inset 0 0 0 1px var(--tint-line)}#tab-${i}:checked ~ .p-${i}{display:block}#tab-${i}:focus-visible ~ .tabrow label[for="tab-${i}"]{outline:2px solid var(--accent)}#tab-${i}:checked ~ .pager i:nth-child(${i + 1}){background:var(--tint-ink)}`)
   .join("\n")
 
 // ---- scripts ------------------------------------------------------------------------------
@@ -573,7 +621,7 @@ function compareTable(t: Table): string {
   const label = (c: string) => esc(c.replace(/`/g, ""))
   const th = t.header.map((c) => `<th scope="col">${inline(c)}</th>`).join("")
   const tr = t.rows
-    .map((r) => `<tr>${r.map((c, i) => (i === 0 ? `<th scope="row">${inline(c)}</th>` : `<td data-label="${label(t.header[i]!)}"><span>${inline(c)}</span></td>`)).join("")}</tr>`)
+    .map((r) => `<tr>${r.map((c, i) => (i === 0 ? `<th scope="row">${inline(c)}</th>` : `<td data-label="${label(t.header[i]!)}"><span${c === "Yes" ? ' class="yes"' : c === "No" ? ' class="no"' : ""}>${inline(c)}</span></td>`)).join("")}</tr>`)
     .join("")
   return `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`
 }
@@ -647,7 +695,7 @@ ${body}
 // ---- landing ------------------------------------------------------------------------------
 
 export function renderIndex(m: Model = resolveModel()): string {
-  const hero = `<section class="hero shell" aria-labelledby="top-h">
+  const hero = `<section class="hero shell hue h-hero" aria-labelledby="top-h">
 ${productMark(44)}
 <h1 id="top-h">${esc(site.h1)}</h1>
 <p class="lede">${inline(site.lede)}</p>
@@ -662,13 +710,13 @@ ${productMark(44)}
 <div class="hero-cell">${cellHtml(m.hero)}</div>
 </section>`
 
-  const why = `<section class="section why" id="why" aria-labelledby="why-h"><div class="shell">
+  const why = `<section class="section tinted hue h-why why" id="why" aria-labelledby="why-h"><div class="shell">
 <div class="centre"><h2 id="why-h">${esc(site.why.title)}</h2>
 <p class="explain">${inline(site.why.body)}</p></div>
-<div class="principles">${site.why.points.map((p) => `<div><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
+<div class="principles">${site.why.points.map((p, i) => `<div class="hue ${["h-why", "h-db", "h-start"][i % 3]}"><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
 </div></section>`
 
-  const compare = `<section class="section band" id="compare" aria-labelledby="compare-h"><div class="shell">
+  const compare = `<section class="section hue h-compare" id="compare" aria-labelledby="compare-h"><div class="shell">
 <div class="sec-intro"><h2 id="compare-h">${esc(site.compare.title)}</h2><p class="explain">${inline(site.compare.body)}</p></div>
 <div class="demo compare">${compareTable(m.compare)}</div>
 </div></section>`
@@ -680,7 +728,7 @@ ${productMark(44)}
   const caps = (c: Chapter) => m.capabilities.filter((x) => x.cap.chapter === c)
 
   // Getting started is a procedure, so its steps are numbered and stay in order.
-  const start = `<section class="section" id="start" aria-labelledby="start-h"><div class="shell">
+  const start = `<section class="section tinted hue h-start" id="start" aria-labelledby="start-h"><div class="shell">
 ${intro("start")}
 <ol class="steps">${caps("start")
     .map(({ cap, demo }, i) => `<li class="step" id="${cap.id}" aria-labelledby="${cap.id}-h"><div class="step-text"><span class="step-n" aria-hidden="true">${i + 1}</span><h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p></div><div class="step-demo">${demoHtml(demo)}</div></li>`)
@@ -703,7 +751,7 @@ ${intro(c)}
   }
 
   const tabInputs = m.tabs.map((_, i) => `<input type="radio" name="tab" id="tab-${i}"${i === 0 ? " checked" : ""}>`).join("")
-  const showcase = `<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
+  const showcase = `<section class="section hue h-show" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
 <div>
 <h2 id="showcase-h">${esc(site.showcase.title)}</h2>
 <p class="explain">${inline(site.showcase.body)}</p>
@@ -723,22 +771,25 @@ ${m.tabs
 </div>
 </div></section>`
 
-  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+  const eco = `<section class="section band eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
 <p class="explain">${inline(site.ecosystem.lede)}</p>
-<div class="marks">${site.ecosystem.marks.map((k) => `<a href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`).join("")}</div>
+<div class="marks">${site.ecosystem.marks.map((k) => {
+    const b = brandTone(k.icon)
+    return `<a class="tone-${b.tone}" style="--brand:${b.hex}" href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`
+  }).join("")}</div>
 </div></section>`
 
-  const today = `<section class="section band" id="today" aria-labelledby="today-h"><div class="shell today">
+  const today = `<section class="section tinted hue h-today" id="today" aria-labelledby="today-h"><div class="shell today">
 <h2 id="today-h">${esc(site.buildToday.title)}</h2>
 <div class="acts"><a class="control control--solid round" href="/reference">${glyph("book", 15)}Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.buildToday.cmd)}</code>${copyBtn(site.buildToday.cmd, "server command")}</span></div>
 </div></section>`
 
-  const guides = `<section class="section" id="guides" aria-labelledby="guides-h"><div class="shell">
+  const guides = `<section class="section band" id="guides" aria-labelledby="guides-h"><div class="shell">
 <div class="sec-head"><h2 id="guides-h">Guides</h2>
 <p class="explain">Design notes for the parts worth understanding before you run them in production.</p></div>
 <div class="demo guides">${m.guides
-    .map((g) => `<a class="guide" href="${esc(g.href)}" rel="noopener"><span class="gt">${esc(g.title)}<span class="ext" aria-hidden="true">↗</span></span><span class="gb">${esc(g.body)}</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(g.file)}</span></span><pre><code>${highlight(g.block.code, g.block.lang)}</code></pre></span></a>`)
+    .map((g) => `<a class="guide hue ${g.href.includes("/packages/bus/") ? "h-bus" : "h-db"}" href="${esc(g.href)}" rel="noopener"><span class="gt">${esc(g.title)}<span class="ext" aria-hidden="true">↗</span></span><span class="gb">${esc(g.body)}</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(g.file)}</span></span><pre><code>${highlight(g.block.code, g.block.lang)}</code></pre></span></a>`)
     .join("")}</div>
 </div></section>`
 
@@ -749,8 +800,8 @@ ${why}
 ${compare}
 ${start}
 ${showcase}
-${explorer("db")}
-${explorer("bus", " band")}
+${explorer("db", " tinted hue h-db")}
+${explorer("bus", " hue h-bus")}
 ${eco}
 ${today}
 ${guides}
