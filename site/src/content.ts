@@ -1,13 +1,13 @@
-// The page model: composition, copy, section order, which captured example each section shows,
-// and the link table. No markup — the renderer owns that. Examples are *references* into the
-// READMEs (see source.ts), never text written here.
+// The page model: the copy, the section order, which README block each section shows, and the link
+// table. No markup; render.ts owns that. Examples are references into the READMEs (see source.ts),
+// never text written here.
 
 import type { DocId, Where } from "./source.ts"
 
 export type IconName =
   | "github" | "x" | "linkedin" | "discord"
-  | "bun" | "sqlite" | "drizzle" | "turso" | "graphql" | "openapi" | "s3" | "cloudflare"
-  | "minio" | "prometheus" | "opentelemetry" | "docker" | "fly" | "clickhouse" | "githubactions"
+  | "bun" | "sqlite" | "drizzle" | "turso" | "graphql" | "openapi" | "s3" | "cloudflare" | "vercel"
+  | "prometheus" | "opentelemetry" | "docker" | "fly" | "clickhouse" | "githubactions"
 
 /** One artefact: a captured run, a code block, or a table from a README. */
 export type Frame =
@@ -17,26 +17,24 @@ export type Frame =
 
 export type Demo =
   | Frame
-  /** Two artefacts side by side — the code and what it prints. A table in a pair stacks. */
+  /** Two artefacts side by side, usually the code and what it printed. A table in a pair stacks. */
   | { kind: "pair"; items: [Frame, Frame] }
   | { kind: "variants"; items: { line: string; label: string; caption: string; where: Where }[] }
 
-export type Chapter = "db" | "bus"
+export type Chapter = "start" | "db" | "bus"
 
 export interface Capability {
   id: string
   chapter: Chapter
   title: string
-  /** Inline Markdown, 1–2 sentences, at least one `code`. */
+  /** Inline Markdown, 1 to 3 sentences, at least one `code`. */
   body: string
   demo: Demo
 }
 
-export type FigureSource = { kind: "regex"; doc: DocId; re: RegExp; unit?: string }
-
 export interface Figure {
   label: string
-  from: FigureSource
+  from: { kind: "regex"; doc: DocId; re: RegExp }
 }
 
 export interface Link {
@@ -48,41 +46,292 @@ export interface Link {
 }
 
 const G = "https://github.com/TimMikeladze/bql/blob/main"
+const root: Where = { doc: "root" }
+const db: Where = { doc: "db" }
+const bus: Where = { doc: "bus" }
 
 export const site = {
   name: "bql.sh",
-  origin: "https://bql.sh", // where it is deployed, and the package name
+  origin: "https://bql.sh",
   repo: "https://github.com/TimMikeladze/bql",
   npm: "https://www.npmjs.com/package/bql.sh",
   themeKey: "bql-theme",
-  title: "bql.sh — SQLite as a database server, and a durable message bus",
-  tagline: "a SQLite database per tenant",
+  title: "bql.sh: a SQLite database server for Bun",
+  tagline: "a SQLite database server for Bun",
   description:
-    "bql.sh serves thousands of SQLite databases from one Bun process, one per tenant, with replicas, S3 backup and live queries, beside a durable message bus.",
+    "bql.sh is a SQLite database server for Bun, with replicas, S3 backup, branches, live queries and search, plus a durable message bus.",
   license: "MIT",
   year: 2026,
 
-  h1: "Thousands of SQLite databases, one Bun process",
+  h1: "A SQLite database server for Bun",
   lede:
-    "`bql.sh` is a database server for SQLite. Give every tenant, user or pull request its own database, with replicas, S3 backup and live queries built in, and run the work against them on `bql.sh/bus`. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).",
+    "`bql.sh` serves SQLite over HTTP, WebSockets and libsql's protocol. It streams every commit to replicas and S3, pushes live query diffs to clients, and ships `bql.sh/bus`, a message bus on the same engine. Built on [Bun](https://bun.sh) by [linesofcode](https://x.com/linesofcode).",
 
   install: {
     humans: { cmd: "bun add bql.sh", where: { doc: "root", section: "bql.sh" } as Where },
     agents: "curl https://bql.sh/llms.txt",
-    note: "on npm, Bun 1.4+",
+    note: "MIT, Bun 1.4+",
   },
 
+  // The hero's split demo: a live query and the diffs it printed, from the README's Getting started.
   split: {
-    left: { cmd: "BQL_ADMIN_KEY=<the admin key> bun client.ts", where: { doc: "root" } as Where, label: "terminal" },
-    right: { line: "const live = db.live`select id, title from todos where done = 0`.key(\"id\")", where: { doc: "root" } as Where, label: "client.ts" },
+    left: { cmd: "BQL_ADMIN_KEY=<the admin key> bun client.ts", where: root, label: "terminal" },
+    right: { line: "const live = db.live`select id, title from todos where done = 0`.key(\"id\")", where: root, label: "client.ts" },
   },
 
-  // No adoption figures row: bql.sh had 54 npm downloads in the week to 2026-10-18 and no GitHub
-  // stars. Counts of the repo's own code are not adoption, so the row stays off until there is one.
+  why: {
+    title: "Why bql.sh",
+    body: "SQLite is fast and runs anywhere, but it's a library: no network access, no replicas, no backups and no way to subscribe to a query. bql.sh adds those and leaves every database a SQLite file.",
+    points: [
+      { title: "Still SQLite", body: "Replication ships the pages SQLite wrote, not statements, so triggers, FTS5, JSON and `random()` replicate exactly." },
+      { title: "In process or served", body: "`Bql.open()` runs the engine inside your app. `bq.serve()` puts HTTP in front of it later, and code written against `db` doesn't change." },
+      { title: "As many as you need", body: "One process keeps up to `[data] maxOpen` databases open, 1024 by default, and closes idle ones. A fork is a reflink copy, so a database per customer or pull request costs a directory." },
+    ],
+  },
+
+  showcase: {
+    title: "The same db, four ways in",
+    body: "`createClient()` over HTTP, `Bql.open()` in your process, `@libsql/client` over Hrana, or the `bun:ffi` driver on its own. The first two hand back the same `db`, so code moves between them unchanged.",
+    supports: ["bun", "turso", "drizzle", "graphql", "openapi"] as IconName[],
+    tabs: [
+      { label: "Client", file: "client.ts", line: "const client = createClient({ url: \"http://localhost:4321\", token })   // token, or the admin key", where: db },
+      { label: "Embedded", file: "embedded.ts", line: "const bq = await Bql.open({ dir: \"./data\" })", where: db },
+      { label: "libsql", file: "libsql.ts", line: "const primary = createClient({ url: \"http://127.0.0.1:4501/v1/db/acme/\", authToken: KEY })", where: db },
+      { label: "Driver", file: "driver.ts", line: "const db = Database.open(\"app.db\")", where: db },
+    ],
+  },
+
+  chapters: {
+    start: { id: "start", pkg: "bun add bql.sh", title: "Getting started", href: "/reference#root-getting-started" },
+    db: { id: "database", pkg: "bql.sh", title: "The database", href: "/reference#db" },
+    bus: { id: "bus", pkg: "bql.sh/bus", title: "The bus", href: "/reference#bus" },
+  } satisfies Record<Chapter, { id: string; pkg: string; title: string; href: string }>,
+
+  capabilities: [
+    // ---- getting started, in the order you do it ----
+    {
+      id: "install",
+      chapter: "start",
+      title: "Install",
+      body: "Add `bql.sh`, then build the libsqlite3 its driver loads. The driver needs the preupdate hook and the session extension, so the package compiles its own SQLite once, in about 15 seconds, with any C compiler.",
+      demo: { kind: "terminal", cmd: "bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts", where: root },
+    },
+    {
+      id: "embedded",
+      chapter: "start",
+      title: "Run it in your process",
+      body: "`Bql.open()` is the whole engine with no server in front. Every write returns the `txid` it committed in.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "snippet", line: "const bq = await Bql.open({ dir: \"./data\" })", label: "app.ts", where: root },
+          { kind: "terminal", cmd: "bun app.ts", where: root },
+        ],
+      },
+    },
+    {
+      id: "serve",
+      chapter: "start",
+      title: "Start a server",
+      body: "`bql serve` prints an admin key the first time it starts and saves it to `keys.json`. The CLI and the client use it as `BQL_ADMIN_KEY`.",
+      demo: { kind: "terminal", cmd: "bunx bql serve --dir ./srv --port 4321", where: root },
+    },
+    {
+      id: "token",
+      chapter: "start",
+      title: "Give the browser a token",
+      body: "Never ship the admin key to a browser. `admin.mintToken` makes a token scoped to databases, tables and `ro` or `rw`, and anything outside it answers `NOT_AUTHORIZED`.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "snippet", line: "const { token } = await admin.mintToken({ dbs: [\"acme\"], scope: \"ro\", ttlMs: 3_600_000 })", label: "token.ts", where: root },
+          { kind: "terminal", cmd: "BQL_ADMIN_KEY=<the admin key> bun token.ts", where: root },
+        ],
+      },
+    },
+    {
+      id: "deploy",
+      chapter: "start",
+      title: "Deploy it",
+      body: "`bql deploy` provisions a server on Fly, Vercel or Cloudflare through the provider CLI you're already logged in to, then saves the connection so `bql db list` talks to it. Vercel and Cloudflare are experimental and keep data in Blob or R2.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "terminal", cmd: "bql deploy init --provider vercel --scope my-team", where: root },
+          { kind: "table", header: "Compute", where: root },
+        ],
+      },
+    },
+
+    // ---- the database ----
+    {
+      id: "realtime",
+      chapter: "db",
+      title: "Live queries",
+      body: "`db.live` runs a query and sends the `added`, `removed` and `updated` rows whenever a commit changes its result. `/changes` streams every commit as SSE. Both run off SQLite's `preupdate` hook, so there are no triggers to install.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "snippet", line: "live.on(\"diff\", (e) => patch(e.added, e.removed, e.updated))", label: "live.ts", where: root },
+          { kind: "terminal", cmd: "curl -N \"localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN\"", where: db },
+        ],
+      },
+    },
+    {
+      id: "replicas",
+      chapter: "db",
+      title: "Replicas",
+      body: "Start a second server with `--replica-of`. It follows every database on the primary, serves reads locally and forwards writes, answering with the primary's txid.",
+      demo: { kind: "terminal", cmd: "curl -sD- -H \"authorization: Bearer $KEY\" -H 'content-type: application/json' \\", where: db },
+    },
+    {
+      id: "failover",
+      chapter: "db",
+      title: "Failover",
+      body: "`bql promote acme` moves a database to a replica and fences the old primary by epoch. With `[cluster]` on, Raft does it when the primary's lease runs out. Write with `ack: \"replica\"` and a failover loses no acknowledged write.",
+      demo: { kind: "terminal", cmd: "bql promote acme --url http://127.0.0.1:4502", where: db },
+    },
+    {
+      id: "backup",
+      chapter: "db",
+      title: "Backups to S3",
+      body: "Pass `--s3` and every commit ships to the bucket in the background; a slow bucket never slows a write. `bql restore` rebuilds a database at any txid or timestamp on a node that has never seen it.",
+      demo: { kind: "terminal", cmd: "bql backup status acme", where: { doc: "db", section: "Back it up to a bucket" } },
+    },
+    {
+      id: "branches",
+      chapter: "db",
+      title: "A database per pull request",
+      body: "`bql db branch` forks a database and records its parent. The `bql-branch` GitHub Action creates one when a pull request opens and deletes it when it closes.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "terminal", cmd: "bql db branch pr-42 --from main", where: { doc: "db", section: "Branches" } },
+          { kind: "snippet", line: "uses: TimMikeladze/bql/.github/actions/bql-branch@main", label: "db-branch.yml", where: root },
+        ],
+      },
+    },
+    {
+      id: "search",
+      chapter: "db",
+      title: "Vector, full-text and geo search",
+      body: "`bql.sh/search` builds sqlite-vec, FTS5 and R*Tree queries out of plain SQL. `hybridSearch` fuses bm25 and vector rank in one statement, and it all runs on a primary, a replica or in your process.",
+      demo: { kind: "snippet", line: "tokenizer: \"porter unicode61\"", label: "search.ts", where: db },
+    },
+    {
+      id: "orms",
+      chapter: "db",
+      title: "Your ORM already works",
+      body: "The server speaks libsql's Hrana protocol, so `@libsql/client` connects as is. `bql.sh/kysely` and `bql.sh/drizzle` run transactions and migrations on bql.sh's own routes.",
+      demo: {
+        kind: "variants",
+        items: [
+          { line: "const replica = createClient({ url: \"http://127.0.0.1:4502/v1/db/acme/\", authToken: KEY })", label: "libsql.ts", caption: "@libsql/client over Hrana", where: db },
+          { line: "dialect: new BqlDialect({ url: \"http://localhost:4321\", token, db: \"acme\" }),", label: "kysely.ts", caption: "bql.sh/kysely, BqlDialect", where: db },
+          { line: "const db = drizzle({ url: \"http://localhost:4321\", token, db: \"acme\" }, { schema: { todos } })", label: "drizzle.ts", caption: "bql.sh/drizzle, drizzle()", where: db },
+        ],
+      },
+    },
+    {
+      id: "rest",
+      chapter: "db",
+      title: "REST, OpenAPI and GraphQL",
+      body: "Every database gets a REST API and an OpenAPI 3.1 document generated from its own tables, and GraphQL once the optional `graphql` peer is installed. Requests go through the same token checks, row cap and write forwarding as SQL.",
+      demo: { kind: "snippet", line: "GET    /v1/db/acme/openapi.json       that database's OpenAPI 3.1 document", label: "routes.http", where: db },
+    },
+    {
+      id: "outbox",
+      chapter: "db",
+      title: "Row changes onto the bus",
+      body: "An `[[outbox.rules]]` entry publishes every committed row change to a bus subject. It reads the durable log and moves its cursor only after the bus acknowledged, so a crash neither loses nor repeats a change.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "snippet", line: "subject = \"db.{db}.{table}\"    # the default", label: "bql.toml", where: db },
+          { kind: "terminal", cmd: "bql bus subscribe cdc 'db.app-1.>'", where: db },
+        ],
+      },
+    },
+
+    // ---- the bus ----
+    {
+      id: "queue",
+      chapter: "bus",
+      title: "Queue, pub/sub and request/reply",
+      body: "Publish to a subject, and each subscription reads it with its own cursor, leases, retries and a dead-letter subject. `bql bus consume --exec` turns any script into a consumer: the message arrives on stdin.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "terminal", cmd: "bql bus publish work.resize '{\"src\":\"a.png\"}'", where: { doc: "bus", section: "bql.sh/bus" } },
+          { kind: "snippet", line: "await new BusConsumer({", label: "consumer.ts", where: bus },
+        ],
+      },
+    },
+    {
+      id: "exactly-once",
+      chapter: "bus",
+      title: "Exactly-once, three ways",
+      body: "Delivery is at-least-once by default. `api.emit` publishes in the same commit as the ack, and `api.effect` records an outside call so a redelivery replays the result instead of repeating the call.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "table", header: "Tier", where: bus },
+          { kind: "snippet", line: "api.emit({ subject: \"thumbnails.ready\", body: { id: message.body.id } });", label: "handler.ts", where: bus },
+        ],
+      },
+    },
+    {
+      id: "schedules",
+      chapter: "bus",
+      title: "Cron schedules",
+      body: "`bql bus schedule add` publishes an ordinary message on each fire, once per slot, in any IANA time zone. `catchUp` decides what happens to slots missed while the bus was down.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "terminal", cmd: "bql bus schedule add nightly '30 2 * * *' reports.nightly '{\"kind\":\"daily\"}' --tz America/New_York", where: bus },
+          { kind: "snippet", line: "await bus.putSchedule({ name: \"nightly\"", label: "schedule.ts", where: bus },
+        ],
+      },
+    },
+    {
+      id: "sinks",
+      chapter: "bus",
+      title: "Sinks to webhooks, S3 and ClickHouse",
+      body: "`bql bus sink` writes a subscription in batches and acks only once the destination took the batch. With the outbox in front, committed rows reach a warehouse with no code.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "snippet", line: "bql bus sink clickhouse --subscription olap", label: "sinks.sh", where: bus },
+          { kind: "snippet", line: "writer: webhookSink({", label: "sink.ts", where: bus },
+        ],
+      },
+    },
+    {
+      id: "schemas",
+      chapter: "bus",
+      title: "Schemas on subjects",
+      body: "Register a JSON Schema with `--compat backward` and bind it to a subject pattern in `warn` mode, then `enforce`. A version that breaks the declared compatibility is refused with the failing pointer.",
+      demo: { kind: "terminal", cmd: "bql bus schema register order ./order.json --compat backward", where: bus },
+    },
+  ] satisfies Capability[],
+
+  measured: {
+    title: "Benchmarks",
+    body: "`bun run bench` on an M5 Pro with SQLite 3.53.4. The driver is compared with `bun:sqlite` as a ratio; the replication legs are two servers on loopback.",
+    figures: [
+      { label: "point read vs bun:sqlite", from: { kind: "regex", doc: "db", re: /\| point read by primary key \| ([\d.]+ – [\d.]+x) \|/ } },
+      { label: "100-row scan vs bun:sqlite", from: { kind: "regex", doc: "db", re: /\| 100-row scan to objects \| ([\d.]+ – [\d.]+x) \|/ } },
+      { label: "p50 commit to replica", from: { kind: "regex", doc: "db", re: /\| commit → applied on the replica \| (\d+ µs) \|/ } },
+    ] satisfies Figure[],
+    tables: [
+      { header: "bql vs `bun:sqlite`", where: db },
+      { header: "leg", where: db },
+    ],
+  },
 
   ecosystem: {
-    title: "Reached by what you already run",
-    lede: "Drizzle, Kysely and `@libsql/client` on top. S3, R2 or MinIO underneath. ClickHouse and webhooks downstream.",
+    title: "Works with what you run",
+    lede: "Drizzle, Kysely and `@libsql/client` connect over Hrana. Backups go to S3, R2 or Tigris. Sinks write to webhooks and ClickHouse, and `bql deploy` targets Fly, Vercel and Cloudflare.",
     marks: [
       { icon: "bun", label: "Bun", href: "https://bun.sh" },
       { icon: "sqlite", label: "SQLite", href: "https://sqlite.org" },
@@ -91,247 +340,35 @@ export const site = {
       { icon: "graphql", label: "GraphQL", href: "https://graphql.org" },
       { icon: "openapi", label: "OpenAPI 3.1", href: "https://www.openapis.org" },
       { icon: "s3", label: "Amazon S3", href: "https://aws.amazon.com/s3/" },
-      { icon: "cloudflare", label: "Cloudflare R2", href: "https://www.cloudflare.com/developer-platform/r2/" },
-      { icon: "minio", label: "MinIO", href: "https://min.io" },
+      { icon: "cloudflare", label: "Cloudflare", href: "https://www.cloudflare.com/developer-platform/r2/" },
+      { icon: "vercel", label: "Vercel", href: "https://vercel.com" },
+      { icon: "fly", label: "Fly.io", href: "https://fly.io" },
       { icon: "clickhouse", label: "ClickHouse", href: "https://clickhouse.com" },
       { icon: "githubactions", label: "GitHub Actions", href: "https://github.com/features/actions" },
       { icon: "prometheus", label: "Prometheus", href: "https://prometheus.io" },
       { icon: "opentelemetry", label: "OpenTelemetry", href: "https://opentelemetry.io" },
-      { icon: "fly", label: "Fly.io", href: "https://fly.io" },
     ] as { icon: IconName; label: string; href: string }[],
   },
 
-  principles: [
-    { title: "A database per tenant", body: "No `tenant_id` on every row, no shared index. `bql db delete acme` removes one customer's data and nothing else." },
-    { title: "Same code, in process or served", body: "`Bql.open()` and `createClient()` hand back the same `db`. `bq.serve()` adds HTTP later." },
-    { title: "Zero runtime dependencies", body: "No `dependencies` field. The OTLP exporter and the schema validator are written, not installed." },
-  ],
-
-  showcase: {
-    title: "One engine, four ways in",
-    body: "A tagged template over HTTP, a synchronous call in your process, a raw `bun:ffi` driver — or a bus handler inside the transaction that acks it.",
-    supports: ["bun", "drizzle", "turso", "graphql", "openapi"] as IconName[],
-    tabs: [
-      { label: "Client", file: "client.ts", line: "const client = createClient({ url: \"http://localhost:4321\", token })   // token, or the admin key", where: { doc: "db" } as Where },
-      { label: "Embedded", file: "embedded.ts", line: "const bq = await Bql.open({ dir: \"./data\" })", where: { doc: "db" } as Where },
-      { label: "Driver", file: "driver.ts", line: "const db = Database.open(\"app.db\")", where: { doc: "db" } as Where },
-      { label: "Transactional ack", file: "bus.ts", line: "bus.consumeTransactional({", where: { doc: "bus" } as Where },
-    ],
-  },
-
-  chapters: {
-    db: { id: "database", pkg: "bql.sh", title: "The database", href: "/reference#db" },
-    bus: { id: "bus", pkg: "bql.sh/bus", title: "The bus", href: "/reference#bus" },
-  } satisfies Record<Chapter, { id: string; pkg: string; title: string; href: string }>,
-
-  capabilities: [
-    {
-      id: "embedded",
-      chapter: "db",
-      title: "Embedded first, served later",
-      body: "`Bql.open()` runs the whole engine in your process. Every write returns the `txid` it committed in.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "snippet", line: "const bq = await Bql.open({ dir: \"./data\" })", label: "app.ts", where: { doc: "root" } },
-          { kind: "terminal", cmd: "bun app.ts", where: { doc: "root" } },
-        ],
-      },
-    },
-    {
-      id: "realtime",
-      chapter: "db",
-      title: "Realtime from SQLite's hooks",
-      body: "`db.live` diffs a query; `/changes` streams every commit as SSE. Driven by `preupdate`, not triggers.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "snippet", line: "live.on(\"diff\", (e) => patch(e.added, e.removed, e.updated))", label: "live.ts", where: { doc: "root" } },
-          { kind: "terminal", cmd: "curl -N \"localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN\"", where: { doc: "db" } },
-        ],
-      },
-    },
-    {
-      id: "txid",
-      chapter: "db",
-      title: "Every write returns a txid",
-      body: "The client sends the highest it has seen as `BQL-Min-Txid`, so a read never goes backwards.",
-      demo: { kind: "terminal", cmd: "curl -sX POST localhost:4321/v1/db -H \"authorization: Bearer $KEY\" \\", where: { doc: "db" } },
-    },
-    {
-      id: "search",
-      chapter: "db",
-      title: "Vector, full-text, hybrid, geo",
-      body: "`bql.sh/search` builds it out of SQL, so it runs on a primary, a replica or in-process alike.",
-      demo: { kind: "snippet", line: "tokenizer: \"porter unicode61\"", label: "search.ts", where: { doc: "db" } },
-    },
-    {
-      id: "replicas",
-      chapter: "db",
-      title: "Replicas that forward writes",
-      body: "Start a node with `--replica-of`. It reads locally and answers a forwarded write with the primary's txid.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "terminal", cmd: "curl -sD- -H \"authorization: Bearer $KEY\" -H 'content-type: application/json' \\", where: { doc: "db" } },
-          { kind: "snippet", line: "await replica.execute(\"insert into notes (body) values ('nope')\")", label: "libsql.ts", where: { doc: "db" } },
-        ],
-      },
-    },
-    {
-      id: "promotion",
-      chapter: "db",
-      title: "Promotion that refuses to guess",
-      body: "`bql promote` fences the old primary by epoch. `--force` overrides exactly three refusals.",
-      demo: { kind: "terminal", cmd: "bql promote acme --url http://127.0.0.1:4502", where: { doc: "db" } },
-    },
-    {
-      id: "branches",
-      chapter: "db",
-      title: "A database per pull request",
-      body: "`bql db branch` is an O(1) fork that remembers its parent. The `bql-branch` action opens and closes one per PR.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "terminal", cmd: "bql db branch pr-42 --from main", where: { doc: "db", section: "Branches" } },
-          { kind: "snippet", line: "uses: TimMikeladze/bql/.github/actions/bql-branch@main", label: "db-branch.yml", where: { doc: "root" } },
-        ],
-      },
-    },
-    {
-      id: "backup",
-      chapter: "db",
-      title: "Backed up to any bucket",
-      body: "Pass `--s3` and every log and snapshot ships continuously. A slow bucket reports `behind`; it never slows a commit.",
-      demo: { kind: "terminal", cmd: "bql backup status acme", where: { doc: "db", section: "Back it up to a bucket" } },
-    },
-    {
-      id: "outbox",
-      chapter: "db",
-      title: "Committed rows onto the bus",
-      body: "An `[outbox]` rule publishes every row change from the durable log. A crash never loses one, a restart never repeats one.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "snippet", line: "subject = \"db.{db}.{table}\"", label: "bql.toml", where: { doc: "db" } },
-          { kind: "terminal", cmd: "bql bus subscribe cdc 'db.app-1.>'", where: { doc: "db" } },
-        ],
-      },
-    },
-    {
-      id: "orms",
-      chapter: "db",
-      title: "ORMs reach it unmodified",
-      body: "It speaks libsql's Hrana. `bql.sh/kysely` and `bql.sh/drizzle` map transactions onto its own routes.",
-      demo: {
-        kind: "variants",
-        items: [
-          { line: "const primary = createClient({ url: \"http://127.0.0.1:4501/v1/db/acme/\", authToken: KEY })", label: "libsql.ts", caption: "@libsql/client — Hrana over HTTP", where: { doc: "db" } },
-          { line: "dialect: new BqlDialect({ url: \"http://localhost:4321\", token, db: \"acme\" }),", label: "kysely.ts", caption: "bql.sh/kysely — BqlDialect", where: { doc: "db" } },
-          { line: "const db = drizzle({ url: \"http://localhost:4321\", token, db: \"acme\" }, { schema: { todos } })", label: "drizzle.ts", caption: "bql.sh/drizzle — drizzle()", where: { doc: "db" } },
-        ],
-      },
-    },
-    {
-      id: "subjects",
-      chapter: "bus",
-      title: "Subjects, fanned out on pull",
-      body: "`*` matches one token, `>` the rest. Publishing is O(1) in subscriptions, and `deliverFrom: \"beginning\"` reads last week.",
-      demo: { kind: "snippet", line: "orders.*.created         matches orders.eu.created", label: "subjects", where: { doc: "bus" } },
-    },
-    {
-      id: "exactly-once",
-      chapter: "bus",
-      title: "Three tiers of exactly-once",
-      body: "At-least-once by default. `api.emit` commits with the ack; `api.effect` records an outside call beside it.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "table", header: "Tier", where: { doc: "bus" } },
-          { kind: "snippet", line: "api.emit({ subject: \"thumbnails.ready\", body: { id: message.body.id } });", label: "handler.ts", where: { doc: "bus" } },
-        ],
-      },
-    },
-    {
-      id: "schedules",
-      chapter: "bus",
-      title: "Cron, as ordinary messages",
-      body: "`bql bus schedule add` fires on the primary, one deduplicated publish per slot, DST-correct in any IANA zone.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "terminal", cmd: "bql bus schedule add nightly '30 2 * * *' reports.nightly '{\"kind\":\"daily\"}' --tz America/New_York", where: { doc: "bus" } },
-          { kind: "snippet", line: "await bus.putSchedule({ name: \"nightly\"", label: "schedule.ts", where: { doc: "bus" } },
-        ],
-      },
-    },
-    {
-      id: "sinks",
-      chapter: "bus",
-      title: "Sinks to webhooks, S3, ClickHouse",
-      body: "`bql bus sink` acks a batch only once the destination took it. Paired with the outbox, that is rows to a warehouse with no code.",
-      demo: {
-        kind: "pair",
-        items: [
-          { kind: "snippet", line: "bql bus sink clickhouse --subscription olap", label: "sinks.sh", where: { doc: "bus" } },
-          { kind: "snippet", line: "writer: webhookSink({", label: "sink.ts", where: { doc: "bus" } },
-        ],
-      },
-    },
-    {
-      id: "schemas",
-      chapter: "bus",
-      title: "Schemas with computed compatibility",
-      body: "Register with `--compat backward`, bind in `warn`, then `enforce`. A breaking version is a 409 naming the pointer.",
-      demo: { kind: "terminal", cmd: "bql bus schema register order ./order.json --compat backward", where: { doc: "bus" } },
-    },
-    {
-      id: "proven",
-      chapter: "bus",
-      title: "Proven with real processes",
-      body: "`bun run test:e2e` SIGKILLs a consumer mid-message. No mocks.",
-      demo: { kind: "snippet", line: "ok   killed worker-a while it held the slow message", label: "bun run test:e2e", where: { doc: "bus" } },
-    },
-  ] satisfies Capability[],
-
-  measured: {
-    title: "Measured against bun:sqlite",
-    body: "`bun run bench` on an M5 Pro, as ratios against `bun:sqlite`, and the replication legs end to end.",
-    figures: [
-      { label: "point read vs bun:sqlite", from: { kind: "regex", doc: "db", re: /\| point read by primary key \| ([\d.]+ – [\d.]+x) \|/ } },
-      { label: "insert in a transaction", from: { kind: "regex", doc: "db", re: /\| insert inside a transaction \| ([\d.]+ – [\d.]+x) \|/ } },
-      { label: "p50 commit → replica", from: { kind: "regex", doc: "db", re: /\| commit → applied on the replica \| (\d+ µs) \|/ } },
-    ] satisfies Figure[],
-    tables: [
-      { header: "bql vs `bun:sqlite`", where: { doc: "db" } as Where },
-      { header: "leg", where: { doc: "db" } as Where },
-    ],
-  },
-
-  start: {
-    install: { cmd: "bun add bql.sh", where: { doc: "db", section: "Install" } as Where },
-    engine: { cmd: "bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts", where: { doc: "db", section: "Install" } as Where },
-  },
-
   buildToday: {
-    title: "Run a bus in one line",
-    cmd: "bunx bql bus serve",
-    where: { doc: "bus", section: "Install" } as Where,
+    title: "Start a server",
+    cmd: "bunx bql serve --dir ./srv --port 4321",
+    where: root,
   },
 
   guides: [
-    { title: "Exactly-once, in three tiers", body: "What each tier guarantees and where the last stops.", href: `${G}/packages/bus/docs/exactly-once.md`, line: "bun run soak --fault post-ack", where: { doc: "bus" } as Where, file: "soak.sh" },
-    { title: "The cluster and its leases", body: "Two primaries are impossible by the guard margin.", href: `${G}/packages/db/docs/c2-promotion.md`, line: "leaseGuardMs = 500     # the margin that makes two primaries impossible", where: { doc: "db" } as Where, file: "bql.toml" },
-    { title: "WAL shipping, byte by byte", body: "Committed pages out of the -wal, self-verifying.", href: `${G}/packages/db/docs/m3-wal.md`, line: "const recorder = TxnRecorder.open({ dbPath: \"primary/main.db\" })", where: { doc: "db" } as Where, file: "wal.ts" },
+    { title: "Exactly-once in the bus", body: "What each of the three tiers guarantees and what it costs.", href: `${G}/packages/bus/docs/exactly-once.md`, line: "bun run soak --fault post-ack", where: bus, file: "soak.sh" },
+    { title: "Promotion and failover", body: "How leases and epochs keep two primaries from writing.", href: `${G}/packages/db/docs/c2-promotion.md`, line: "leaseGuardMs = 500     # the margin that makes two primaries impossible", where: db, file: "bql.toml" },
+    { title: "WAL shipping", body: "The record a replica verifies before it applies a page.", href: `${G}/packages/db/docs/m3-wal.md`, line: "const recorder = TxnRecorder.open({ dbPath: \"primary/main.db\" })", where: db, file: "wal.ts" },
   ],
 
   credit:
-    "bql.sh is built by [linesofcode](https://x.com/linesofcode), who also builds [dagr](https://github.com/TimMikeladze/dagr), a workflow engine on one SQLite journal that uses this bus for remote steps.",
+    "bql.sh is built by [linesofcode](https://x.com/linesofcode), who also wrote [dagr](https://github.com/TimMikeladze/dagr), a workflow engine on one SQLite journal that sends remote steps over `bql.sh/bus`.",
 
   nav: [
+    { label: "Getting started", href: "/#start" },
     { label: "Database", href: "/#database" },
     { label: "Bus", href: "/#bus" },
-    { label: "Measured", href: "/#measured" },
     { label: "Reference", href: "/reference" },
     { label: "npm", href: "https://www.npmjs.com/package/bql.sh" },
   ],
@@ -363,9 +400,9 @@ export const site = {
       { label: "Operations", href: `${G}/packages/bus/docs/operations.md` },
     ] },
     { title: "Learn", links: [
-      { label: "Why one package", href: `${G}/docs/monorepo.md` },
+      { label: "Design", href: `${G}/packages/db/docs/design.md` },
       { label: "Outbox", href: `${G}/packages/db/docs/x6-outbox.md` },
-      { label: "Promotion", href: `${G}/packages/db/docs/c2-promotion.md` },
+      { label: "Cloud deployments", href: `${G}/packages/db/docs/cloud-deployments.md` },
       { label: "Performance", href: `${G}/packages/db/docs/performance.md` },
     ] },
     { title: "Community", links: [

@@ -1,26 +1,156 @@
-# Thousands of SQLite databases, one Bun process
+# A SQLite database server for Bun
 
-`bql.sh` is a database server for SQLite. Give every tenant, user or pull request its own database, with replicas, S3 backup and live queries built in, and run the work against them on `bql.sh/bus`. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
+`bql.sh` serves SQLite over HTTP, WebSockets and libsql's protocol. It streams every commit to replicas and S3, pushes live query diffs to clients, and ships `bql.sh/bus`, a message bus on the same engine. Built on [Bun](https://bun.sh) by [linesofcode](https://x.com/linesofcode).
 
-Currently `bql.sh` v0.5.0 · on npm, Bun 1.4+.
+Currently `bql.sh` v0.5.0 · MIT, Bun 1.4+.
 
 ```sh
 bun add bql.sh
 ```
 
-## Reached by what you already run
+```ts
+// client.ts
+import { createClient } from "bql.sh/client"
 
-Drizzle, Kysely and `@libsql/client` on top. S3, R2 or MinIO underneath. ClickHouse and webhooks downstream.
+const client = createClient({ url: "http://localhost:4321", token: process.env.BQL_ADMIN_KEY! })
+await client.admin.create("acme")
+const db = client.db("acme")
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
 
-## Principles
+const live = db.live`select id, title from todos where done = 0`.key("id")
+live.on("diff", (e) => console.log("diff", JSON.stringify({ added: e.added, removed: e.removed })))
+await new Promise((resolve) => live.on("rows", resolve))   // the first result; diffs follow
 
-- **A database per tenant.** No `tenant_id` on every row, no shared index. `bql db delete acme` removes one customer's data and nothing else.
-- **Same code, in process or served.** `Bql.open()` and `createClient()` hand back the same `db`. `bq.serve()` adds HTTP later.
-- **Zero runtime dependencies.** No `dependencies` field. The OTLP exporter and the schema validator are written, not installed.
+await db.sql`insert into todos(title) values (${"write it"})`.run()
+await db.sql`update todos set done = 1 where id = ${1}`.run()
+await Bun.sleep(100)
+client.close()
+```
 
-## One engine, four ways in
+```sh
+BQL_ADMIN_KEY=<the admin key> bun client.ts
+# diff {"added":[{"id":1,"title":"write it"}],"removed":[]}
+# diff {"added":[],"removed":[{"id":1}]}
+```
 
-A tagged template over HTTP, a synchronous call in your process, a raw `bun:ffi` driver — or a bus handler inside the transaction that acks it.
+## Why bql.sh
+
+SQLite is fast and runs anywhere, but it's a library: no network access, no replicas, no backups and no way to subscribe to a query. bql.sh adds those and leaves every database a SQLite file.
+
+### Still SQLite
+
+Replication ships the pages SQLite wrote, not statements, so triggers, FTS5, JSON and `random()` replicate exactly.
+
+### In process or served
+
+`Bql.open()` runs the engine inside your app. `bq.serve()` puts HTTP in front of it later, and code written against `db` doesn't change.
+
+### As many as you need
+
+One process keeps up to `[data] maxOpen` databases open, 1024 by default, and closes idle ones. A fork is a reflink copy, so a database per customer or pull request costs a directory.
+
+## Getting started
+
+### Install
+
+Add `bql.sh`, then build the libsqlite3 its driver loads. The driver needs the preupdate hook and the session extension, so the package compiles its own SQLite once, in about 15 seconds, with any C compiler.
+
+```sh
+bun add bql.sh
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
+```
+
+### Run it in your process
+
+`Bql.open()` is the whole engine with no server in front. Every write returns the `txid` it committed in.
+
+```ts
+// app.ts
+import { Bql } from "bql.sh"
+
+const bq = await Bql.open({ dir: "./data" })
+const db = await bq.create("acme")
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
+console.log("txid", written.txid)
+console.log(await db.sql`select * from todos`)
+
+await bq.close()
+```
+
+```sh
+bun app.ts
+# txid 2
+# [
+#   {
+#     id: 1,
+#     title: "write it",
+#     done: 0,
+#   }, count: 1, command: "SELECT", lastInsertRowid: null, affectedRows: 0, txid: 2,
+#   columns: [ "id", "title", "done" ], types: [ "INTEGER", "TEXT", "INTEGER" ], durationUs: 97,
+#   vmSteps: 11
+# ]
+```
+
+### Start a server
+
+`bql serve` prints an admin key the first time it starts and saves it to `keys.json`. The CLI and the client use it as `BQL_ADMIN_KEY`.
+
+```sh
+bunx bql serve --dir ./srv --port 4321
+# bql: generated an admin key and wrote it to ./srv/keys.json
+# bql: admin key: <43 url-safe base64 characters, printed this once and never again>
+# bql http://localhost:4321  node=bql-77779295  data=./srv
+# bql: 0 database(s), maxOpen 1024, ack fsync
+```
+
+### Give the browser a token
+
+Never ship the admin key to a browser. `admin.mintToken` makes a token scoped to databases, tables and `ro` or `rw`, and anything outside it answers `NOT_AUTHORIZED`.
+
+```ts
+// token.ts
+import { createClient } from "bql.sh/client"
+
+const url = "http://localhost:4321"
+const admin = createClient({ url, token: process.env.BQL_ADMIN_KEY! }).admin
+const { token } = await admin.mintToken({ dbs: ["acme"], scope: "ro", ttlMs: 3_600_000 })
+
+// Hand `token` to the browser. It can read acme and nothing else.
+const db = createClient({ url, token }).db("acme")
+console.log(JSON.stringify(await db.sql`select id, title, done from todos`))
+await db.sql`delete from todos`.run().catch((err) => console.log(err.code, err.message))
+```
+
+```sh
+BQL_ADMIN_KEY=<the admin key> bun token.ts
+# [{"id":1,"title":"write it","done":1}]
+# NOT_AUTHORIZED not authorized
+```
+
+### Deploy it
+
+`bql deploy` provisions a server on Fly, Vercel or Cloudflare through the provider CLI you're already logged in to, then saves the connection so `bql db list` talks to it. Vercel and Cloudflare are experimental and keep data in Blob or R2.
+
+```sh
+mkdir bql-preview
+cd bql-preview
+bql deploy init --provider vercel --scope my-team
+bql deploy plan
+bql deploy apply
+bql deploy status
+```
+
+| Provider | Compute | Durable data | Default region | Status |
+| --- | --- | --- | --- | --- |
+| Vercel | Bun container | Private Vercel Blob | `iad1` | Experimental object mode |
+| Cloudflare | Worker + named Bun container | Private R2 bucket | `wnam` bucket location hint | Experimental object mode |
+| Fly | Bun machine | Encrypted persistent volume at `/data` | `sjc` | Persistent-disk server |
+
+## The same db, four ways in
+
+`createClient()` over HTTP, `Bql.open()` in your process, `@libsql/client` over Hrana, or the `bun:ffi` driver on its own. The first two hand back the same `db`, so code moves between them unchanged.
 
 ### Client
 
@@ -70,6 +200,20 @@ for await (const event of db.changes()) console.log(event)           // the bus,
 await bq.serve({ port: 4321 })                       // the same engine, now over HTTP/WS/SSE
 ```
 
+### libsql
+
+```ts
+import { createClient } from "@libsql/client"
+
+// The trailing slash matters: the client resolves `v2/pipeline` relative to this URL.
+const primary = createClient({ url: "http://127.0.0.1:4501/v1/db/acme/", authToken: KEY })
+const replica = createClient({ url: "http://127.0.0.1:4502/v1/db/acme/", authToken: KEY })
+
+await primary.execute("insert into notes (body) values ('written by @libsql/client')")
+await replica.execute("select id, body from notes order by id")  // already applied
+await replica.execute("insert into notes (body) values ('nope')") // LibsqlError: NOT_PRIMARY
+```
+
 ### Driver
 
 ```ts
@@ -83,63 +227,11 @@ db.onUpdate((op, dbName, table, rowid) => console.log(op, table, rowid))
 db.close()
 ```
 
-### Transactional ack
+## The database
 
-```ts
-import { Bql } from "bql.sh";
-import { createBus, ensureBusDatabase } from "bql.sh/bus";
+### Live queries
 
-const bq = await Bql.open({ dir: "./data" });
-await ensureBusDatabase(bq);
-const bus = createBus({ bql: bq });
-bus.store.raw().run("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY)");
-
-bus.consumeTransactional({
-  subscription: "work",
-  // Synchronous, and that is load-bearing: an `await` in here would let another
-  // statement interleave into the transaction this exists to provide.
-  handle: (envelope, db) => {
-    db.run("INSERT INTO processed (seq) VALUES (?)", [envelope.message.seq]);
-  },
-});
-```
-
-## Embedded first, served later
-
-`Bql.open()` runs the whole engine in your process. Every write returns the `txid` it committed in.
-
-```ts
-// app.ts
-import { Bql } from "bql.sh"
-
-const bq = await Bql.open({ dir: "./data" })
-const db = await bq.create("acme")
-
-await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
-const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
-console.log("txid", written.txid)
-console.log(await db.sql`select * from todos`)
-
-await bq.close()
-```
-
-```sh
-bun app.ts
-# txid 2
-# [
-#   {
-#     id: 1,
-#     title: "write it",
-#     done: 0,
-#   }, count: 1, command: "SELECT", lastInsertRowid: null, affectedRows: 0, txid: 2,
-#   columns: [ "id", "title", "done" ], types: [ "INTEGER", "TEXT", "INTEGER" ], durationUs: 97,
-#   vmSteps: 11
-# ]
-```
-
-## Realtime from SQLite's hooks
-
-`db.live` diffs a query; `/changes` streams every commit as SSE. Driven by `preupdate`, not triggers.
+`db.live` runs a query and sends the `added`, `removed` and `updated` rows whenever a commit changes its result. `/changes` streams every commit as SSE. Both run off SQLite's `preupdate` hook, so there are no triggers to install.
 
 ```ts
 import { createClient } from "bql.sh/client"
@@ -165,59 +257,9 @@ curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
 # data: {"txid":3,"changes":[{"table":"todos","op":"insert","rowid":2,"pk":{"id":2},"row":{…}}]}
 ```
 
-## Every write returns a txid
+### Replicas
 
-The client sends the highest it has seen as `BQL-Min-Txid`, so a read never goes backwards.
-
-```sh
-KEY=<the admin key it printed>
-curl -sX POST localhost:4321/v1/db -H "authorization: Bearer $KEY" \
-     -H 'content-type: application/json' -d '{"name":"acme"}'
-
-curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
-     -H 'content-type: application/json' \
-     -d '{"sql":"create table todos(id integer primary key, title text)"}'
-# {"columns":[],"types":[],"rows":[],"rowsAffected":0,"lastInsertRowid":null,"txid":1,...}
-
-curl -sX POST localhost:4321/v1/db/acme/query -H "authorization: Bearer $KEY" \
-     -H 'content-type: application/json' \
-     -d '{"sql":"insert into todos(title) values (?)","args":["write it"]}'
-# {"columns":[],"types":[],"rows":[],"rowsAffected":1,"lastInsertRowid":1,"txid":2,...}
-```
-
-## Vector, full-text, hybrid, geo
-
-`bql.sh/search` builds it out of SQL, so it runs on a primary, a replica or in-process alike.
-
-```ts
-import { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } from "bql.sh/search"
-
-// Full-text: an external-content FTS5 index kept in step with `posts` by three triggers.
-const fts = ftsIndex(db, { table: "posts_fts", source: "posts", columns: ["title", "body"], tokenizer: "porter unicode61" })
-await fts.create()                                 // fills from existing rows the first time
-await fts.search(ftsQuote(userInput), { limit: 20, highlight: true, snippet: { column: "body" } })
-// → [{ rowid, rank /* bm25, lower is better */, title, body, highlight, snippet }]
-
-// Vectors: a sqlite-vec vec0 table; metadata columns filter inside the KNN.
-const vec = vectorIndex(db, { table: "posts_vec", dimensions: 384, metric: "cosine", metadata: { lang: "text" } })
-await vec.create()
-await vec.upsert(post.id, embedding, { lang: "en" })
-await vec.search(queryEmbedding, { k: 10, where: { lang: "en" } })   // → [{ id, distance, lang }]
-
-// Hybrid: one statement, bm25 rank and KNN rank fused by reciprocal rank (k = 60).
-await hybridSearch(db, { fts, vector: vec, query: ftsQuote(userInput), embedding: queryEmbedding, k: 10 })
-// → [{ id, score, ftsRank, vectorRank, bm25, distance }]
-
-// Geo: an R*Tree over `shops.lat`/`shops.lon`, exact great-circle distance on top.
-const geo = geoIndex(db, { table: "shops_geo", source: "shops" })
-await geo.create()
-await geo.near(51.5033, -0.1196, 2_000, { limit: 20 })              // → [{ id, lat, lon, distance /* m */ }]
-await geo.within({ minLat: 51.4, maxLat: 51.6, minLon: -0.3, maxLon: 0.1 })
-```
-
-## Replicas that forward writes
-
-Start a node with `--replica-of`. It reads locally and answers a forwarded write with the primary's txid.
+Start a second server with `--replica-of`. It follows every database on the primary, serves reads locally and forwards writes, answering with the primary's txid.
 
 ```sh
 curl -sD- -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
@@ -231,21 +273,9 @@ curl -s -H "authorization: Bearer $KEY" http://127.0.0.1:4502/v1/db/acme/replica
 # {"role":"replica","connected":true,"applied":2,"lagTxid":0,"bootstrapping":false,...}
 ```
 
-```ts
-import { createClient } from "@libsql/client"
+### Failover
 
-// The trailing slash matters: the client resolves `v2/pipeline` relative to this URL.
-const primary = createClient({ url: "http://127.0.0.1:4501/v1/db/acme/", authToken: KEY })
-const replica = createClient({ url: "http://127.0.0.1:4502/v1/db/acme/", authToken: KEY })
-
-await primary.execute("insert into notes (body) values ('written by @libsql/client')")
-await replica.execute("select id, body from notes order by id")  // already applied
-await replica.execute("insert into notes (body) values ('nope')") // LibsqlError: NOT_PRIMARY
-```
-
-## Promotion that refuses to guess
-
-`bql promote` fences the old primary by epoch. `--force` overrides exactly three refusals.
+`bql promote acme` moves a database to a replica and fences the old primary by epoch. With `[cluster]` on, Raft does it when the primary's lease runs out. Write with `ack: "replica"` and a failover loses no acknowledged write.
 
 ```sh
 bql promote acme --url http://127.0.0.1:4502        # addresses the candidate, not the cluster
@@ -253,9 +283,23 @@ bql promote acme --url http://127.0.0.1:4502        # addresses the candidate, n
 # n2 takes acme at epoch 4, fencing n1
 ```
 
-## A database per pull request
+### Backups to S3
 
-`bql db branch` is an O(1) fork that remembers its parent. The `bql-branch` action opens and closes one per PR.
+Pass `--s3` and every commit ships to the bucket in the background; a slow bucket never slows a write. `bql restore` rebuilds a database at any txid or timestamp on a node that has never seen it.
+
+```sh
+export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…
+bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
+
+bql backup status acme
+# acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)
+
+bql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+```
+
+### A database per pull request
+
+`bql db branch` forks a database and records its parent. The `bql-branch` GitHub Action creates one when a pull request opens and deletes it when it closes.
 
 ```sh
 bql db branch pr-42 --from main             # --from main@4812 or @2026-09-11T10:00:00Z also work
@@ -284,48 +328,41 @@ jobs:
       - run: echo "database ${{ steps.db.outputs.name }}"
 ```
 
-## Backed up to any bucket
+### Vector, full-text and geo search
 
-Pass `--s3` and every log and snapshot ships continuously. A slow bucket reports `behind`; it never slows a commit.
+`bql.sh/search` builds sqlite-vec, FTS5 and R*Tree queries out of plain SQL. `hybridSearch` fuses bm25 and vector rank in one statement, and it all runs on a primary, a replica or in your process.
 
-```sh
-export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…
-bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…
+```ts
+import { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } from "bql.sh/search"
 
-bql backup status acme
-# acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)
+// Full-text: an external-content FTS5 index kept in step with `posts` by three triggers.
+const fts = ftsIndex(db, { table: "posts_fts", source: "posts", columns: ["title", "body"], tokenizer: "porter unicode61" })
+await fts.create()                                 // fills from existing rows the first time
+await fts.search(ftsQuote(userInput), { limit: 20, highlight: true, snippet: { column: "body" } })
+// → [{ rowid, rank /* bm25, lower is better */, title, body, highlight, snippet }]
 
-bql restore acme --from s3://backups/prod --at 2026-09-11T10:00:00Z --into acme-recovered
+// Vectors: a sqlite-vec vec0 table; metadata columns filter inside the KNN.
+const vec = vectorIndex(db, { table: "posts_vec", dimensions: 384, metric: "cosine", metadata: { lang: "text" } })
+await vec.create()
+await vec.upsert(post.id, embedding, { lang: "en" })
+await vec.search(queryEmbedding, { k: 10, where: { lang: "en" } })   // → [{ id, distance, lang }]
+
+// Hybrid: one statement, bm25 rank and KNN rank fused by reciprocal rank (k = 60).
+await hybridSearch(db, { fts, vector: vec, query: ftsQuote(userInput), embedding: queryEmbedding, k: 10 })
+// → [{ id, score, ftsRank, vectorRank, bm25, distance }]
+
+// Geo: an R*Tree over `shops.lat`/`shops.lon`, exact great-circle distance on top.
+const geo = geoIndex(db, { table: "shops_geo", source: "shops" })
+await geo.create()
+await geo.near(51.5033, -0.1196, 2_000, { limit: 20 })              // → [{ id, lat, lon, distance /* m */ }]
+await geo.within({ minLat: 51.4, maxLat: 51.6, minLon: -0.3, maxLon: 0.1 })
 ```
 
-## Committed rows onto the bus
+### Your ORM already works
 
-An `[outbox]` rule publishes every row change from the durable log. A crash never loses one, a restart never repeats one.
+The server speaks libsql's Hrana protocol, so `@libsql/client` connects as is. `bql.sh/kysely` and `bql.sh/drizzle` run transactions and migrations on bql.sh's own routes.
 
-```toml
-[replication]
-logicalChanges = "row"
-
-[[outbox.rules]]
-db = "app-*"                   # database-name glob
-busUrl = "http://bus:4317"
-tokenEnv = "BUS_TOKEN"         # or token = "${BUS_TOKEN}"
-subject = "db.{db}.{table}"    # the default
-include = "row"                # "pk" | "row" | "row+old", at most what logicalChanges records
-```
-
-```sh
-bql bus subscribe cdc 'db.app-1.>'
-# {"db":"app-1","table":"users","op":"insert","txid":42,"seq":0,"i":0,"rowid":7,
-#  "pk":{"id":7},"row":{"id":7,"email":"a@b.c"},"committedAt":1790640000000}
-bql bus sink webhook --subscription cdc --to https://example.com/hook --secret "$HOOK_SECRET"
-```
-
-## ORMs reach it unmodified
-
-It speaks libsql's Hrana. `bql.sh/kysely` and `bql.sh/drizzle` map transactions onto its own routes.
-
-@libsql/client — Hrana over HTTP:
+@libsql/client over Hrana:
 
 ```ts
 import { createClient } from "@libsql/client"
@@ -339,7 +376,7 @@ await replica.execute("select id, body from notes order by id")  // already appl
 await replica.execute("insert into notes (body) values ('nope')") // LibsqlError: NOT_PRIMARY
 ```
 
-bql.sh/kysely — BqlDialect:
+bql.sh/kysely, BqlDialect:
 
 ```ts
 import { Kysely, type Generated } from "kysely"
@@ -364,7 +401,7 @@ await db.transaction().execute(async (trx) => {        // one bql.sh transaction
 })
 ```
 
-bql.sh/drizzle — drizzle():
+bql.sh/drizzle, drizzle():
 
 ```ts
 import { eq } from "drizzle-orm"
@@ -385,20 +422,75 @@ await db.transaction(async (tx) => {
 })
 ```
 
-## Subjects, fanned out on pull
+### REST, OpenAPI and GraphQL
 
-`*` matches one token, `>` the rest. Publishing is O(1) in subscriptions, and `deliverFrom: "beginning"` reads last week.
+Every database gets a REST API and an OpenAPI 3.1 document generated from its own tables, and GraphQL once the optional `graphql` peer is installed. Requests go through the same token checks, row cap and write forwarding as SQL.
 
+```http
+GET    /v1/db/acme/api/users?name=like.ann*&order=name.asc&limit=20
+POST   /v1/db/acme/api/users          { "name": "ann" }
+GET    /v1/db/acme/openapi.json       that database's OpenAPI 3.1 document
+POST   /v1/db/acme/graphql            { "query": "{ listUsers { id name } }" }
+GET    /v1/openapi.json               this server's own API
 ```
-orders.eu.created        a concrete subject
-orders.*.created         matches orders.eu.created, not orders.eu.west.created
-orders.>                 matches both
->                        everything
+
+### Row changes onto the bus
+
+An `[[outbox.rules]]` entry publishes every committed row change to a bus subject. It reads the durable log and moves its cursor only after the bus acknowledged, so a crash neither loses nor repeats a change.
+
+```toml
+[replication]
+logicalChanges = "row"
+
+[[outbox.rules]]
+db = "app-*"                   # database-name glob
+busUrl = "http://bus:4317"
+tokenEnv = "BUS_TOKEN"         # or token = "${BUS_TOKEN}"
+subject = "db.{db}.{table}"    # the default
+include = "row"                # "pk" | "row" | "row+old", at most what logicalChanges records
 ```
 
-## Three tiers of exactly-once
+```sh
+bql bus subscribe cdc 'db.app-1.>'
+# {"db":"app-1","table":"users","op":"insert","txid":42,"seq":0,"i":0,"rowid":7,
+#  "pk":{"id":7},"row":{"id":7,"email":"a@b.c"},"committedAt":1790640000000}
+bql bus sink webhook --subscription cdc --to https://example.com/hook --secret "$HOOK_SECRET"
+```
 
-At-least-once by default. `api.emit` commits with the ack; `api.effect` records an outside call beside it.
+## The bus
+
+### Queue, pub/sub and request/reply
+
+Publish to a subject, and each subscription reads it with its own cursor, leases, retries and a dead-letter subject. `bql bus consume --exec` turns any script into a consumer: the message arrives on stdin.
+
+```sh
+bql bus serve &
+bql bus subscribe work 'work.>'
+bql bus consume work --exec ./handle.sh &
+bql bus publish work.resize '{"src":"a.png"}'
+```
+
+```ts
+import { BusClient, BusConsumer, FatalError } from "bql.sh/bus/client";
+
+const client = new BusClient({ url: "http://127.0.0.1:4317", token: process.env.BUS_TOKEN! });
+
+await new BusConsumer({
+  client,
+  id: "resizer-1",
+  subscription: "work",
+  prefetch: 4,
+  async handle({ message }, api) {
+    if (!supported(message.body)) throw new FatalError("unsupported format");
+    await api.extend();               // renew the lease from a long handler
+    return { ok: true };              // a returned value answers a request
+  },
+}).start();
+```
+
+### Exactly-once, three ways
+
+Delivery is at-least-once by default. `api.emit` publishes in the same commit as the ack, and `api.effect` records an outside call so a redelivery replays the result instead of repeating the call.
 
 | Tier | Guarantee | Requires |
 | --- | --- | --- |
@@ -423,9 +515,9 @@ async handle({ message }, api) {
 }
 ```
 
-## Cron, as ordinary messages
+### Cron schedules
 
-`bql bus schedule add` fires on the primary, one deduplicated publish per slot, DST-correct in any IANA zone.
+`bql bus schedule add` publishes an ordinary message on each fire, once per slot, in any IANA time zone. `catchUp` decides what happens to slots missed while the bus was down.
 
 ```sh
 bql bus schedule add nightly '30 2 * * *' reports.nightly '{"kind":"daily"}' --tz America/New_York
@@ -439,9 +531,9 @@ await bus.putSchedule({ name: "nightly", cron: "30 2 * * *", tz: "America/New_Yo
   subject: "reports.nightly", body: { kind: "daily" }, catchUp: "latest" });
 ```
 
-## Sinks to webhooks, S3, ClickHouse
+### Sinks to webhooks, S3 and ClickHouse
 
-`bql bus sink` acks a batch only once the destination took it. Paired with the outbox, that is rows to a warehouse with no code.
+`bql bus sink` writes a subscription in batches and acks only once the destination took the batch. With the outbox in front, committed rows reach a warehouse with no code.
 
 ```sh
 bql bus sink webhook    --subscription cdc --subject 'db.>' --to https://example.com/hook --secret "$SECRET"
@@ -460,9 +552,9 @@ await new SinkRunner({
 }).start();
 ```
 
-## Schemas with computed compatibility
+### Schemas on subjects
 
-Register with `--compat backward`, bind in `warn`, then `enforce`. A breaking version is a 409 naming the pointer.
+Register a JSON Schema with `--compat backward` and bind it to a subject pattern in `warn` mode, then `enforce`. A version that breaks the declared compatibility is refused with the failing pointer.
 
 ```sh
 bql bus schema register order ./order.json --compat backward
@@ -470,26 +562,9 @@ bql bus schema bind 'orders.>' order --mode warn      # then --mode enforce
 bql bus schema check order ./order-v2.json            # dry-run the compat check
 ```
 
-## Proven with real processes
+## Benchmarks
 
-`bun run test:e2e` SIGKILLs a consumer mid-message. No mocks.
-
-```
-ok   eight messages were handled with none left pending or dead — pending=0 dead=0
-ok   a second subscription received the same messages independently — 8 envelopes
-ok   killed worker-a while it held the slow message
-ok   a surviving consumer recovered the expired lease — attempt 2, now on worker-b
-ok   the poison message reached the dead-letter subject with its reason — unsupported payload
-ok   a request was answered by a consumer in another process — "HELLO BUS"
-ok   a long handler is running as a real child process — pid 86892
-ok   cancelling the message cancelled its in-flight delivery — 1 delivery
-ok   the consumer's child process actually stopped
-ok   a repeated dedupe key does not publish twice
-```
-
-## Measured against bun:sqlite
-
-`bun run bench` on an M5 Pro, as ratios against `bun:sqlite`, and the replication legs end to end.
+`bun run bench` on an M5 Pro with SQLite 3.53.4. The driver is compared with `bun:sqlite` as a ratio; the replication legs are two servers on loopback.
 
 | op | bql vs `bun:sqlite` |
 | --- | --- |
@@ -506,17 +581,14 @@ ok   a repeated dedupe key does not publish twice
 | write, `ack: "replica"` | 379 µs | 442 µs |
 | write, `ack: "quorum"` | 359 µs | 417 µs |
 
-## Two commands to start
+## Works with what you run
 
-```sh
-bun add bql.sh
-bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
-```
+Drizzle, Kysely and `@libsql/client` connect over Hrana. Backups go to S3, R2 or Tigris. Sinks write to webhooks and ClickHouse, and `bql deploy` targets Fly, Vercel and Cloudflare.
 
 ## Guides
 
-- [Exactly-once, in three tiers](https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/exactly-once.md) — What each tier guarantees and where the last stops.
-- [The cluster and its leases](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md) — Two primaries are impossible by the guard margin.
-- [WAL shipping, byte by byte](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/m3-wal.md) — Committed pages out of the -wal, self-verifying.
+- [Exactly-once in the bus](https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/exactly-once.md): What each of the three tiers guarantees and what it costs.
+- [Promotion and failover](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md): How leases and epochs keep two primaries from writing.
+- [WAL shipping](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/m3-wal.md): The record a replica verifies before it applies a page.
 
 Reference: https://bql.sh/reference · Repository: https://github.com/TimMikeladze/bql

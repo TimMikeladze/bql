@@ -2,7 +2,7 @@
 // the reference page, their Markdown twins and the agent/SEO artefacts. No copy lives here —
 // markup, styles, icons and the two small scripts do.
 
-import { site, type Capability, type Demo, type Figure, type Frame, type IconName } from "./content.ts"
+import { site, type Capability, type Chapter, type Demo, type Figure, type Frame, type IconName } from "./content.ts"
 import { brand, faviconSvg, glyph, productMark } from "./icons.ts"
 import { esc, highlight, inline, renderDoc, renderTable, slug, type LinkContext } from "./markdown.ts"
 import {
@@ -79,8 +79,6 @@ export function resolveModel(p: Parsed = source()) {
     measuredTables: site.measured.tables.map((t) => resolveTable(t.header, t.where, p)),
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
     capabilities: site.capabilities.map((c) => ({ cap: c as Capability, demo: resolveDemo(c.demo, p) })),
-    startInstall: resolveTerminal(site.start.install.cmd, site.start.install.where, p),
-    startEngine: resolveTerminal(site.start.engine.cmd, site.start.engine.where, p),
     buildToday: resolveTerminal(site.buildToday.cmd, site.buildToday.where, p),
     guides: site.guides.map((g) => ({ ...g, block: resolveSnippet(g.line, g.where, p) })),
     version: version(),
@@ -218,6 +216,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); } .t-n { color: var(--t-n); }
 .prompt-line::before { content: "$ "; color: var(--soft); }
 .out-line { color: var(--ink); }
+.cont-line::before { content: "  "; }
 
 .split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
 .split { align-items: stretch; }
@@ -236,9 +235,8 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .cap + .cap { border-top: 1px solid var(--line-soft); }
 .chapter { background: var(--band); border-block: 1px solid var(--line); padding-block: 1.1rem; scroll-margin-top: 3.75rem; }
 .chapter .shell { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
-.chapter code { background: none; padding: 0; font: 600 1.15rem/1.2 var(--mono); letter-spacing: -.02em; }
-.chapter span { color: var(--body); }
-.chapter em { font: .75rem var(--mono); font-style: normal; color: var(--soft); }
+.chapter span { font-weight: 650; font-size: 1.15rem; color: var(--ink); letter-spacing: -.02em; }
+.chapter code { font-size: .8rem; color: var(--soft); background: none; padding: 0; }
 .chapter a { margin-left: auto; font-size: .85rem; color: var(--soft); text-decoration: none; transition: color .14s ease; }
 .chapter a:hover { color: var(--ink); }
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
@@ -261,11 +259,13 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .marks a { color: var(--soft); transition: color .14s ease; }
 .marks a:hover { color: var(--ink); }
 
+.why .centre .explain { color: var(--body); }
 .principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem; }
+.why .principles { margin-top: 3rem; }
 .principles h3 { font-size: 1.25rem; font-weight: 500; }
 .principles p { margin-top: .5rem; color: var(--soft); max-width: 34ch; }
 
-.showcase > *, .start > *, .guides > *, .principles > *, .figures > * { min-width: 0; }
+.showcase > *, .guides > *, .principles > *, .figures > * { min-width: 0; }
 .showcase { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3rem; align-items: start; }
 .showcase h2 { font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.03em; }
 .control { display: inline-flex; align-items: center; gap: .5rem; padding: .62rem .85rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--raise); color: var(--ink); font: 500 .9rem/1.15 var(--sans); text-decoration: none; transition: background .14s ease, border-color .14s ease; }
@@ -301,7 +301,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 .demo .table-wrap + .table-wrap { margin-top: 2rem; }
 
 
-.start { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
 
 .today { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1.5rem; }
 .today h2 { font-size: clamp(2rem, 4.5vw, 3rem); letter-spacing: -.04em; max-width: 18ch; line-height: 1.1; }
@@ -318,7 +317,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 .guide .tilt { position: absolute; left: 1.2rem; top: 7.5rem; width: 130%; transform: rotate(-3deg) translate(1rem, .5rem); border: 1px solid var(--line); border-radius: .6rem; background: var(--paper); overflow: hidden; }
 .guide .tilt pre { margin: 0; padding: .9rem 1rem; font: .75rem/1.6 var(--mono); white-space: pre; color: var(--body); height: 14rem; }
 
-.aside { text-align: center; color: var(--soft); font-size: .95rem; padding-block: 1.5rem; }
 
 /* footer */
 .site-footer { border-top: 1px solid var(--line); padding-block: 4rem 2rem; font-size: .875rem; }
@@ -367,7 +365,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .shell { width: calc(100% - 2rem); }
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
-  .split, .principles, .start, .pair { grid-template-columns: minmax(0, 1fr); }
+  .split, .principles, .pair { grid-template-columns: minmax(0, 1fr); }
   .figures.three { grid-template-columns: minmax(0, 1fr); }
   .fig b { font-size: 3rem; }
   .cols { grid-template-columns: repeat(2, 1fr); }
@@ -478,8 +476,27 @@ function copyBtn(text: string, what: string): string {
   return `<button type="button" class="copy" data-copy="${esc(text)}" aria-label="Copy ${esc(what)}">${glyph("copy", 15)}</button>`
 }
 
+/**
+ * A README run block as a terminal: `# ` lines are what the command printed, every other line is a
+ * command and gets a prompt, unless it continues the previous one after a trailing backslash.
+ */
+function runLines(code: string): string {
+  let cont = false
+  return code
+    .split("\n")
+    .map((l) => {
+      const out = /^#( |$)/.test(l) && !cont
+      const html = out
+        ? `<span class="out-line">${esc(l.replace(/^# ?/, ""))}</span>`
+        : l.trim() === "" ? "" : `<span class="${cont ? "cont-line" : "prompt-line"}">${highlight(l, "sh")}</span>`
+      cont = !out && /\\\s*$/.test(l)
+      return html
+    })
+    .join("\n")
+}
+
 function terminalFrame(cmd: string, block: Block): string {
-  return `<div class="frame"><div class="bar">${glyph("terminal", 14)}<span class="label">$ ${esc(cmd)}</span><span class="chip">captured output</span></div><pre><code>${highlight(block.code, block.lang || "sh")}</code></pre></div>`
+  return `<div class="frame"><div class="bar">${glyph("terminal", 14)}<span class="label">$ ${esc(cmd)}</span><span class="chip">captured output</span></div><pre><code>${runLines(block.code)}</code></pre></div>`
 }
 
 function codeFrame(label: string, block: Block, dots = true): string {
@@ -522,8 +539,8 @@ function section(id: string, title: string, body: string, demo: string, cls = ""
 </div></section>`
 }
 
-function chapterRule(c: { id: string; pkg: string; title: string; href: string }, count: number): string {
-  return `<div class="chapter" id="${c.id}"><div class="shell"><code>${esc(c.pkg)}</code><span>${esc(c.title)}</span><em>${count} capabilities</em><a href="${esc(c.href)}">Reference</a></div></div>`
+function chapterRule(c: { id: string; pkg: string; title: string; href: string }): string {
+  return `<div class="chapter" id="${c.id}"><div class="shell"><span>${esc(c.title)}</span><code>${esc(c.pkg)}</code><a href="${esc(c.href)}">Reference</a></div></div>`
 }
 
 function head(opts: { title: string; description: string; path: string; md: string }): string {
@@ -562,7 +579,7 @@ function head(opts: { title: string; description: string; path: string; md: stri
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:type" content="image/png">
-<meta property="og:image:alt" content="${esc(`${site.name} — ${site.h1}`)}">
+<meta property="og:image:alt" content="${esc(`${site.name}: ${site.h1}`)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${esc(opts.title)}">
 <meta name="twitter:description" content="${esc(opts.description)}">
@@ -590,11 +607,8 @@ ${body}
 // ---- landing ------------------------------------------------------------------------------
 
 export function renderIndex(m: Model = resolveModel()): string {
-  const left = m.splitLeft.code
-    .split("\n")
-    // `# ` lines in a README run block are what the command printed: shown as output, unprompted.
-    .map((l) => (l.startsWith("# ") ? `<span class="out-line">${esc(l.slice(2))}</span>` : `<span class="prompt-line">${highlight(l, "sh")}</span>`))
-    .join("\n")
+  const left = runLines(m.splitLeft.code)
+
   const hero = `<section class="hero shell" aria-labelledby="top-h">
 ${productMark(44)}
 <h1 id="top-h">${esc(site.h1)}</h1>
@@ -613,18 +627,16 @@ ${codeFrame(site.split.right.label, m.splitRight, false)}
 </div>
 </section>`
 
-  const figs = (list: ResolvedFigure[], cls = "") =>
-    `<div class="figures${cls}">${list.map((f) => `<div class="fig" data-source="${esc(f.source)}"><b>${esc(f.value)}</b><span>${esc(f.label)}</span></div>`).join("")}</div>`
-
-  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
-<h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
-<p class="explain">${inline(site.ecosystem.lede)}</p>
-<div class="marks">${site.ecosystem.marks.map((k) => `<a href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`).join("")}</div>
+  const why = `<section class="section why" id="why" aria-labelledby="why-h"><div class="shell">
+<div class="centre"><h2 id="why-h">${esc(site.why.title)}</h2>
+<p class="explain">${inline(site.why.body)}</p></div>
+<div class="principles">${site.why.points.map((p) => `<div><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
 </div></section>`
 
-  const principles = `<section class="section" id="principles" aria-labelledby="principles-h"><div class="shell"><h2 id="principles-h" class="sr">Principles</h2>
-<div class="principles">${site.principles.map((p) => `<div><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
-</div></section>`
+  const chapter = (c: Chapter) => {
+    const caps = m.capabilities.filter((x) => x.cap.chapter === c)
+    return chapterRule(site.chapters[c]) + caps.map(({ cap, demo }) => section(cap.id, cap.title, cap.body, demoHtml(demo))).join("\n")
+  }
 
   const tabInputs = m.tabs.map((_, i) => `<input type="radio" name="tab" id="tab-${i}"${i === 0 ? " checked" : ""}>`).join("")
   const showcase = `<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
@@ -633,7 +645,7 @@ ${codeFrame(site.split.right.label, m.splitRight, false)}
 <p class="explain">${inline(site.showcase.body)}</p>
 <a class="control control--solid round" href="/reference">${glyph("book", 15)}Visit Documentation</a>
 <p class="supports">Supports</p>
-<div class="avatars">${site.showcase.supports.map((s) => `<span title="${esc(s)}">${brand(s, 20)}</span>`).join("")}<em>+ more</em></div>
+<div class="avatars">${site.showcase.supports.map((s) => `<span title="${esc(s)}">${brand(s, 20)}</span>`).join("")}<em>+ Kysely</em></div>
 </div>
 <div class="tabs">${tabInputs}
 <div class="tabrow" role="presentation">${m.tabs.map((t, i) => `<label for="tab-${i}">${esc(t.label)}</label>`).join("")}</div>
@@ -647,36 +659,30 @@ ${m.tabs
 </div>
 </div></section>`
 
-  const caps = m.capabilities
-    .map(({ cap, demo }, i, all) => {
-      const first = i === 0 || all[i - 1]!.cap.chapter !== cap.chapter
-      const rule = first ? chapterRule(site.chapters[cap.chapter], all.filter((x) => x.cap.chapter === cap.chapter).length) : ""
-      return rule + section(cap.id, cap.title, cap.body, demoHtml(demo))
-    })
-    .join("\n")
-  const aside = `<p class="aside shell">Want it without a server? <code>Bql.open()</code> runs the same engine in your process. See <a href="/reference#db-embedded">Embedded</a>.</p>`
+  const figs = (list: ResolvedFigure[]) =>
+    `<div class="figures three">${list.map((f) => `<div class="fig" data-source="${esc(f.source)}"><b>${esc(f.value)}</b><span>${esc(f.label)}</span></div>`).join("")}</div>`
 
-  const measured = `<section class="section band" id="measured" aria-labelledby="measured-h"><div class="shell">
-<div class="sec-head"><h2 id="measured-h">${esc(site.measured.title)}</h2>
+  const measured = `<section class="section band" id="benchmarks" aria-labelledby="benchmarks-h"><div class="shell">
+<div class="sec-head"><h2 id="benchmarks-h">${esc(site.measured.title)}</h2>
 <p class="explain">${inline(site.measured.body)}</p></div>
-<div class="demo">${figs(m.measuredFigures, " three")}</div>
+<div class="demo">${figs(m.measuredFigures)}</div>
 <div class="demo">${m.measuredTables.map((t) => renderTable(t.header, t.rows)).join("")}</div>
 </div></section>`
 
-  const start = `<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
-<div class="sec-head"><h2 id="start-h">Two commands to start</h2>
-<p class="explain">Install <code>bql.sh</code>, then build the engine's libsqlite3 once, by path. It needs a C compiler.</p></div>
-<div class="demo">${terminalFrame(site.start.install.cmd, m.startInstall)}</div>
+  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+<h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
+<p class="explain">${inline(site.ecosystem.lede)}</p>
+<div class="marks">${site.ecosystem.marks.map((k) => `<a href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`).join("")}</div>
 </div></section>`
 
-  const today = `<section class="section" id="today" aria-labelledby="today-h"><div class="shell today">
+  const today = `<section class="section band" id="today" aria-labelledby="today-h"><div class="shell today">
 <h2 id="today-h">${esc(site.buildToday.title)}</h2>
-<div class="acts"><a class="control control--solid round" href="/reference">${glyph("book", 15)}Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.buildToday.cmd)}</code>${copyBtn(site.buildToday.cmd, "dev command")}</span></div>
+<div class="acts"><a class="control control--solid round" href="/reference">${glyph("book", 15)}Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.buildToday.cmd)}</code>${copyBtn(site.buildToday.cmd, "server command")}</span></div>
 </div></section>`
 
-  const guides = `<section class="section band" id="guides" aria-labelledby="guides-h"><div class="shell">
+  const guides = `<section class="section" id="guides" aria-labelledby="guides-h"><div class="shell">
 <div class="sec-head"><h2 id="guides-h">Guides</h2>
-<p class="explain">The design notes behind the sharpest edges, from <code>packages/*/docs</code>.</p></div>
+<p class="explain">Design notes for the parts worth understanding before you run them in production.</p></div>
 <div class="demo guides">${m.guides
     .map((g) => `<a class="guide" href="${esc(g.href)}" rel="noopener"><span class="gt">${esc(g.title)}<span class="ext" aria-hidden="true">↗</span></span><span class="gb">${esc(g.body)}</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(g.file)}</span></span><pre><code>${highlight(g.block.code, g.block.lang)}</code></pre></span></a>`)
     .join("")}</div>
@@ -685,13 +691,13 @@ ${m.tabs
   const body = `${header("home")}
 <main id="main">
 ${hero}
-${principles}
+${why}
+${chapter("start")}
 ${showcase}
-${caps}
-${aside}
+${chapter("db")}
+${chapter("bus")}
 ${measured}
 ${eco}
-${start}
 ${today}
 ${guides}
 </main>
@@ -725,7 +731,7 @@ export function renderReference(p: Parsed = source()): { html: string; ids: stri
 </main>
 ${footer()}`
   const description = "The bql.sh reference: the repository README and the full bql.sh and bql.sh/bus documentation on one page."
-  const html = page(head({ title: `Reference — ${site.name}`, description, path: "/reference", md: "/reference.md" }), body)
+  const html = page(head({ title: `Reference · ${site.name}`, description, path: "/reference", md: "/reference.md" }), body)
   return { html, ids: parts.flatMap((x) => x.headings.map((h) => h.id)) }
 }
 
@@ -756,6 +762,13 @@ function demoMd(d: ResolvedDemo): string {
 }
 
 export function renderIndexMd(m: Model = resolveModel()): string {
+  const chapter = (c: Chapter) => [
+    `## ${site.chapters[c].title}`,
+    "",
+    ...m.capabilities
+      .filter((x) => x.cap.chapter === c)
+      .flatMap(({ cap, demo }) => [`### ${cap.title}`, "", cap.body, "", demoMd(demo), ""]),
+  ]
   const out: string[] = [
     `# ${site.h1}`,
     "",
@@ -765,32 +778,35 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     "",
     "```sh\n" + site.install.humans.cmd + "\n```",
     "",
-    `## ${site.ecosystem.title}`,
+    fence(m.splitRight),
     "",
-    site.ecosystem.lede,
+    fence(m.splitLeft),
     "",
-    "## Principles",
+    `## ${site.why.title}`,
     "",
-    ...site.principles.map((p) => `- **${p.title}.** ${p.body}`),
+    site.why.body,
     "",
+    ...site.why.points.flatMap((p) => [`### ${p.title}`, "", p.body, ""]),
+    ...chapter("start"),
     `## ${site.showcase.title}`,
     "",
     site.showcase.body,
     "",
     ...m.tabs.flatMap((t) => [`### ${t.label}`, "", fence(t.block), ""]),
-    ...m.capabilities.flatMap(({ cap, demo }) => [`## ${cap.title}`, "", cap.body, "", demoMd(demo), ""]),
+    ...chapter("db"),
+    ...chapter("bus"),
     `## ${site.measured.title}`,
     "",
     site.measured.body,
     "",
     ...m.measuredTables.flatMap((t) => [tableMd(t), ""]),
-    "## Two commands to start",
+    `## ${site.ecosystem.title}`,
     "",
-    fence(m.startInstall),
+    site.ecosystem.lede,
     "",
     "## Guides",
     "",
-    ...m.guides.map((g) => `- [${g.title}](${g.href}) — ${g.body}`),
+    ...m.guides.map((g) => `- [${g.title}](${g.href}): ${g.body}`),
     "",
     `Reference: ${url("/reference")} · Repository: ${site.repo}`,
     "",
@@ -810,7 +826,7 @@ export function renderLlms(m: Model = resolveModel()): string {
     "",
     plain(site.lede),
     "",
-    `Status: \`bql.sh\` v${m.version}, ${site.install.note}. Install with \`${site.install.humans.cmd}\`.`,
+    `Currently \`bql.sh\` v${m.version}, ${site.install.note}. Install with \`${site.install.humans.cmd}\`.`,
     "",
     ...m.capabilities.flatMap(({ cap, demo }) => [`## ${cap.title}`, "", cap.body, "", demoMd(demo), ""]),
     "## Links",
@@ -825,45 +841,64 @@ export function renderLlms(m: Model = resolveModel()): string {
 }
 
 export function renderAgents(m: Model = resolveModel()): string {
-  const client = m.tabs[0]!.block
+  const by = (id: string) => m.capabilities.find((x) => x.cap.id === id)!.demo
   const consumer = resolveSnippet("await new BusConsumer({", { doc: "bus" })
   return [
     `# Using ${site.name} from an agent`,
     "",
-    `${site.name} is one npm package with two halves: \`bql.sh\` (SQLite as a multi-tenant database server, CLI \`bql\`) and \`bql.sh/bus\` (a durable message bus, CLI \`bql bus\`). Bun 1.4 or newer. Currently v${m.version}.`,
+    `${site.name} is one npm package. \`bql.sh\` is a SQLite database server for Bun with one database per tenant; its CLI is \`bql\`. \`bql.sh/bus\` is a message bus on the same engine; its CLI is \`bql bus\`. Bun 1.4 or newer. Currently v${m.version}.`,
     "",
     "## Install",
     "",
-    fence(m.startInstall),
+    "Install the package, then build the libsqlite3 the driver loads. The build needs a C compiler and runs once per machine.",
     "",
-    "## Minimal database client",
+    fence(m.humans),
     "",
-    fence(client),
+    demoMd(by("install")),
     "",
-    "## Minimal bus consumer",
+    "## Embedded",
+    "",
+    "`Bql.open()` runs the engine in-process. No server, no key.",
+    "",
+    demoMd(by("embedded")),
+    "",
+    "## Server and client",
+    "",
+    "`bql serve` prints the admin key once on first start and saves it to `<dir>/keys.json`. Pass it as `BQL_ADMIN_KEY`.",
+    "",
+    demoMd(by("serve")),
+    "",
+    fence(m.splitRight),
+    "",
+    "## Scoped tokens",
+    "",
+    "Give browsers and untrusted callers a minted token, never the admin key.",
+    "",
+    demoMd(by("token")),
+    "",
+    "## Bus consumer",
     "",
     fence(consumer),
     "",
-    "## Options that matter",
+    "## Options",
     "",
     "| option | where | effect |",
     "| --- | --- | --- |",
     "| `ack` | db write, per request or node | `fsync` (default), `local`, `replica`, `quorum` |",
     "| `consistency` | db client | `ryw` (default) sends `BQL-Min-Txid` so reads never go backwards |",
     "| `intMode` | db client | `bigint` or `string`; the default refuses to round past 2^53 |",
-    "| `--replica-of` | `bql serve` | follow a primary, forward writes |",
-    "| `--s3` | `bql serve` | ship log and snapshots to a bucket |",
+    "| `--replica-of` | `bql serve` | follow a primary and forward writes to it |",
+    "| `--s3` | `bql serve` | ship the log and snapshots to a bucket |",
     "| `ackWaitMs`, `maxAttempts` | bus subscription | lease length, retries before dead-letter |",
     "| `ordered` | bus subscription | per-key FIFO; off by default |",
     "| `[[outbox.rules]]` | `bql.toml` | publish committed row changes to a bus subject; needs `[replication] logicalChanges` |",
-    "| `tz`, `catchUp` | bus schedule | IANA zone; `latest` (default) or `none` for missed slots |",
-    "| `handlerTimeoutMs` | `BusConsumer` | stop a wedged handler holding its lease forever |",
+    "| `handlerTimeoutMs` | `BusConsumer` | stop a handler that hangs while holding its lease |",
     "",
-    "## Three mistakes that break it",
+    "## Mistakes that break it",
     "",
-    "1. Skipping the engine build, or reaching for a system libsqlite3. Run the by-path build above once (`bun run sqlite:build` in your project finds no such script); Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size` and fails WAL tests.",
-    "2. `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.",
-    "3. Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.",
+    "- Skipping the engine build, or pointing at a system libsqlite3. `bun run sqlite:build` in your own project finds no such script; use the by-path command above. Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size`, and WAL tests fail on it.",
+    "- `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.",
+    "- Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.",
     "",
     `Full reference: ${url("/reference")} (Markdown: ${url("/reference.md")}).`,
     "",

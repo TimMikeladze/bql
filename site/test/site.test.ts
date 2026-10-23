@@ -117,7 +117,7 @@ test("every capability section has id, h2, 1–3 sentences with inline code", ()
     expect(sec).toBeTruthy()
     const sentences = sec![1]!.replace(/<code>.*?<\/code>/g, "x").split(/[.](\s|$)/).filter((s) => s.trim().length > 1)
     expect(sentences.length).toBeGreaterThanOrEqual(1)
-    expect(sentences.length).toBeLessThanOrEqual(2) // terse by design: the artefact carries the rest
+    expect(sentences.length).toBeLessThanOrEqual(3)
     expect(sec![1]).toContain("<code>")
   }
 })
@@ -172,7 +172,7 @@ test("chapter rules open each group, and the nav anchors land on them", () => {
   for (const [, id] of index.matchAll(/href="\/#([^"]+)"/g)) expect(index).toContain(`id="${id}"`)
   const order = site.capabilities.map((c) => index.indexOf(`id="${c.id}"`))
   expect(order).toEqual([...order].sort((a, b) => a - b))
-  expect(index.indexOf('id="database"')).toBeLessThan(index.indexOf(`id="${site.capabilities[0]!.id}"`))
+  for (const c of site.capabilities) expect(index.indexOf(`id="${site.chapters[c.chapter].id}"`)).toBeLessThan(index.indexOf(`id="${c.id}"`))
 })
 
 test("pairs render both artefacts", () => {
@@ -186,4 +186,20 @@ test("pairs render both artefacts", () => {
 test("no figures row of repo counts, and no section listing weaknesses", () => {
   expect(index).not.toContain('id="figures"')
   expect(index).not.toMatch(/id="(boundaries|limits|limitations|not-yet)"/)
+})
+
+test("authored copy has no em dashes", () => {
+  const strings: string[] = []
+  const walk = (v: unknown) => {
+    if (typeof v === "string") strings.push(v)
+    else if (Array.isArray(v)) v.forEach(walk)
+    else if (v && typeof v === "object" && !(v instanceof RegExp)) Object.values(v).forEach(walk)
+  }
+  // Only what a reader sees: references (`line`, `cmd`) quote the READMEs verbatim.
+  const { capabilities, showcase, guides, ...rest } = site
+  walk(rest)
+  for (const c of capabilities) strings.push(c.title, c.body)
+  strings.push(showcase.title, showcase.body)
+  for (const g of guides) strings.push(g.title, g.body)
+  for (const s of strings) expect(s).not.toContain("—")
 })

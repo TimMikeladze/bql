@@ -3,8 +3,8 @@
 // mark, the one decorative element on the page.
 
 import {
-  siBun, siClickhouse, siCloudflare, siDiscord, siDocker, siDrizzle, siFlydotio, siGithub, siGithubactions, siGraphql, siMinio,
-  siOpenapiinitiative, siOpentelemetry, siPrometheus, siSqlite, siTurso, siX,
+  siBun, siClickhouse, siCloudflare, siDiscord, siDocker, siDrizzle, siFlydotio, siGithub, siGithubactions, siGraphql,
+  siOpenapiinitiative, siOpentelemetry, siPrometheus, siSqlite, siTurso, siVercel, siX,
 } from "simple-icons"
 // LinkedIn and Amazon S3 were dropped from later simple-icons releases; v9 still carries them.
 import { siAmazons3, siLinkedin } from "si-legacy"
@@ -13,7 +13,7 @@ import type { IconName } from "./content.ts"
 const BRANDS: Record<IconName, { path: string }> = {
   github: siGithub, x: siX, linkedin: siLinkedin, discord: siDiscord,
   bun: siBun, sqlite: siSqlite, drizzle: siDrizzle, turso: siTurso, graphql: siGraphql,
-  openapi: siOpenapiinitiative, s3: siAmazons3, cloudflare: siCloudflare, minio: siMinio,
+  openapi: siOpenapiinitiative, s3: siAmazons3, cloudflare: siCloudflare, vercel: siVercel,
   prometheus: siPrometheus, opentelemetry: siOpentelemetry, docker: siDocker, fly: siFlydotio,
   clickhouse: siClickhouse, githubactions: siGithubactions,
 }

@@ -2,10 +2,10 @@
 
 # bql.sh
 
-SQLite as a database server for Bun. One process holds thousands of small databases, one per
-tenant, user, agent or pull request, and serves them over HTTP, WebSockets and libsql's protocol
-with replicas, continuous S3 backup and live queries. The same package ships a durable message bus,
-`bql.sh/bus`, that runs work against them. Zero runtime dependencies.
+A SQLite database server for Bun. It serves databases over HTTP, WebSockets and libsql's protocol,
+streams every commit to replicas and any S3-compatible bucket, and pushes live query diffs to
+clients. The same package ships `bql.sh/bus`, a durable message bus on the same engine. Zero runtime
+dependencies.
 
 ```sh
 bun add bql.sh
@@ -13,25 +13,26 @@ bun add bql.sh
 
 ## Why
 
-A database per tenant is the simplest isolation there is: no `tenant_id` on every row, no noisy
-neighbour in a shared index, delete a customer by deleting a file. SQLite makes each one cheap, but
-on its own it is a library: no server, no replicas, no backup, no way to watch a query change. bql.sh
-is that server.
+SQLite is fast and runs anywhere, but it's a library: no network access, no replicas, no backups and
+no way to subscribe to a query. bql.sh adds those and leaves every database a SQLite file.
 
-- **A database is a file.** Create one per tenant; fork one per pull request in O(1). A node keeps
-  up to `[data] maxOpen` (1024 by default) open and closes the idle ones.
-- **Realtime from SQLite's own hooks.** `db.live` sends a diff when a query's rows change, and
-  `/changes` streams every commit. Both come from the `preupdate`/`update` hooks, not triggers or
-  SQL parsing.
-- **Replicas and backup are built in.** WAL frames stream to replicas over a socket, ship
-  continuously to any S3-compatible bucket, and restore to any txid. A Raft control plane promotes a
-  replica when a primary goes away.
-- **Your client already speaks it.** It answers libsql's Hrana, so `@libsql/client`, Drizzle and
-  Kysely connect unmodified. REST, OpenAPI 3.1 and GraphQL are generated from one operation model.
-- **Embedded first, server later.** `Bql.open()` runs the whole engine in your process; `serve()`
-  puts HTTP in front of it without changing the code that uses `db`.
-- **A bus that shares the storage.** Subjects, consumer groups, leases, retries, a dead-letter path
-  and three tiers of exactly-once. The outbox publishes every committed row change onto it.
+- Replication ships the pages SQLite wrote rather than statements, so triggers, FTS5, JSON and
+  `random()` replicate exactly.
+- `db.live` sends a diff when a query's result changes, and `/changes` streams every commit. Both run
+  off SQLite's `preupdate` and `update` hooks, so there are no triggers to install.
+- WAL frames stream to replicas over a WebSocket and ship to any S3-compatible bucket. `bql restore`
+  rebuilds a database at any txid or timestamp. With `[cluster]` on, Raft promotes a replica when the
+  primary's lease runs out.
+- It speaks libsql's Hrana protocol, so `@libsql/client`, Drizzle and Kysely connect without changes.
+  Every database also gets a generated REST API and OpenAPI 3.1 document, and GraphQL with the
+  optional `graphql` peer.
+- `Bql.open()` runs the engine in your process. `bq.serve()` puts HTTP in front of it later, and code
+  written against `db` doesn't change.
+- One process keeps up to `[data] maxOpen` databases open (1024 by default) and closes idle ones. A
+  fork is a reflink copy where the filesystem supports it, so a database per customer, pull request or
+  test run is cheap.
+- `bql.sh/bus` is a message bus stored in a bql.sh database: subjects, consumer groups, leases,
+  retries, a dead-letter subject and cron schedules. The outbox publishes committed row changes to it.
 
 ## Getting started
 
@@ -117,14 +118,42 @@ BQL_ADMIN_KEY=<the admin key> bun client.ts
 # diff {"added":[],"removed":[{"id":1}]}
 ```
 
-The client runs in browsers, Bun, Node and Workers. Hand a browser a scoped token from
-`client.admin.mintToken`, never the admin key.
+The client runs in browsers, Bun, Node and Workers.
+
+### A token for the browser
+
+Never ship the admin key to a browser. Mint a token scoped to one database instead. This one can
+read `acme` and gets `NOT_AUTHORIZED` on a write:
+
+```ts
+// token.ts
+import { createClient } from "bql.sh/client"
+
+const url = "http://localhost:4321"
+const admin = createClient({ url, token: process.env.BQL_ADMIN_KEY! }).admin
+const { token } = await admin.mintToken({ dbs: ["acme"], scope: "ro", ttlMs: 3_600_000 })
+
+// Hand `token` to the browser. It can read acme and nothing else.
+const db = createClient({ url, token }).db("acme")
+console.log(JSON.stringify(await db.sql`select id, title, done from todos`))
+await db.sql`delete from todos`.run().catch((err) => console.log(err.code, err.message))
+```
+
+```sh
+BQL_ADMIN_KEY=<the admin key> bun token.ts
+# [{"id":1,"title":"write it","done":1}]
+# NOT_AUTHORIZED not authorized
+```
+
+`scope` is `ro` or `rw`, `dbs` takes globs (`app-*`), and `tables` narrows a token to single tables.
 
 ### Next
 
 - [packages/db](packages/db/README.md) is the database's full documentation: replicas, promotion,
   S3, branches, search, the driver, the measured numbers.
 - [packages/bus](packages/bus/README.md) starts the bus with `bunx bql bus serve`.
+- [Deploying to Vercel, Cloudflare, or Fly](#deploying-to-vercel-cloudflare-or-fly) puts a server
+  on a provider you're already logged in to.
 - [packages/db/docs/api.md](packages/db/docs/api.md) is every route, config key and CLI flag.
 
 ## What is in the package

@@ -1,45 +1,109 @@
 # Using bql.sh from an agent
 
-bql.sh is one npm package with two halves: `bql.sh` (SQLite as a multi-tenant database server, CLI `bql`) and `bql.sh/bus` (a durable message bus, CLI `bql bus`). Bun 1.4 or newer. Currently v0.5.0.
+bql.sh is one npm package. `bql.sh` is a SQLite database server for Bun with one database per tenant; its CLI is `bql`. `bql.sh/bus` is a message bus on the same engine; its CLI is `bql bus`. Bun 1.4 or newer. Currently v0.5.0.
 
 ## Install
+
+Install the package, then build the libsqlite3 the driver loads. The build needs a C compiler and runs once per machine.
+
+```sh
+bun add bql.sh
+```
 
 ```sh
 bun add bql.sh
 bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
 ```
 
-## Minimal database client
+## Embedded
+
+`Bql.open()` runs the engine in-process. No server, no key.
 
 ```ts
-import { createClient } from "bql.sh/client"
+// app.ts
+import { Bql } from "bql.sh"
 
-const client = createClient({ url: "http://localhost:4321", token })   // token, or the admin key
-const db = client.db("acme")
+const bq = await Bql.open({ dir: "./data" })
+const db = await bq.create("acme")
 
 await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
 const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
-written.lastInsertRowid // 1          · also .affectedRows, .txid, .command, .count
+console.log("txid", written.txid)
+console.log(await db.sql`select * from todos`)
 
-const todos = await db.sql`select * from todos where done = ${0}`  // [{ id: 1, title: "write it", done: 0 }]
-const one = await db.sql`select title from todos where id = ${1}`.first()
-const rows = await db.sql`select id, title from todos`.values()    // [[1, "write it"]]
-
-await db.batch([db.stmt`insert into todos(title) values ('a')`, db.stmt`update todos set done = 1`])
-await db.transaction(async (tx) => {                               // over the socket, else a baton
-  await tx.sql`insert into todos(title) values (${"in a transaction"})`
-})
-
-const live = db.live`select * from todos where done = 0`.key("id")
-live.on("rows", (event) => render(event.rows))                     // full result, then diffs
-live.on("diff", (event) => patch(event.added, event.removed, event.updated))
-
-for await (const event of db.changes({ tables: ["todos"] })) {
-  console.log(event.txid, event.changes)                           // reconnects and resumes on its own
-}
+await bq.close()
 ```
 
-## Minimal bus consumer
+```sh
+bun app.ts
+# txid 2
+# [
+#   {
+#     id: 1,
+#     title: "write it",
+#     done: 0,
+#   }, count: 1, command: "SELECT", lastInsertRowid: null, affectedRows: 0, txid: 2,
+#   columns: [ "id", "title", "done" ], types: [ "INTEGER", "TEXT", "INTEGER" ], durationUs: 97,
+#   vmSteps: 11
+# ]
+```
+
+## Server and client
+
+`bql serve` prints the admin key once on first start and saves it to `<dir>/keys.json`. Pass it as `BQL_ADMIN_KEY`.
+
+```sh
+bunx bql serve --dir ./srv --port 4321
+# bql: generated an admin key and wrote it to ./srv/keys.json
+# bql: admin key: <43 url-safe base64 characters, printed this once and never again>
+# bql http://localhost:4321  node=bql-77779295  data=./srv
+# bql: 0 database(s), maxOpen 1024, ack fsync
+```
+
+```ts
+// client.ts
+import { createClient } from "bql.sh/client"
+
+const client = createClient({ url: "http://localhost:4321", token: process.env.BQL_ADMIN_KEY! })
+await client.admin.create("acme")
+const db = client.db("acme")
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+
+const live = db.live`select id, title from todos where done = 0`.key("id")
+live.on("diff", (e) => console.log("diff", JSON.stringify({ added: e.added, removed: e.removed })))
+await new Promise((resolve) => live.on("rows", resolve))   // the first result; diffs follow
+
+await db.sql`insert into todos(title) values (${"write it"})`.run()
+await db.sql`update todos set done = 1 where id = ${1}`.run()
+await Bun.sleep(100)
+client.close()
+```
+
+## Scoped tokens
+
+Give browsers and untrusted callers a minted token, never the admin key.
+
+```ts
+// token.ts
+import { createClient } from "bql.sh/client"
+
+const url = "http://localhost:4321"
+const admin = createClient({ url, token: process.env.BQL_ADMIN_KEY! }).admin
+const { token } = await admin.mintToken({ dbs: ["acme"], scope: "ro", ttlMs: 3_600_000 })
+
+// Hand `token` to the browser. It can read acme and nothing else.
+const db = createClient({ url, token }).db("acme")
+console.log(JSON.stringify(await db.sql`select id, title, done from todos`))
+await db.sql`delete from todos`.run().catch((err) => console.log(err.code, err.message))
+```
+
+```sh
+BQL_ADMIN_KEY=<the admin key> bun token.ts
+# [{"id":1,"title":"write it","done":1}]
+# NOT_AUTHORIZED not authorized
+```
+
+## Bus consumer
 
 ```ts
 import { BusClient, BusConsumer, FatalError } from "bql.sh/bus/client";
@@ -59,25 +123,24 @@ await new BusConsumer({
 }).start();
 ```
 
-## Options that matter
+## Options
 
 | option | where | effect |
 | --- | --- | --- |
 | `ack` | db write, per request or node | `fsync` (default), `local`, `replica`, `quorum` |
 | `consistency` | db client | `ryw` (default) sends `BQL-Min-Txid` so reads never go backwards |
 | `intMode` | db client | `bigint` or `string`; the default refuses to round past 2^53 |
-| `--replica-of` | `bql serve` | follow a primary, forward writes |
-| `--s3` | `bql serve` | ship log and snapshots to a bucket |
+| `--replica-of` | `bql serve` | follow a primary and forward writes to it |
+| `--s3` | `bql serve` | ship the log and snapshots to a bucket |
 | `ackWaitMs`, `maxAttempts` | bus subscription | lease length, retries before dead-letter |
 | `ordered` | bus subscription | per-key FIFO; off by default |
 | `[[outbox.rules]]` | `bql.toml` | publish committed row changes to a bus subject; needs `[replication] logicalChanges` |
-| `tz`, `catchUp` | bus schedule | IANA zone; `latest` (default) or `none` for missed slots |
-| `handlerTimeoutMs` | `BusConsumer` | stop a wedged handler holding its lease forever |
+| `handlerTimeoutMs` | `BusConsumer` | stop a handler that hangs while holding its lease |
 
-## Three mistakes that break it
+## Mistakes that break it
 
-1. Skipping the engine build, or reaching for a system libsqlite3. Run the by-path build above once (`bun run sqlite:build` in your project finds no such script); Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size` and fails WAL tests.
-2. `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.
-3. Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.
+- Skipping the engine build, or pointing at a system libsqlite3. `bun run sqlite:build` in your own project finds no such script; use the by-path command above. Apple's `/usr/lib/libsqlite3.dylib` loads but changes `cache_size`, and WAL tests fail on it.
+- `await` inside a `consumeTransactional` handler. It must be synchronous, or another statement interleaves into the ack transaction.
+- Dropping the trailing slash from a `@libsql/client` URL (`/v1/db/acme/`). The client resolves `v2/pipeline` relative to it.
 
 Full reference: https://bql.sh/reference (Markdown: https://bql.sh/reference.md).
