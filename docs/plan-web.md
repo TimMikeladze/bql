@@ -28,7 +28,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | `table()` and `state()` | `sql`, `db.live` | **`table()` built**: `bql.sh/web`; `state()` not yet |
 | Author column (`bql_sub()`) | new driver function binding | **built**: `Database.function`, `tenant/subject.ts`, `bql app table`, `db.shared.table()` |
 | SQL actions | app config, one transaction | **built**: `server/web.ts` `runAction`, `db.action()` |
-| Form endpoint | `a` tables | server routes |
+| Form endpoint | `a` tables | **built**: `server/web.ts` `submitForm`, `bql app table --form` |
 | Action proxy | Ed25519 keys | server routes |
 
 ## Decisions
@@ -190,7 +190,13 @@ set to the caller inside the action, so author columns hold there too.
 
 ## Form endpoint
 
-`POST /f/:app/:table`, `application/x-www-form-urlencoded` or multipart without files.
+As built: `POST /v1/forms/:app/:table`, not `/f/…`, so it stays in the route registry, the OpenAPI
+document and `routes:check`. The redirect target must be on an allowed origin (no open redirect),
+a form table defaults to `read: false`, the per-IP limit is `form.perMinute` per table, and
+`fields` reuses the action input schema plus an `email` type. Form tables are the plain `table()`
+shape: a post has no visitor, so there is no author column.
+
+The original plan: `POST /f/:app/:table`, `application/x-www-form-urlencoded` or multipart without files.
 
 - The table must be `"form": true` and mode `a`. Form fields map to keys of `data`; `_next` and
   the honeypot field `_gotcha` are reserved.

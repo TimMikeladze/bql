@@ -21,7 +21,7 @@ import { createClient, type Client } from "./client/index.ts"
 import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
 import { diffSchema, formatSchemaDiff } from "./client/diff.ts"
-import { sharedTableSql } from "./web/table.ts"
+import { createTableSql, sharedTableSql } from "./web/table.ts"
 import type {
   AppConfig,
   AppInfo,
@@ -75,6 +75,7 @@ bql — SQLite as a multi-tenant database server (design §9.3)
   bql app create <id> [--config bql.json]   an app for a static page: a pk_ key and app-<id>-shared
   bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
   bql app table <id> <table> [--mode a|r|rw]   a shared table with an author column (default a)
+  bql app table <id> <table> --form            a table HTML forms post into (POST /v1/forms/<id>/<table>)
   bql exec <db> --sql "select 1"
   bql shell <db>
   bql bus <command>   the message bus — \`bql bus help\` lists its commands
@@ -820,16 +821,26 @@ async function app(args: ParsedArgs, remote: Remote): Promise<void> {
       const appId = need("table")
       const table = file
       if (!table) throw new CliError("app table needs <id> <table>")
+      const form = args.flags.form === true
       const mode = str(args, "mode") ?? "a"
       if (mode !== "a" && mode !== "r" && mode !== "rw") throw new CliError("--mode must be a, r or rw")
+      if (form && mode !== "a") throw new CliError("a form table is mode a")
       const current = await admin.app(appId)
       // The DDL first: a config naming a table that does not exist yet would fail every session's reads.
-      await remote.client.db(current.sharedDb).batch(sharedTableSql(table).map((sql) => ({ sql })))
+      // A form post has no visitor, so a form table is the plain shape, with no author column.
+      const ddl = form ? [createTableSql(table)] : sharedTableSql(table)
+      await remote.client.db(current.sharedDb).batch(ddl.map((sql) => ({ sql })))
       const updated = await admin.updateApp(appId, {
         ...current.config,
-        tables: { ...current.config.tables, [table]: { mode } },
+        tables: { ...current.config.tables, [table]: form ? { mode: "a", form: true } : { mode } },
       })
-      out(remote, updated, `${current.sharedDb}.${table}  mode=${mode}  author column, author-only updates and deletes`)
+      out(
+        remote,
+        updated,
+        form
+          ? `${current.sharedDb}.${table}  form  POST ${remote.url}/v1/forms/${appId}/${table}`
+          : `${current.sharedDb}.${table}  mode=${mode}  author column, author-only updates and deletes`,
+      )
       return
     }
     case "delete": {

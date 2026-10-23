@@ -903,6 +903,25 @@ const SPECS: Spec[] = [
     errors: [...ON_STATEMENT, "NOT_FOUND", "CONFLICT"],
     handler: web.runAction,
   },
+  {
+    id: "submitForm",
+    method: "post",
+    path: "/v1/forms/:app/:table",
+    summary: "Take an HTML form post into one of the app's form tables",
+    description:
+      "No JavaScript and no token: `Origin` must be one of the app's origins and the table must " +
+      "have `form` in the config. Answers `303` to `_next` or the `Referer` (on an allowed origin " +
+      "only) with `?bql=ok` or `?bql=error&reason=…`, or JSON with `Accept: application/json`. " +
+      "A filled `_gotcha` field is answered `ok` and not stored.",
+    tags: ["apps"],
+    security: "none",
+    body: s.record(s.string()).describe("The form's fields."),
+    bodyType: "application/x-www-form-urlencoded",
+    status: 201,
+    response: s.object({ ok: s.boolean(), id: s.union([s.string(), s.null()]) }),
+    errors: [...COMMON, "NOT_FOUND", "TOO_MANY_REQUESTS", "PAYLOAD_TOO_LARGE", "SQLITE_CONSTRAINT", "NOT_PRIMARY"],
+    handler: web.submitForm,
+  },
 
   // ── operations ──────────────────────────────────────────────────────────────────────────────
   {

@@ -13,6 +13,7 @@ import type { AppRow } from "../tenant/catalog.ts"
 import { setSubject } from "../tenant/subject.ts"
 import { ADMIN, applyPolicy, type TableScope, type TokenGrant } from "./auth.ts"
 import { resolveOptions, step, toResult } from "./exec.ts"
+import { uuidv7 } from "../web/table.ts"
 import { BqlError } from "./errors.ts"
 import { toBase64Url } from "./json.ts"
 import {
@@ -32,9 +33,18 @@ export interface AppTable {
   mode: TableScope
   /** False keeps the table out of visitor tokens entirely; only the owner reads or writes it. */
   read: boolean
+  /** Takes HTML form posts (`POST /v1/forms/:app/:table`). Only an `a` table can. */
+  form?: AppForm
 }
 
-export type InputType = "int" | "number" | "text" | "bool"
+export interface AppForm {
+  /** Declared fields are checked and kept; others are dropped. Absent: any text field is kept. */
+  fields?: Record<string, ActionInput>
+  /** Posts one IP may make to this table per minute. */
+  perMinute: number
+}
+
+export type InputType = "int" | "number" | "text" | "bool" | "email"
 
 export interface ActionInput {
   type: InputType
@@ -96,8 +106,7 @@ function keysOf(value: unknown, where: string, allowed: readonly string[]): Reco
   const record = value as Record<string, unknown>
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) {
-      // `form` is in the plan and not built; saying so beats a silent no-op.
-      refuse(`${where}.${key} is not supported${key === "form" ? " yet" : ""}`)
+      refuse(`${where}.${key} is not supported`)
     }
   }
   return record
@@ -131,14 +140,19 @@ export function parseAppConfig(input: unknown = {}): AppConfig {
     const raw = keysOf(root.tables, "tables", Object.keys(root.tables as object))
     for (const [name, value] of Object.entries(raw)) {
       if (!TABLE.test(name)) refuse(`table name ${JSON.stringify(name)} is not a plain identifier`)
-      const table = keysOf(value, `tables.${name}`, ["mode", "read"])
+      const table = keysOf(value, `tables.${name}`, ["mode", "read", "form"])
       if (table.mode !== "r" && table.mode !== "a" && table.mode !== "rw") {
         refuse(`tables.${name}.mode must be "r", "a" or "rw"`)
       }
       if (table.read !== undefined && typeof table.read !== "boolean") {
         refuse(`tables.${name}.read must be a boolean`)
       }
-      tables[name] = { mode: table.mode, read: table.read !== false }
+      const form = table.form === undefined || table.form === false ? undefined : parseForm(table.form, `tables.${name}.form`)
+      if (form && table.mode !== "a") refuse(`tables.${name}: a form table must be mode "a"`)
+      // A form table usually holds what strangers typed in (emails), so it stays out of visitor
+      // tokens unless the config says otherwise.
+      const read = table.read === undefined ? !form : table.read
+      tables[name] = { mode: table.mode, read, ...(form ? { form } : {}) }
     }
   }
   const actions: Record<string, AppAction> = {}
@@ -167,33 +181,37 @@ export function parseAppConfig(input: unknown = {}): AppConfig {
   }
 }
 
-/** What a statement in an action may start with: data, never schema, `ATTACH` or `PRAGMA`. */
-const ACTION_SQL = /^\s*(?:--[^\n]*\n\s*)*(insert|update|delete|select|with|replace)\b/i
-const MAX_ACTION_STATEMENTS = 20
-const MAX_ACTION_INPUTS = 32
+const DEFAULT_FORM_PER_MINUTE = 10
 
-function parseAction(value: unknown, where: string): AppAction {
-  const action = keysOf(value, where, ["db", "input", "run"])
-  if (action.db !== undefined && action.db !== "shared" && action.db !== "private") {
-    refuse(`${where}.db must be "shared" or "private"`)
+function parseForm(value: unknown, where: string): AppForm {
+  if (value === true) return { perMinute: DEFAULT_FORM_PER_MINUTE }
+  const form = keysOf(value, where, ["fields", "perMinute"])
+  const fields =
+    form.fields === undefined ? undefined : parseInputs(form.fields, `${where}.fields`)
+  return {
+    ...(fields ? { fields } : {}),
+    perMinute: intIn(form.perMinute, `${where}.perMinute`, 1, 10_000, DEFAULT_FORM_PER_MINUTE),
   }
+}
+
+function parseInputs(value: unknown, where: string): Record<string, ActionInput> {
+  const raw = keysOf(value, where, Object.keys(value as object))
+  if (Object.keys(raw).length > MAX_ACTION_INPUTS) refuse(`${where} has more than ${MAX_ACTION_INPUTS} fields`)
   const input: Record<string, ActionInput> = {}
-  const rawInput = action.input === undefined ? {} : keysOf(action.input, `${where}.input`, Object.keys(action.input as object))
-  if (Object.keys(rawInput).length > MAX_ACTION_INPUTS) refuse(`${where}.input has more than ${MAX_ACTION_INPUTS} fields`)
-  for (const [field, spec] of Object.entries(rawInput)) {
-    if (!TABLE.test(field)) refuse(`${where}.input.${field} is not a plain identifier`)
+  for (const [field, spec] of Object.entries(raw)) {
+    if (!TABLE.test(field)) refuse(`${where}.${field} is not a plain identifier`)
     // `:user` is the caller's sub, bound by the server; an input must not be able to set it.
-    if (field === "user") refuse(`${where}.input.user is reserved: :user is the caller`)
-    const one = keysOf(spec, `${where}.input.${field}`, ["type", "min", "max", "minLength", "maxLength", "optional"])
-    if (one.type !== "int" && one.type !== "number" && one.type !== "text" && one.type !== "bool") {
-      refuse(`${where}.input.${field}.type must be "int", "number", "text" or "bool"`)
+    if (field === "user") refuse(`${where}.user is reserved: :user is the caller`)
+    const one = keysOf(spec, `${where}.${field}`, ["type", "min", "max", "minLength", "maxLength", "optional"])
+    if (!["int", "number", "text", "bool", "email"].includes(one.type as string)) {
+      refuse(`${where}.${field}.type must be "int", "number", "text", "bool" or "email"`)
     }
     for (const bound of ["min", "max", "minLength", "maxLength"] as const) {
-      if (one[bound] !== undefined && typeof one[bound] !== "number") refuse(`${where}.input.${field}.${bound} must be a number`)
+      if (one[bound] !== undefined && typeof one[bound] !== "number") refuse(`${where}.${field}.${bound} must be a number`)
     }
-    if (one.optional !== undefined && typeof one.optional !== "boolean") refuse(`${where}.input.${field}.optional must be a boolean`)
+    if (one.optional !== undefined && typeof one.optional !== "boolean") refuse(`${where}.${field}.optional must be a boolean`)
     input[field] = {
-      type: one.type,
+      type: one.type as InputType,
       ...(one.min !== undefined ? { min: one.min as number } : {}),
       ...(one.max !== undefined ? { max: one.max as number } : {}),
       ...(one.minLength !== undefined ? { minLength: one.minLength as number } : {}),
@@ -201,6 +219,22 @@ function parseAction(value: unknown, where: string): AppAction {
       optional: one.optional === true,
     }
   }
+  return input
+}
+
+/** What a statement in an action may start with: data, never schema, `ATTACH` or `PRAGMA`. */
+const ACTION_SQL = /^\s*(?:--[^\n]*\n\s*)*(insert|update|delete|select|with|replace)\b/i
+const MAX_ACTION_STATEMENTS = 20
+/** Enough to catch a typo, not a proof the address exists: one @, something on each side, a dot after. */
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const MAX_ACTION_INPUTS = 32
+
+function parseAction(value: unknown, where: string): AppAction {
+  const action = keysOf(value, where, ["db", "input", "run"])
+  if (action.db !== undefined && action.db !== "shared" && action.db !== "private") {
+    refuse(`${where}.db must be "shared" or "private"`)
+  }
+  const input = action.input === undefined ? {} : parseInputs(action.input, `${where}.input`)
   if (!Array.isArray(action.run) || action.run.length === 0 || action.run.length > MAX_ACTION_STATEMENTS) {
     refuse(`${where}.run must be 1 to ${MAX_ACTION_STATEMENTS} statements`)
   }
@@ -244,8 +278,9 @@ export function bindInput(action: AppAction, input: unknown): Record<string, str
     if (spec.type === "bool") {
       if (typeof value !== "boolean") fail("must be true or false")
       out[field] = value ? 1 : 0
-    } else if (spec.type === "text") {
+    } else if (spec.type === "text" || spec.type === "email") {
       if (typeof value !== "string") fail("must be text")
+      if (spec.type === "email" && !EMAIL.test(value as string)) fail("must be an email address")
       const text = value as string
       if (spec.minLength !== undefined && text.length < spec.minLength) fail(`must be at least ${spec.minLength} characters`)
       if (spec.maxLength !== undefined && text.length > spec.maxLength) fail(`must be at most ${spec.maxLength} characters`)
@@ -599,4 +634,165 @@ export const runAction: Handler = async (ctx) => {
     }),
     txid: Number(written.txid),
   })
+}
+
+// ── forms ──────────────────────────────────────────────────────────────────────────────────────
+
+const MAX_FORM_FIELDS = 32
+
+/** The part of a parsed form this reads; Bun's and undici's `FormData` types disagree on values. */
+interface Form {
+  get(name: string): unknown
+  entries(): Iterable<[string, unknown]>
+  values(): Iterable<unknown>
+}
+const MAX_FORM_TEXT = 2000
+
+/** Form values are strings; this turns each declared field into what `bindInput` checks. */
+function coerceForm(fields: Record<string, ActionInput>, form: Form): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [field, spec] of Object.entries(fields)) {
+    const raw = form.get(field)
+    if (typeof raw !== "string") {
+      // An unchecked checkbox is not sent at all.
+      if (spec.type === "bool") out[field] = false
+      continue
+    }
+    if (spec.type === "bool") out[field] = ["on", "true", "1", "yes"].includes(raw.toLowerCase())
+    else if (spec.type === "int" || spec.type === "number") {
+      if (raw.trim() !== "") out[field] = /^-?\d+(\.\d+)?$/.test(raw.trim()) ? Number(raw) : raw
+    } else if (raw !== "") out[field] = raw
+  }
+  return out
+}
+
+/** The document a post becomes: declared fields checked, or every plain text field kept. */
+function formDocument(config: AppForm, form: Form): Record<string, unknown> {
+  for (const value of form.values()) {
+    if (typeof value !== "string") throw BqlError.badRequest("file uploads are not accepted")
+  }
+  if (config.fields) {
+    const values = bindInput({ db: "shared", input: config.fields, run: [] }, coerceForm(config.fields, form))
+    const doc: Record<string, unknown> = {}
+    for (const [field, spec] of Object.entries(config.fields)) {
+      const value = values[field]
+      if (value === null || value === undefined) continue
+      doc[field] = spec.type === "bool" ? value === 1 : value
+    }
+    return doc
+  }
+  const doc: Record<string, string> = {}
+  for (const [field, value] of form.entries()) {
+    // `_next`, `_gotcha` and anything else starting with `_` is for this endpoint, not the row.
+    if (field.startsWith("_") || typeof value !== "string") continue
+    if (!TABLE.test(field)) throw BqlError.badRequest(`input.${field} is not a plain field name`)
+    if (value.length > MAX_FORM_TEXT) throw BqlError.badRequest(`input.${field} must be at most ${MAX_FORM_TEXT} characters`)
+    doc[field] = value
+  }
+  if (Object.keys(doc).length > MAX_FORM_FIELDS) throw BqlError.badRequest(`a form may send at most ${MAX_FORM_FIELDS} fields`)
+  return doc
+}
+
+/** `_next`, else the `Referer`, but only on an origin the app allows: never an open redirect. */
+function redirectTarget(origins: readonly string[], form: Form | null, referer: string | null): URL | null {
+  const next = form?.get("_next")
+  for (const candidate of [typeof next === "string" ? next : null, referer]) {
+    if (!candidate) continue
+    try {
+      const url = new URL(candidate)
+      if (originAllowed(origins, url.origin)) return url
+    } catch {
+      // not an absolute URL: try the next one
+    }
+  }
+  return null
+}
+
+function reasonOf(err: unknown): string {
+  const message = err instanceof Error ? err.message : ""
+  const field = /^input\.([A-Za-z_][A-Za-z0-9_]*)/.exec(message)?.[1]
+  if (field) return field
+  const code = (err as { code?: unknown })?.code
+  if (typeof code === "string" && code.startsWith("SQLITE_CONSTRAINT")) return "check"
+  if (code === "TOO_MANY_REQUESTS") return "rate"
+  return "error"
+}
+
+/**
+ * `POST /v1/forms/:app/:table`: an HTML `<form>` with no JavaScript writes one row. The answer is
+ * a `303` back to the page (`_next`, else the `Referer`) with `?bql=ok` or
+ * `?bql=error&reason=<field|check|rate|error>`, or JSON when the request asks for it. A filled
+ * `_gotcha` field (a honeypot hidden from people) is answered `ok` and stored nowhere.
+ */
+export const submitForm: Handler = async (ctx) => {
+  const wantsJson = (ctx.request.headers.get("accept") ?? "").includes("application/json")
+  const appId = ctx.params.app
+  assertValidAppId(appId)
+  const app = ctx.runtime.registry.catalog.getApp(appId)
+  if (!app) throw new BqlError("NOT_FOUND", `no app ${appId}`, 404)
+  const config = parseAppConfig(app.config)
+  const tableName = ctx.params.table ?? ""
+  const table = config.tables[tableName]
+  if (!table?.form) throw new BqlError("NOT_FOUND", `${tableName} takes no form posts`, 404)
+  // Browsers send Origin on every cross-site form POST; without an allowed one, there is nowhere
+  // safe to send the visitor back to, so this one is always a plain refusal.
+  if (!originAllowed(config.origins, ctx.request.headers.get("origin"))) {
+    throw BqlError.notAuthorized("this origin is not in the app's origins")
+  }
+
+  let form: Form | null = null
+  const answer = async (): Promise<string | null> => {
+    const wait = limiterFor(ctx).take(`form|${app.id}|${tableName}|${clientIp(ctx)}`, table.form!.perMinute)
+    if (wait > 0) {
+      throw new BqlError("TOO_MANY_REQUESTS", "too many posts from this address", 429, { retryAfterSec: wait })
+    }
+    if (Number(ctx.request.headers.get("content-length") ?? 0) > ctx.runtime.config.limits.maxBodyBytes) {
+      throw new BqlError("PAYLOAD_TOO_LARGE", "form is too large", 413)
+    }
+    let parsed: Form
+    try {
+      parsed = (await ctx.request.formData()) as unknown as Form
+    } catch {
+      throw BqlError.badRequest("the body is not a form (application/x-www-form-urlencoded or multipart/form-data)")
+    }
+    form = parsed
+    const honeypot = parsed.get("_gotcha")
+    if (typeof honeypot === "string" && honeypot !== "") return null
+    const doc = formDocument(table.form!, parsed)
+    requirePrimary(ctx)
+    const dbName = sharedDbOf(app.id)
+    ctx.runtime.assertWritable(dbName)
+    const id = uuidv7()
+    const written = ctx.runtime.tenant(dbName).write((db) => {
+      const handle = applyPolicy(db, ctx.runtime.hubFor(db), ADMIN, dbName)
+      try {
+        db.run(`insert into "${tableName}" (id, data) values (?, ?)`, [id, JSON.stringify(doc)])
+      } finally {
+        handle.release()
+      }
+    })
+    ctx.txid = Number(written.txid)
+    return id
+  }
+
+  let id: string | null
+  try {
+    id = await answer()
+  } catch (err) {
+    const target = wantsJson ? null : redirectTarget(config.origins, form, ctx.request.headers.get("referer"))
+    if (!target) throw err
+    target.searchParams.set("bql", "error")
+    target.searchParams.set("reason", reasonOf(err))
+    return new Response(null, { status: 303, headers: { location: target.toString() } })
+  }
+  if (wantsJson) return json({ ok: true, id }, 201)
+  const target = redirectTarget(config.origins, form, ctx.request.headers.get("referer"))
+  if (!target) {
+    return new Response("<!doctype html><title>Sent</title><p>Thanks, that was sent.</p>", {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    })
+  }
+  target.searchParams.set("bql", "ok")
+  return new Response(null, { status: 303, headers: { location: target.toString() } })
 }

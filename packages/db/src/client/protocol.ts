@@ -787,27 +787,34 @@ export interface RevokedToken {
 export interface AppConfig {
   /** `https://acme.app`, `https://*.acme.app`, `http://localhost:*`, or `*`. */
   origins?: string[]
-  /** Shared-database tables visitors see. `read: false` keeps one out of their tokens. */
-  tables?: Record<string, { mode: TableScope; read?: boolean }>
+  /**
+   * Shared-database tables visitors see. `read: false` keeps one out of their tokens. `form` lets
+   * an HTML form post rows into an `a` table (`POST /v1/forms/:app/:table`); a form table defaults
+   * to `read: false`.
+   */
+  tables?: Record<
+    string,
+    { mode: TableScope; read?: boolean; form?: true | { fields?: Record<string, InputSpec>; perMinute?: number } }
+  >
   /** Named SQL a visitor runs with the server's rights; `docs/api.md`, "Actions". */
   actions?: Record<string, AppAction>
   session?: { ttlMs?: number; newVisitorsPerMinute?: number }
 }
 
+/** One input of an action or field of a form. */
+export interface InputSpec {
+  type: "int" | "number" | "text" | "bool" | "email"
+  min?: number
+  max?: number
+  minLength?: number
+  maxLength?: number
+  optional?: boolean
+}
+
 export interface AppAction {
   /** Default `"shared"`. */
   db?: "shared" | "private"
-  input?: Record<
-    string,
-    {
-      type: "int" | "number" | "text" | "bool"
-      min?: number
-      max?: number
-      minLength?: number
-      maxLength?: number
-      optional?: boolean
-    }
-  >
+  input?: Record<string, InputSpec>
   /** Bound by name from `input`; `:user` is the caller's sub. */
   run: { sql: string; expect?: number; error?: string }[]
 }

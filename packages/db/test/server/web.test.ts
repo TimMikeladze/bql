@@ -12,7 +12,7 @@ import {
   UNUSED_VISITOR_MS,
   visitorDbOf,
 } from "../../src/server/web.ts"
-import { sharedTableSql } from "../../src/web/table.ts"
+import { createTableSql, sharedTableSql } from "../../src/web/table.ts"
 import { startTestServer, stopAll, type TestServer } from "./harness.ts"
 
 let server: TestServer
@@ -86,7 +86,7 @@ describe("app config", () => {
   })
 
   test("unknown keys and bad modes are refused, and planned keys say so", () => {
-    expect(() => parseAppConfig({ form: {} })).toThrow(/form is not supported yet/)
+    expect(() => parseAppConfig({ forms: {} })).toThrow(/forms is not supported/)
     expect(() => parseAppConfig({ tables: { t: { mode: "w" } } })).toThrow(/mode must be/)
     expect(() => parseAppConfig({ origins: ["acme.test"] })).toThrow(/must look like/)
   })
@@ -364,6 +364,111 @@ describe("actions", () => {
     expect(() => parseAppConfig({ actions: { bad: { run: [{ sql: "drop table scores" }] } } })).toThrow(/must be one insert/)
     expect(() => parseAppConfig({ actions: { bad: { run: [{ sql: "attach 'x' as y" }] } } })).toThrow(/must be one insert/)
     expect(() => parseAppConfig({ actions: { bad: { input: { user: { type: "text" } }, run: [{ sql: "select 1" }] } } })).toThrow(/reserved/)
+  })
+})
+
+describe("forms", () => {
+  let site: App
+  const PAGE = `${ORIGIN}/join.html`
+
+  function post(table: string, fields: Record<string, string>, headers: Record<string, string> = {}) {
+    return fetch(`${server.url}/v1/forms/forms/${table}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: ORIGIN, referer: PAGE, "content-type": "application/x-www-form-urlencoded", ...headers },
+      body: new URLSearchParams(fields).toString(),
+    })
+  }
+
+  async function rows(table: string): Promise<Record<string, unknown>[]> {
+    const response = await run(site.sharedDb, `select data from ${table} order by created_at`)
+    return ((await response.json()) as { rows: string[][] }).rows.map(([data]) => JSON.parse(data as string))
+  }
+
+  beforeAll(async () => {
+    site = await createApp("forms", {
+      origins: [ORIGIN],
+      tables: {
+        signups: {
+          mode: "a",
+          form: { fields: { email: { type: "email" }, plan: { type: "text", optional: true, maxLength: 20 }, news: { type: "bool" } }, perMinute: 5 },
+        },
+        notes: { mode: "a", form: true },
+      },
+    })
+    for (const table of ["signups", "notes"]) {
+      expect((await run(site.sharedDb, createTableSql(table))).status).toBe(200)
+    }
+  })
+
+  test("a post becomes a row and the visitor goes back with ?bql=ok", async () => {
+    const response = await post("signups", { email: "ann@example.com", news: "on", ignored: "x" })
+    expect(response.status).toBe(303)
+    expect(response.headers.get("location")).toBe(`${PAGE}?bql=ok`)
+    expect((await rows("signups")).at(-1)).toEqual({ email: "ann@example.com", news: true })
+  })
+
+  test("a bad field goes back with its name, and nothing is stored", async () => {
+    const before = (await rows("signups")).length
+    const response = await post("signups", { email: "not an email" })
+    expect(response.headers.get("location")).toBe(`${PAGE}?bql=error&reason=email`)
+    expect((await rows("signups")).length).toBe(before)
+  })
+
+  test("Accept: application/json answers JSON instead", async () => {
+    const ok = await post("signups", { email: "bob@example.com" }, { accept: "application/json" })
+    expect(ok.status).toBe(201)
+    expect(((await ok.json()) as { id: string }).id).toMatch(/^[0-9a-f-]{36}$/)
+    const bad = await post("signups", { email: "x" }, { accept: "application/json" })
+    expect(bad.status).toBe(400)
+  })
+
+  test("_next is followed only to an allowed origin", async () => {
+    const own = await post("notes", { text: "hi", _next: `${ORIGIN}/thanks.html` })
+    expect(own.headers.get("location")).toBe(`${ORIGIN}/thanks.html?bql=ok`)
+    const elsewhere = await post("notes", { text: "hi", _next: "https://evil.test/phish" })
+    expect(elsewhere.headers.get("location")).toBe(`${PAGE}?bql=ok`)
+    const nowhere = await post("notes", { text: "hi", _next: "https://evil.test/" }, { referer: "https://evil.test/" })
+    expect(nowhere.status).toBe(200)
+  })
+
+  test("a table with form: true keeps any plain text field, minus the _ ones", async () => {
+    await post("notes", { text: "kept", _gotcha: "", _next: PAGE })
+    expect((await rows("notes")).at(-1)).toEqual({ text: "kept" })
+  })
+
+  test("a filled honeypot is answered ok and stored nowhere", async () => {
+    const before = (await rows("notes")).length
+    const response = await post("notes", { text: "spam", _gotcha: "bot" })
+    expect(response.headers.get("location")).toBe(`${PAGE}?bql=ok`)
+    expect((await rows("notes")).length).toBe(before)
+  })
+
+  test("the origin is checked, and a table without form takes no posts", async () => {
+    expect((await post("notes", { text: "x" }, { origin: "https://evil.test" })).status).toBe(403)
+    expect((await post("scores", { text: "x" })).status).toBe(404)
+  })
+
+  test("posts are limited per IP and table", async () => {
+    const limited = await createApp("formlimit", { origins: [ORIGIN], tables: { t: { mode: "a", form: { perMinute: 2 } } } })
+    await run(limited.sharedDb, createTableSql("t"))
+    const send = () =>
+      fetch(`${server.url}/v1/forms/formlimit/t`, {
+        method: "POST",
+        redirect: "manual",
+        headers: { origin: ORIGIN, referer: PAGE, "content-type": "application/x-www-form-urlencoded" },
+        body: "a=1",
+      })
+    expect((await send()).status).toBe(303)
+    expect((await send()).status).toBe(303)
+    expect((await send()).headers.get("location")).toBe(`${PAGE}?bql=error&reason=rate`)
+  })
+
+  test("a form table stays out of visitor tokens unless read is set", async () => {
+    const config = parseAppConfig({ tables: { signups: { mode: "a", form: true }, guestbook: { mode: "a", form: true, read: true } } })
+    expect(config.tables.signups?.read).toBe(false)
+    expect(config.tables.guestbook?.read).toBe(true)
+    expect(() => parseAppConfig({ tables: { t: { mode: "rw", form: true } } })).toThrow(/must be mode "a"/)
   })
 })
 

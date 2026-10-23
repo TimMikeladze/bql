@@ -289,6 +289,7 @@ server: the database's SQLite lacks sqlite-vec, the geo functions, FTS5 or R*Tre
 | `POST /v1/apps/:id/rotate` | a new `pk_` key | admin |
 | `POST /v1/session` | a visitor's tokens for an app | `pk_` key in the body, `Origin` |
 | `POST /v1/session/action` | run one of the app's actions as the visitor | session token, `pk_` key, `Origin` |
+| `POST /v1/forms/:app/:table` | an HTML form post into a form table | `Origin` |
 | `GET /v1/ws` | WebSocket upgrade, sub-protocol `bql.v1` | any |
 | `GET /v2`, `GET /v3` | Hrana version probe | none |
 | `POST /v2/pipeline`, `POST /v3/pipeline` | Hrana pipeline, database from `x-namespace`/`Host`/`default` | `ro`, `rw` when it writes |
@@ -972,6 +973,42 @@ the whole action back with `409 CONFLICT` and the statement's `error`. A stateme
 
 The caller is proved by the session's private token, which is `rw` on exactly the database named
 after its `sub`. There is no rate limit on actions yet beyond the server's own limits.
+
+#### Forms
+
+A table with `form` in the config takes posts from a plain HTML `<form>`, with no JavaScript and
+no token. `bql app table demo signups --form` creates one (the plain `table()` shape, no author
+column, since a post has no visitor) and sets `{ "mode": "a", "form": true }`.
+
+```html
+<form method="post" action="https://bql.example.com/v1/forms/demo/signups">
+  <input name="email" type="email" required>
+  <input name="_gotcha" tabindex="-1" autocomplete="off" style="display:none">
+  <input type="hidden" name="_next" value="https://acme.app/thanks.html">
+  <button>Join the waitlist</button>
+</form>
+```
+
+```json
+"signups": { "mode": "a", "form": { "fields": { "email": { "type": "email" },
+                                                "news": { "type": "bool" } },
+                                    "perMinute": 10 } }
+```
+
+With `fields`, each declared field is checked like an action input (`email` is also a type here;
+an unchecked checkbox is `false`) and anything else is dropped. With `"form": true`, every plain
+text field is kept, up to 32 fields of 2000 characters; names starting with `_` never are. The row
+is `{ id, data, created_at, updated_at }` with the fields as `data`.
+
+The answer is a `303` to `_next`, else the `Referer`, with `?bql=ok` or
+`?bql=error&reason=<field>` (`check` for a failed CHECK, `rate` past `perMinute`, `error`
+otherwise). Either URL must be on one of the app's `origins`, so the endpoint is never an open
+redirect; with neither, it answers a short HTML page. `Accept: application/json` gets `201
+{ "ok": true, "id": … }` or the error JSON instead. `Origin` must be allowed; browsers send it
+with every cross-site form post. A filled `_gotcha` field is answered `ok` and stored nowhere.
+`perMinute` (default 10) counts posts per table and client IP. A form table defaults to
+`read: false`, so visitor tokens never see what strangers typed into it; the owner reads it with
+the admin key, and the outbox can send each new row to a webhook.
 
 #### The author column
 
@@ -1978,6 +2015,7 @@ bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,posts:a,use
 bql app create <id> [--config bql.json]
 bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
 bql app table <id> <table> [--mode a|r|rw]
+bql app table <id> <table> --form
 bql exec <db> --sql "select 1"
 bql shell <db>
 ```

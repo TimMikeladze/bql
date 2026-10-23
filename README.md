@@ -229,6 +229,18 @@ app's config that the server runs with its own rights, given checked input.
 await db.action("submitScore", { score: 4200, name: "ann" })
 // rejects with code CONFLICT and the action's error when its `expect` does not hold
 ```
+
+A waitlist needs no JavaScript at all. `bunx bql app table demo signups --form` makes a table HTML
+forms post into:
+
+```html
+<form method="post" action="http://localhost:4321/v1/forms/demo/signups">
+  <input name="email" type="email" required>
+  <input name="_gotcha" tabindex="-1" autocomplete="off" style="display:none">
+  <button>Join</button>
+</form>
+<!-- the server sends the visitor back to this page with ?bql=ok or ?bql=error&reason=email -->
+```
 [packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next
