@@ -53,7 +53,12 @@ beforeAll(async () => {
   server = await startTestServer()
   const app = await server.json<{ key: string; sharedDb: string }>("/v1/apps", {
     method: "POST",
-    body: JSON.stringify({ id: "page", config: { origins: [ORIGIN], tables: { guestbook: { mode: "a" } } } }),
+    body: JSON.stringify({ id: "page", config: {
+        origins: [ORIGIN],
+        tables: { guestbook: { mode: "a" } },
+        // Every test is a new visitor from 127.0.0.1; the default 10 a minute would refuse them.
+        session: { newVisitorsPerMinute: 1000 },
+      } }),
   })
   key = app.key
   await server.fetch(`/v1/db/${app.sharedDb}/query`, {
@@ -161,6 +166,76 @@ describe("live", () => {
     await Bun.sleep(150)
     stop()
     expect(lists.at(-1)).toBe(1)
+  })
+})
+
+describe("db.live", () => {
+  /** Resolves with the first event that passes `check`. */
+  function next<T>(on: (fn: (value: T) => void) => void, check: (value: T) => boolean): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("no matching event")), 4000)
+      on((value) => {
+        if (!check(value)) return
+        clearTimeout(timer)
+        resolve(value)
+      })
+    })
+  }
+
+  test("without a key, every change delivers the whole result", async () => {
+    const db = await visit()
+    await db.sql`create table notes(id integer primary key, body text)`
+    const live = db.live<{ body: string }>`select body from notes order by id`
+    const lists: string[][] = []
+    const two = next<{ body: string }[]>((fn) => live.on("rows", (rows) => { lists.push(rows.map((r) => r.body)); fn(rows) }), (rows) => rows.length === 2)
+    await next<{ body: string }[]>((fn) => live.on("rows", fn), () => true)
+    await db.sql`insert into notes(body) values (${"one"})`
+    await db.sql`insert into notes(body) values (${"two"})`
+    await two
+    live.close()
+    expect(lists[0]).toEqual([])
+    expect(lists.at(-1)).toEqual(["one", "two"])
+  })
+
+  test("with a key, changes arrive as diffs", async () => {
+    const db = await visit()
+    await db.sql`create table notes(id integer primary key, body text)`
+    await db.sql`insert into notes(body) values (${"one"})`
+    const live = db.live<{ id: number; body: string }>`select id, body from notes`.key("id")
+    await next((fn) => live.on("rows", fn), (rows: unknown[]) => rows.length === 1)
+    const diff = next<{ added: { body: string }[]; removed: { id: number }[]; updated: unknown[] }>(
+      (fn) => live.on("diff", fn as never),
+      (d) => d.added.length > 0,
+    )
+    await db.sql`insert into notes(body) values (${"two"})`
+    expect((await diff).added.map((r) => r.body)).toEqual(["two"])
+    const removed = next<{ removed: { id: number }[] }>((fn) => live.on("diff", fn as never), (d) => d.removed.length > 0)
+    await db.sql`delete from notes where id = ${1}`
+    expect((await removed).removed).toEqual([{ id: 1 }])
+    live.close()
+  })
+
+  test("re-subscribes across a session refresh, starting with the full rows", async () => {
+    const db = await visit()
+    await db.sql`create table notes(id integer primary key, body text)`
+    const live = db.live<{ body: string }>`select body from notes`
+    await next((fn) => live.on("rows", fn), () => true)
+    await db.refresh()
+    const after = next<{ body: string }[]>((fn) => live.on("rows", fn), (rows) => rows.length === 1)
+    await db.sql`insert into notes(body) values (${"after refresh"})`
+    expect((await after).map((r) => r.body)).toEqual(["after refresh"])
+    live.close()
+  })
+
+  test("shared.live reads the shared tables the token can see", async () => {
+    const db = await visit()
+    if (!db.shared) throw new Error("expected shared tables")
+    const live = db.shared.live<{ message: string }>`select message from guestbook where message = ${"live hello"}`
+    const seen = next<{ message: string }[]>((fn) => live.on("rows", fn), (rows) => rows.length === 1)
+    await Bun.sleep(50)
+    await db.shared.sql`insert into guestbook(message) values (${"live hello"})`
+    expect((await seen)[0]?.message).toBe("live hello")
+    live.close()
   })
 })
 

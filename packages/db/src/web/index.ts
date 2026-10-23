@@ -42,6 +42,25 @@ export interface SqlRunner {
   <T = JsRow>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T[]>
 }
 
+/**
+ * A live query on raw SQL. Without `key()` every change delivers the whole result as `rows`; with
+ * one, the first event is `rows` and each change after it a `diff` keyed on that column. A
+ * session renewal re-subscribes on the new tokens, which delivers `rows` again: treat every
+ * `rows` as the full list.
+ */
+export interface LiveSql<T = JsRow> {
+  /** The column that identifies a row, which switches the feed to diffs. Call before the first tick. */
+  key(column: string): this
+  on(event: "rows", listener: (rows: T[]) => void): this
+  on(event: "diff", listener: (diff: { added: T[]; removed: T[]; updated: T[] }) => void): this
+  on(event: "error", listener: (err: unknown) => void): this
+  close(): void
+}
+
+export interface LiveRunner {
+  <T = JsRow>(strings: TemplateStringsArray, ...values: unknown[]): LiveSql<T>
+}
+
 export interface WebDb {
   /** The id this browser is known by. */
   readonly visitor: string
@@ -51,8 +70,10 @@ export interface WebDb {
   table<T extends Doc = Doc>(name: string): Table<T>
   /** Raw SQL on the visitor's database. */
   readonly sql: SqlRunner
+  /** A live query on the visitor's database. */
+  readonly live: LiveRunner
   /** The app's shared database, or null when the app declares no tables visitors can see. */
-  readonly shared: { readonly db: string; readonly sql: SqlRunner } | null
+  readonly shared: { readonly db: string; readonly sql: SqlRunner; readonly live: LiveRunner } | null
   /** Fetches a new session now. Live queries carry on over the new tokens. */
   refresh(): Promise<void>
   /** Stops refreshing and closes every connection and live query. */
@@ -111,6 +132,7 @@ function errorFrom(status: number, body: unknown): Error {
 interface LiveHandle {
   statement: Statement
   db: "private" | "shared"
+  key: string | null
   onRows: (rows: JsRow[]) => void
   onDiff: (diff: LiveDiff) => void
   onError: (err: unknown) => void
@@ -131,7 +153,9 @@ class Connection implements WebDb {
   readonly #live = new Set<LiveHandle>()
   readonly #ensured = new Map<string, Promise<void>>()
   readonly sql: SqlRunner
+  readonly live: LiveRunner
   readonly #sharedSql: SqlRunner
+  readonly #sharedLive: LiveRunner
 
   constructor(key: string, url: string, visitor: string, options: ConnectOptions) {
     this.#key = key
@@ -142,6 +166,10 @@ class Connection implements WebDb {
       this.#run("private", { strings: [...strings], values })) as SqlRunner
     this.#sharedSql = ((strings: TemplateStringsArray, ...values: unknown[]) =>
       this.#run("shared", { strings: [...strings], values })) as SqlRunner
+    this.live = ((strings: TemplateStringsArray, ...values: unknown[]) =>
+      this.#liveSql("private", { strings: [...strings], values })) as LiveRunner
+    this.#sharedLive = ((strings: TemplateStringsArray, ...values: unknown[]) =>
+      this.#liveSql("shared", { strings: [...strings], values })) as LiveRunner
   }
 
   get db(): string {
@@ -150,14 +178,14 @@ class Connection implements WebDb {
 
   get shared(): WebDb["shared"] {
     const shared = this.#session.shared
-    return shared ? { db: shared.db, sql: this.#sharedSql } : null
+    return shared ? { db: shared.db, sql: this.#sharedSql, live: this.#sharedLive } : null
   }
 
   table<T extends Doc = Doc>(name: string): Table<T> {
     return new Table<T>(
       {
         run: (statement) => this.#run("private", statement),
-        live: (statement, onRows, onDiff, onError) => this.#subscribe({ statement, db: "private", onRows, onDiff, onError, stop: null }),
+        live: (statement, onRows, onDiff, onError) => this.#subscribe({ statement, db: "private", key: "id", onRows, onDiff, onError, stop: null }),
         ensure: (table) => this.#ensure(table),
       },
       name,
@@ -277,10 +305,57 @@ class Connection implements WebDb {
     }
   }
 
+  /** `db.live`: listeners attach synchronously, the subscription starts on the next microtask. */
+  #liveSql<T>(db: "private" | "shared", statement: Statement): LiveSql<T> {
+    const listeners = { rows: new Set<(rows: T[]) => void>(), diff: new Set<(diff: LiveDiff) => void>(), error: new Set<(err: unknown) => void>() }
+    let stop: (() => void) | null = null
+    let started = false
+    let closed = false
+    const handle: LiveHandle = {
+      statement,
+      db,
+      key: null,
+      onRows: (rows) => listeners.rows.forEach((fn) => fn(rows as T[])),
+      onDiff: (diff) => listeners.diff.forEach((fn) => fn(diff)),
+      onError: (err) => {
+        if (listeners.error.size === 0) this.#report(err)
+        listeners.error.forEach((fn) => fn(err))
+      },
+      stop: null,
+    }
+    queueMicrotask(() => {
+      started = true
+      if (closed) return
+      try {
+        stop = this.#subscribe(handle)
+      } catch (err) {
+        handle.onError(err)
+      }
+    })
+    const live: LiveSql<T> = {
+      key(column) {
+        if (started) throw new Error("key() must be called before the subscription starts")
+        handle.key = column
+        return live
+      },
+      on(event: "rows" | "diff" | "error", listener: (payload: never) => void) {
+        ;(listeners[event] as Set<unknown>).add(listener)
+        return live
+      },
+      close() {
+        closed = true
+        stop?.()
+      },
+    } as LiveSql<T>
+    return live
+  }
+
   #open(handle: LiveHandle): () => void {
-    const query = this.#dbOf(handle.db)
-      .live(handle.statement.strings as unknown as TemplateStringsArray, ...handle.statement.values)
-      .key("id")
+    const query = this.#dbOf(handle.db).live(
+      handle.statement.strings as unknown as TemplateStringsArray,
+      ...handle.statement.values,
+    )
+    if (handle.key !== null) query.key(handle.key)
     query.on("rows", (event) => handle.onRows(event.rows))
     query.on("diff", (event) => handle.onDiff(event))
     query.on("error", (err) => {

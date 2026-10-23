@@ -181,22 +181,33 @@ bunx bql app create demo --config bql.json
   import { connect } from "https://cdn.jsdelivr.net/npm/bql.sh/packages/db/dist/web.js"
 
   const db = await connect("pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0", { url: "http://localhost:4321" })
-  const todos = db.table("todos")                       // created on first use
-  await todos.insert({ title: "write it", done: false })
-  todos.where({ done: false }).orderBy("createdAt").live((rows) => render(rows))
+
+  // The visitor's own database: the page runs its own DDL there.
+  await db.sql`create table if not exists todos(
+    id integer primary key,
+    title text not null check (length(title) between 1 and 200),
+    done integer not null default 0
+  ) strict`
+
+  await db.sql`insert into todos(title) values (${"write it"})`
+  db.live`select id, title, done from todos order by id`.on("rows", render)
 </script>
 ```
 
 `connect()` generates a visitor id once and keeps it in `localStorage`, so the same browser gets
-the same database (`app-demo-u-<hash>`) back. `table()` stores documents as JSON in a real SQLite
-table and returns rows as `{ ...doc, id, createdAt, updatedAt }`. `insert`, `get`,
-`update` (a JSON merge patch) and `delete` write; `where`, `orderBy`, `limit`, `list` and `live` read.
-`live` calls back with the whole ordered list now and after every commit that changes it. `db.sql`
-runs raw SQL on the same database. Tokens are refreshed before they expire, and live lists carry
-on across the refresh.
+the same database (`app-demo-u-<hash>`) back. Every `${}` in `db.sql` and `db.live` is a bound
+parameter. `db.sql` returns the rows. `db.live` calls `rows` with the whole result now and after
+every commit that changes it; with `.key("id")` it sends `diff`s after the first `rows` instead.
+A failed CHECK rejects with `code` `SQLITE_CONSTRAINT_CHECK`. Tokens are renewed before they
+expire, and live queries carry on across the renewal, starting again with a full `rows`.
+
+`db.table("todos")` is the shortcut for a page that does not want a schema: JSON documents in
+a table it creates itself, with `insert`, `get`, `update`, `delete`, and
+`where(...).orderBy(...).limit(...)` ending in `list()` or `live(cb)`. Raw SQL against it reads the
+document through `json_extract(data, '$.title')`.
 
 Tables the app lists in its config under `tables`, with a mode each (`r`, `a`, `rw`), live in the
-shared database `app-demo-shared` and are reachable as `db.shared.sql`.
+shared database `app-demo-shared` and are reachable as `db.shared.sql` and `db.shared.live`.
 [packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next
@@ -222,7 +233,7 @@ shared database `app-demo-shared` and are reachable as `db.shared.sql`.
 | `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
-| `bql.sh/web` | For a page with no server: `connect()` with an app's `pk_` key, then `table()` and `sql` on the visitor's own database. Built to `packages/db/dist/web.js` for a script tag |
+| `bql.sh/web` | For a page with no server: `connect()` with an app's `pk_` key, then `sql`, `live` and `table()` on the visitor's own database. Built to `packages/db/dist/web.js` for a script tag |
 
 Two binaries: `bql` for the database, `bql bus` for the bus. Both use `BQL_URL` for the server URL
 and `BQL_ADMIN_KEY` for its admin key (or `BQL_TOKEN` for a scoped token; it takes precedence over

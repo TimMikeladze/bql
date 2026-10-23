@@ -9,9 +9,9 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
   import { connect } from "https://cdn.jsdelivr.net/npm/bql.sh/packages/db/dist/web.js"
 
   const db = await connect("pk_live_…")
-  const todos = db.table("todos")                 // the visitor's own database
-  await todos.insert({ title: "write it", done: false })
-  todos.where({ done: false }).live(render)
+  await db.sql`create table if not exists todos(id integer primary key, title text, done integer default 0)`
+  await db.sql`insert into todos(title) values (${"write it"})`   // the visitor's own database
+  db.live`select * from todos where done = 0`.on("rows", render)
 
   const scores = db.shared.table("scores")        // the app's shared database, mode `a`
   scores.orderBy("score", "desc").limit(10).live(renderBoard)
@@ -33,10 +33,12 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 
 ## Decisions
 
-- **`table()` is the headline API.** A collection is a real SQLite table, so table modes, CHECK
+- **SQL is the headline API; `table()` is the shortcut.** Changed after `table()` was built: the
+  first reaction to it was "this looks like an ORM", and SQL is what bql.sh is. `db.sql` and
+  `db.live` (tagged templates, values bound) lead the README and `llms.txt`. `table()` stays for a
+  page that wants no schema: a collection is a real SQLite table, so table modes, CHECK
   constraints, the form endpoint, the dashboard and raw SQL all see the same thing. `state()` is
-  sugar over a `state` table, documented second, for settings and small single-user apps.
-  `llms.txt` leads with `table()`.
+  sugar over a `state` table, documented last.
 - **Actions are SQL first.** Named, parameterized statements in app config, run by the server in one
   transaction. No code runtime, nothing to sandbox. The proxy to the user's own function is the
   escape hatch for secrets and `fetch`. QuickJS-wasm in-process comes only if SQL actions run out;
