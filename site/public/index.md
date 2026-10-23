@@ -8,50 +8,6 @@ Currently `bql.sh` v0.5.0 · MIT, Bun 1.4+.
 bun add bql.sh
 ```
 
-## SQLite, plus the server it never had
-
-SQLite is fast and runs anywhere, but it's a library: no network access, no replicas, no backups and no way to subscribe to a query. bql.sh adds those and leaves every database a SQLite file.
-
-### Network access
-
-HTTP, WebSockets and libsql's Hrana protocol, so any process, browser or machine can query a database.
-
-### Live queries
-
-`db.live` sends the rows a commit added or removed. It runs off SQLite's `preupdate` hook, not triggers.
-
-### Replicas
-
-WAL frames stream to replicas over a WebSocket. A replica serves reads and forwards writes to the primary.
-
-### Failover
-
-`bql promote` fences the old primary by epoch. With `[cluster]` on, Raft promotes a replica on its own.
-
-### Backups to S3
-
-Every commit ships to S3, R2 or Tigris in the background. `bql restore` rebuilds any txid or timestamp.
-
-### Branches
-
-`bql db branch` forks a database as a reflink copy and records its parent, so a branch per pull request costs a directory.
-
-### Search
-
-`bql.sh/search` builds sqlite-vec, FTS5 and R*Tree queries, with hybrid ranking in one statement.
-
-### Scoped tokens
-
-Tokens scoped to databases, tables and `ro` or `rw`, safe to hand to a browser.
-
-### Embedded or served
-
-`Bql.open()` runs the engine in your process. `bq.serve()` adds HTTP later and your code stays the same.
-
-## Watch a query change
-
-`db.live` runs a query once, then sends the rows each commit added or removed. This is `client.ts` from the README and what it printed.
-
 ```ts
 // client.ts
 import { createClient } from "bql.sh/client"
@@ -77,7 +33,40 @@ BQL_ADMIN_KEY=<the admin key> bun client.ts
 # diff {"added":[],"removed":[{"id":1}]}
 ```
 
-## Getting started in five steps
+## Why bql.sh
+
+SQLite is fast and runs anywhere, but it's a library: no network access, no replicas, no backups and no way to subscribe to a query. bql.sh adds those and leaves every database a SQLite file.
+
+### Still SQLite
+
+Replication ships the pages SQLite wrote, not statements, so triggers, FTS5, JSON and `random()` replicate exactly.
+
+### In process or served
+
+`Bql.open()` runs the engine inside your app. `bq.serve()` puts HTTP in front of it later, and code written against `db` doesn't change.
+
+### As many as you need
+
+One process keeps up to `[data] maxOpen` databases open, 1024 by default, and closes idle ones. A fork is a reflink copy, so a database per customer or pull request costs a directory.
+
+## How it compares
+
+Plain SQLite is enough when one process owns the file. [Litestream](https://litestream.io) adds continuous backup to that setup without changing your code. bql.sh is for when other processes, browsers or machines need the database, or you want replicas and live queries.
+
+|  | SQLite (`bun:sqlite`) | SQLite + Litestream | bql.sh |
+| --- | --- | --- | --- |
+| Where it runs | In your process | In your process, plus a `litestream` sidecar | In your process (`Bql.open()`) or as a server (`bql serve`) |
+| Clients over the network | No | No | HTTP, WebSockets, libsql's Hrana |
+| Continuous backup to S3 | No | Yes | Yes |
+| Restore to a txid or timestamp | No | Yes | Yes |
+| Read replicas | No | Read-only VFS over the bucket (experimental) | Live replicas over a WebSocket that forward writes |
+| Failover | No | No | `bql promote`, or automatic with `[cluster]` |
+| Live queries and a change feed | No | No | `db.live` and `/changes` |
+| Branches | Copy the file | Restore into a new file | `bql db branch`, a reflink copy |
+| Access control | File permissions | File permissions | Tokens scoped to databases, tables and `ro` or `rw` |
+| Message bus | No | No | `bql.sh/bus` |
+
+## Getting started
 
 ### Install
 
@@ -176,9 +165,9 @@ bql deploy status
 | Cloudflare | Worker + named Bun container | Private R2 bucket | `wnam` bucket location hint | Experimental object mode |
 | Fly | Bun machine | Encrypted persistent volume at `/data` | `sjc` | Persistent-disk server |
 
-## One db, every way in
+## The same db, four ways in
 
-`createClient()` over HTTP, `Bql.open()` in your process, `@libsql/client` over Hrana, an ORM, or the `bun:ffi` driver on its own.
+`createClient()` over HTTP, `Bql.open()` in your process, `@libsql/client` over Hrana, or the `bun:ffi` driver on its own. The first two hand back the same `db`, so code moves between them unchanged.
 
 ### Client
 
@@ -242,52 +231,6 @@ await replica.execute("select id, body from notes order by id")  // already appl
 await replica.execute("insert into notes (body) values ('nope')") // LibsqlError: NOT_PRIMARY
 ```
 
-### Drizzle
-
-```ts
-import { eq } from "drizzle-orm"
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { drizzle } from "bql.sh/drizzle"
-
-const todos = sqliteTable("todos", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  title: text("title").notNull(),
-  done: integer("done").notNull().default(0),
-})
-
-const db = drizzle({ url: "http://localhost:4321", token, db: "acme" }, { schema: { todos } })
-
-const [written] = await db.insert(todos).values({ title: "write it" }).returning()
-await db.transaction(async (tx) => {
-  await tx.update(todos).set({ done: 1 }).where(eq(todos.id, written.id))
-})
-```
-
-### Kysely
-
-```ts
-import { Kysely, type Generated } from "kysely"
-import { BqlDialect } from "bql.sh/kysely"
-
-interface Database {
-  todos: { id: Generated<number>; title: string; done: Generated<number> }
-}
-
-const db = new Kysely<Database>({
-  dialect: new BqlDialect({ url: "http://localhost:4321", token, db: "acme" }),
-})
-
-const written = await db
-  .insertInto("todos")
-  .values({ title: "write it" })
-  .returningAll()
-  .executeTakeFirstOrThrow()
-
-await db.transaction().execute(async (trx) => {        // one bql.sh transaction, not a loose begin
-  await trx.updateTable("todos").set({ done: 1 }).where("id", "=", written.id).execute()
-})
-```
-
 ### Driver
 
 ```ts
@@ -301,7 +244,35 @@ db.onUpdate((op, dbName, table, rowid) => console.log(op, table, rowid))
 db.close()
 ```
 
-## The database past SQL
+## The database
+
+### Live queries
+
+`db.live` runs a query and sends the `added`, `removed` and `updated` rows whenever a commit changes its result. `/changes` streams every commit as SSE. Both run off SQLite's `preupdate` hook, so there are no triggers to install.
+
+```ts
+import { createClient } from "bql.sh/client"
+
+const db = createClient({ url: "http://localhost:4321", token }).db("acme")
+
+await db.sql`insert into todos(title) values (${"write it"})`.run()
+const live = db.live`select * from todos where done = 0`.key("id")
+live.on("diff", (e) => patch(e.added, e.removed, e.updated))
+```
+
+```sh
+TOKEN=$(curl -sX POST localhost:4321/v1/tokens -H "authorization: Bearer $KEY" \
+        -H 'content-type: application/json' \
+        -d '{"dbs":["acme"],"scope":"ro","ttl":86400}' | jq -r .token)
+
+curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
+# retry: 1000
+# : open
+#
+# id: 3
+# event: change
+# data: {"txid":3,"changes":[{"table":"todos","op":"insert","rowid":2,"pk":{"id":2},"row":{…}}]}
+```
 
 ### Replicas
 
@@ -503,7 +474,7 @@ bql bus subscribe cdc 'db.app-1.>'
 bql bus sink webhook --subscription cdc --to https://example.com/hook --secret "$HOOK_SECRET"
 ```
 
-## A message bus on the same engine
+## The bus
 
 ### Queue, pub/sub and request/reply
 
@@ -608,8 +579,14 @@ bql bus schema bind 'orders.>' order --mode warn      # then --mode enforce
 bql bus schema check order ./order-v2.json            # dry-run the compat check
 ```
 
-## Speaks to what you already run
+## Works with what you run
 
 Drizzle, Kysely and `@libsql/client` connect over Hrana. Backups go to S3, R2 or Tigris. Sinks write to webhooks and ClickHouse, and `bql deploy` targets Fly, Vercel and Cloudflare.
+
+## Guides
+
+- [Exactly-once in the bus](https://github.com/TimMikeladze/bql/blob/main/packages/bus/docs/exactly-once.md): What each of the three tiers guarantees and what it costs.
+- [Promotion and failover](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/c2-promotion.md): How leases and epochs keep two primaries from writing.
+- [WAL shipping](https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/m3-wal.md): The record a replica verifies before it applies a page.
 
 Reference: https://bql.sh/reference · Repository: https://github.com/TimMikeladze/bql

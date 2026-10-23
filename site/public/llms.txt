@@ -103,6 +103,34 @@ bql deploy status
 | Cloudflare | Worker + named Bun container | Private R2 bucket | `wnam` bucket location hint | Experimental object mode |
 | Fly | Bun machine | Encrypted persistent volume at `/data` | `sjc` | Persistent-disk server |
 
+## Live queries
+
+`db.live` runs a query and sends the `added`, `removed` and `updated` rows whenever a commit changes its result. `/changes` streams every commit as SSE. Both run off SQLite's `preupdate` hook, so there are no triggers to install.
+
+```ts
+import { createClient } from "bql.sh/client"
+
+const db = createClient({ url: "http://localhost:4321", token }).db("acme")
+
+await db.sql`insert into todos(title) values (${"write it"})`.run()
+const live = db.live`select * from todos where done = 0`.key("id")
+live.on("diff", (e) => patch(e.added, e.removed, e.updated))
+```
+
+```sh
+TOKEN=$(curl -sX POST localhost:4321/v1/tokens -H "authorization: Bearer $KEY" \
+        -H 'content-type: application/json' \
+        -d '{"dbs":["acme"],"scope":"ro","ttl":86400}' | jq -r .token)
+
+curl -N "localhost:4321/v1/db/acme/changes?include=row&token=$TOKEN"
+# retry: 1000
+# : open
+#
+# id: 3
+# event: change
+# data: {"txid":3,"changes":[{"table":"todos","op":"insert","rowid":2,"pk":{"id":2},"row":{…}}]}
+```
+
 ## Replicas
 
 Start a second server with `--replica-of`. It follows every database on the primary, serves reads locally and forwards writes, answering with the primary's txid.

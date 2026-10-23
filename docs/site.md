@@ -27,27 +27,27 @@ The page was rebuilt around what a new reader has to do, in the order they do it
 - Copy rules: one fact per sentence, the option in inline code, no em dashes, no slogans, no
   bold-led bullet lists, no decorative numbering.
 
-## Layout (2026-10-23, third pass, after resend.com)
+## Layout (2026-10-23, second pass)
 
-- **Black page, space between sections.** No bands. Sections are separated by padding; the paper
-  token went from 12.5% to 9% lightness.
-- **Hero.** Copy on the left (a version badge, a serif H1, the lede, a solid-outline Get started
-  pill beside a plain Documentation link, the humans/agents install switch), an SVG object on the
-  right: three dark database platters with a perforated top and a cyan rim light. A soft glow sits
-  behind it. The header centres its links and ends in a Get started pill.
-- **Section heads** are large sans with a muted tail (`SQLite, plus the server` / `it never had`).
-  Centred heads get a glossy glyph tile above them.
-- **Overview grid.** Nine features as glyph, title, two lines.
-- **Live query panel.** One window: `client.ts` with line numbers on the left, the captured diffs
-  drawn as an event timeline on the right (`added`/`removed` tags, the row as key/value chips),
-  parsed from the README run, plus the query text pulled out of the code.
-- **Code tabs.** An icon row (Client, Embedded, libsql, Drizzle, Kysely, Driver) over one
-  line-numbered window with a footer.
-- **Feature cards.** Database and bus capabilities are two-up cards: the artefact on top, then the
-  glyph, title, explanation and a Reference link. An odd last card spans both columns.
-- **Closing.** A serif "Start a server in one command", the two actions, the command, and a giant
-  faded `bql.sh` wordmark above the footer.
-- Code never clips: frames wrap and grow.
+- **Notebook cells.** Code and the run that executed it are one frame: the file, then an Output
+  strip with the captured lines. Used in the hero and in Getting started.
+- **Getting started is a stepper.** An ordered list; the step's text stays sticky on the left while
+  its cell scrolls on the right. Numbers appear only here, because the order matters.
+- **Database and bus are explorers.** A feature list on the left, one panel on the right. Links
+  target panels by id and CSS shows the targeted one (the first by default), so every feature is
+  deep-linkable with no script. Without `:has()` or without CSS every panel shows in order. On a
+  phone the list becomes a row of chips above the panel.
+- Sections alternate paper and band backgrounds, so no two banded sections touch.
+
+## Colour (2026-10-23)
+
+A per-area rainbow was tried and read as childish; it was replaced the same day. The page now uses
+neutrals with a faint cool cast (`0.004`-`0.012` chroma at hue 265) and **one** accent, a cyan
+(`--accent`, `--accent-soft`), used sparingly: the product mark, step numbers, the selected tab's
+pager dot, the comparison's bql.sh column and the audience-switch underline. Depth comes from a soft
+radial glow and a masked 64px grid behind the hero (`.hero-wrap`, clipped so nothing overflows),
+a headline that fades slightly toward its second line, and a hairline inner highlight on frames.
+Syntax colours are low chroma. Brand marks are muted and take their own colour on hover.
 
 ## What ships
 

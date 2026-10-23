@@ -3,7 +3,7 @@
 // markup, styles, icons and the two small scripts do.
 
 import { site, type Capability, type Chapter, type Demo, type Frame, type IconName } from "./content.ts"
-import { brand, brandTone, faviconSvg, glyph, heroObject, productMark } from "./icons.ts"
+import { brand, brandTone, faviconSvg, glyph, productMark } from "./icons.ts"
 import { esc, highlight, inline, renderDoc, renderTable, slug, type LinkContext } from "./markdown.ts"
 import {
   DOCS, resolveSnippet, resolveTable, resolveTerminal, source, version,
@@ -76,7 +76,8 @@ export function resolveModel(p: Parsed = source()) {
     compare: resolveTable(site.compare.table.header, site.compare.table.where, p),
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
     capabilities: site.capabilities.map((c) => ({ cap: c as Capability, demo: resolveDemo(c.demo, p) })),
-    cta: resolveTerminal(site.cta.cmd, site.cta.where, p),
+    buildToday: resolveTerminal(site.buildToday.cmd, site.buildToday.where, p),
+    guides: site.guides.map((g) => ({ ...g, block: resolveSnippet(g.line, g.where, p) })),
     version: version(),
   }
 }
@@ -103,7 +104,7 @@ export function linkContext(docPath?: string, forReference = false): LinkContext
 // ---- styles -------------------------------------------------------------------------------
 
 export const TOKENS_DARK = {
-  paper: 9, band: 12, raise: 15.5, ink: 98.5, body: 78, soft: 60,
+  paper: 12.5, band: 15.5, raise: 18.5, ink: 98.5, body: 78, soft: 60,
 }
 export const TOKENS_LIGHT = {
   paper: 99, band: 97, raise: 100, ink: 14.5, body: 38, soft: 48,
@@ -137,7 +138,6 @@ export const CSS = `
   --t-f: oklch(84% 0.07 225); --t-t: oklch(86% 0.07 85); --t-p: oklch(80% 0.06 205);
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "New York", ui-serif, Georgia, serif;
 }
 :root[data-theme="light"] { ${LIGHT_VARS} }
 @media (prefers-color-scheme: light) {
@@ -163,15 +163,14 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 
 /* header */
 .site-header { position: sticky; top: 0; z-index: 5; min-height: 3.75rem; display: flex; align-items: center;
-  background: color-mix(in oklab, var(--paper) 72%, transparent); backdrop-filter: blur(14px) saturate(1.4); -webkit-backdrop-filter: blur(14px) saturate(1.4);
-  border-bottom: 1px solid var(--line-soft); }
-.site-header .shell { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1.5rem; }
-.header-cta { padding: .45rem .95rem; font-size: .85rem; }
+  background: color-mix(in oklab, var(--paper) 82%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line); }
+.site-header .shell { display: flex; align-items: center; gap: 1.5rem; }
 .wordmark { font-weight: 700; font-size: 1.05rem; color: var(--ink); text-decoration: none; letter-spacing: -.01em; }
 .nav { display: flex; gap: 1.1rem; }
 .nav a { font-size: .875rem; color: var(--soft); text-decoration: none; transition: color .14s ease; }
 .nav a:hover, .nav a[aria-current="page"] { color: var(--ink); }
-.icons { justify-self: end; display: flex; align-items: center; gap: .75rem; }
+.icons { margin-left: auto; display: flex; align-items: center; gap: .75rem; }
 .icons a, .icon-btn { color: var(--soft); display: inline-flex; padding: .25rem; transition: color .14s ease; }
 .icons a:hover, .icon-btn:hover { color: var(--ink); }
 .icon-btn { background: none; border: 1px solid var(--line); border-radius: .6rem; padding: .4rem; cursor: pointer; }
@@ -179,212 +178,197 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 :root:not([data-pref]) .theme-toggle .g-system, :root[data-pref="system"] .theme-toggle .g-system,
 :root[data-pref="dark"] .theme-toggle .g-dark, :root[data-pref="light"] .theme-toggle .g-light { display: block; }
 
-/* hero: copy on the left, the object on the right, a cool glow behind both */
-.hero-wrap { position: relative; isolation: isolate; overflow: clip; }
-.hero-wrap::before { content: ""; position: absolute; z-index: -1; inset: 0; pointer-events: none;
-  background: radial-gradient(40% 55% at 72% 38%, var(--glow), transparent 70%), radial-gradient(60% 50% at 20% 0%, oklch(100% 0 0 / .035), transparent 70%); }
-.hero { padding-block: clamp(4rem, 9vw, 7.5rem) clamp(3rem, 6vw, 5rem); }
-.hero-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 3rem; align-items: center; }
-.badge { display: inline-flex; align-items: center; gap: .45rem; padding: .32rem .8rem; border-radius: 999px; font-size: .82rem; color: var(--ink); text-decoration: none;
-  background: var(--raise); border: 1px solid var(--line); transition: border-color .14s ease; }
-.badge:hover { border-color: color-mix(in oklab, var(--accent) 50%, transparent); }
-.badge span { color: var(--soft); }
-.hero h1 { margin-top: 1.6rem; font: 400 clamp(3rem, 6vw, 5rem)/1.02 var(--serif); letter-spacing: -.025em; max-width: 17ch; text-wrap: balance;
-  background: linear-gradient(180deg, var(--ink) 40%, color-mix(in oklab, var(--ink) 72%, var(--paper))); -webkit-background-clip: text; background-clip: text; color: transparent; padding-bottom: .08em; }
-.lede { margin-top: 1.4rem; font-size: clamp(1.02rem, 1.4vw, 1.15rem); line-height: 1.65; max-width: 54ch; color: var(--body); }
-.acts { margin-top: 2rem; display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
-.btn { display: inline-flex; align-items: center; gap: .5rem; padding: .7rem 1.25rem; border-radius: 999px; font: 550 .95rem/1 var(--sans); color: var(--ink); text-decoration: none;
-  background: linear-gradient(180deg, color-mix(in oklab, var(--raise), var(--ink) 8%), var(--raise)); border: 1px solid var(--line);
-  box-shadow: inset 0 1px 0 oklch(100% 0 0 / .08); transition: border-color .14s ease; }
-.btn:hover { border-color: color-mix(in oklab, var(--ink) 30%, transparent); }
-.btn-ghost { padding: .7rem 1rem; font: 500 .95rem/1 var(--sans); color: var(--body); text-decoration: none; transition: color .14s ease; }
-.btn-ghost:hover { color: var(--ink); }
-.aud { margin-top: 2.2rem; display: flex; flex-direction: column; align-items: flex-start; }
+/* hero */
+.hero { padding-top: clamp(5rem, 12vw, 9rem); text-align: center; }
+.hero > * { margin-inline: auto; }
+.mark { display: inline-grid; place-items: center; background: var(--raise); border: 1px solid var(--line); border-radius: .8rem; color: var(--ink); }
+.hero h1 { margin-top: 1.6rem; font-size: clamp(2.8rem, 7vw, 5.2rem); font-weight: 680; letter-spacing: -.045em; line-height: 1; max-width: 18ch; text-wrap: balance; }
+.lede { margin-top: 1.4rem; font-size: clamp(1.05rem, 1.7vw, 1.3rem); line-height: 1.6; max-width: 62ch; color: var(--body); }
+.aud { margin-top: 2.2rem; display: flex; flex-direction: column; align-items: center; }
 .aud > input { position: absolute; opacity: 0; pointer-events: none; }
 .aud-tabs { display: flex; font-size: .8rem; }
 .aud-tabs label { cursor: pointer; color: var(--soft); padding: 0 .8rem; transition: color .14s ease; }
-.aud-tabs label:first-child { padding-left: 0; }
 .aud-tabs label + label { border-left: 1px solid var(--line); }
 #aud-h:checked ~ .aud-tabs label[for="aud-h"], #aud-a:checked ~ .aud-tabs label[for="aud-a"] { color: var(--ink); }
 #aud-h:focus-visible ~ .aud-tabs label[for="aud-h"], #aud-a:focus-visible ~ .aud-tabs label[for="aud-a"] { outline: 2px solid var(--accent); outline-offset: 3px; }
-.aud-panel { display: none; margin-top: .8rem; flex-direction: column; align-items: flex-start; gap: .7rem; max-width: 100%; }
+.aud-panel { display: none; margin-top: .9rem; flex-direction: column; align-items: center; gap: .7rem; max-width: 100%; }
 #aud-h:checked ~ .p-h, #aud-a:checked ~ .p-a { display: flex; }
-.pill { display: inline-flex; align-items: center; gap: .6rem; max-width: 100%; border-radius: 999px; background: var(--band); border: 1px solid var(--line); padding: .5rem .55rem .5rem 1.05rem; color: var(--ink); }
-.pill .prompt { color: var(--accent); font: .88rem/1.3 var(--mono); }
-.pill code { font: .88rem/1.3 var(--mono); background: none; padding: 0; overflow-wrap: anywhere; text-align: left; }
+.pill { display: inline-flex; align-items: center; gap: .6rem; max-width: 100%; border-radius: 999px; background: var(--raise); border: 1px solid var(--line); padding: .55rem .6rem .55rem 1.1rem; color: var(--ink); }
+.pill .prompt { color: var(--soft); font: .9rem/1.3 var(--mono); }
+.pill code { font: .9rem/1.3 var(--mono); background: none; padding: 0; overflow-wrap: anywhere; text-align: left; }
 .copy { background: none; border: 0; color: var(--soft); cursor: pointer; padding: .3rem; border-radius: 999px; display: inline-flex; transition: color .14s ease; }
 .copy:hover { color: var(--ink); }
-.agent-links { display: flex; flex-wrap: wrap; gap: .3rem 1.1rem; font-size: .85rem; }
+.agent-links { display: flex; flex-wrap: wrap; justify-content: center; gap: .3rem 1.1rem; font-size: .85rem; }
 .agent-links a, .agent-links button { color: var(--soft); background: none; border: 0; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: .18em; text-decoration-color: var(--line); padding: 0; }
 .agent-links a:hover, .agent-links button:hover { color: var(--ink); }
-.version { margin-top: 1rem; font-size: .8rem; color: var(--soft); font-family: var(--mono); }
-.hero-art { display: grid; place-items: center; }
-.hero-object { width: min(100%, 26rem); height: auto; filter: drop-shadow(0 40px 60px oklch(0% 0 0 / .5)); }
-.mark { display: inline-grid; place-items: center; background: var(--raise); border: 1px solid var(--line); border-radius: .8rem; color: var(--accent); }
+.version { margin-top: 1.1rem; font-size: .85rem; color: var(--soft); }
+.version a { color: var(--body); text-underline-offset: .18em; text-decoration-color: var(--line); }
 
-/* sections: space separates them, not bands */
-.section { padding-block: clamp(4.5rem, 9vw, 8rem); scroll-margin-top: 4rem; }
-.shead { max-width: 46rem; }
-.shead.centre { margin-inline: auto; text-align: center; max-width: 54rem; }
-.shead h2 { font: 500 clamp(2.1rem, 4.6vw, 3.4rem)/1.08 var(--sans); letter-spacing: -.04em; color: var(--ink); }
-.shead h2 .mute { color: var(--soft); }
-.shead .explain { margin-top: 1rem; font-size: 1.05rem; color: var(--body); max-width: 58ch; }
-.shead.centre .explain { margin-inline: auto; }
-.explain a { color: var(--ink); text-decoration: underline; text-underline-offset: .18em; text-decoration-color: var(--line); }
-.explain a:hover { text-decoration-color: var(--accent); }
+/* frames */
+.frame { border: 1px solid var(--line); border-radius: .7rem; overflow: hidden; background: var(--paper); min-width: 0; }
+.bar { display: flex; align-items: center; gap: .6rem; background: var(--band); border-bottom: 1px solid var(--line); padding: .55rem .8rem; font: .8rem/1.3 var(--mono); color: var(--soft); min-width: 0; }
+.bar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--body); }
+.dots { display: flex; gap: .35rem; flex: none; }
+.dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--raise); border: 1px solid var(--line); }
+.chip { margin-left: auto; flex: none; font: .7rem/1 var(--mono); color: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .5rem; }
+.frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.6 var(--mono); color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); font-style: italic; } .t-n { color: var(--t-n); }
+.t-f { color: var(--t-f); } .t-t { color: var(--t-t); } .t-p { color: var(--t-p); }
+
+/* depth: a quiet glow behind the hero, hairline highlights on raised surfaces */
+.hero-wrap { position: relative; isolation: isolate; overflow: clip; }
+.hero-wrap::before { content: ""; position: absolute; z-index: -1; inset: 0 0 auto; height: 44rem; pointer-events: none;
+  background: radial-gradient(42% 60% at 50% 0%, var(--glow), transparent 72%); }
+.hero-wrap::after { content: ""; position: absolute; z-index: -1; inset: 0 0 auto; height: 34rem; pointer-events: none;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 64px 64px; background-position: center top;
+  -webkit-mask-image: radial-gradient(48% 70% at 50% 0%, #000, transparent 80%); mask-image: radial-gradient(48% 70% at 50% 0%, #000, transparent 80%); }
+.hero h1 { background: linear-gradient(180deg, var(--ink) 45%, color-mix(in oklab, var(--ink) 86%, var(--paper))); -webkit-background-clip: text; background-clip: text; color: transparent; padding-bottom: .06em; }
+.mark { color: var(--accent); }
+.frame { box-shadow: inset 0 1px 0 oklch(100% 0 0 / .04); }
+.hero-cell .frame { border-color: color-mix(in oklab, var(--line) 100%, var(--accent) 18%); }
+.principles > div { padding: 1.5rem; border-radius: .9rem; background: var(--raise); border: 1px solid var(--line-soft); }
+.principles h3 { font-size: 1.05rem; font-weight: 600; }
+.principles p { color: var(--body); font-size: .95rem; }
+.step-n { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.cell .run-bar { color: var(--soft); }
+.prompt-line::before { content: "$ "; color: var(--soft); }
+.out-line { color: var(--ink); }
+.cont-line::before { content: "  "; }
+
+/* a notebook cell: code, then the run that executed it */
+.cell .run { border-top: 1px solid var(--line); background: var(--band); }
+.cell .run-bar { display: flex; align-items: center; gap: .6rem; padding: .5rem 1.1rem 0; font: .72rem/1.3 var(--mono); color: var(--soft); text-transform: uppercase; letter-spacing: .08em; }
+.cell .run pre { padding-top: .5rem; }
+.hero-cell { max-width: 880px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; text-align: left; }
+.hero-cell .frame > pre { max-height: none; }
+
+/* comparison: rows are prose, the last column is the product */
+.compare table { font-size: .92rem; }
+.compare th:not(:first-child), .compare td:not(:first-child) { width: 27%; }
+.compare tbody th { text-align: left; font: 500 .92rem/1.5 var(--sans); color: var(--body); text-transform: none; letter-spacing: 0; padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.compare td:first-of-type { font-family: var(--sans); font-size: .92rem; color: var(--body); }
+.compare td:last-child, .compare th:last-child { color: var(--ink); background: var(--accent-soft); }
+.compare th:last-child { font-weight: 700; color: var(--accent); border-radius: .5rem .5rem 0 0; }
+.compare td, .compare thead th { padding-inline: .8rem; }
+.compare .yes { color: var(--ink); font-weight: 600; }
+.compare .no { color: var(--soft); }
+
+/* getting started */
+.sec-intro { max-width: 46rem; }
+.sec-intro h2 { font-size: clamp(1.8rem, 3.6vw, 2.6rem); letter-spacing: -.035em; line-height: 1.1; }
+.sec-intro .explain { margin-top: .8rem; font-size: 1.05rem; }
+.steps { list-style: none; margin: 3rem 0 0; padding: 0; counter-reset: step; }
+.step { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 2.5rem; padding-block: 2.5rem; border-top: 1px solid var(--line-soft); scroll-margin-top: 4.5rem; }
+.step-text { position: sticky; top: 5.5rem; align-self: start; }
+.step-n { display: inline-grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: 999px; border: 1px solid var(--line); background: var(--raise); font: 600 .8rem/1 var(--mono); color: var(--ink); }
+.step h3 { margin-top: .9rem; font-size: 1.3rem; letter-spacing: -.02em; }
+.step .explain { margin-top: .5rem; }
+.step-demo { min-width: 0; }
+
+/* feature explorers */
+.explorer { margin-top: 2.5rem; display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 2.5rem; }
+.ex-nav { position: sticky; top: 5rem; align-self: start; display: flex; flex-direction: column; gap: .15rem; }
+.ex-nav a { padding: .5rem .75rem; border-radius: .5rem; color: var(--soft); text-decoration: none; font-size: .92rem; border: 1px solid transparent; transition: color .14s ease, background .14s ease; }
+.ex-nav a:hover { color: var(--ink); }
+.panel h3 { color: var(--ink); }
+.panel { min-width: 0; scroll-margin-top: 5rem; }
+.panel h3 { font-size: 1.45rem; letter-spacing: -.025em; }
+.panel .explain { margin-top: .6rem; }
+.panel .pair { grid-template-columns: minmax(0, 1fr); }
+.panel .variants { grid-template-columns: minmax(0, 1fr); }
+@supports selector(:has(*)) {
+  .panel { display: none; }
+  .panel:target, .explorer:not(:has(.panel:target)) .panel:first-child { display: block; }
+  .explorer:not(:has(.panel:target)) .ex-nav a:first-child { color: var(--ink); background: var(--raise); border-color: var(--line); }
+}
+
+/* sections */
+.section { padding-block: clamp(3.5rem, 7vw, 6rem); scroll-margin-top: 4.5rem; }
+.section.band { background: var(--band); }
+.section h2 { font-size: clamp(1.35rem, 2.4vw, 1.7rem); font-weight: 650; line-height: 1.2; letter-spacing: -.02em; }
+.explain { margin-top: .6rem; max-width: 68ch; }
 .demo { margin-top: 1.6rem; }
+.sec-head { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: .6rem 2.5rem; align-items: baseline; }
+.sec-head .explain { margin-top: 0; max-width: 60ch; }
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
+.pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
+.pair > .frame { display: flex; flex-direction: column; }
+.pair > .frame pre { flex: 1; }
+.centre { text-align: center; }
+.centre .explain, .centre h2 { margin-inline: auto; }
 
-/* the glossy tile above a centred head */
-.tile { width: 5.5rem; height: 5.5rem; margin: 0 auto 2.2rem; display: grid; place-items: center; border-radius: 1.4rem; color: var(--ink); position: relative;
-  background: radial-gradient(120% 90% at 30% 10%, oklch(100% 0 0 / .14), transparent 55%), linear-gradient(160deg, color-mix(in oklab, var(--raise), var(--ink) 10%), var(--paper));
-  border: 1px solid var(--line); box-shadow: inset 0 1px 0 oklch(100% 0 0 / .12), 0 24px 40px -12px oklch(0% 0 0 / .6); }
-.tile::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); filter: blur(1px); opacity: .9; }
-.tile::before { content: ""; position: absolute; inset: auto 10% -18px; height: 26px; background: var(--glow); filter: blur(14px); z-index: -1; }
 
-/* logos strip */
-.logos { padding-block: 2rem 4rem; text-align: center; }
-.logos-h { font: 500 1.05rem/1.4 var(--sans); color: var(--body); letter-spacing: 0; }
-.logos-p { margin: .4rem auto 0; max-width: 58ch; color: var(--soft); font-size: .92rem; }
-.marks { margin-top: 2.2rem; display: flex; flex-wrap: wrap; justify-content: center; gap: 2.4rem; }
+.eco h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.04em; }
+.eco .explain { color: var(--soft); max-width: 60ch; }
+.marks { margin-top: 2.4rem; display: flex; flex-wrap: wrap; justify-content: center; gap: 2.5rem; }
+/* brand marks are muted until hovered, then take their own colour (ink when it would not read) */
 .marks a { color: var(--soft); transition: color .14s ease; }
 .marks a:hover { color: var(--brand); }
 :root:not([data-theme="light"]) .marks a.tone-dark:hover { color: var(--ink); }
 :root[data-theme="light"] .marks a.tone-light:hover { color: var(--ink); }
 
-/* overview: icon, title, two lines */
-.grid9 { margin-top: 4rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3.2rem 3rem; }
-.gi .glyph { color: var(--ink); }
-.gi h3 { margin-top: .9rem; font: 500 1.15rem/1.3 var(--sans); letter-spacing: -.01em; }
-.gi p { margin-top: .5rem; color: var(--soft); font-size: .95rem; line-height: 1.6; }
+.why .centre .explain { color: var(--body); }
+.principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem; }
+.why .principles { margin-top: 3rem; }
+.principles h3 { font-size: 1.25rem; font-weight: 500; }
+.principles p { margin-top: .5rem; color: var(--soft); max-width: 34ch; }
 
-/* windows: product chrome around real code */
-.window { border: 1px solid var(--line); border-radius: 1.1rem; overflow: hidden; background: linear-gradient(180deg, color-mix(in oklab, var(--band), var(--ink) 2%), var(--paper));
-  box-shadow: inset 0 1px 0 oklch(100% 0 0 / .05); }
-.win-bar { display: flex; align-items: center; gap: .7rem; padding: .7rem 1rem; border-bottom: 1px solid var(--line-soft); font: .8rem/1 var(--mono); color: var(--soft); }
-.win-bar .copy { margin-left: auto; }
-.win-title, .win-file { color: var(--body); display: inline-flex; align-items: center; gap: .45rem; }
-.win-body { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
-.win-foot { display: flex; gap: 1.4rem; padding: .9rem 1.2rem; border-top: 1px solid var(--line-soft); font-size: .8rem; }
-.win-foot a { display: inline-flex; align-items: center; gap: .4rem; color: var(--soft); text-decoration: none; }
-.win-foot a:hover { color: var(--ink); }
-#live .window { margin-top: 3.5rem; }
+.showcase > *, .guides > *, .principles > * { min-width: 0; }
+.showcase { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3rem; align-items: start; }
+.showcase h2 { font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.03em; }
+.control { display: inline-flex; align-items: center; gap: .5rem; padding: .62rem .85rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--raise); color: var(--ink); font: 500 .9rem/1.15 var(--sans); text-decoration: none; transition: background .14s ease, border-color .14s ease; }
+.control:hover { background: color-mix(in oklab, var(--raise) 80%, var(--ink) 4%); }
+.control code { font: .88rem/1.3 var(--mono); background: none; padding: 0; overflow-wrap: anywhere; }
+.control--solid { background: var(--ink); color: var(--paper); border-color: transparent; font-weight: 550; }
+.control--solid:hover { background: color-mix(in oklab, var(--ink) 88%, var(--paper)); }
+.round { border-radius: 999px; }
+.showcase .control { margin-top: 1.6rem; }
+.supports { margin-top: 2rem; font-size: .8rem; color: var(--soft); }
+.avatars { display: flex; align-items: center; margin-top: .6rem; padding-left: .6rem; }
+.avatars span { width: 40px; height: 40px; border-radius: 50%; background: var(--raise); box-shadow: 0 0 0 2px var(--paper); display: grid; place-items: center; margin-left: -.6rem; color: var(--ink); }
+.avatars em { font-style: normal; margin-left: .7rem; color: var(--soft); font-size: .85rem; }
+.tabs > input { position: absolute; opacity: 0; pointer-events: none; }
+.tabrow { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .8rem; }
+.tabrow label { cursor: pointer; font-size: .85rem; color: var(--soft); padding: .35rem .75rem; border-radius: .5rem; transition: color .14s ease; }
+.tabpanel { display: none; }
+.tabpanel .bar .label { margin-inline: auto; }
 
-pre.code-n { margin: 0; padding: 1.1rem 1.2rem 1.2rem .4rem; font: .8rem/1.75 var(--mono); color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
-.code-n .ln { display: grid; grid-template-columns: 2.6rem minmax(0, 1fr); }
-.code-n .n { color: color-mix(in oklab, var(--soft) 60%, transparent); text-align: right; padding-right: 1.1rem; user-select: none; }
+.pager { display: flex; gap: .4rem; justify-content: center; margin-top: .8rem; }
+.pager i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
 
-.live { border-left: 1px solid var(--line-soft); padding: 1.2rem 1.3rem; background: color-mix(in oklab, var(--band) 75%, transparent); display: flex; flex-direction: column; gap: .9rem; min-width: 0; }
-.live-h { display: flex; align-items: center; gap: .5rem; font: 500 .75rem/1 var(--sans); text-transform: uppercase; letter-spacing: .1em; color: var(--soft); }
-.live-h .glyph { color: var(--accent); }
-.live-sql { display: block; font: .78rem/1.5 var(--mono); padding: .6rem .75rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--band); color: var(--body); white-space: pre-wrap; }
-.events { list-style: none; margin: .2rem 0 0; padding: 0; display: flex; flex-direction: column; }
-.ev { display: grid; grid-template-columns: 1.4rem minmax(0, 1fr); gap: .6rem; padding-bottom: 1.1rem; position: relative; }
-.ev::before { content: ""; position: absolute; left: .45rem; top: 1.2rem; bottom: 0; width: 1px; background: var(--line); }
-.ev:last-child::before { display: none; }
-.ev-dot { width: .9rem; height: .9rem; margin-top: .2rem; border-radius: 50%; border: 1px solid var(--line); background: var(--raise); position: relative; }
-.ev-dot::after { content: ""; position: absolute; inset: .22rem; border-radius: 50%; }
-.ev-dot.added::after { background: var(--add); } .ev-dot.removed::after { background: var(--del); }
-.ev-top { display: flex; align-items: center; gap: .6rem; }
-.tag { font: 500 .72rem/1 var(--mono); padding: .3rem .5rem; border-radius: .4rem; }
-.tag.added { color: var(--add); background: color-mix(in oklab, var(--add) 14%, transparent); }
-.tag.removed { color: var(--del); background: color-mix(in oklab, var(--del) 14%, transparent); }
-.ev-n { font: .72rem/1 var(--mono); color: var(--soft); }
-.ev-row { margin-top: .55rem; display: flex; flex-wrap: wrap; gap: .35rem; }
-.chip-kv { font: .76rem/1 var(--mono); color: var(--ink); padding: .38rem .5rem; border-radius: .45rem; border: 1px solid var(--line); background: var(--band); }
-.chip-kv i { font-style: normal; color: var(--soft); margin-right: .4rem; }
-.live-cap { margin-top: auto; font-size: .75rem; color: var(--soft); }
-.live-cap code { font-size: .72rem; background: none; padding: 0; color: var(--soft); }
-
-/* frames inside steps and cards */
-.frame { border: 1px solid var(--line); border-radius: .8rem; overflow: hidden; background: var(--paper); min-width: 0; box-shadow: inset 0 1px 0 oklch(100% 0 0 / .04); }
-.bar { display: flex; align-items: center; gap: .6rem; background: var(--band); border-bottom: 1px solid var(--line-soft); padding: .55rem .85rem; font: .78rem/1.3 var(--mono); color: var(--soft); min-width: 0; }
-.bar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--body); }
-.dots { display: flex; gap: .35rem; flex: none; }
-.dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--raise); border: 1px solid var(--line); }
-.chip { margin-left: auto; flex: none; font: .68rem/1 var(--mono); color: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .5rem; }
-.frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.7 var(--mono); color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
-.t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); font-style: italic; } .t-n { color: var(--t-n); }
-.t-f { color: var(--t-f); } .t-t { color: var(--t-t); } .t-p { color: var(--t-p); }
-.prompt-line::before { content: "$ "; color: var(--accent); }
-.out-line { color: var(--ink); }
-.cont-line::before { content: "  "; }
-.cell .run { border-top: 1px solid var(--line-soft); background: var(--band); }
-.cell .run-bar { display: flex; align-items: center; gap: .6rem; padding: .55rem 1.1rem 0; font: .7rem/1.3 var(--mono); color: var(--soft); text-transform: uppercase; letter-spacing: .1em; }
-.cell .run pre { padding-top: .5rem; }
-.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
-.pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
-.pair > .frame { display: flex; flex-direction: column; }
-.pair > .frame pre { flex: 1; }
 .variants { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
 .variants figure { margin: 0; min-width: 0; }
+
 .variants figcaption { margin-top: .5rem; font: .75rem/1.4 var(--mono); color: var(--soft); }
+
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 th { text-align: left; font: .72rem/1.4 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--soft); padding: .6rem .8rem .6rem 0; border-bottom: 1px solid var(--line-soft); }
 td { padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
 td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink); }
+.demo .table-wrap + .table-wrap { margin-top: 2rem; }
 
-/* getting started */
-.steps { list-style: none; margin: 3.5rem 0 0; padding: 0; }
-.step { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 3rem; padding-block: 2.6rem; border-top: 1px solid var(--line-soft); scroll-margin-top: 4.5rem; }
-.step-text { position: sticky; top: 5.5rem; align-self: start; }
-.step-n { display: inline-grid; place-items: center; width: 1.8rem; height: 1.8rem; border-radius: .55rem; font: 600 .8rem/1 var(--mono); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in oklab, var(--accent) 25%, transparent); }
-.step h3 { margin-top: 1rem; font: 500 1.35rem/1.25 var(--sans); letter-spacing: -.02em; }
-.step .explain { margin-top: .55rem; color: var(--soft); font-size: .95rem; }
-.step-demo { min-width: 0; }
 
-/* code tabs: an icon row of labels over one window */
-.tabs { margin-top: 3rem; }
-.tabs > input { position: absolute; opacity: 0; pointer-events: none; }
-.tabrow { display: flex; flex-wrap: wrap; justify-content: center; gap: .9rem; margin-bottom: 2rem; }
-.tabrow label { cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: .6rem; font-size: .85rem; color: var(--soft); transition: color .14s ease; }
-.tab-ico { width: 3.6rem; height: 3.6rem; display: grid; place-items: center; border-radius: 1rem; border: 1px solid var(--line); background: var(--band); transition: border-color .14s ease, background .14s ease; }
-.tabrow label:hover { color: var(--ink); }
-.tabpanel { display: none; max-width: 62rem; margin-inline: auto; }
 
-/* feature cards: the artefact on top, then what it is */
-.cards { margin-top: 3.5rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; }
-.card { border-radius: 1.25rem; border: 1px solid var(--line-soft); background: linear-gradient(180deg, oklch(100% 0 0 / .025), transparent 40%); box-shadow: inset 0 1px 0 oklch(100% 0 0 / .06);
-  display: flex; flex-direction: column; min-width: 0; scroll-margin-top: 5rem; }
-.card.wide { grid-column: 1 / -1; }
-.card-art { padding: 1.4rem 1.4rem 0; min-width: 0; display: flex; flex-direction: column; gap: .9rem; }
-.card-art .frame { border-color: var(--line-soft); background: var(--paper); box-shadow: none; }
-.card-art .bar { background: var(--band); }
-.card-art .table-wrap { padding: .2rem .4rem; }
-.card-art .pair { grid-template-columns: minmax(0, 1fr); }
-.card.wide .card-art .pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.card-art .variants { grid-template-columns: minmax(0, 1fr); }
-.card-body { padding: 1.6rem 2rem 2rem; margin-top: auto; }
-.card-body .glyph { color: var(--ink); }
-.card-body h3 { margin-top: .9rem; font: 500 1.3rem/1.25 var(--sans); letter-spacing: -.02em; }
-.card-body .explain { margin-top: .55rem; color: var(--soft); font-size: .95rem; max-width: 56ch; }
-.more { margin-top: 1.1rem; display: inline-flex; align-items: center; gap: .4rem; font-size: .9rem; color: var(--ink); text-decoration: none; }
-.more .glyph { transition: transform .14s ease; }
-.more:hover .glyph { transform: translateX(2px); }
+.today { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1.5rem; }
+.today h2 { font-size: clamp(2rem, 4.5vw, 3rem); letter-spacing: -.04em; max-width: 18ch; line-height: 1.1; }
+.today .acts { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; }
+.outline { display: inline-flex; align-items: center; gap: .5rem; border: 1px solid var(--line); border-radius: 999px; padding: .5rem .5rem .5rem 1rem; color: var(--ink); max-width: 100%; }
+.outline code { background: none; padding: 0; font: .88rem/1.3 var(--mono); }
+.outline .prompt { color: var(--soft); font: .88rem var(--mono); }
 
-/* comparison: rows are prose, the last column is the product */
-.compare { margin-top: 3rem; }
-.compare table { font-size: .92rem; }
-.compare th:not(:first-child), .compare td:not(:first-child) { width: 27%; }
-.compare tbody th { text-align: left; font: 500 .92rem/1.5 var(--sans); color: var(--body); text-transform: none; letter-spacing: 0; padding: .8rem .8rem .8rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
-.compare td, .compare thead th { padding-inline: .9rem; }
-.compare td { font-family: var(--sans); font-size: .92rem; color: var(--body); }
-.compare td:last-child, .compare th:last-child { color: var(--ink); background: color-mix(in oklab, var(--accent) 6%, transparent); }
-.compare th:last-child { color: var(--accent); border-radius: .6rem .6rem 0 0; }
-.compare .yes { color: var(--ink); font-weight: 600; }
-.compare .no { color: var(--soft); }
+.guides { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; }
+.guide { display: block; border: 1px solid var(--line); border-radius: .5rem; background: var(--band); overflow: hidden; text-decoration: none; height: 19rem; position: relative; transition: border-color .14s ease; }
+.guide:hover { border-color: color-mix(in oklab, var(--ink) 25%, transparent); }
+.guide .gt { display: block; padding: 1.2rem 1.2rem 0; font-size: 1rem; color: var(--ink); font-weight: 550; }
+.guide .gb { display: block; padding: .3rem 1.2rem 0; font-size: .88rem; color: var(--soft); }
+.guide .tilt { position: absolute; left: 1.2rem; top: 7.5rem; width: 130%; transform: rotate(-3deg) translate(1rem, .5rem); border: 1px solid var(--line); border-radius: .6rem; background: var(--paper); overflow: hidden; }
+.guide .tilt pre { margin: 0; padding: .9rem 1rem; font: .75rem/1.6 var(--mono); white-space: pre; color: var(--body); height: 14rem; }
 
-/* the closing call: serif head, actions, the command, then a giant faded wordmark */
-.cta { text-align: center; padding-bottom: 0; overflow: clip; }
-.cta h2 { font: 400 clamp(2.6rem, 6vw, 4.6rem)/1.02 var(--serif); letter-spacing: -.025em; color: var(--ink); }
-.cta h2 .mute { color: var(--soft); }
-.cta .acts { justify-content: center; }
-.cta .pill { margin-top: 1.4rem; }
-.wordmark-xl { margin-top: 4rem; font: 800 clamp(7rem, 26vw, 22rem)/.78 var(--sans); letter-spacing: -.07em; text-align: center; color: transparent; user-select: none;
-  background: linear-gradient(180deg, color-mix(in oklab, var(--ink) 9%, transparent), transparent 85%); -webkit-background-clip: text; background-clip: text; }
 
 /* footer */
-.site-footer { border-top: 1px solid var(--line-soft); padding-block: 4rem 2rem; font-size: .875rem; }
+.site-footer { border-top: 1px solid var(--line); padding-block: 4rem 2rem; font-size: .875rem; }
 .credit { color: var(--soft); max-width: 60ch; }
 .cols { margin-top: 3rem; display: grid; grid-template-columns: repeat(6, 1fr); row-gap: 3rem; column-gap: 1.5rem; }
 .cols h3 { font-size: .9rem; font-weight: 500; }
@@ -421,47 +405,46 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 
 @media (max-width: 1000px) {
   .cols { grid-template-columns: repeat(3, 1fr); }
-  .hero-grid { grid-template-columns: minmax(0, 1fr); }
-  .hero-art { order: -1; }
-  .hero-object { width: min(70%, 18rem); }
-  .grid9 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .win-body { grid-template-columns: minmax(0, 1fr); }
-  .live { border-left: 0; border-top: 1px solid var(--line-soft); }
+  .showcase { grid-template-columns: minmax(0, 1fr); }
+  .sec-head { grid-template-columns: minmax(0, 1fr); }
   .step { grid-template-columns: minmax(0, 1fr); gap: 1.2rem; }
   .step-text { position: static; }
-  .cards { grid-template-columns: minmax(0, 1fr); }
-  .card.wide .card-art .pair, .variants { grid-template-columns: minmax(0, 1fr); }
-  .site-header .nav { display: none; }
+  .explorer { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+  .ex-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: .4rem; }
+  .ex-nav a { border-color: var(--line); padding: .35rem .7rem; font-size: .85rem; }
+  .guides, .variants { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
   .shell { width: calc(100% - 2rem); }
-  .hero h1 { font-size: 2.9rem; }
-  .grid9 { grid-template-columns: minmax(0, 1fr); gap: 2.4rem; }
-  .pair { grid-template-columns: minmax(0, 1fr); }
+  .nav { display: none; }
+  .hero h1 { font-size: 2.6rem; }
+  .principles, .pair { grid-template-columns: minmax(0, 1fr); }
   .cols { grid-template-columns: repeat(2, 1fr); }
   .ref { grid-template-columns: minmax(0, 1fr); }
   .toc { position: static; max-height: 18rem; border: 1px solid var(--line); border-radius: .6rem; padding: .5rem 1rem 1rem; }
-  .card-body { padding: 1.4rem 1.4rem 1.6rem; }
-  .card-art { padding: 1rem 1rem 0; }
-  .tab-ico { width: 3rem; height: 3rem; }
-  .tabrow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem .5rem; }
-  .site-header .header-cta { display: none; }
+  .today .acts { width: 100%; }
   .compare thead { display: none; }
   .compare table, .compare tbody, .compare tr, .compare th, .compare td { display: block; width: auto; }
   .compare tr { padding-block: .9rem; border-bottom: 1px solid var(--line-soft); }
   .compare tbody th { border: 0; padding: 0 0 .4rem; color: var(--ink); font-weight: 600; }
-  .compare td, .compare td:not(:first-child) { width: auto; border: 0; padding: .2rem 0; display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .8rem; background: none; }
+  .compare td, .compare td:not(:first-child) { width: auto; border: 0; padding: .2rem 0; display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .8rem; }
   .compare td::before { content: attr(data-label); color: var(--soft); font: .75rem/1.6 var(--mono); }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
-  .more:hover .glyph { transform: none; }
+  .control, .guide:hover { transform: none; }
 }
 `
 
+/** The explorer nav marks the targeted panel's link; one rule per panel. */
+export const EXPLORER_CSS = `@supports selector(:has(*)) {${site.capabilities
+  .filter((c) => c.chapter !== "start")
+  .map((c) => `.explorer:has(#${c.id}:target) .ex-nav a[href="#${c.id}"]{color:var(--ink);background:var(--raise);border-color:var(--line)}`)
+  .join("")}}`
+
 /** Radio-driven tabs need one rule set per tab; generated from the model's tab count. */
 export const TAB_CSS = site.showcase.tabs
-  .map((_, i) => `#tab-${i}:checked ~ .tabrow label[for="tab-${i}"]{color:var(--ink)}#tab-${i}:checked ~ .tabrow label[for="tab-${i}"] .tab-ico{background:var(--raise);border-color:color-mix(in oklab,var(--accent) 45%,transparent);color:var(--accent)}#tab-${i}:checked ~ .p-${i}{display:block}#tab-${i}:focus-visible ~ .tabrow label[for="tab-${i}"] .tab-ico{outline:2px solid var(--accent);outline-offset:3px}`)
+  .map((_, i) => `#tab-${i}:checked ~ .tabrow label[for="tab-${i}"]{background:var(--raise);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}#tab-${i}:checked ~ .p-${i}{display:block}#tab-${i}:focus-visible ~ .tabrow label[for="tab-${i}"]{outline:2px solid var(--accent)}#tab-${i}:checked ~ .pager i:nth-child(${i + 1}){background:var(--accent)}`)
   .join("\n")
 
 // ---- scripts ------------------------------------------------------------------------------
@@ -520,7 +503,7 @@ function header(current: "home" | "reference"): string {
 <header class="site-header"><div class="shell">
 <a class="wordmark" href="/">${esc(site.name)}</a>
 <nav class="nav" aria-label="Site">${nav}</nav>
-<div class="icons">${icons}<button type="button" class="icon-btn theme-toggle" data-theme-cycle aria-label="Theme: system. Click to change">${glyph("monitor").replace('class="glyph"', 'class="glyph g-system"')}${glyph("moon").replace('class="glyph"', 'class="glyph g-dark"')}${glyph("sun").replace('class="glyph"', 'class="glyph g-light"')}</button><a class="btn header-cta" href="/#start">Get started</a></div>
+<div class="icons">${icons}<button type="button" class="icon-btn theme-toggle" data-theme-cycle aria-label="Theme: system. Click to change">${glyph("monitor").replace('class="glyph"', 'class="glyph g-system"')}${glyph("moon").replace('class="glyph"', 'class="glyph g-dark"')}${glyph("sun").replace('class="glyph"', 'class="glyph g-light"')}</button></div>
 </div></header>`
 }
 
@@ -628,7 +611,7 @@ function cellHtml(d: Extract<ResolvedDemo, { kind: "cell" }>): string {
 <div class="run"><div class="run-bar">${glyph("terminal", 13)}<span>Output</span></div><pre><code>${runLines(d.run.code)}</code></pre></div></div>`
 }
 
-function pageHead(opts: { title: string; description: string; path: string; md: string }): string {
+function head(opts: { title: string; description: string; path: string; md: string }): string {
   const u = url(opts.path)
   const og = url("/og.png")
   const ld = {
@@ -671,7 +654,7 @@ function pageHead(opts: { title: string; description: string; path: string; md: 
 <meta name="twitter:image" content="${og}">
 <link rel="icon" href="${favicon}">
 <script>${BOOT}</script>
-<style>${CSS}${TAB_CSS}</style>
+<style>${CSS}${TAB_CSS}${EXPLORER_CSS}</style>
 <script type="application/ld+json">${JSON.stringify(ld).replace(/</g, "\\u003c")}</script>`
 }
 
@@ -691,65 +674,11 @@ ${body}
 
 // ---- landing ------------------------------------------------------------------------------
 
-/** Code with line numbers. Each line is highlighted on its own, so a number always sits beside it. */
-function numbered(code: string, lang: string): string {
-  return code
-    .split("\n")
-    .map((l, i) => `<span class="ln"><span class="n" aria-hidden="true">${i + 1}</span><span class="c">${highlight(l, lang) || " "}</span></span>`)
-    .join("")
-}
-
-/** A section head: the title in ink, its tail muted, then one or two sentences. */
-function head(id: string, title: string, muted: string, body: string, cls = ""): string {
-  return `<div class="shead${cls}"><h2 id="${id}-h">${esc(title)} <span class="mute">${esc(muted)}</span></h2>${body ? `<p class="explain">${inline(body, linkContext())}</p>` : ""}</div>`
-}
-
-/** The live query panel: the code on the left, its captured diffs drawn as an event timeline. */
-function livePanel(d: Extract<ResolvedDemo, { kind: "cell" }>): string {
-  const sql = /db\.live`([^`]*)`/.exec(d.code.code)?.[1] ?? ""
-  const events = d.run.code
-    .split("\n")
-    .filter((l) => /^# diff /.test(l))
-    .map((l) => JSON.parse(l.replace(/^# diff /, "")) as { added: Record<string, unknown>[]; removed: Record<string, unknown>[] })
-  const chips = (row: Record<string, unknown>) =>
-    Object.entries(row).map(([k, v]) => `<span class="chip-kv"><i>${esc(k)}</i>${esc(JSON.stringify(v))}</span>`).join("")
-  const rows = events
-    .flatMap((e, i) => [
-      ...e.added.map((r) => ({ kind: "added", r, i })),
-      ...e.removed.map((r) => ({ kind: "removed", r, i })),
-    ])
-    .map(({ kind, r, i }) => `<li class="ev"><span class="ev-dot ${kind}" aria-hidden="true"></span><div><div class="ev-top"><span class="tag ${kind}">${kind}</span><span class="ev-n">diff ${i + 1}</span></div><div class="ev-row">${chips(r)}</div></div></li>`)
-    .join("")
-  const cmd = d.cmd
-  return `<div class="window">
-<div class="win-bar"><span class="dots"><i></i><i></i><i></i></span><span class="win-title">${esc(d.label)}</span>${copyBtn(d.code.code, d.label)}</div>
-<div class="win-body">
-<pre class="code-n"><code>${numbered(d.code.code, d.code.lang)}</code></pre>
-<aside class="live">
-<p class="live-h">${glyph("activity", 14)}<span>Live query</span></p>
-<code class="live-sql">${esc(sql)}</code>
-<ol class="events">${rows}</ol>
-<p class="live-cap">Captured from <code>${esc(cmd)}</code></p>
-</aside>
-</div>
-</div>`
-}
-
-/** A feature card: its artefact on top, then the glyph, title, explanation and a reference link. */
-function card(cap: Capability, demo: ResolvedDemo, href: string, wide = false): string {
-  return `<article class="card${wide ? " wide" : ""}" id="${cap.id}" aria-labelledby="${cap.id}-h">
-<div class="card-art">${demoHtml(demo)}</div>
-<div class="card-body">${glyph(cap.icon, 20)}<h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p><a class="more" href="${esc(href)}">Reference ${glyph("arrow", 14)}</a></div>
-</article>`
-}
-
 export function renderIndex(m: Model = resolveModel()): string {
-  const hero = `<div class="hero-wrap"><section class="hero" aria-labelledby="top-h"><div class="shell hero-grid">
-<div class="hero-copy">
-<a class="badge" href="${esc(site.npm)}" rel="noopener">v${esc(m.version)} on npm <span aria-hidden="true">›</span></a>
+  const hero = `<div class="hero-wrap"><section class="hero shell" aria-labelledby="top-h">
+${productMark(44)}
 <h1 id="top-h">${esc(site.h1)}</h1>
 <p class="lede">${inline(site.lede)}</p>
-<div class="acts"><a class="btn" href="#start">Get started</a><a class="btn-ghost" href="/reference">Documentation</a></div>
 <div class="aud">
 <input type="radio" name="aud" id="aud-h" checked><input type="radio" name="aud" id="aud-a">
 <div class="aud-tabs"><label for="aud-h">For humans</label><label for="aud-a">For agents</label></div>
@@ -757,99 +686,108 @@ export function renderIndex(m: Model = resolveModel()): string {
 <div class="aud-panel p-a" data-panel="agents"><div class="pill"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.install.agents)}</code>${copyBtn(site.install.agents, "agent command")}</div>
 <div class="agent-links"><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">AGENTS.md</a><button type="button" data-copy-page="/index.md">Copy page as Markdown</button></div></div>
 </div>
-<p class="version">Currently v${esc(m.version)} · ${esc(site.install.note)}</p>
-</div>
-<div class="hero-art">${heroObject()}</div>
-</div></section></div>`
+<p class="version">Currently <a href="${esc(site.npm)}" rel="noopener">v${esc(m.version)}</a> · ${esc(site.install.note)}</p>
+<div class="hero-cell">${cellHtml(m.hero)}</div>
+</section></div>`
 
-  const logos = `<section class="section logos" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
-<h2 id="ecosystem-h" class="logos-h">${esc(site.ecosystem.title)}</h2>
-<p class="logos-p">${inline(site.ecosystem.lede)}</p>
-<div class="marks">${site.ecosystem.marks.map((k) => {
-    const b = brandTone(k.icon)
-    return `<a class="tone-${b.tone}" style="--brand:${b.hex}" href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 32)}</a>`
-  }).join("")}</div>
+  const why = `<section class="section why" id="why" aria-labelledby="why-h"><div class="shell">
+<div class="centre"><h2 id="why-h">${esc(site.why.title)}</h2>
+<p class="explain">${inline(site.why.body)}</p></div>
+<div class="principles">${site.why.points.map((p) => `<div><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
 </div></section>`
 
-  const overview = `<section class="section" id="why" aria-labelledby="why-h"><div class="shell">
-${head("why", site.overview.title, site.overview.muted, site.overview.body)}
-<div class="grid9">${site.overview.items.map((x) => `<div class="gi">${glyph(x.icon, 20)}<h3>${esc(x.title)}</h3><p>${inline(x.body)}</p></div>`).join("")}</div>
+  const compare = `<section class="section band" id="compare" aria-labelledby="compare-h"><div class="shell">
+<div class="sec-intro"><h2 id="compare-h">${esc(site.compare.title)}</h2><p class="explain">${inline(site.compare.body)}</p></div>
+<div class="demo compare">${compareTable(m.compare)}</div>
 </div></section>`
 
-  const live = `<section class="section" id="live" aria-labelledby="live-h"><div class="shell">
-<div class="tile" aria-hidden="true">${glyph("activity", 34)}</div>
-${head("live", site.live.title, "", site.live.body, " centre")}
-${livePanel(m.hero)}
-</div></section>`
-
+  const intro = (c: Chapter) => {
+    const ch = site.chapters[c]
+    return `<div class="sec-intro"><h2 id="${ch.id}-h">${esc(ch.title)}</h2><p class="explain">${inline(ch.body)} <a href="${esc(ch.href)}">Reference</a>.</p></div>`
+  }
   const caps = (c: Chapter) => m.capabilities.filter((x) => x.cap.chapter === c)
-  const ch = site.chapters
 
+  // Getting started is a procedure, so its steps are numbered and stay in order.
   const start = `<section class="section" id="start" aria-labelledby="start-h"><div class="shell">
-${head("start", ch.start.title, ch.start.muted, ch.start.body)}
+${intro("start")}
 <ol class="steps">${caps("start")
     .map(({ cap, demo }, i) => `<li class="step" id="${cap.id}" aria-labelledby="${cap.id}-h"><div class="step-text"><span class="step-n" aria-hidden="true">${i + 1}</span><h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p></div><div class="step-demo">${demoHtml(demo)}</div></li>`)
     .join("\n")}</ol>
 </div></section>`
 
+  // One feature at a time: the nav targets a panel by id, CSS shows the targeted one (the first by
+  // default). Without :has() or without CSS, every panel shows in order.
+  const explorer = (c: Chapter, cls = "") => {
+    const list = caps(c)
+    return `<section class="section${cls}" id="${site.chapters[c].id}" aria-labelledby="${site.chapters[c].id}-h"><div class="shell">
+${intro(c)}
+<div class="explorer">
+<nav class="ex-nav" aria-label="${esc(site.chapters[c].title)} features">${list.map(({ cap }) => `<a href="#${cap.id}">${esc(cap.title)}</a>`).join("")}</nav>
+<div class="ex-panels">${list
+      .map(({ cap, demo }) => `<article class="panel" id="${cap.id}" aria-labelledby="${cap.id}-h"><h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p><div class="demo">${demoHtml(demo)}</div></article>`)
+      .join("\n")}</div>
+</div>
+</div></section>`
+  }
+
   const tabInputs = m.tabs.map((_, i) => `<input type="radio" name="tab" id="tab-${i}"${i === 0 ? " checked" : ""}>`).join("")
-  const showcase = `<section class="section" id="showcase" aria-labelledby="showcase-h"><div class="shell">
-${head("showcase", site.showcase.title, site.showcase.muted, site.showcase.body, " centre")}
+  const showcase = `<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
+<div>
+<h2 id="showcase-h">${esc(site.showcase.title)}</h2>
+<p class="explain">${inline(site.showcase.body)}</p>
+<a class="control control--solid round" href="/reference">${glyph("book", 15)}Visit Documentation</a>
+<p class="supports">Supports</p>
+<div class="avatars">${site.showcase.supports.map((s) => `<span title="${esc(s)}">${brand(s, 20)}</span>`).join("")}<em>+ Kysely</em></div>
+</div>
 <div class="tabs">${tabInputs}
-<div class="tabrow" role="presentation">${m.tabs.map((t, i) => `<label for="tab-${i}"><span class="tab-ico">${glyph(t.icon, 22)}</span><span>${esc(t.label)}</span></label>`).join("")}</div>
+<div class="tabrow" role="presentation">${m.tabs.map((t, i) => `<label for="tab-${i}">${esc(t.label)}</label>`).join("")}</div>
 ${m.tabs
   .map(
     (t, i) =>
-      `<div class="tabpanel p-${i}"><div class="window"><div class="win-bar"><span class="win-file">${glyph("file", 13)}${esc(t.file)}</span>${copyBtn(t.block.code, t.file)}</div><pre class="code-n"><code>${numbered(t.block.code, t.block.lang)}</code></pre><div class="win-foot"><a href="${esc(site.repo)}" rel="noopener">${glyph("arrow", 13)}View on GitHub</a><a href="/reference#db">${glyph("book", 13)}Read the reference</a></div></div></div>`,
+      `<div class="tabpanel p-${i}"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(t.file)}</span>${copyBtn(t.block.code, t.file)}</div><pre><code>${highlight(t.block.code, t.block.lang)}</code></pre></div></div>`,
   )
   .join("")}
+<div class="pager" aria-hidden="true">${m.tabs.map(() => "<i></i>").join("")}</div>
 </div>
 </div></section>`
 
-  const cards = (c: Chapter, href: string) => {
-    const list = caps(c)
-    return `<div class="cards">${list.map(({ cap, demo }, i) => card(cap, demo, href, list.length % 2 === 1 && i === list.length - 1)).join("\n")}</div>`
-  }
-
-  const database = `<section class="section" id="${ch.db.id}" aria-labelledby="${ch.db.id}-h"><div class="shell">
-${head(ch.db.id, ch.db.title, ch.db.muted, ch.db.body)}
-${cards("db", ch.db.href)}
+  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+<h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
+<p class="explain">${inline(site.ecosystem.lede)}</p>
+<div class="marks">${site.ecosystem.marks.map((k) => {
+    const b = brandTone(k.icon)
+    return `<a class="tone-${b.tone}" style="--brand:${b.hex}" href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`
+  }).join("")}</div>
 </div></section>`
 
-  const bus = `<section class="section" id="${ch.bus.id}" aria-labelledby="${ch.bus.id}-h"><div class="shell">
-<div class="tile" aria-hidden="true">${glyph("inbox", 34)}</div>
-${head(ch.bus.id, ch.bus.title, ch.bus.muted, ch.bus.body, " centre")}
-${cards("bus", ch.bus.href)}
+  const today = `<section class="section band" id="today" aria-labelledby="today-h"><div class="shell today">
+<h2 id="today-h">${esc(site.buildToday.title)}</h2>
+<div class="acts"><a class="control control--solid round" href="/reference">${glyph("book", 15)}Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.buildToday.cmd)}</code>${copyBtn(site.buildToday.cmd, "server command")}</span></div>
 </div></section>`
 
-  const compare = `<section class="section" id="compare" aria-labelledby="compare-h"><div class="shell">
-${head("compare", site.compare.title, site.compare.muted, site.compare.body)}
-<div class="demo compare">${compareTable(m.compare)}</div>
+  const guides = `<section class="section" id="guides" aria-labelledby="guides-h"><div class="shell">
+<div class="sec-head"><h2 id="guides-h">Guides</h2>
+<p class="explain">Design notes for the parts worth understanding before you run them in production.</p></div>
+<div class="demo guides">${m.guides
+    .map((g) => `<a class="guide" href="${esc(g.href)}" rel="noopener"><span class="gt">${esc(g.title)}<span class="ext" aria-hidden="true">↗</span></span><span class="gb">${esc(g.body)}</span><span class="tilt" aria-hidden="true"><span class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(g.file)}</span></span><pre><code>${highlight(g.block.code, g.block.lang)}</code></pre></span></a>`)
+    .join("")}</div>
 </div></section>`
-
-  const cta = `<section class="section cta" id="today" aria-labelledby="today-h"><div class="shell">
-<h2 id="today-h">${esc(site.cta.title)} <span class="mute">${esc(site.cta.muted)}</span></h2>
-<div class="acts"><a class="btn" href="#start">Get started</a><a class="btn-ghost" href="/reference">Documentation</a></div>
-<div class="pill"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.cta.cmd)}</code>${copyBtn(site.cta.cmd, "server command")}</div>
-</div>
-<div class="wordmark-xl" aria-hidden="true">${esc(site.name)}</div>
-</section>`
 
   const body = `${header("home")}
 <main id="main">
 ${hero}
-${logos}
-${overview}
-${live}
+${why}
+${compare}
 ${start}
 ${showcase}
-${database}
-${bus}
-${compare}
-${cta}
+${explorer("db")}
+${explorer("bus", " band")}
+${eco}
+${today}
+${guides}
 </main>
 ${footer()}`
-  return page(pageHead({ title: site.title, description: site.description, path: "/", md: "/index.md" }), body)
+  return page(head({ title: site.title, description: site.description, path: "/", md: "/index.md" }), body)
 }
 
 // ---- reference ----------------------------------------------------------------------------
@@ -878,7 +816,7 @@ export function renderReference(p: Parsed = source()): { html: string; ids: stri
 </main>
 ${footer()}`
   const description = "The bql.sh reference: the repository README and the full bql.sh and bql.sh/bus documentation on one page."
-  const html = page(pageHead({ title: `Reference · ${site.name}`, description, path: "/reference", md: "/reference.md" }), body)
+  const html = page(head({ title: `Reference · ${site.name}`, description, path: "/reference", md: "/reference.md" }), body)
   return { html, ids: parts.flatMap((x) => x.headings.map((h) => h.id)) }
 }
 
@@ -912,7 +850,7 @@ function demoMd(d: ResolvedDemo): string {
 
 export function renderIndexMd(m: Model = resolveModel()): string {
   const chapter = (c: Chapter) => [
-    `## ${site.chapters[c].title} ${site.chapters[c].muted}`,
+    `## ${site.chapters[c].title}`,
     "",
     ...m.capabilities
       .filter((x) => x.cap.chapter === c)
@@ -927,19 +865,21 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     "",
     "```sh\n" + site.install.humans.cmd + "\n```",
     "",
-    `## ${site.overview.title} ${site.overview.muted}`,
-    "",
-    site.overview.body,
-    "",
-    ...site.overview.items.flatMap((x) => [`### ${x.title}`, "", x.body, ""]),
-    `## ${site.live.title}`,
-    "",
-    site.live.body,
-    "",
     demoMd(m.hero),
     "",
+    `## ${site.why.title}`,
+    "",
+    site.why.body,
+    "",
+    ...site.why.points.flatMap((p) => [`### ${p.title}`, "", p.body, ""]),
+    `## ${site.compare.title}`,
+    "",
+    site.compare.body,
+    "",
+    tableMd(m.compare),
+    "",
     ...chapter("start"),
-    `## ${site.showcase.title} ${site.showcase.muted}`,
+    `## ${site.showcase.title}`,
     "",
     site.showcase.body,
     "",
@@ -949,6 +889,10 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     `## ${site.ecosystem.title}`,
     "",
     site.ecosystem.lede,
+    "",
+    "## Guides",
+    "",
+    ...m.guides.map((g) => `- [${g.title}](${g.href}): ${g.body}`),
     "",
     `Reference: ${url("/reference")} · Repository: ${site.repo}`,
     "",

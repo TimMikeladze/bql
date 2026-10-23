@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { artefacts, OUT } from "../src/build.ts"
 import { site } from "../src/content.ts"
-import { esc, highlight, renderDoc } from "../src/markdown.ts"
+import { esc, renderDoc } from "../src/markdown.ts"
 import {
   BOOT, CSS, TOKENS_DARK, TOKENS_LIGHT, PAGES, linkContext, renderIndex, renderReference, resolveModel, url,
 } from "../src/render.ts"
@@ -25,8 +25,9 @@ describe("references", () => {
     expect(() => resolveTerminal("bar", { doc: "db" }, p)).toThrow(/did not resolve/)
     expect(() => resolveSnippet("foo", { doc: "db" }, p)).toThrow(/ambiguous/)
   })
-  test("showcase tabs are resolved snippets", () => {
-    for (const t of m.tabs) expect(index).toContain(highlight(t.block.code.split("\n")[0]!, t.block.lang))
+  test("showcase tabs and guides are resolved snippets", () => {
+    for (const t of m.tabs) expect(index).toContain(esc(t.block.code.split("\n")[0]!))
+    expect(m.guides).toHaveLength(3)
   })
 })
 
@@ -106,7 +107,7 @@ test("head metadata", () => {
 test("every capability has an id, a heading, 1 to 3 sentences with inline code", () => {
   for (const c of site.capabilities) {
     const tag = c.chapter === "start" ? "li" : "article"
-    const sec = new RegExp(`<${tag} class="(?:step|card(?: wide)?)" id="${c.id}" aria-labelledby="${c.id}-h">[\\s\\S]*?<h3 id="${c.id}-h">[\\s\\S]*?<p class="explain">([\\s\\S]*?)</p>`).exec(index)
+    const sec = new RegExp(`<${tag} class="(?:step|panel)" id="${c.id}" aria-labelledby="${c.id}-h">[\\s\\S]*?<h3 id="${c.id}-h">[\\s\\S]*?<p class="explain">([\\s\\S]*?)</p>`).exec(index)
     expect(sec).toBeTruthy()
     const sentences = sec![1]!.replace(/<code>.*?<\/code>/g, "x").split(/[.](\s|$)/).filter((s) => s.trim().length > 1)
     expect(sentences.length).toBeGreaterThanOrEqual(1)
@@ -115,21 +116,15 @@ test("every capability has an id, a heading, 1 to 3 sentences with inline code",
   }
 })
 
-test("getting started is an ordered list; database and bus capabilities are cards", () => {
+test("getting started is an ordered list; each explorer links to every one of its panels", () => {
   expect(index).toMatch(/<ol class="steps">/)
   for (const ch of ["db", "bus"] as const) {
-    const sec = new RegExp(`<section[^>]*id="${site.chapters[ch].id}"[\\s\\S]*?</section>`).exec(index)![0]
+    const nav = new RegExp(`<nav class="ex-nav" aria-label="${site.chapters[ch].title} features">([\\s\\S]*?)</nav>`).exec(index)![1]!
     const ids = site.capabilities.filter((c) => c.chapter === ch).map((c) => c.id)
-    expect([...sec.matchAll(/<article class="card[^"]*" id="([^"]+)"/g)].map((x) => x[1])).toEqual(ids)
+    expect([...nav.matchAll(/href="#([^"]+)"/g)].map((x) => x[1])).toEqual(ids)
   }
-})
-
-test("the live panel draws the captured diffs, one event per changed row", () => {
-  const diffs = m.hero.run.code.split("\n").filter((l) => l.startsWith("# diff "))
-  const rows = diffs.flatMap((l) => { const d = JSON.parse(l.slice(7)); return [...d.added, ...d.removed] })
-  const panel = /<ol class="events">([\s\S]*?)<\/ol>/.exec(index)![1]!
-  expect([...panel.matchAll(/<li class="ev">/g)]).toHaveLength(rows.length)
-  expect(rows.length).toBeGreaterThan(0)
+  // Without :has(), every panel stays visible.
+  expect(CSS).toMatch(/@supports selector\(:has\(\*\)\) \{\s*\.panel \{ display: none; \}/)
 })
 
 test("agent files exist and the sitemap names only built files", () => {
@@ -162,7 +157,8 @@ test("links: header github, x, linkedin in order; footer adds discord", () => {
   expect(/<nav class="nav"[\s\S]*?<\/nav>/.exec(index)![0]).not.toContain("class=\"brand\"")
 })
 
-test("hero carries both audience panels", () => {
+test("hero is centred with both audience panels", () => {
+  expect(CSS).toMatch(/\.hero \{[^}]*text-align: center/)
   expect(index).toContain('data-panel="humans"')
   expect(index).toContain('data-panel="agents"')
   expect(m.humans.code).toContain(site.install.humans.cmd)
@@ -211,10 +207,11 @@ test("authored copy has no em dashes", () => {
     else if (v && typeof v === "object" && !(v instanceof RegExp)) Object.values(v).forEach(walk)
   }
   // Only what a reader sees: references (`line`, `cmd`) quote the READMEs verbatim.
-  const { capabilities, showcase, ...rest } = site
+  const { capabilities, showcase, guides, ...rest } = site
   walk(rest)
   for (const c of capabilities) strings.push(c.title, c.body)
   strings.push(showcase.title, showcase.body)
+  for (const g of guides) strings.push(g.title, g.body)
   for (const s of strings) expect(s).not.toContain("—")
 })
 
