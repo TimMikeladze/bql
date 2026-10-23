@@ -2,7 +2,7 @@
 // and the link table. No markup — the renderer owns that. Examples are *references* into the
 // READMEs (see source.ts), never text written here.
 
-import type { DocId, RepoCount, Where } from "./source.ts"
+import type { DocId, Where } from "./source.ts"
 
 export type IconName =
   | "github" | "x" | "linkedin" | "discord"
@@ -32,9 +32,7 @@ export interface Capability {
   demo: Demo
 }
 
-export type FigureSource =
-  | { kind: "count"; count: RepoCount }
-  | { kind: "regex"; doc: DocId; re: RegExp; unit?: string }
+export type FigureSource = { kind: "regex"; doc: DocId; re: RegExp; unit?: string }
 
 export interface Figure {
   label: string
@@ -58,33 +56,29 @@ export const site = {
   npm: "https://www.npmjs.com/package/bql.sh",
   themeKey: "bql-theme",
   title: "bql.sh — SQLite as a database server, and a durable message bus",
-  tagline: "SQLite as a server, and a bus",
+  tagline: "a SQLite database per tenant",
   description:
-    "bql.sh serves thousands of SQLite databases from one Bun process, with replicas, S3 backup, realtime and search, beside a durable message bus.",
+    "bql.sh serves thousands of SQLite databases from one Bun process, one per tenant, with replicas, S3 backup and live queries, beside a durable message bus.",
   license: "MIT",
   year: 2026,
 
-  h1: "SQLite as a server, and a durable bus",
+  h1: "Thousands of SQLite databases, one Bun process",
   lede:
-    "`bql.sh` serves thousands of SQLite databases from one process. `bql.sh/bus` runs the work against them. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).",
+    "`bql.sh` is a database server for SQLite. Give every tenant, user or pull request its own database, with replicas, S3 backup and live queries built in, and run the work against them on `bql.sh/bus`. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).",
 
   install: {
-    humans: { cmd: "bun add bql.sh", where: { doc: "root" } as Where },
+    humans: { cmd: "bun add bql.sh", where: { doc: "root", section: "bql.sh" } as Where },
     agents: "curl https://bql.sh/llms.txt",
     note: "on npm, Bun 1.4+",
   },
 
   split: {
-    left: { cmd: "bql bus publish work.resize '{\"src\":\"a.png\"}'", where: { doc: "bus", section: "bql.sh/bus" } as Where, label: "terminal" },
-    right: { line: "await new BusConsumer({", where: { doc: "bus" } as Where, label: "consumer.ts" },
+    left: { cmd: "BQL_ADMIN_KEY=<the admin key> bun client.ts", where: { doc: "root" } as Where, label: "terminal" },
+    right: { line: "const live = db.live`select id, title from todos where done = 0`.key(\"id\")", where: { doc: "root" } as Where, label: "client.ts" },
   },
 
-  figures: [
-    { label: "test files", from: { kind: "count", count: "testFiles" } },
-    { label: "runtime dependencies", from: { kind: "count", count: "runtimeDependencies" } },
-    { label: "writes/s, 64 clients", from: { kind: "regex", doc: "db", re: /~(\d+k) writes\/s at 64/ } },
-    { label: "point read over HTTP", from: { kind: "regex", doc: "db", re: /a point read is\s+(\d+ µs)/, unit: "" } },
-  ] satisfies Figure[],
+  // No adoption figures row: bql.sh had 54 npm downloads in the week to 2026-10-18 and no GitHub
+  // stars. Counts of the repo's own code are not adoption, so the row stays off until there is one.
 
   ecosystem: {
     title: "Reached by what you already run",
@@ -108,9 +102,9 @@ export const site = {
   },
 
   principles: [
+    { title: "A database per tenant", body: "No `tenant_id` on every row, no shared index. `bql db delete acme` removes one customer's data and nothing else." },
+    { title: "Same code, in process or served", body: "`Bql.open()` and `createClient()` hand back the same `db`. `bq.serve()` adds HTTP later." },
     { title: "Zero runtime dependencies", body: "No `dependencies` field. The OTLP exporter and the schema validator are written, not installed." },
-    { title: "The write path never waits", body: "A write checks a lease held in memory. Raft and S3 run beside the commit, never in front." },
-    { title: "Refuse rather than guess", body: "Promotion answers `BEHIND`. An unknown schema keyword fails. Past 2^53 is never rounded." },
   ],
 
   showcase: {
@@ -131,6 +125,19 @@ export const site = {
   } satisfies Record<Chapter, { id: string; pkg: string; title: string; href: string }>,
 
   capabilities: [
+    {
+      id: "embedded",
+      chapter: "db",
+      title: "Embedded first, served later",
+      body: "`Bql.open()` runs the whole engine in your process. Every write returns the `txid` it committed in.",
+      demo: {
+        kind: "pair",
+        items: [
+          { kind: "snippet", line: "const bq = await Bql.open({ dir: \"./data\" })", label: "app.ts", where: { doc: "root" } },
+          { kind: "terminal", cmd: "bun app.ts", where: { doc: "root" } },
+        ],
+      },
+    },
     {
       id: "realtime",
       chapter: "db",
@@ -288,8 +295,8 @@ export const site = {
   ] satisfies Capability[],
 
   measured: {
-    title: "Measured, including where it loses",
-    body: "`bun run bench` on an M5 Pro, as ratios against `bun:sqlite`. Writes in a transaction still lose slightly.",
+    title: "Measured against bun:sqlite",
+    body: "`bun run bench` on an M5 Pro, as ratios against `bun:sqlite`, and the replication legs end to end.",
     figures: [
       { label: "point read vs bun:sqlite", from: { kind: "regex", doc: "db", re: /\| point read by primary key \| ([\d.]+ – [\d.]+x) \|/ } },
       { label: "insert in a transaction", from: { kind: "regex", doc: "db", re: /\| insert inside a transaction \| ([\d.]+ – [\d.]+x) \|/ } },
@@ -300,33 +307,6 @@ export const site = {
       { header: "leg", where: { doc: "db" } as Where },
     ],
   },
-
-  boundaries: [
-    {
-      title: "What holds",
-      items: [
-        "A restore reproduces the target txid checksum for checksum, or fails loudly.",
-        "`ack: \"replica\"` makes failover lossless; the old primary is fenced by epoch.",
-        "The bus survives SIGKILL mid-flight in `bun run soak`, nothing lost.",
-        "A clustered bus fails over with zero acknowledged publishes lost at `ack: \"replica\"`.",
-      ],
-    },
-    {
-      title: "What is a judgement",
-      items: [
-        "Default `ack: \"fsync\"` costs ~2.7x on one write against `ack: \"local\"`.",
-        "The bus has one writer: a cluster adds copies and reads, not publish throughput.",
-        "Ordering is off by default; it costs throughput.",
-      ],
-    },
-    {
-      title: "What is not here yet",
-      items: [
-        "CI gates on Linux only; macOS and Windows legs stopped 2026-09-26.",
-        "Kysely's `.stream()` is not implemented.",
-      ],
-    },
-  ],
 
   start: {
     install: { cmd: "bun add bql.sh", where: { doc: "db", section: "Install" } as Where },

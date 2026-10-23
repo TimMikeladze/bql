@@ -7,7 +7,7 @@ import { esc, renderDoc } from "../src/markdown.ts"
 import {
   BOOT, CSS, TOKENS_DARK, TOKENS_LIGHT, PAGES, linkContext, renderIndex, renderReference, resolveModel, url,
 } from "../src/render.ts"
-import { parse, repoCount, resolveFigure, resolveSnippet, resolveTerminal, source } from "../src/source.ts"
+import { parse, resolveFigure, resolveSnippet, resolveTerminal, source } from "../src/source.ts"
 
 const m = resolveModel()
 const index = renderIndex(m)
@@ -26,11 +26,9 @@ describe("references", () => {
     expect(() => resolveSnippet("foo", { doc: "db" }, p)).toThrow(/ambiguous/)
   })
   test("figures match their sources", () => {
-    const figs = [...site.figures, ...site.measured.figures]
-    const rendered = [...m.figures, ...m.measuredFigures]
-    figs.forEach((f, i) => {
-      const want = f.from.kind === "count" ? String(repoCount(f.from.count)) : resolveFigure(f.from.re, f.from.doc)
-      expect(rendered[i]!.value).toBe(want)
+    site.measured.figures.forEach((f, i) => {
+      const want = resolveFigure(f.from.re, f.from.doc)
+      expect(m.measuredFigures[i]!.value).toBe(want)
       expect(index).toContain(`<b>${esc(want)}</b>`)
     })
   })
@@ -183,4 +181,9 @@ test("pairs render both artefacts", () => {
     expect(sec).toContain('class="pair')
     for (const f of demo.items) expect(sec).toContain(f.kind === "terminal" ? `$ ${esc(f.cmd)}` : f.kind === "snippet" ? `>${esc(f.label)}<` : "<table")
   }
+})
+
+test("no figures row of repo counts, and no section listing weaknesses", () => {
+  expect(index).not.toContain('id="figures"')
+  expect(index).not.toMatch(/id="(boundaries|limits|limitations|not-yet)"/)
 })

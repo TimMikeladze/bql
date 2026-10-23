@@ -1,6 +1,6 @@
-# SQLite as a server, and a durable bus
+# Thousands of SQLite databases, one Bun process
 
-`bql.sh` serves thousands of SQLite databases from one process. `bql.sh/bus` runs the work against them. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
+`bql.sh` is a database server for SQLite. Give every tenant, user or pull request its own database, with replicas, S3 backup and live queries built in, and run the work against them on `bql.sh/bus`. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
 
 Currently `bql.sh` v0.5.0 · on npm, Bun 1.4+.
 
@@ -8,22 +8,15 @@ Currently `bql.sh` v0.5.0 · on npm, Bun 1.4+.
 bun add bql.sh
 ```
 
-## By the numbers
-
-- **206** test files
-- **0** runtime dependencies
-- **49k** writes/s, 64 clients
-- **54 µs** point read over HTTP
-
 ## Reached by what you already run
 
 Drizzle, Kysely and `@libsql/client` on top. S3, R2 or MinIO underneath. ClickHouse and webhooks downstream.
 
 ## Principles
 
+- **A database per tenant.** No `tenant_id` on every row, no shared index. `bql db delete acme` removes one customer's data and nothing else.
+- **Same code, in process or served.** `Bql.open()` and `createClient()` hand back the same `db`. `bq.serve()` adds HTTP later.
 - **Zero runtime dependencies.** No `dependencies` field. The OTLP exporter and the schema validator are written, not installed.
-- **The write path never waits.** A write checks a lease held in memory. Raft and S3 run beside the commit, never in front.
-- **Refuse rather than guess.** Promotion answers `BEHIND`. An unknown schema keyword fails. Past 2^53 is never rounded.
 
 ## One engine, four ways in
 
@@ -109,6 +102,39 @@ bus.consumeTransactional({
     db.run("INSERT INTO processed (seq) VALUES (?)", [envelope.message.seq]);
   },
 });
+```
+
+## Embedded first, served later
+
+`Bql.open()` runs the whole engine in your process. Every write returns the `txid` it committed in.
+
+```ts
+// app.ts
+import { Bql } from "bql.sh"
+
+const bq = await Bql.open({ dir: "./data" })
+const db = await bq.create("acme")
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
+console.log("txid", written.txid)
+console.log(await db.sql`select * from todos`)
+
+await bq.close()
+```
+
+```sh
+bun app.ts
+# txid 2
+# [
+#   {
+#     id: 1,
+#     title: "write it",
+#     done: 0,
+#   }, count: 1, command: "SELECT", lastInsertRowid: null, affectedRows: 0, txid: 2,
+#   columns: [ "id", "title", "done" ], types: [ "INTEGER", "TEXT", "INTEGER" ], durationUs: 97,
+#   vmSteps: 11
+# ]
 ```
 
 ## Realtime from SQLite's hooks
@@ -461,9 +487,9 @@ ok   the consumer's child process actually stopped
 ok   a repeated dedupe key does not publish twice
 ```
 
-## Measured, including where it loses
+## Measured against bun:sqlite
 
-`bun run bench` on an M5 Pro, as ratios against `bun:sqlite`. Writes in a transaction still lose slightly.
+`bun run bench` on an M5 Pro, as ratios against `bun:sqlite`, and the replication legs end to end.
 
 | op | bql vs `bun:sqlite` |
 | --- | --- |
@@ -479,26 +505,6 @@ ok   a repeated dedupe key does not publish twice
 | write forwarded through the replica | 404 µs | 494 µs |
 | write, `ack: "replica"` | 379 µs | 442 µs |
 | write, `ack: "quorum"` | 359 µs | 417 µs |
-
-## Boundaries
-
-### What holds
-
-- A restore reproduces the target txid checksum for checksum, or fails loudly.
-- `ack: "replica"` makes failover lossless; the old primary is fenced by epoch.
-- The bus survives SIGKILL mid-flight in `bun run soak`, nothing lost.
-- A clustered bus fails over with zero acknowledged publishes lost at `ack: "replica"`.
-
-### What is a judgement
-
-- Default `ack: "fsync"` costs ~2.7x on one write against `ack: "local"`.
-- The bus has one writer: a cluster adds copies and reads, not publish throughput.
-- Ordering is off by default; it costs throughput.
-
-### What is not here yet
-
-- CI gates on Linux only; macOS and Windows legs stopped 2026-09-26.
-- Kysely's `.stream()` is not implemented.
 
 ## Two commands to start
 

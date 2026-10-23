@@ -1,10 +1,43 @@
 # bql.sh
 
-> bql.sh serves thousands of SQLite databases from one Bun process, with replicas, S3 backup, realtime and search, beside a durable message bus.
+> bql.sh serves thousands of SQLite databases from one Bun process, one per tenant, with replicas, S3 backup and live queries, beside a durable message bus.
 
-`bql.sh` serves thousands of SQLite databases from one process. `bql.sh/bus` runs the work against them. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
+`bql.sh` is a database server for SQLite. Give every tenant, user or pull request its own database, with replicas, S3 backup and live queries built in, and run the work against them on `bql.sh/bus`. Built on [Bun](https://bun.sh), zero runtime dependencies, by [linesofcode](https://x.com/linesofcode).
 
 Status: `bql.sh` v0.5.0, on npm, Bun 1.4+. Install with `bun add bql.sh`.
+
+## Embedded first, served later
+
+`Bql.open()` runs the whole engine in your process. Every write returns the `txid` it committed in.
+
+```ts
+// app.ts
+import { Bql } from "bql.sh"
+
+const bq = await Bql.open({ dir: "./data" })
+const db = await bq.create("acme")
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
+console.log("txid", written.txid)
+console.log(await db.sql`select * from todos`)
+
+await bq.close()
+```
+
+```sh
+bun app.ts
+# txid 2
+# [
+#   {
+#     id: 1,
+#     title: "write it",
+#     done: 0,
+#   }, count: 1, command: "SELECT", lastInsertRowid: null, affectedRows: 0, txid: 2,
+#   columns: [ "id", "title", "done" ], types: [ "INTEGER", "TEXT", "INTEGER" ], durationUs: 97,
+#   vmSteps: 11
+# ]
+```
 
 ## Realtime from SQLite's hooks
 

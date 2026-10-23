@@ -2,12 +2,132 @@
 
 # bql.sh
 
-One package: SQLite as a multi-tenant database server for Bun, and the durable bus that runs work
-against it.
+SQLite as a database server for Bun. One process holds thousands of small databases, one per
+tenant, user, agent or pull request, and serves them over HTTP, WebSockets and libsql's protocol
+with replicas, continuous S3 backup and live queries. The same package ships a durable message bus,
+`bql.sh/bus`, that runs work against them. Zero runtime dependencies.
 
 ```sh
 bun add bql.sh
 ```
+
+## Why
+
+A database per tenant is the simplest isolation there is: no `tenant_id` on every row, no noisy
+neighbour in a shared index, delete a customer by deleting a file. SQLite makes each one cheap, but
+on its own it is a library: no server, no replicas, no backup, no way to watch a query change. bql.sh
+is that server.
+
+- **A database is a file.** Create one per tenant; fork one per pull request in O(1). A node keeps
+  up to `[data] maxOpen` (1024 by default) open and closes the idle ones.
+- **Realtime from SQLite's own hooks.** `db.live` sends a diff when a query's rows change, and
+  `/changes` streams every commit. Both come from the `preupdate`/`update` hooks, not triggers or
+  SQL parsing.
+- **Replicas and backup are built in.** WAL frames stream to replicas over a socket, ship
+  continuously to any S3-compatible bucket, and restore to any txid. A Raft control plane promotes a
+  replica when a primary goes away.
+- **Your client already speaks it.** It answers libsql's Hrana, so `@libsql/client`, Drizzle and
+  Kysely connect unmodified. REST, OpenAPI 3.1 and GraphQL are generated from one operation model.
+- **Embedded first, server later.** `Bql.open()` runs the whole engine in your process; `serve()`
+  puts HTTP in front of it without changing the code that uses `db`.
+- **A bus that shares the storage.** Subjects, consumer groups, leases, retries, a dead-letter path
+  and three tiers of exactly-once. The outbox publishes every committed row change onto it.
+
+## Getting started
+
+Bun 1.4 or newer, and a C compiler once. Install the package, then build the libsqlite3 the driver
+loads (about 15 seconds; [packages/db](packages/db/README.md#the-driver) says why a system one will
+not do):
+
+```sh
+bun add bql.sh
+bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts
+```
+
+### In your process
+
+`Bql.open()` is the engine with no server in front. Every write returns the `txid` it committed in.
+
+```ts
+// app.ts
+import { Bql } from "bql.sh"
+
+const bq = await Bql.open({ dir: "./data" })
+const db = await bq.create("acme")
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${"write it"})`.run()
+console.log("txid", written.txid)
+console.log(await db.sql`select * from todos`)
+
+await bq.close()
+```
+
+```sh
+bun app.ts
+# txid 2
+# [
+#   {
+#     id: 1,
+#     title: "write it",
+#     done: 0,
+#   }, count: 1, command: "SELECT", lastInsertRowid: null, affectedRows: 0, txid: 2,
+#   columns: [ "id", "title", "done" ], types: [ "INTEGER", "TEXT", "INTEGER" ], durationUs: 97,
+#   vmSteps: 11
+# ]
+```
+
+### As a server
+
+`bql serve` prints an admin key the first time it starts, once. Keep it; the client below uses it.
+
+```sh
+bunx bql serve --dir ./srv --port 4321
+# bql: generated an admin key and wrote it to ./srv/keys.json
+# bql: admin key: <43 url-safe base64 characters, printed this once and never again>
+# bql http://localhost:4321  node=bql-77779295  data=./srv
+# bql: 0 database(s), maxOpen 1024, ack fsync
+```
+
+The client creates a database, subscribes to a live query, and gets a diff for each write that
+changes its rows:
+
+```ts
+// client.ts
+import { createClient } from "bql.sh/client"
+
+const client = createClient({ url: "http://localhost:4321", token: process.env.BQL_ADMIN_KEY! })
+await client.admin.create("acme")
+const db = client.db("acme")
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+
+const live = db.live`select id, title from todos where done = 0`.key("id")
+live.on("diff", (e) => console.log("diff", JSON.stringify({ added: e.added, removed: e.removed })))
+await new Promise((resolve) => live.on("rows", resolve))   // the first result; diffs follow
+
+await db.sql`insert into todos(title) values (${"write it"})`.run()
+await db.sql`update todos set done = 1 where id = ${1}`.run()
+await Bun.sleep(100)
+client.close()
+```
+
+```sh
+BQL_ADMIN_KEY=<the admin key> bun client.ts
+# diff {"added":[{"id":1,"title":"write it"}],"removed":[]}
+# diff {"added":[],"removed":[{"id":1}]}
+```
+
+The client runs in browsers, Bun, Node and Workers. Hand a browser a scoped token from
+`client.admin.mintToken`, never the admin key.
+
+### Next
+
+- [packages/db](packages/db/README.md) is the database's full documentation: replicas, promotion,
+  S3, branches, search, the driver, the measured numbers.
+- [packages/bus](packages/bus/README.md) starts the bus with `bunx bql bus serve`.
+- [packages/db/docs/api.md](packages/db/docs/api.md) is every route, config key and CLI flag.
+
+## What is in the package
 
 | Import | What it is |
 | --- | --- |
@@ -22,156 +142,13 @@ bun add bql.sh
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
 
-Two binaries: `bql` for the database, `bql bus` for the bus.
-
-Run the CLI from this checkout, or link it globally so `bql` works from any directory:
-
-```sh
-bun run cli --help
-bun run cli db list
-bun run cli:link           # once; global bql follows this checkout's source
-bql --help
-```
-
-Bun's global bin directory (normally `~/.bun/bin`) must be on your `PATH`.
-Run `bun unlink` from this checkout to remove the global link.
-Both entry points use `BQL_URL` for the server URL and `BQL_ADMIN_KEY` for its admin
-key (or `BQL_TOKEN` for a scoped token; it takes precedence over `BQL_ADMIN_KEY`).
-
-## Saved endpoints
-
-Organize independently deployed servers into local organizations, projects, and named
-endpoints. These are connection settings on your machine; database and bus tokens
-still control access on each server.
-
-```sh
-bql org add personal
-bql switch personal
-bql project add myapp
-bql project use myapp
-
-# Enter the deployment's BQL_AUTH_ADMIN_KEY at the hidden prompt.
-bql endpoint add preview --url https://your-preview.vercel.app --prompt-token
-bql endpoint add production --url https://your-production.example --prompt-token
-bql link --org personal --project myapp --endpoint preview
-
-bql context                       # show target without revealing credentials
-bql db list
-bql db create myapp
-bql exec myapp --sql 'SELECT 1'
-bql db list --endpoint production # override for this command
-bql endpoint use production       # change this checkout's endpoint
-bql endpoint use preview --default # default for this project outside linked checkouts
-```
-
-`bql link` offers terminal selection when required context is missing. In scripts,
-supply the organization, project, and endpoint explicitly. Links live in
-`.bql/project.json`, work from subdirectories, and contain IDs rather than secrets.
-Linking adds `.bql/` to `.gitignore`. `bql unlink` removes the nearest project link.
-`bql switch` and `bql project use` change global defaults without changing existing links.
-
-All three record types support `list`, `inspect`, `update`, and `remove`, with
-`--json` output. Rename with `bql project update myapp --name new-name`; existing links
-keep working. Removing a nonempty organization or project requires `--recursive` and
-only removes local connection settings, never remote databases. Deleted selections
-produce an error until you select or link another record.
-
-For protected Vercel deployments, save that endpoint's **Protection Bypass for Automation**
-secret separately from its BQL token:
-
-```sh
-bql endpoint update preview --prompt-vercel-bypass
-bql db list --endpoint preview
-```
-
-The CLI sends `x-vercel-protection-bypass` on HTTP requests and socket handshakes.
-Cloud runtimes still support `bql exec` rather than interactive `bql shell` sessions.
-CLI requests reject HTTP redirects, and named database connections reject cross-origin
-primary-movement retries; select the destination endpoint explicitly instead.
-
-For CI, reference environment variables instead of saving secret values:
-
-```sh
-bql endpoint add ci --org personal --project myapp \
-  --url https://your-preview.vercel.app \
-  --token-env CI_BQL_TOKEN --vercel-bypass-env CI_VERCEL_BYPASS
-
-# Set these secrets through your CI environment, then select the context:
-BQL_ORG=personal BQL_PROJECT=myapp BQL_ENDPOINT=ci bql db list --json
-```
-
-The registry defaults to `$XDG_CONFIG_HOME/bql` or `~/.config/bql`. Override it with
-`--config-dir` or `BQL_CONFIG_DIR` to provision isolated CI configuration. Saved secrets
-live in an owner-only `credentials.json`, separately from the registry. Use
-`--clear-token` or `--clear-vercel-bypass` to remove credentials. Changing a service URL
-clears its old credential references unless you supply new ones in the same command.
-
-Selection order is explicit `--url`; explicit `--org`/`--project`/`--endpoint`; matching
-`BQL_ORG`/`BQL_PROJECT`/`BQL_ENDPOINT` variables; legacy `BQL_URL` (bus: `BUS_URL`);
-checkout link; global selection; then localhost. `--url` cannot be combined with explicit
-selection flags. Within named selection, flags override environment values, then linked
-IDs, then global defaults; changing a parent discards incompatible child selections.
-`--cwd` changes link lookup without changing the shell directory.
-
-Named endpoints use their own credentials and ignore ambient `BQL_TOKEN`, `BQL_ADMIN_KEY`,
-and `BUS_TOKEN`. Explicit `--token` and `--vercel-bypass` override credentials for one
-command. Direct URL mode keeps the old environment-variable behavior and never inherits
-saved credentials; its bypass variables are `BQL_VERCEL_BYPASS` and `BUS_VERCEL_BYPASS`.
-
-Add an optional bus connection to the same endpoint with separate credentials:
-
-```sh
-bql endpoint update preview --bus-url https://your-bus.example --prompt-bus-token
-# Add --prompt-bus-vercel-bypass if that service is also protected.
-bql bus stats --endpoint preview
-bql bus publish work.hello '{"hello":"world"}' --endpoint preview
-```
-
-Missing bus settings fail explicitly; database credentials are never reused for the bus.
-Use `--clear-bus` to remove that connection. Local `serve`, key management, and storage
-initialization do not require a saved remote context.
-
-Bun/Node scripts can resolve the same connection; browser SDKs remain explicitly configured:
-
-```ts
-import { resolveContext } from "bql.sh/context"
-import { createClient } from "bql.sh/client"
-
-const connection = await resolveContext({ org: "personal", project: "myapp", endpoint: "preview" })
-const client = createClient(connection)
-try {
-  console.log(await client.db("myapp").sql`SELECT 1`)
-} finally {
-  client.close()
-}
-```
-
-`resolveContext` returns credentials for client construction: don't log its result.
-Use the exported `redactContext` for diagnostics. SDK transport behavior remains the
-SDK's own; the resolver does not install CLI redirect or WebSocket policies.
+Two binaries: `bql` for the database, `bql bus` for the bus. Both use `BQL_URL` for the server URL
+and `BQL_ADMIN_KEY` for its admin key (or `BQL_TOKEN` for a scoped token; it takes precedence over
+`BQL_ADMIN_KEY`).
 
 The database and the bus ship together because they were solving the same problems apart: storage,
 replication, tenancy and a change feed. [docs/monorepo.md](docs/monorepo.md) is why, what moved, and
 what comes next.
-
-Bun 1.4 or newer. Zero runtime dependencies.
-
-```sh
-bun install
-
-bun run typecheck          # the repository's scripts, then both halves
-bun run test               # both halves
-bun run bytes              # no raw control bytes in any tracked file
-
-bun run db sqlite:build    # build the pinned libsqlite3 bql.sh needs
-bun run db test
-bun run bus test
-bun run bus dev
-```
-
-The repository keeps two source trees — `packages/db` and `packages/bus` — behind that one package,
-so `bun run db <script>` and `bun run bus <script>` forward to the tree, and every script either half
-already had still runs by its own name.
 
 ## The database
 
@@ -350,6 +327,150 @@ bql bus sink webhook --subscription cdc --subject 'db.>' --to https://example.co
 [packages/db/docs/x6-outbox.md](packages/db/docs/x6-outbox.md) is the design and what changed
 while building it.
 
+## Saved endpoints
+
+Organize independently deployed servers into local organizations, projects, and named
+endpoints. These are connection settings on your machine; database and bus tokens
+still control access on each server.
+
+```sh
+bql org add personal
+bql switch personal
+bql project add myapp
+bql project use myapp
+
+# Enter the deployment's BQL_AUTH_ADMIN_KEY at the hidden prompt.
+bql endpoint add preview --url https://your-preview.vercel.app --prompt-token
+bql endpoint add production --url https://your-production.example --prompt-token
+bql link --org personal --project myapp --endpoint preview
+
+bql context                       # show target without revealing credentials
+bql db list
+bql db create myapp
+bql exec myapp --sql 'SELECT 1'
+bql db list --endpoint production # override for this command
+bql endpoint use production       # change this checkout's endpoint
+bql endpoint use preview --default # default for this project outside linked checkouts
+```
+
+`bql link` offers terminal selection when required context is missing. In scripts,
+supply the organization, project, and endpoint explicitly. Links live in
+`.bql/project.json`, work from subdirectories, and contain IDs rather than secrets.
+Linking adds `.bql/` to `.gitignore`. `bql unlink` removes the nearest project link.
+`bql switch` and `bql project use` change global defaults without changing existing links.
+
+All three record types support `list`, `inspect`, `update`, and `remove`, with
+`--json` output. Rename with `bql project update myapp --name new-name`; existing links
+keep working. Removing a nonempty organization or project requires `--recursive` and
+only removes local connection settings, never remote databases. Deleted selections
+produce an error until you select or link another record.
+
+For protected Vercel deployments, save that endpoint's **Protection Bypass for Automation**
+secret separately from its BQL token:
+
+```sh
+bql endpoint update preview --prompt-vercel-bypass
+bql db list --endpoint preview
+```
+
+The CLI sends `x-vercel-protection-bypass` on HTTP requests and socket handshakes.
+Cloud runtimes still support `bql exec` rather than interactive `bql shell` sessions.
+CLI requests reject HTTP redirects, and named database connections reject cross-origin
+primary-movement retries; select the destination endpoint explicitly instead.
+
+For CI, reference environment variables instead of saving secret values:
+
+```sh
+bql endpoint add ci --org personal --project myapp \
+  --url https://your-preview.vercel.app \
+  --token-env CI_BQL_TOKEN --vercel-bypass-env CI_VERCEL_BYPASS
+
+# Set these secrets through your CI environment, then select the context:
+BQL_ORG=personal BQL_PROJECT=myapp BQL_ENDPOINT=ci bql db list --json
+```
+
+The registry defaults to `$XDG_CONFIG_HOME/bql` or `~/.config/bql`. Override it with
+`--config-dir` or `BQL_CONFIG_DIR` to provision isolated CI configuration. Saved secrets
+live in an owner-only `credentials.json`, separately from the registry. Use
+`--clear-token` or `--clear-vercel-bypass` to remove credentials. Changing a service URL
+clears its old credential references unless you supply new ones in the same command.
+
+Selection order is explicit `--url`; explicit `--org`/`--project`/`--endpoint`; matching
+`BQL_ORG`/`BQL_PROJECT`/`BQL_ENDPOINT` variables; legacy `BQL_URL` (bus: `BUS_URL`);
+checkout link; global selection; then localhost. `--url` cannot be combined with explicit
+selection flags. Within named selection, flags override environment values, then linked
+IDs, then global defaults; changing a parent discards incompatible child selections.
+`--cwd` changes link lookup without changing the shell directory.
+
+Named endpoints use their own credentials and ignore ambient `BQL_TOKEN`, `BQL_ADMIN_KEY`,
+and `BUS_TOKEN`. Explicit `--token` and `--vercel-bypass` override credentials for one
+command. Direct URL mode keeps the old environment-variable behavior and never inherits
+saved credentials; its bypass variables are `BQL_VERCEL_BYPASS` and `BUS_VERCEL_BYPASS`.
+
+Add an optional bus connection to the same endpoint with separate credentials:
+
+```sh
+bql endpoint update preview --bus-url https://your-bus.example --prompt-bus-token
+# Add --prompt-bus-vercel-bypass if that service is also protected.
+bql bus stats --endpoint preview
+bql bus publish work.hello '{"hello":"world"}' --endpoint preview
+```
+
+Missing bus settings fail explicitly; database credentials are never reused for the bus.
+Use `--clear-bus` to remove that connection. Local `serve`, key management, and storage
+initialization do not require a saved remote context.
+
+Bun/Node scripts can resolve the same connection; browser SDKs remain explicitly configured:
+
+```ts
+import { resolveContext } from "bql.sh/context"
+import { createClient } from "bql.sh/client"
+
+const connection = await resolveContext({ org: "personal", project: "myapp", endpoint: "preview" })
+const client = createClient(connection)
+try {
+  console.log(await client.db("myapp").sql`SELECT 1`)
+} finally {
+  client.close()
+}
+```
+
+`resolveContext` returns credentials for client construction: don't log its result.
+Use the exported `redactContext` for diagnostics. SDK transport behavior remains the
+SDK's own; the resolver does not install CLI redirect or WebSocket policies.
+
+## Working on bql.sh
+
+Bun 1.4 or newer. Run the CLI from a checkout, or link it globally so `bql` works from any
+directory:
+
+```sh
+bun run cli --help
+bun run cli db list
+bun run cli:link           # once; global bql follows this checkout's source
+bql --help
+```
+
+Bun's global bin directory (normally `~/.bun/bin`) must be on your `PATH`.
+Run `bun unlink` from this checkout to remove the global link.
+
+```sh
+bun install
+
+bun run typecheck          # the repository's scripts, then both halves
+bun run test               # both halves
+bun run bytes              # no raw control bytes in any tracked file
+
+bun run db sqlite:build    # build the pinned libsqlite3 bql.sh needs
+bun run db test
+bun run bus test
+bun run bus dev
+```
+
+The repository keeps two source trees — `packages/db` and `packages/bus` — behind that one package,
+so `bun run db <script>` and `bun run bus <script>` forward to the tree, and every script either half
+already had still runs by its own name.
+
 ## CI and releases
 
 Every push and pull request to `main` runs both halves on Linux. macOS and Windows legs ran here
@@ -360,8 +481,8 @@ stopped passing, and what they proved is written down in `packages/db/docs/e1-wi
 One package, one tag: `v0.1.0` publishes `bql.sh` with both halves in it, and the tag must match the
 root `package.json` version or the release refuses. `bun run pack:check` is the gate the release runs
 first — it packs, installs the tarball somewhere that knows nothing about this repository, builds
-libsqlite3 from it, and then uses both halves and both binaries out of that install. Not on npm
-yet.
+libsqlite3 from it, and then uses both halves and both binaries out of that install. Releases are published to npm by
+hand; [docs/releasing.md](docs/releasing.md) has the steps.
 
 ## Deploying to Vercel, Cloudflare, or Fly
 

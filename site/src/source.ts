@@ -2,8 +2,8 @@
 // page is a fenced block (or table) in one of these READMEs, found by a reference that must match
 // exactly one of them. A reference that matches none — or two — throws, and the build fails.
 
-import { readFileSync, readdirSync, statSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 
 export const ROOT = join(import.meta.dir, "..", "..")
 
@@ -165,34 +165,6 @@ export function resolveFigure(re: RegExp, doc: DocId, p: Parsed = source()): str
   const m = only(all, `figure ${re} in ${doc}`)
   if (m[1] === undefined) throw new Error(`figure ${re} has no capture group`)
   return m[1]
-}
-
-// ---- repo counts --------------------------------------------------------------------------
-
-function walk(dir: string, out: string[]) {
-  for (const name of readdirSync(dir)) {
-    if (name === "node_modules" || name === "dist" || name === "vendor" || name.startsWith(".")) continue
-    const p = join(dir, name)
-    const s = statSync(p)
-    if (s.isDirectory()) walk(p, out)
-    else out.push(relative(ROOT, p))
-  }
-}
-
-export type RepoCount = "testFiles" | "runtimeDependencies" | "packages"
-
-export function repoCount(what: RepoCount, root = ROOT): number {
-  const pkgs = ["packages/db", "packages/bus"]
-  if (what === "packages") return pkgs.length
-  if (what === "runtimeDependencies") {
-    return pkgs.reduce((n, p) => {
-      const pj = JSON.parse(readFileSync(join(root, p, "package.json"), "utf8"))
-      return n + Object.keys(pj.dependencies ?? {}).length
-    }, 0)
-  }
-  const files: string[] = []
-  for (const p of pkgs) walk(join(root, p), files)
-  return files.filter((f) => /\.test\.ts$/.test(f)).length
 }
 
 /** The one published version: `bql.sh` ships both halves, so there is one number to state. */

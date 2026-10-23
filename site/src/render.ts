@@ -6,7 +6,7 @@ import { site, type Capability, type Demo, type Figure, type Frame, type IconNam
 import { brand, faviconSvg, glyph, productMark } from "./icons.ts"
 import { esc, highlight, inline, renderDoc, renderTable, slug, type LinkContext } from "./markdown.ts"
 import {
-  DOCS, repoCount, resolveFigure, resolveSnippet, resolveTable, resolveTerminal, source, version,
+  DOCS, resolveFigure, resolveSnippet, resolveTable, resolveTerminal, source, version,
   type Block, type Parsed, type Table,
 } from "./source.ts"
 
@@ -30,10 +30,6 @@ export interface ResolvedFigure {
 }
 
 export function figureValue(f: Figure, p: Parsed = source()): ResolvedFigure {
-  if (f.from.kind === "count") {
-    const n = repoCount(f.from.count)
-    return { label: f.label, value: String(n), source: `repo count: ${f.from.count}` }
-  }
   return { label: f.label, value: resolveFigure(f.from.re, f.from.doc, p), source: `${f.from.doc} README ${f.from.re}` }
 }
 
@@ -79,7 +75,6 @@ export function resolveModel(p: Parsed = source()) {
     humans: resolveTerminal(site.install.humans.cmd, site.install.humans.where, p),
     splitLeft: resolveTerminal(site.split.left.cmd, site.split.left.where, p),
     splitRight: resolveSnippet(site.split.right.line, site.split.right.where, p),
-    figures: site.figures.map((f) => figureValue(f, p)),
     measuredFigures: site.measured.figures.map((f) => figureValue(f, p)),
     measuredTables: site.measured.tables.map((t) => resolveTable(t.header, t.where, p)),
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
@@ -222,6 +217,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.6 var(--mono); color: var(--body); overflow-x: auto; }
 .t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); } .t-n { color: var(--t-n); }
 .prompt-line::before { content: "$ "; color: var(--soft); }
+.out-line { color: var(--ink); }
 
 .split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
 .split .frame pre { height: 17.5rem; overflow: hidden; white-space: pre; }
@@ -268,7 +264,7 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .principles h3 { font-size: 1.25rem; font-weight: 500; }
 .principles p { margin-top: .5rem; color: var(--soft); max-width: 34ch; }
 
-.showcase > *, .start > *, .guides > *, .principles > *, .bounds > *, .figures > * { min-width: 0; }
+.showcase > *, .start > *, .guides > *, .principles > *, .figures > * { min-width: 0; }
 .showcase { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3rem; align-items: start; }
 .showcase h2 { font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.03em; }
 .control { display: inline-flex; align-items: center; gap: .5rem; padding: .62rem .85rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--raise); color: var(--ink); font: 500 .9rem/1.15 var(--sans); text-decoration: none; transition: background .14s ease, border-color .14s ease; }
@@ -303,11 +299,6 @@ td { padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--line-soft); ve
 td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink); }
 .demo .table-wrap + .table-wrap { margin-top: 2rem; }
 
-.bounds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; }
-.bounds h3 { font-size: 1rem; font-weight: 600; display: flex; gap: .6rem; align-items: baseline; }
-.bounds h3 span { font: .8rem var(--mono); color: var(--soft); }
-.bounds ul { margin: .8rem 0 0; padding: 0; list-style: none; }
-.bounds li { padding: .6rem 0; border-top: 1px solid var(--line-soft); font-size: .92rem; }
 
 .start { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
 
@@ -375,7 +366,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .shell { width: calc(100% - 2rem); }
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
-  .split, .principles, .bounds, .start, .pair { grid-template-columns: minmax(0, 1fr); }
+  .split, .principles, .start, .pair { grid-template-columns: minmax(0, 1fr); }
   .split .frame pre { height: 16rem; }
   .split .frame:first-child pre { height: auto; }
   .figures.three { grid-template-columns: minmax(0, 1fr); }
@@ -602,7 +593,8 @@ ${body}
 export function renderIndex(m: Model = resolveModel()): string {
   const left = m.splitLeft.code
     .split("\n")
-    .map((l) => `<span class="prompt-line">${highlight(l, "sh")}</span>`)
+    // `# ` lines in a README run block are what the command printed: shown as output, unprompted.
+    .map((l) => (l.startsWith("# ") ? `<span class="out-line">${esc(l.slice(2))}</span>` : `<span class="prompt-line">${highlight(l, "sh")}</span>`))
     .join("\n")
   const hero = `<section class="hero shell" aria-labelledby="top-h">
 ${productMark(44)}
@@ -624,8 +616,6 @@ ${codeFrame(site.split.right.label, m.splitRight, false)}
 
   const figs = (list: ResolvedFigure[], cls = "") =>
     `<div class="figures${cls}">${list.map((f) => `<div class="fig" data-source="${esc(f.source)}"><b>${esc(f.value)}</b><span>${esc(f.label)}</span></div>`).join("")}</div>`
-
-  const figures = `<section class="section" id="figures" aria-labelledby="figures-h"><div class="shell"><h2 id="figures-h" class="sr">By the numbers</h2>${figs(m.figures)}</div></section>`
 
   const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
@@ -674,12 +664,6 @@ ${m.tabs
 <div class="demo">${m.measuredTables.map((t) => renderTable(t.header, t.rows)).join("")}</div>
 </div></section>`
 
-  const bounds = `<section class="section" id="boundaries" aria-labelledby="boundaries-h"><div class="shell">
-<div class="sec-head"><h2 id="boundaries-h">Boundaries</h2>
-<p class="explain">What is proven, what is chosen, what is missing. <a href="/reference#bus-boundaries">The bus's boundaries</a> in full.</p></div>
-<div class="demo bounds">${site.boundaries.map((b) => `<div><h3>${esc(b.title)}<span>${b.items.length}</span></h3><ul>${b.items.map((x) => `<li>${inline(x)}</li>`).join("")}</ul></div>`).join("")}</div>
-</div></section>`
-
   const start = `<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
 <div class="sec-head"><h2 id="start-h">Two commands to start</h2>
 <p class="explain">Install <code>bql.sh</code>, then build the engine's libsqlite3 once, by path. It needs a C compiler.</p></div>
@@ -702,14 +686,12 @@ ${m.tabs
   const body = `${header("home")}
 <main id="main">
 ${hero}
-${figures}
+${principles}
 ${showcase}
 ${caps}
 ${aside}
 ${measured}
 ${eco}
-${principles}
-${bounds}
 ${start}
 ${today}
 ${guides}
@@ -784,10 +766,6 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     "",
     "```sh\n" + site.install.humans.cmd + "\n```",
     "",
-    "## By the numbers",
-    "",
-    ...m.figures.map((f) => `- **${f.value}** ${f.label}`),
-    "",
     `## ${site.ecosystem.title}`,
     "",
     site.ecosystem.lede,
@@ -807,9 +785,6 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     site.measured.body,
     "",
     ...m.measuredTables.flatMap((t) => [tableMd(t), ""]),
-    "## Boundaries",
-    "",
-    ...site.boundaries.flatMap((b) => [`### ${b.title}`, "", ...b.items.map((x) => `- ${x}`), ""]),
     "## Two commands to start",
     "",
     fence(m.startInstall),
@@ -852,7 +827,7 @@ export function renderLlms(m: Model = resolveModel()): string {
 
 export function renderAgents(m: Model = resolveModel()): string {
   const client = m.tabs[0]!.block
-  const consumer = m.splitRight
+  const consumer = resolveSnippet("await new BusConsumer({", { doc: "bus" })
   return [
     `# Using ${site.name} from an agent`,
     "",

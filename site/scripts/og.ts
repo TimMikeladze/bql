@@ -9,13 +9,13 @@ import { CSS } from "../src/render.ts"
 import { esc } from "../src/markdown.ts"
 
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-const lede = "Thousands of SQLite databases in one Bun process, and the durable bus that runs work against them."
+const lede = "A database per tenant, user or pull request, with replicas, S3 backup and live queries built in."
 
 export function cardHtml(): string {
   return `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${CSS}
 html,body{margin:0;width:1200px;height:630px;overflow:hidden}
 .card{box-sizing:border-box;width:1200px;height:630px;padding:72px 80px;display:flex;flex-direction:column;background:var(--paper)}
-h1{margin-top:44px;font:700 78px/1.02 var(--sans);letter-spacing:-.04em;max-width:15ch}
+h1{margin-top:44px;font:700 74px/1.04 var(--sans);letter-spacing:-.04em;max-width:19ch}
 p{margin-top:26px;font-size:26px;color:var(--body);max-width:46ch}
 .row{margin-top:auto;display:flex;align-items:center;gap:18px;font:22px var(--mono);color:var(--soft)}
 .row code{font-size:22px;padding:.3em .6em;border:1px solid var(--line);border-radius:10px}
