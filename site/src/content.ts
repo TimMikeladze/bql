@@ -99,7 +99,7 @@ export const site = {
     supports: ["bun", "turso", "drizzle", "graphql", "openapi"] as IconName[],
     tabs: [
       { label: "Client", file: "client.ts", line: "const client = createClient({ url: \"http://localhost:4321\", token })   // token, or the admin key", where: db },
-      { label: "Embedded", file: "embedded.ts", line: "const bq = await Bql.open({ dir: \"./data\" })", where: db },
+      { label: "Embedded", file: "embedded.ts", line: "const bq = await Bql.open({ dir: \"./data\" })", where: { doc: "db", section: "Embedded" } },
       { label: "libsql", file: "libsql.ts", line: "const primary = createClient({ url: \"http://127.0.0.1:4501/v1/db/acme/\", authToken: KEY })", where: db },
       { label: "Driver", file: "driver.ts", line: "const db = Database.open(\"app.db\")", where: db },
     ],
