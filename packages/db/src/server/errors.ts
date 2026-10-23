@@ -48,6 +48,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
    * is the function's own for a 4xx refusal, 502 otherwise (docs/plan-web.md).
    */
   ACTION_FAILED: 502,
+  /** An app's identity provider (`auth.jwks`) could not be read, so no JWT can be checked. */
+  IDP_UNAVAILABLE: 503,
   REPLICATION_DISABLED: 403,
   /** `GET /v1/cluster` on a node with no `[cluster]` section enabled. */
   CLUSTER_DISABLED: 503,
