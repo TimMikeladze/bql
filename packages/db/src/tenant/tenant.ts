@@ -35,6 +35,7 @@
 // append, because that is the last moment the row changes still exist, and it is opaque because
 // this file must not learn what a change event looks like. See `docs/p9-logical-cdc.md`.
 
+import { installSubjectFunction } from "./subject.ts"
 import fs from "node:fs"
 import path from "node:path"
 import { BqlError } from "../server/errors.ts"
@@ -2325,6 +2326,7 @@ function openConnection(
       db.fileControl("SQLITE_FCNTL_PERSIST_WAL", new Int32Array([1]))
     }
     applyPragmas(db, options.sqlite, role.writer)
+    installSubjectFunction(db)
     const limits = { ...DEFAULT_LIMITS, ...options.limits }
     for (const [name, value] of Object.entries(limits)) {
       if (value !== undefined) db.limit(name as LimitName, value)

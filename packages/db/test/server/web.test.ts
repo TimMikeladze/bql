@@ -12,6 +12,7 @@ import {
   UNUSED_VISITOR_MS,
   visitorDbOf,
 } from "../../src/server/web.ts"
+import { sharedTableSql } from "../../src/web/table.ts"
 import { startTestServer, stopAll, type TestServer } from "./harness.ts"
 
 let server: TestServer
@@ -202,6 +203,57 @@ describe("sessions", () => {
     expect(refused.status).toBe(429)
     expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0)
     expect((await session(limited.key, visitor(10))).status).toBe(201)
+  })
+})
+
+describe("the author column", () => {
+  test("bql_sub() fills, checks and guards a shared table's author", async () => {
+    const own = await createApp("authors", {
+      origins: [ORIGIN],
+      tables: { msgs: { mode: "rw" } },
+      session: { newVisitorsPerMinute: 100 },
+    })
+    const ddl = await server.fetch(`/v1/db/${own.sharedDb}/batch`, {
+      method: "POST",
+      body: JSON.stringify({ statements: sharedTableSql("msgs").map((sql) => ({ sql })) }),
+    })
+    expect(ddl.status).toBe(200)
+    const a = (await (await session(own.key, visitor(30))).json()) as Session
+    const b = (await (await session(own.key, visitor(31))).json()) as Session
+    const as = async (who: Session, sql: string) => {
+      const response = await run(own.sharedDb, sql, who.shared?.token)
+      return { status: response.status, body: (await response.json()) as { rows?: unknown[][]; error?: { code: string } } }
+    }
+
+    const made = await as(a, "insert into msgs(id, data) values ('m1', '{}') returning author")
+    expect(made.status).toBe(200)
+    const author = made.body.rows?.[0]?.[0]
+    expect(author).toBe(visitorDbOf("authors", visitor(30)).sub)
+    expect((await as(a, "select bql_sub()")).body.rows?.[0]?.[0]).toBe(author)
+
+    expect((await as(a, "insert into msgs(id, author, data) values ('m2', 'someone', '{}')")).body.error?.code).toBe(
+      "SQLITE_CONSTRAINT_CHECK",
+    )
+    for (const sql of [
+      "update msgs set data = '{\"x\":1}' where id = 'm1'",
+      "update msgs set author = bql_sub() where id = 'm1'",
+      "delete from msgs where id = 'm1'",
+      "insert into msgs(id, data) values ('m1', '{}') on conflict(id) do update set data = excluded.data",
+    ]) {
+      expect((await as(b, sql)).body.error?.code).toBe("SQLITE_CONSTRAINT_TRIGGER")
+    }
+    // REPLACE would skip the DELETE trigger, so a token may not use it on this table at all.
+    expect((await as(b, "insert or replace into msgs(id, data) values ('m1', '{}')")).status).toBe(403)
+    expect((await as(b, "insert into msgs(id, data) values ('b1', '{}')")).status).toBe(200)
+    expect((await as(b, "update or replace msgs set id = 'm1' where id = 'b1'")).body.error?.code).toBe(
+      "SQLITE_CONSTRAINT_TRIGGER",
+    )
+
+    expect((await as(a, "update msgs set data = '{\"x\":2}' where id = 'm1'")).status).toBe(200)
+    const kept = await as(a, "select author, data from msgs where id = 'm1'")
+    expect(kept.body.rows).toEqual([[author, '{"x":2}']])
+    // The admin is NULL to bql_sub(), passes every check, and names the author itself.
+    expect((await run(own.sharedDb, "insert into msgs(id, author, data) values ('m3', 'owner', '{}')")).status).toBe(200)
   })
 })
 

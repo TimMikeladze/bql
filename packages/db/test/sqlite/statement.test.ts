@@ -331,3 +331,56 @@ describe("what the authorizer saw while compiling", () => {
     expect(db.lastInsertRowid).toBe(set)
   })
 })
+
+describe("scalar functions", () => {
+  test("function() returns strings, numbers and null, and a throw fails the statement", () => {
+    const db = fresh()
+    let value: string | number | null = "ann"
+    db.function("who", () => value)
+    expect(db.prepare("select who() as w").get()).toEqual({ w: "ann" })
+    value = 42
+    expect(db.prepare("select who() + 1 as w").get()).toEqual({ w: 43 })
+    value = null
+    expect(db.prepare("select who() is null as w").get()).toEqual({ w: 1 })
+    db.function("broken", () => {
+      throw new Error("no subject")
+    })
+    expect(() => db.prepare("select broken()").get()).toThrow(/no subject/)
+    db.close()
+  })
+
+  test("a deterministic, innocuous function may be called from a CHECK with trusted_schema off", () => {
+    const db = fresh()
+    let me: string | null = "ann"
+    db.function("me", () => me, { deterministic: true, innocuous: true })
+    db.exec("pragma trusted_schema = off")
+    db.exec("create table notes(author text not null default (me()) check (author = me()))")
+    db.run("insert into notes default values")
+    expect(() => db.run("insert into notes(author) values ('bob')")).toThrow(/CHECK constraint failed/)
+    me = "bob"
+    db.run("insert into notes(author) values ('bob')")
+    expect(db.prepare("select author from notes order by rowid").values()).toEqual([["ann"], ["bob"]])
+    db.close()
+  })
+})
+
+describe("REPLACE detection", () => {
+  test("an EXPLAIN of an insert explains it and inserts nothing", () => {
+    const db = fresh()
+    const plan = db.prepare("explain insert or replace into t(id, v) values (1, 'x')").all()
+    expect(plan.length).toBeGreaterThan(0)
+    expect(db.prepare("select count(*) as n from t").get()).toEqual({ n: 0 })
+    db.close()
+  })
+
+  test("REPLACE deletes are reported, an upsert's update is not", () => {
+    const db = fresh()
+    expect(db.prepare("insert or replace into t(id, v) values (1, 'x')").replaces).toEqual(["t"])
+    expect(db.prepare("insert into t(id, v) values (1, 'x') on conflict(id) do update set v = excluded.v").replaces).toBeNull()
+    expect(db.prepare("insert into t(v) values ('x')").replaces).toBeNull()
+    // An UPDATE deletes the row it rewrites; with a trigger that inserts, it still is no REPLACE.
+    db.exec("create table log(v text); create trigger t_log after update on t begin insert into log values (new.v); end")
+    expect(db.prepare("update t set v = 'y' where id = 1").replaces).toBeNull()
+    db.close()
+  })
+})

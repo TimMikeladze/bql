@@ -35,6 +35,9 @@ import {
   SQLITE_PRAGMA,
   SQLITE_ROW,
   SQLITE_TRANSACTION,
+  SQLITE_UTF8,
+  SQLITE_DETERMINISTIC,
+  SQLITE_INNOCUOUS,
   type CheckpointMode,
   type FileControlName,
   type LimitName,
@@ -202,6 +205,8 @@ export class Database implements StatementHost {
   #onRollback: RollbackHook | null = null
   #onWal: WalHook | null = null
   #onAuth: Authorizer | null = null
+  /** Scalar functions registered with `function()`, kept alive until `close()`. */
+  #functionCbs: JSCallback[] = []
   #guard: Authorizer | null = null
   #deadlineAt = Infinity
   #sessions = new Set<number>()
@@ -209,6 +214,8 @@ export class Database implements StatementHost {
   // Set while `prepare()` is compiling; the authorizer trampoline writes what it sees into them.
   #probing = false
   #probeInserts = false
+  /** An INSERT the statement makes itself, not one a trigger makes for it. */
+  #probeInsertsDirectly = false
   #probeReadsRowid = false
   #probeGuarded: GuardedAction[] | null = null
 
@@ -350,6 +357,7 @@ export class Database implements StatementHost {
     this.cacheCounters.misses++
     this.#probing = true
     this.#probeInserts = false
+    this.#probeInsertsDirectly = false
     this.#probeReadsRowid = false
     this.#probeGuarded = null
     let stmt: Statement
@@ -544,8 +552,10 @@ export class Database implements StatementHost {
           // The compile-time facts of design §6.1's `lastInsertRowid`. `cstr` is skipped unless
           // the action can carry one of them, so a connection with no authorizer of its own
           // allocates nothing here.
-          if (action === SQLITE_INSERT) this.#probeInserts = true
-          else if (
+          if (action === SQLITE_INSERT) {
+            this.#probeInserts = true
+            if (!a4) this.#probeInsertsDirectly = true // no trigger name: a null pointer
+          } else if (
             action === SQLITE_FUNCTION &&
             !this.#probeReadsRowid &&
             cstr(a2) === "last_insert_rowid"
@@ -575,9 +585,12 @@ export class Database implements StatementHost {
     this.#probing = false
     const guarded = this.#probeGuarded
     this.#probeGuarded = null
-    return guarded === null
-      ? { inserts: this.#probeInserts, readsLastInsertRowid: this.#probeReadsRowid }
-      : { inserts: this.#probeInserts, readsLastInsertRowid: this.#probeReadsRowid, guarded }
+    const facts = {
+      inserts: this.#probeInserts,
+      insertsDirectly: this.#probeInsertsDirectly,
+      readsLastInsertRowid: this.#probeReadsRowid,
+    }
+    return guarded === null ? facts : { ...facts, guarded }
   }
 
   /**
@@ -617,12 +630,63 @@ export class Database implements StatementHost {
     for (const table of tables) {
       let rc: number
       try {
-        rc = fn(SQLITE_DELETE, table, null, "main", null) | 0
+        // `arg2` is never set on a real DELETE; "replace" tells an authorizer this one is a
+        // REPLACE's, which skips the table's DELETE triggers (recursive_triggers is off).
+        rc = fn(SQLITE_DELETE, table, "replace", "main", null) | 0
       } catch {
         rc = SQLITE_DENY
       }
       if (rc === SQLITE_DENY) throw new SqliteError("not authorized", SQLITE_AUTH)
     }
+  }
+
+  /**
+   * Registers a scalar SQL function of no arguments, `name()`, whose value `impl` returns:
+   * a string, a number, a bigint or null. A throw becomes the statement's error.
+   *
+   * `deterministic` says the value cannot change within one statement, which is what lets a CHECK
+   * constraint or a generated column call it; SQLite may evaluate it once per statement. `innocuous`
+   * says it has no side effects, which lets the schema use it when `trusted_schema` is off.
+   */
+  function(
+    name: string,
+    impl: () => string | number | bigint | null,
+    options: { deterministic?: boolean; innocuous?: boolean } = {},
+  ): void {
+    this.#assertOpen()
+    const s = this.lib.symbols
+    const cb = new JSCallback(
+      (ctx: number) => {
+        let value: string | number | bigint | null
+        try {
+          value = impl()
+        } catch (err) {
+          const message = cbuf(err instanceof Error ? err.message : String(err))
+          s.sqlite3_result_error(ctx, message, message.length - 1)
+          return
+        }
+        if (value === null || value === undefined) s.sqlite3_result_null(ctx)
+        else if (typeof value === "bigint") s.sqlite3_result_int64(ctx, value)
+        else if (typeof value === "number") {
+          if (Number.isSafeInteger(value)) s.sqlite3_result_int64(ctx, value)
+          else s.sqlite3_result_double(ctx, value)
+        } else {
+          const text = cbuf(value)
+          s.sqlite3_result_text(ctx, text, text.length - 1, -1)
+        }
+      },
+      { args: [T.ptr, T.i32, T.ptr], returns: T.void },
+    )
+    const flags =
+      SQLITE_UTF8 |
+      (options.deterministic ? SQLITE_DETERMINISTIC : 0) |
+      (options.innocuous ? SQLITE_INNOCUOUS : 0)
+    const rc = s.sqlite3_create_function_v2(this.#handle, cbuf(name), 0, flags, null, cb.ptr, null, null, null)
+    if (rc !== SQLITE_OK) {
+      cb.close()
+      this.fail(rc)
+    }
+    this.#functionCbs.push(cb)
   }
 
   /** Fires once per inserted, updated or deleted row, after the change, in rowid tables. */
@@ -961,6 +1025,9 @@ export class Database implements StatementHost {
     this.#handle = 0
     s.sqlite3_close_v2(h)
 
+    // After the close: until then SQLite could still call a registered function.
+    for (const cb of this.#functionCbs) cb.close()
+    this.#functionCbs = []
     for (const cb of [
       this.#updateCb,
       this.#preupdateCb,

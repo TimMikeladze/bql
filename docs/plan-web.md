@@ -26,7 +26,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | `/v1/session` | `mintToken`, create | **built**: `server/web.ts` |
 | Browser bundle | `bql.sh/client` | **built**: `packages/db/src/web/`, `packages/db/dist/web.js` |
 | `table()` and `state()` | `sql`, `db.live` | **`table()` built**: `bql.sh/web`; `state()` not yet |
-| Author column (`bql_sub()`) | new driver function binding | `sqlite/`, `server/auth.ts` |
+| Author column (`bql_sub()`) | new driver function binding | **built**: `Database.function`, `tenant/subject.ts`, `bql app table`, `db.shared.table()` |
 | SQL actions | app config, one transaction | server routes |
 | Form endpoint | `a` tables | server routes |
 | Action proxy | Ed25519 keys | server routes |
@@ -149,7 +149,8 @@ create table if not exists todos(
 ## Author column
 
 A visitor can insert into an `a` table, but nothing stops them from writing someone else's name in
-`user`. The fix is a connection function the policy sets per request:
+the author column. The fix is a connection function the policy sets per request. As built the
+column is `author`, not `user`, and the table carries triggers too (`sharedTableSql`):
 
 ```sql
 create table scores(
@@ -162,8 +163,16 @@ create table scores(
 
 - `bql_sub()` returns the token's `sub`, and NULL for the admin. The CHECK has to allow the admin's
   NULL (`check (bql_sub() is null or user = bql_sub())`).
-- The driver has no `sqlite3_create_function` binding today. This piece adds one (a `JSCallback`,
-  deterministic flag off) and `applyPolicy` sets what it returns.
+- The driver had no `sqlite3_create_function` binding; `Database.function` adds a zero-argument
+  one. `bql_sub()` is registered deterministic (true within a statement, and required for a CHECK)
+  and innocuous (so the schema may call it with `trusted_schema` off). `applyPolicy` sets it
+  before its cached-policy shortcut, since two visitors with the same ACL share a policy key.
+- Where the plan was wrong: a CHECK alone guards inserts only. BEFORE UPDATE/DELETE triggers make
+  rows author-only, and REPLACE skips DELETE triggers, so with a table ACL the policy now refuses
+  REPLACE on any table with a DELETE trigger (the driver tags the synthetic DELETE it asks about
+  as `"replace"`). An upsert's update half shows up as a `Delete` opcode too; it carries
+  `OPFLAG_ISUPDATE` and is skipped, so upserts still work. Building this found that the REPLACE
+  scan turned `EXPLAIN INSERT …` into a real insert; it now leaves an EXPLAIN alone.
 
 ## SQL actions
 

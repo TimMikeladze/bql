@@ -356,3 +356,8 @@ export const UPDATE_OPS: Readonly<Record<number, "insert" | "update" | "delete">
   23: "update",
   9: "delete",
 }
+
+/** `sqlite3_create_function_v2` text encoding and flags. */
+export const SQLITE_UTF8 = 1
+export const SQLITE_DETERMINISTIC = 0x800
+export const SQLITE_INNOCUOUS = 0x200000

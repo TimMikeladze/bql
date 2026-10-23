@@ -389,6 +389,18 @@ describe("append", () => {
     db.close()
   })
 
+  test("REPLACE is refused on a table whose DELETE trigger it would skip, even for rw", () => {
+    const db = board()
+    db.exec(`create table guarded(id integer primary key, body text);
+      create trigger guarded_delete before delete on guarded begin select raise(abort, 'kept'); end;
+      insert into guarded values (1, 'original')`)
+    policyFor(db, append({ guarded: "rw", scores: "rw" }), "acme")
+    expect(codeOf(() => db.run("insert or replace into guarded(id, body) values (1, 'replaced')"))).toBe("SQLITE_AUTH")
+    // Without a DELETE trigger there is nothing to skip.
+    db.run("insert or replace into scores(id, player, score) values (1, 'ann', 99)")
+    db.close()
+  })
+
   test("a view does not widen what a token can read", () => {
     const db = board()
     policyFor(db, append({ scores: "a", leaked: "r" }), "acme")

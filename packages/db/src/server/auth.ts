@@ -45,6 +45,7 @@ import {
 } from "../sqlite/constants.ts"
 import type { Authorizer, Database } from "../sqlite/index.ts"
 import { VIRTUAL_TABLES_SQL, shadowOwner, virtualTables } from "../sqlite/shadow.ts"
+import { setSubject } from "../tenant/subject.ts"
 import { BqlError } from "./errors.ts"
 import { fromBase64, toBase64Url } from "./json.ts"
 
@@ -859,6 +860,12 @@ export interface AuthorizerRules {
    * builds it.
    */
   isTrigger?: (name: string) => boolean
+  /**
+   * True when `table` has a DELETE trigger. With a per-table ACL, a REPLACE on such a table is
+   * refused: REPLACE deletes the conflicting row without firing DELETE triggers, so a trigger that
+   * guards deletes (the author column's) would be bypassed. `deleteTriggerLookup` builds it.
+   */
+  hasDeleteTrigger?: (table: string) => boolean
 }
 
 /** Lower-cases the ACL keys once, so lookups can be case-insensitive like SQLite identifiers. */
@@ -928,6 +935,9 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
       }
       if (action === SQLITE_INSERT || action === SQLITE_UPDATE || action === SQLITE_DELETE) {
         if (name.startsWith("sqlite_")) return name === "sqlite_sequence" ? SQLITE_OK : SQLITE_DENY
+        if (action === SQLITE_DELETE && arg2 === "replace" && rules.hasDeleteTrigger?.(name) === true) {
+          return SQLITE_DENY
+        }
         const acl = aclOf(name, true)
         if (acl === "rw") return SQLITE_OK
         // REPLACE deletes the conflicting row without an authorizer DELETE; the driver asks for one
@@ -1023,7 +1033,11 @@ export function applyPolicy(
   options: PolicyOptions = {},
 ): PolicyHandle {
   const before = queryOnlyState.get(db) ?? false
+  // Set on every request, before the cached-policy shortcut below: two visitors with the same ACL
+  // share a policy key, not a subject.
+  setSubject(db, principal.kind === "token" ? (principal.claims.sub ?? null) : null)
   const restore = (): void => {
+    setSubject(db, null)
     appliedPolicy.delete(db)
     hub.setBase(null)
     if (queryOnlyState.get(db) !== before) hub.bypass(() => setQueryOnly(db, before))
@@ -1053,7 +1067,7 @@ export function applyPolicy(
     buildAuthorizer({
       scope,
       ...(principal.tables ? { tables: principal.tables } : {}),
-      ...(shadowOf ? { shadowOf, shadowWrites: hardened, isTrigger: isTriggerLookup(db) } : {}),
+      ...(shadowOf ? { shadowOf, shadowWrites: hardened, isTrigger: isTriggerLookup(db), hasDeleteTrigger: deleteTriggerLookup(db) } : {}),
       ...(options.reportEveryDelete ? { reportEveryDelete: true } : {}),
     }),
   )
@@ -1091,7 +1105,7 @@ function defend(db: Database, want: boolean): boolean {
 /** Shadow table → owning virtual table, and the trigger names (all lower-cased), per connection, as of `cookie`. */
 const shadowMaps = new WeakMap<
   Database,
-  { cookie: number; map: Map<string, string>; triggers: Set<string> }
+  { cookie: number; map: Map<string, string>; triggers: Set<string>; deleteTriggers: Set<string> }
 >()
 
 /**
@@ -1121,12 +1135,24 @@ export function shadowLookup(db: Database, hub: PolicySlot): (name: string) => s
       }
     }
     const triggers = new Set<string>()
-    for (const row of db.prepare("select name from sqlite_schema where type = 'trigger'").all()) {
-      if (typeof row.name === "string") triggers.add(row.name.toLowerCase())
+    const deleteTriggers = new Set<string>()
+    for (const row of db.prepare("select name, tbl_name, sql from sqlite_schema where type = 'trigger'").all()) {
+      if (typeof row.name !== "string") continue
+      triggers.add(row.name.toLowerCase())
+      // The event is in the header, before BEGIN: `create trigger x before delete on t`.
+      const header = String(row.sql ?? "").split(/\bbegin\b/i)[0] ?? ""
+      if (/\bdelete\s+on\b/i.test(header) && typeof row.tbl_name === "string") {
+        deleteTriggers.add(row.tbl_name.toLowerCase())
+      }
     }
-    shadowMaps.set(db, { cookie, map, triggers })
+    shadowMaps.set(db, { cookie, map, triggers, deleteTriggers })
   })
   return (name) => shadowMaps.get(db)?.map.get(name)
+}
+
+/** The tables with a DELETE trigger, as `shadowLookup` last read them: `AuthorizerRules.hasDeleteTrigger`. */
+export function deleteTriggerLookup(db: Database): (table: string) => boolean {
+  return (table) => shadowMaps.get(db)?.deleteTriggers.has(table.toLowerCase()) === true
 }
 
 /** The trigger names `shadowLookup` last read for this connection, as `AuthorizerRules.isTrigger`. */

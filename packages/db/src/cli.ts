@@ -21,6 +21,7 @@ import { createClient, type Client } from "./client/index.ts"
 import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
 import { diffSchema, formatSchemaDiff } from "./client/diff.ts"
+import { sharedTableSql } from "./web/table.ts"
 import type {
   AppConfig,
   AppInfo,
@@ -73,6 +74,7 @@ bql — SQLite as a multi-tenant database server (design §9.3)
   bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,posts:a,users:rw']
   bql app create <id> [--config bql.json]   an app for a static page: a pk_ key and app-<id>-shared
   bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
+  bql app table <id> <table> [--mode a|r|rw]   a shared table with an author column (default a)
   bql exec <db> --sql "select 1"
   bql shell <db>
   bql bus <command>   the message bus — \`bql bus help\` lists its commands
@@ -814,13 +816,29 @@ async function app(args: ParsedArgs, remote: Remote): Promise<void> {
       out(remote, rotated, line(rotated))
       return
     }
+    case "table": {
+      const appId = need("table")
+      const table = file
+      if (!table) throw new CliError("app table needs <id> <table>")
+      const mode = str(args, "mode") ?? "a"
+      if (mode !== "a" && mode !== "r" && mode !== "rw") throw new CliError("--mode must be a, r or rw")
+      const current = await admin.app(appId)
+      // The DDL first: a config naming a table that does not exist yet would fail every session's reads.
+      await remote.client.db(current.sharedDb).batch(sharedTableSql(table).map((sql) => ({ sql })))
+      const updated = await admin.updateApp(appId, {
+        ...current.config,
+        tables: { ...current.config.tables, [table]: { mode } },
+      })
+      out(remote, updated, `${current.sharedDb}.${table}  mode=${mode}  author column, author-only updates and deletes`)
+      return
+    }
     case "delete": {
       const deleted = await admin.deleteApp(need("delete"))
       out(remote, deleted, `${deleted.id} deleted; its databases are left in place`)
       return
     }
     default:
-      throw new CliError("app takes create, list, show, push, rotate or delete")
+      throw new CliError("app takes create, list, show, push, table, rotate or delete")
   }
 }
 

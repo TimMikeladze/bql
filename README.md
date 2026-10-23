@@ -206,8 +206,21 @@ a table it creates itself, with `insert`, `get`, `update`, `delete`, and
 `where(...).orderBy(...).limit(...)` ending in `list()` or `live(cb)`. Raw SQL against it reads the
 document through `json_extract(data, '$.title')`.
 
-Tables the app lists in its config under `tables`, with a mode each (`r`, `a`, `rw`), live in the
-shared database `app-demo-shared` and are reachable as `db.shared.sql` and `db.shared.live`.
+The app's shared database, `app-demo-shared`, holds what visitors see of each other. The owner
+creates a table there with an author column and gives it a mode (`r`, `a` append-only, `rw`):
+
+```sh
+bunx bql app table demo posts --mode rw
+```
+
+```js
+const posts = db.shared.table("posts")
+await posts.insert({ text: "hello" })                 // author is filled in by the server
+posts.orderBy("createdAt", "desc").limit(50).live(render)
+// row.author === db.author for your own rows; only the author can update or delete a row
+```
+
+`db.shared.sql` and `db.shared.live` reach the same tables with raw SQL.
 [packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next

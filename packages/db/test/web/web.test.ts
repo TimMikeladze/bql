@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { connect, type Row, type WebDb } from "../../src/web/index.ts"
-import { compareRows, selectSql, uuidv7 } from "../../src/web/table.ts"
+import { compareRows, selectSql, sharedTableSql, uuidv7, type SharedRow } from "../../src/web/table.ts"
 import { startTestServer, stopAll, type TestServer } from "../server/harness.ts"
 
 const ORIGIN = "https://page.test"
@@ -55,7 +55,7 @@ beforeAll(async () => {
     method: "POST",
     body: JSON.stringify({ id: "page", config: {
         origins: [ORIGIN],
-        tables: { guestbook: { mode: "a" } },
+        tables: { guestbook: { mode: "a" }, posts: { mode: "rw" } },
         // Every test is a new visitor from 127.0.0.1; the default 10 a minute would refuse them.
         session: { newVisitorsPerMinute: 1000 },
       } }),
@@ -64,6 +64,10 @@ beforeAll(async () => {
   await server.fetch(`/v1/db/${app.sharedDb}/query`, {
     method: "POST",
     body: JSON.stringify({ sql: "create table guestbook(id integer primary key, message text)" }),
+  })
+  await server.fetch(`/v1/db/${app.sharedDb}/batch`, {
+    method: "POST",
+    body: JSON.stringify({ statements: sharedTableSql("posts").map((sql) => ({ sql })) }),
   })
 })
 afterAll(async () => {
@@ -255,6 +259,44 @@ describe("tokens", () => {
     await db.shared.sql`insert into guestbook(message) values (${"hello"})`
     const err = await db.shared.sql`update guestbook set message = ${"edited"}`.catch((e) => e)
     expect(err.code).toBe("NOT_AUTHORIZED")
+  })
+})
+
+describe("shared.table", () => {
+  interface Post extends Record<string, unknown> {
+    text: string
+  }
+
+  test("rows carry their author; only the author changes them", async () => {
+    const ann = await visit()
+    const bob = await visit()
+    if (!ann.shared || !bob.shared) throw new Error("expected shared tables")
+    const annPosts = ann.shared.table<Post>("posts")
+    const bobPosts = bob.shared.table<Post>("posts")
+
+    const post = (await annPosts.insert({ text: "hello", author: "forged" } as Post)) as SharedRow<Post>
+    expect(post.author).toBe(ann.author)
+    expect(post.author).not.toBe(bob.author)
+
+    expect(((await bobPosts.get(post.id)) as SharedRow<Post> | null)?.author).toBe(ann.author)
+    const refused = await bobPosts.update(post.id, { text: "edited by bob" }).catch((err) => err)
+    expect(refused.code).toBe("SQLITE_CONSTRAINT_TRIGGER")
+    expect((await bobPosts.delete(post.id).catch((err) => err)).code).toBe("SQLITE_CONSTRAINT_TRIGGER")
+
+    expect((await annPosts.update(post.id, { text: "edited" }))?.text).toBe("edited")
+    const mine = (await bobPosts.where({ author: ann.author }).list()) as SharedRow<Post>[]
+    expect(mine.map((p) => p.text)).toContain("edited")
+  })
+
+  test("a live list sees another visitor's post", async () => {
+    const ann = await visit()
+    const bob = await visit()
+    if (!ann.shared || !bob.shared) throw new Error("expected shared tables")
+    const text = `from bob ${Date.now()}`
+    const seen = waitFor<Row<Post>>((cb) => ann.shared!.table<Post>("posts").where({ text }).live(cb), (rows) => rows.length === 1)
+    await Bun.sleep(50)
+    await bob.shared.table<Post>("posts").insert({ text })
+    expect(((await seen)[0] as SharedRow<Post>).author).toBe(bob.author)
   })
 })
 

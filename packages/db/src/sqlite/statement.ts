@@ -49,6 +49,12 @@ export interface ProgramFacts {
    * why it is a gate and not an answer.
    */
   readonly inserts: boolean
+  /**
+   * The statement's own program inserts (an INSERT or REPLACE statement), as opposed to only a
+   * trigger it fires. Only such a statement can REPLACE on insert; `ProgramFacts.replaces` is
+   * looked for only then, because an UPDATE's main program also deletes the row it rewrites.
+   */
+  readonly insertsDirectly?: boolean
   /** The program calls `last_insert_rowid()`, so the connection's counter is an input to it. */
   readonly readsLastInsertRowid: boolean
   /**
@@ -635,20 +641,24 @@ export function prepareStatement(
   // Taken here, while the compile that produced `handle` is still the last one the connection
   // authorized: the facts belong to this statement and to no other.
   const facts = host.takeProgramFacts()
-  if (!facts.inserts) return new Statement(host, sql, handle, facts)
+  if (!facts.insertsDirectly) return new Statement(host, sql, handle, facts)
   const replaces = conflictDeletes(host, handle)
   return new Statement(host, sql, handle, replaces === null ? facts : { ...facts, replaces })
 }
 
 /**
  * Reads the statement's own bytecode (`sqlite3_stmt_explain`, no recompile) for `Delete` opcodes
- * naming a table. In an inserting statement's main program those come only from REPLACE: the
+ * naming a table. In an inserting statement's main program those come only from REPLACE (and an
+ * upsert's update, which is flagged and skipped): the
  * rowid-only case still emits one (as a no-op that fires the preupdate hook), so it is not missed.
  * Trigger subprograms are listed after the main program with their addresses starting again at
  * zero; the scan stops there, since a trigger's deletes are its author's, not the caller's.
  */
 function conflictDeletes(host: StatementHost, handle: number): string[] | null {
   const s = host.lib.symbols
+  // An EXPLAIN never runs, so it deletes nothing; and switching it back to mode 0 below would turn
+  // `EXPLAIN INSERT …` into the INSERT itself.
+  if (s.sqlite3_stmt_isexplain(handle) !== 0) return null
   if (s.sqlite3_stmt_explain(handle, 1) !== SQLITE_OK) return null
   let tables: string[] | null = null
   try {
@@ -658,6 +668,9 @@ function conflictDeletes(host: StatementHost, handle: number): string[] | null {
       if (addr < last) break
       last = addr
       if (cstr(s.sqlite3_column_text(handle, 1)) !== "Delete") continue
+      // OPFLAG_ISUPDATE: the delete half of an upsert's DO UPDATE, which the authorizer already
+      // saw as an UPDATE. Internal to SQLite, but the library is pinned (`scripts/sqlite.ts`).
+      if ((Number(s.sqlite3_column_int64(handle, 3)) & 0x04) !== 0) continue
       const table = cstr(s.sqlite3_column_text(handle, 5))
       if (table !== null && !(tables ??= []).includes(table)) tables.push(table)
     }

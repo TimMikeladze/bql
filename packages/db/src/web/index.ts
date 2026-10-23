@@ -13,7 +13,7 @@ import type { JsRow } from "../client/values.ts"
 import { type Doc, type LiveDiff, type Statement, Table, createTableSql } from "./table.ts"
 
 export { Table, View, uuidv7 } from "./table.ts"
-export type { Direction, Doc, Filter, Json, Row } from "./table.ts"
+export type { Direction, Doc, Filter, Json, Row, SharedRow } from "./table.ts"
 
 export interface ConnectOptions {
   /** The bql.sh server. Default: the page's own origin. */
@@ -61,6 +61,19 @@ export interface LiveRunner {
   <T = JsRow>(strings: TemplateStringsArray, ...values: unknown[]): LiveSql<T>
 }
 
+/** The app's shared database: the tables its config lists, in the mode each is given. */
+export interface SharedDb {
+  readonly db: string
+  readonly sql: SqlRunner
+  readonly live: LiveRunner
+  /**
+   * A table the owner created with `bql app table`; the page never creates one here. Rows carry
+   * `author` (`SharedRow`), which the server fills in and checks, and only a row's author can
+   * update or delete it.
+   */
+  table<T extends Doc = Doc>(name: string): Table<T>
+}
+
 export interface WebDb {
   /** The id this browser is known by. */
   readonly visitor: string
@@ -73,7 +86,12 @@ export interface WebDb {
   /** A live query on the visitor's database. */
   readonly live: LiveRunner
   /** The app's shared database, or null when the app declares no tables visitors can see. */
-  readonly shared: { readonly db: string; readonly sql: SqlRunner; readonly live: LiveRunner } | null
+  readonly shared: SharedDb | null
+  /**
+   * The id this visitor's rows carry in a shared table's `author` column: a hash of the visitor
+   * id, safe to show. Compare a row's `author` with it to tell your rows from others'.
+   */
+  readonly author: string
   /** Fetches a new session now. Live queries carry on over the new tokens. */
   refresh(): Promise<void>
   /** Stops refreshing and closes every connection and live query. */
@@ -178,12 +196,34 @@ class Connection implements WebDb {
 
   get shared(): WebDb["shared"] {
     const shared = this.#session.shared
-    return shared ? { db: shared.db, sql: this.#sharedSql, live: this.#sharedLive } : null
+    if (!shared) return null
+    return {
+      db: shared.db,
+      sql: this.#sharedSql,
+      live: this.#sharedLive,
+      table: <T extends Doc = Doc>(name: string) =>
+        new Table<T>(
+          {
+            shared: true,
+            run: (statement) => this.#run("shared", statement),
+            live: (statement, onRows, onDiff, onError) =>
+              this.#subscribe({ statement, db: "shared", key: "id", onRows, onDiff, onError, stop: null }),
+            ensure: async () => {},
+          },
+          name,
+        ),
+    }
+  }
+
+  get author(): string {
+    const payload = (this.#session.private.token.split(".")[1] ?? "").replaceAll("-", "+").replaceAll("_", "/")
+    return String((JSON.parse(atob(payload)) as { sub?: string }).sub ?? "")
   }
 
   table<T extends Doc = Doc>(name: string): Table<T> {
     return new Table<T>(
       {
+        shared: false,
         run: (statement) => this.#run("private", statement),
         live: (statement, onRows, onDiff, onError) => this.#subscribe({ statement, db: "private", key: "id", onRows, onDiff, onError, stop: null }),
         ensure: (table) => this.#ensure(table),

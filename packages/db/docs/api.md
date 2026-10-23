@@ -931,6 +931,41 @@ anonymous visitor gets.
 Apps live in the node's catalog. In a cluster, create the app on the node that serves its
 databases; sessions are refused on a replica.
 
+#### The author column
+
+Every tenant connection has `bql_sub()`: the `sub` of the token serving the current request, or
+NULL for the admin and for the node's own work. A session's tokens carry the visitor's `sub` (the
+hash in their database's name), so a shared table can record and enforce who wrote each row.
+`bql app table` creates one:
+
+```sh
+bql app table demo posts --mode rw
+# app-demo-shared.posts  mode=rw  author column, author-only updates and deletes
+```
+
+```sql
+create table posts (
+  id text primary key,
+  author text not null default (bql_sub()) check (bql_sub() is null or author = bql_sub()),
+  data text not null check (json_valid(data)),
+  created_at integer not null default (cast(unixepoch('subsec') * 1000 as integer)),
+  updated_at integer not null default (cast(unixepoch('subsec') * 1000 as integer))
+) strict;
+-- plus BEFORE UPDATE and BEFORE DELETE triggers that abort unless old.author is bql_sub(),
+-- and one that refuses changing id
+```
+
+A visitor's insert gets their `sub` as `author`; naming another one fails the CHECK
+(`SQLITE_CONSTRAINT_CHECK`). Updating or deleting someone else's row, an upsert onto it included,
+fails a trigger (`SQLITE_CONSTRAINT_TRIGGER`). The admin passes every check and names the author
+itself. `bql_sub()` is registered deterministic, so it may appear in a CHECK; do not index on it.
+
+With a table ACL, a token may not REPLACE (`INSERT OR REPLACE`, `REPLACE INTO`, a table declared
+`ON CONFLICT REPLACE`) into a table that has a DELETE trigger: REPLACE deletes the conflicting row
+without firing DELETE triggers (`recursive_triggers` is off), so the trigger's guard would be
+skipped. It is a `403`. Trigger bodies themselves run as their author: a write the token makes may
+fire a trigger that writes a table the token can only read.
+
 ### Operations
 
 ```http
@@ -1900,6 +1935,7 @@ bql cluster
 bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,posts:a,users:rw']
 bql app create <id> [--config bql.json]
 bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
+bql app table <id> <table> [--mode a|r|rw]
 bql exec <db> --sql "select 1"
 bql shell <db>
 ```

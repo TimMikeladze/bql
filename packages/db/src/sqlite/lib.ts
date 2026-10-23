@@ -93,6 +93,7 @@ const CORE = {
   sqlite3_clear_bindings: { args: [T.ptr], returns: T.i32 },
   sqlite3_stmt_readonly: { args: [T.ptr], returns: T.i32 },
   sqlite3_stmt_explain: { args: [T.ptr, T.i32], returns: T.i32 },
+  sqlite3_stmt_isexplain: { args: [T.ptr], returns: T.i32 },
   sqlite3_stmt_busy: { args: [T.ptr], returns: T.i32 },
   sqlite3_stmt_status: { args: [T.ptr, T.i32, T.i32], returns: T.i32 },
   sqlite3_sql: { args: [T.ptr], returns: T.cstring },
@@ -139,6 +140,16 @@ const CORE = {
   sqlite3_value_text: { args: [T.ptr], returns: T.ptr },
   sqlite3_value_blob: { args: [T.ptr], returns: T.ptr },
   sqlite3_value_bytes: { args: [T.ptr], returns: T.i32 },
+  sqlite3_create_function_v2: {
+    args: [T.ptr, T.ptr, T.i32, T.i32, T.ptr, T.ptr, T.ptr, T.ptr, T.ptr],
+    returns: T.i32,
+  },
+  sqlite3_result_null: { args: [T.ptr], returns: T.void },
+  sqlite3_result_int64: { args: [T.ptr, T.i64], returns: T.void },
+  sqlite3_result_double: { args: [T.ptr, T.f64], returns: T.void },
+  // The destructor is passed as -1, SQLITE_TRANSIENT: SQLite copies the bytes before returning.
+  sqlite3_result_text: { args: [T.ptr, T.ptr, T.i32, T.i64], returns: T.void },
+  sqlite3_result_error: { args: [T.ptr, T.ptr, T.i32], returns: T.void },
 } as const
 
 /**
@@ -260,6 +271,7 @@ export interface CoreSymbols {
   sqlite3_clear_bindings(stmt: Ptr): number
   sqlite3_stmt_readonly(stmt: Ptr): number
   sqlite3_stmt_explain(stmt: Ptr, mode: number): number
+  sqlite3_stmt_isexplain(stmt: Ptr): number
   sqlite3_stmt_busy(stmt: Ptr): number
   sqlite3_stmt_status(stmt: Ptr, op: number, reset: number): number
   sqlite3_sql(stmt: Ptr): CString
@@ -324,6 +336,22 @@ export interface CoreSymbols {
   sqlite3_value_text(value: Ptr): Ptr | null
   sqlite3_value_blob(value: Ptr): Ptr | null
   sqlite3_value_bytes(value: Ptr): number
+  sqlite3_create_function_v2(
+    db: Ptr,
+    name: PtrArg,
+    nArg: number,
+    flags: number,
+    app: Ptr | null,
+    xFunc: Ptr | null,
+    xStep: Ptr | null,
+    xFinal: Ptr | null,
+    xDestroy: Ptr | null,
+  ): number
+  sqlite3_result_null(ctx: Ptr): void
+  sqlite3_result_int64(ctx: Ptr, value: bigint | number): void
+  sqlite3_result_double(ctx: Ptr, value: number): void
+  sqlite3_result_text(ctx: Ptr, text: PtrArg, bytes: number, destructor: bigint | number): void
+  sqlite3_result_error(ctx: Ptr, text: PtrArg, bytes: number): void
 }
 
 export interface WideSymbols {
