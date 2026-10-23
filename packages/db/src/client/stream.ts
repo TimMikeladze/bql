@@ -132,7 +132,9 @@ export class SseSubscription {
   async #once(): Promise<void> {
     const headers = new Headers(this.#options.headers())
     headers.set("accept", "text/event-stream")
-    const response = await this.#options.fetchImpl(this.#options.url(), {
+    // Called unbound, as in `http.ts`: a browser's `fetch` refuses any other `this`.
+    const fetchImpl = this.#options.fetchImpl
+    const response = await fetchImpl(this.#options.url(), {
       headers,
       signal: this.#controller.signal,
     })

@@ -288,3 +288,30 @@ describe("createClient", () => {
     expect(() => createClient({ url: "file:///tmp/x" })).toThrow(BqlClientError)
   })
 })
+
+describe("fetch", () => {
+  test("is called unbound, the way a browser's fetch insists on", async () => {
+    // A browser's `fetch` throws "Illegal invocation" for any `this` but the window.
+    const strict = function (this: unknown, input: string | URL | Request, init?: RequestInit) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation")
+      return fetch(input, init)
+    } as typeof fetch
+    const client = createClient({ url: fixture.server.url, token: fixture.server.adminKey, fetch: strict, WebSocket: null })
+    try {
+      const db = client.db("acme")
+      expect((await db.sql`select count(*) as n from todos`.first())?.n).toBeGreaterThan(0)
+      // The SSE live path makes its own fetch.
+      const first = await new Promise((resolve, reject) => {
+        const live = db.live`select id from todos`.key("id")
+        live.on("rows", (event) => {
+          live.close()
+          resolve(event.rows.length)
+        })
+        live.on("error", reject)
+      })
+      expect(first).toBeGreaterThan(0)
+    } finally {
+      client.close()
+    }
+  })
+})

@@ -114,8 +114,10 @@ export class HttpClient {
       body = JSON.stringify(init.body)
       if (!headers.has("content-type")) headers.set("content-type", "application/json")
     }
+    // Called unbound: a browser's `fetch` throws "Illegal invocation" when `this` is not `window`.
+    const fetchImpl = this.#config.fetchImpl
     try {
-      return await this.#config.fetchImpl(`${base}${path}`, {
+      return await fetchImpl(`${base}${path}`, {
         method: init.method ?? (body === undefined ? "GET" : "POST"),
         headers,
         ...(body === undefined ? {} : { body }),
