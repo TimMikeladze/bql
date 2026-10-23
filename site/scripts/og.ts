@@ -14,12 +14,12 @@ const lede = "SQLite over HTTP, WebSockets and libsql, with replicas, S3 backup,
 export function cardHtml(): string {
   return `<!doctype html><html data-theme="dark"><head><meta charset="utf-8"><style>${CSS}
 html,body{margin:0;width:1200px;height:630px;overflow:hidden}
-.card{box-sizing:border-box;width:1200px;height:630px;padding:72px 80px;display:flex;flex-direction:column;background:var(--paper)}
-h1{margin-top:44px;font:700 74px/1.04 var(--sans);letter-spacing:-.04em;max-width:19ch;text-wrap:balance}
+.og{box-sizing:border-box;width:1200px;height:630px;padding:72px 80px;display:flex;flex-direction:column;background:var(--paper)}
+h1{margin-top:44px;font:400 82px/1.02 var(--serif);letter-spacing:-.025em;max-width:17ch;text-wrap:balance}
 p{margin-top:26px;font-size:26px;color:var(--body);max-width:46ch}
 .row{margin-top:auto;display:flex;align-items:center;gap:18px;font:22px var(--mono);color:var(--soft)}
 .row code{font-size:22px;padding:.3em .6em;border:1px solid var(--line);border-radius:10px}
-.row i{font-style:normal;color:var(--accent)}</style></head><body><div class="card">
+.row i{font-style:normal;color:var(--accent)}</style></head><body><div class="og">
 ${productMark(64)}<h1>${esc(site.h1)}</h1><p>${esc(lede)}</p>
 <div class="row"><code>${esc(site.install.humans.cmd)}</code><i>·</i><span>zero dependencies</span><i>·</i><span>${esc(new URL(site.origin).host)}</span></div>
 </div></body></html>`
