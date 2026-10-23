@@ -326,6 +326,78 @@ describe("db.action", () => {
   })
 })
 
+describe("db.state", () => {
+  type Todo = { title: string; done: boolean }
+  const defaults = { todos: [] as Todo[], theme: "dark", prefs: { size: 14 } }
+
+  async function stored(db: WebDb, key: string): Promise<unknown> {
+    const [row] = await db.sql<{ value: string }>`select value from bql_state where key = ${key}`
+    return row ? JSON.parse(row.value) : undefined
+  }
+
+  test("mutations persist, and defaults fill what was never written", async () => {
+    const v = "state-visitor-00000000001"
+    const db = await visit(v)
+    const app = await db.state(defaults)
+    expect(app.theme).toBe("dark")
+    app.todos.push({ title: "write it", done: false })
+    app.todos[0]!.done = true
+    app.prefs.size = 16
+    await app.$saved
+
+    const again = await (await visit(v)).state(defaults)
+    expect(again.todos).toEqual([{ title: "write it", done: true }])
+    expect(again.prefs).toEqual({ size: 16 })
+    expect(again.theme).toBe("dark")
+    expect(await stored(db, "theme")).toBeUndefined()
+  })
+
+  test("two tabs pushing at once both land", async () => {
+    const v = "state-visitor-00000000002"
+    const one = await (await visit(v)).state(defaults)
+    const two = await (await visit(v)).state(defaults)
+    one.todos.push({ title: "from one", done: false })
+    two.todos.push({ title: "from two", done: false })
+    await Promise.all([one.$saved, two.$saved])
+    const db = await visit(v)
+    const titles = ((await stored(db, "todos")) as Todo[]).map((t) => t.title).sort()
+    expect(titles).toEqual(["from one", "from two"])
+  })
+
+  test("splice writes the array whole; delete removes a field", async () => {
+    const db = await visit()
+    const app = await db.state(defaults)
+    app.todos.push({ title: "a", done: false }, { title: "b", done: false }, { title: "c", done: false })
+    await app.$saved
+    app.todos.splice(1, 1)
+    delete (app.prefs as { size?: number }).size
+    await app.$saved
+    expect(((await stored(db, "todos")) as Todo[]).map((t) => t.title)).toEqual(["a", "c"])
+    expect(await stored(db, "prefs")).toEqual({})
+  })
+
+  test("a change in one tab reaches the other, with a change event", async () => {
+    const v = "state-visitor-00000000003"
+    const one = await (await visit(v)).state(defaults)
+    const two = await (await visit(v)).state(defaults)
+    const seen = new Promise<string>((resolve) => {
+      two.$on("change", (state) => {
+        if (state.theme === "light") resolve(state.theme)
+      })
+    })
+    await Bun.sleep(50)
+    one.theme = "light"
+    expect(await Promise.race([seen, Bun.sleep(3000).then(() => "no change event")])).toBe("light")
+  })
+
+  test("a root key may not start with $", async () => {
+    const app = await (await visit()).state(defaults)
+    expect(() => {
+      ;(app as unknown as Record<string, unknown>).$hidden = 1
+    }).toThrow(TypeError)
+  })
+})
+
 describe("helpers", () => {
   test("uuidv7 ids sort by time", () => {
     expect(uuidv7(1000) < uuidv7(2000)).toBe(true)

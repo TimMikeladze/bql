@@ -10,10 +10,12 @@
 
 import { createClient, type Client, type Db } from "../client/index.ts"
 import type { JsRow } from "../client/values.ts"
+import { type State, StateStore } from "./state.ts"
 import { type Doc, type LiveDiff, type Statement, Table, createTableSql } from "./table.ts"
 
 export { Table, View, uuidv7 } from "./table.ts"
 export type { Direction, Doc, Filter, Json, Row, SharedRow } from "./table.ts"
+export type { State, StateApi } from "./state.ts"
 
 export interface ConnectOptions {
   /** The bql.sh server. Default: the page's own origin. */
@@ -85,6 +87,13 @@ export interface WebDb {
   readonly visitor: string
   /** The visitor's own database, `app-<id>-u-<hash>`. */
   readonly db: string
+  /**
+   * The page's state as one object to mutate in place, loaded from the visitor's database and kept
+   * there and in step across tabs. `defaults` fills keys never written. Assigning a field, `push`
+   * and `delete` each become one JSON operation on the server; `$on("change")` fires after local
+   * and remote changes alike.
+   */
+  state<T extends Record<string, import("./state.ts").Json>>(defaults: T): Promise<State<T>>
   /** A table in the visitor's database, created on first use. */
   table<T extends Doc = Doc>(name: string): Table<T>
   /** Raw SQL on the visitor's database. */
@@ -230,6 +239,20 @@ class Connection implements WebDb {
   get author(): string {
     const payload = (this.#session.private.token.split(".")[1] ?? "").replaceAll("-", "+").replaceAll("_", "/")
     return String((JSON.parse(atob(payload)) as { sub?: string }).sub ?? "")
+  }
+
+  async state<T extends Record<string, import("./state.ts").Json>>(defaults: T): Promise<State<T>> {
+    const store = new StateStore<T>(
+      {
+        run: (statement) => this.#run("private", statement),
+        live: (statement, onRows, onDiff, onError) =>
+          this.#subscribe({ statement, db: "private", key: "key", onRows, onDiff, onError, stop: null }),
+        report: (err) => this.#report(err),
+      },
+      defaults,
+    )
+    await store.open()
+    return store.root
   }
 
   table<T extends Doc = Doc>(name: string): Table<T> {

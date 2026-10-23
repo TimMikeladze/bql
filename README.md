@@ -201,6 +201,19 @@ every commit that changes it; with `.key("id")` it sends `diff`s after the first
 A failed CHECK rejects with `code` `SQLITE_CONSTRAINT_CHECK`. Tokens are renewed before they
 expire, and live queries carry on across the renewal, starting again with a full `rows`.
 
+`db.state()` keeps one object in sync instead, for a page that holds its data in one place:
+
+```js
+const app = await db.state({ todos: [], theme: "dark" })
+app.todos.push({ title: "write it", done: false })   // one json_insert on the server
+app.$on("change", render)                              // after this tab's changes and other tabs'
+```
+
+It is one row per top-level key in the visitor's `bql_state` table. `push` becomes
+`json_insert(…, '$[#]')`, so two tabs pushing at once both land; assigning a field is `json_set` and
+`delete` is `json_remove`. Any other array change (splice, sort) writes that array whole, last
+writer wins. `await app.$saved` waits for every write so far.
+
 `db.table("todos")` is the shortcut for a page that does not want a schema: JSON documents in
 a table it creates itself, with `insert`, `get`, `update`, `delete`, and
 `where(...).orderBy(...).limit(...)` ending in `list()` or `live(cb)`. Raw SQL against it reads the
