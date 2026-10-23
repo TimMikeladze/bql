@@ -799,6 +799,11 @@ export interface AppConfig {
   /** Named SQL a visitor runs with the server's rights; `docs/api.md`, "Actions". */
   actions?: Record<string, AppAction>
   session?: { ttlMs?: number; newVisitorsPerMinute?: number }
+  /**
+   * Sign-in with the app's own provider: `/v1/session { jwt }` checks the JWT against `jwks`, and
+   * one account gets one database on every device. `required` refuses anonymous sessions.
+   */
+  auth?: { issuer: string; jwks: string; audience?: string; userClaim?: string; required?: boolean }
 }
 
 /** One input of an action or field of a form. */
@@ -831,6 +836,6 @@ export interface AppInfo {
   /** The public `pk_` key. It goes in the page; it is not a secret. */
   key: string
   sharedDb: string
-  config: Required<AppConfig>
+  config: Required<Omit<AppConfig, "auth">> & Pick<AppConfig, "auth">
   createdAtMs: number
 }

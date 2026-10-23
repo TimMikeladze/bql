@@ -154,7 +154,10 @@ const ChangeEvent = s
 /** An app's `bql.json`, checked by `parseAppConfig` rather than here so the message names the key. */
 const AppConfigBody = s
   .record(s.unknown())
-  .describe("`origins`, `tables` (`{ mode: r|a|rw, read? }` per table) and `session` (`ttlMs`, `newVisitorsPerMinute`).")
+  .describe(
+    "`origins`, `tables` (`{ mode: r|a|rw, read? }` per table), `actions`, `session` (`ttlMs`, " +
+      "`newVisitorsPerMinute`) and `auth` (`issuer`, `jwks`, `audience?`, `userClaim?`, `required?`).",
+  )
 
 const App = s
   .object({
@@ -866,21 +869,25 @@ const SPECS: Spec[] = [
     id: "createSession",
     method: "post",
     path: "/v1/session",
-    summary: "Trade an app key and a visitor id for tokens",
+    summary: "Trade an app key and a visitor id or a sign-in JWT for tokens",
     description:
       "No bearer token: the `pk_` key in the body is the credential, and `Origin` must match the " +
-      "app's `origins`. Creates the visitor's database on first use, limited per IP by " +
-      "`session.newVisitorsPerMinute`. `shared` is null when the app declares no visible tables.",
+      "app's `origins`. `visitor` gets that browser's database; `jwt`, checked against the app's " +
+      "`auth` provider, gets the account's, the same on every device. Creates the database on " +
+      "first use, limited per IP by `session.newVisitorsPerMinute`. `shared` is null when the app " +
+      "declares no visible tables. With `jwt` and `visitor`, `anonymous` is a token on that " +
+      "visitor's database when it holds data, for the page to copy from.",
     tags: ["apps"],
     security: "none",
-    body: s.object({ key: s.string(), visitor: s.string() }),
+    body: s.object({ key: s.string(), visitor: s.string().optional(), jwt: s.string().optional() }),
     status: 201,
     response: s.object({
       private: s.object({ db: s.string(), token: s.string() }),
       shared: s.union([s.object({ db: s.string(), token: s.string() }), s.null()]),
       exp: s.int().describe("Expiry of both tokens, seconds since the epoch."),
+      anonymous: s.union([s.object({ db: s.string(), token: s.string() }), s.null()]).optional(),
     }),
-    errors: [...COMMON, "TOO_MANY_REQUESTS", "NOT_PRIMARY", "TOO_MANY_OPEN"],
+    errors: [...COMMON, "TOO_MANY_REQUESTS", "NOT_PRIMARY", "TOO_MANY_OPEN", "IDP_UNAVAILABLE"],
     handler: web.createSession,
   },
   {

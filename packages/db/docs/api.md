@@ -216,6 +216,7 @@ that were once refused and is gone with the last of them.
 | `TOO_MANY_OPEN` | 503 | the node is at `[data] maxOpen` and every open database is pinned by a subscription |
 | `NO_REPLICAS` | 503 | `ack: "replica"`/`"quorum"` on a node with no replica attached |
 | `ACK_TIMEOUT` | 503 | committed and locally durable, but not enough replica acks in time |
+| `IDP_UNAVAILABLE` | 503 | `/v1/session { jwt }`: the app's `auth.jwks` could not be read and no cached keys exist |
 | `FORWARD_TIMEOUT` | 504 | the primary never answered a write a replica forwarded to it |
 | `REPLICATION_DISABLED` | 403 | `GET /v1/replication` on a node with no `[replication] secret` |
 | `CLUSTER_DISABLED` | 503 | `GET /v1/cluster` on a node with no `[cluster]` section enabled; 403 on the raft socket |
@@ -933,6 +934,65 @@ anonymous visitor gets.
 
 Apps live in the node's catalog. In a cluster, create the app on the node that serves its
 databases; sessions are refused on a replica.
+
+#### Accounts
+
+An app whose page signs people in with its own provider takes the provider's JWT in place of a
+visitor id, so one account gets one database on every browser and device:
+
+```json
+"auth": {
+  "issuer": "https://clerk.acme.app",
+  "jwks": "https://clerk.acme.app/.well-known/jwks.json",
+  "audience": "acme",
+  "userClaim": "sub",
+  "required": false
+}
+```
+
+```http
+POST /v1/session
+Origin: https://acme.app
+{ "key": "pk_ie1VLTy…", "jwt": "eyJhbGciOiJSUzI1NiIs…", "visitor": "<the browser's visitor id, optional>" }
+→ 201 { "private": { "db": "app-acme-u-5d0e8b1c2f6a9e47", "token": "eyJ…" },
+        "shared":  { "db": "app-acme-shared", "token": "eyJ…" },
+        "exp": 1792780868,
+        "anonymous": { "db": "app-acme-u-93b0cabf8668e0c5", "token": "eyJ…" } }
+```
+
+`issuer` must equal the token's `iss`. `jwks` is where the provider publishes its keys:
+`https://`, or `http://localhost` and `http://127.0.0.1` for development. `audience` is optional
+(Clerk's session tokens carry none); when set, `aud` must equal it or, as an array, contain it.
+`userClaim` names the claim holding the user id, `sub` by default. Unknown keys are refused.
+
+| Provider | `issuer` | `jwks` |
+|---|---|---|
+| Clerk | your Frontend API URL, `https://clerk.acme.app` | `<issuer>/.well-known/jwks.json` |
+| Supabase | `https://<ref>.supabase.co/auth/v1` | `<issuer>/.well-known/jwks.json` (asymmetric signing keys only; the legacy HS256 secret is refused) |
+| Better-Auth, `jwt` plugin | the app's `baseURL` | `<baseURL>/api/auth/jwks` |
+| Auth0 | `https://<tenant>.auth0.com/` | `<issuer>.well-known/jwks.json` |
+
+The token must be RS256, RS384, RS512, ES256, ES384 or EdDSA; `none` and HS* are refused. `exp` is
+required, and `exp`, `nbf` and `iat` are checked with 30 s of skew. A refusal is `401
+UNAUTHENTICATED` with the failed check in the message (`jwt: expired`, `jwt: bad signature`). Keys
+are fetched on first use and kept 10 minutes per node; a `kid` the cached set lacks reads the set
+again at most once per 30 s, so a token naming a made-up key costs the provider nothing. A JWKS
+that cannot be read is `503 IDP_UNAVAILABLE` unless an earlier copy is cached.
+
+The database is `app-{id}-u-{first 16 hex of sha256("bql-account", app, iss, user id)}` and the
+tokens' `sub` is that hash. Everything that keys off `sub` (the author column, `:user` in actions,
+`call.user` in url actions) sees it, never the provider's id, which is stored nowhere. A new
+account counts against `session.newVisitorsPerMinute` like a new visitor, since anonymous sign-in
+and unverified signups make accounts free; a returning one is never limited. The session lasts
+`session.ttlMs` whatever the JWT's own `exp`: signing out at the provider stops new sessions, not
+an open one. `required: true` refuses `{ key, visitor }` with `401`. `{ key, jwt }` to an app with
+no `auth` is a `400`.
+
+`anonymous` is present on a signed-in session: a token on the database of the `visitor` sent with
+it, when that database exists and has a table, else null. Its `sub` is that visitor's own. The
+server never copies or deletes it; the browser bundle's `db.anonymous.adopt()` copies each table
+into the account's database (`insert or ignore`, so the account's rows win on a key clash), drops
+it from the anonymous one and forgets the visitor id.
 
 #### Actions
 

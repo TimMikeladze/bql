@@ -12,6 +12,7 @@ import { createHash } from "node:crypto"
 import type { AppRow } from "../tenant/catalog.ts"
 import { setSubject } from "../tenant/subject.ts"
 import { ADMIN, applyPolicy, type TableScope, type TokenGrant } from "./auth.ts"
+import { JwtVerifier } from "./jwt.ts"
 import { resolveOptions, step, toResult } from "./exec.ts"
 import { uuidv7 } from "../web/table.ts"
 import { BqlError } from "./errors.ts"
@@ -77,9 +78,25 @@ export interface AppAction {
   timeoutMs?: number
 }
 
+/** The app's sign-in provider: `/v1/session { jwt }` checks the provider's JWT against these. */
+export interface AppAuth {
+  /** `iss` must equal it. */
+  issuer: string
+  /** Where the provider publishes its keys. */
+  jwks: string
+  /** When set, `aud` must equal it or, as an array, contain it. */
+  audience?: string
+  /** The claim that identifies the user. Default `sub`. */
+  userClaim: string
+  /** Refuse anonymous (`visitor`) sessions. Default false. */
+  required: boolean
+}
+
 export interface AppConfig {
   /** `https://acme.app`, `https://*.acme.app`, `http://localhost:*`, or `*` for any origin. */
   origins: string[]
+  /** Sign-in with the app's own provider (Clerk, Supabase, Better-Auth, Auth0). Absent: visitors only. */
+  auth?: AppAuth
   tables: Record<string, AppTable>
   /** Named SQL a visitor can run with the server's rights (`POST /v1/session/action`). */
   actions: Record<string, AppAction>
@@ -127,7 +144,7 @@ function intIn(value: unknown, where: string, min: number, max: number, fallback
 
 /** Validates a `bql.json` and fills in its defaults. Unknown keys are refused, not ignored. */
 export function parseAppConfig(input: unknown = {}): AppConfig {
-  const root = keysOf(input, "config", ["origins", "tables", "actions", "session"])
+  const root = keysOf(input, "config", ["origins", "tables", "actions", "session", "auth"])
   let origins = DEFAULT_ORIGINS
   if (root.origins !== undefined) {
     if (!Array.isArray(root.origins) || root.origins.length === 0) {
@@ -169,8 +186,10 @@ export function parseAppConfig(input: unknown = {}): AppConfig {
     }
   }
   const session = keysOf(root.session ?? {}, "session", ["ttlMs", "newVisitorsPerMinute"])
+  const auth = root.auth === undefined ? undefined : parseAuth(root.auth)
   return {
     origins,
+    ...(auth ? { auth } : {}),
     tables,
     actions,
     session: {
@@ -183,6 +202,30 @@ export function parseAppConfig(input: unknown = {}): AppConfig {
         DEFAULT_NEW_VISITORS_PER_MINUTE,
       ),
     },
+  }
+}
+
+function parseAuth(value: unknown): AppAuth {
+  const auth = keysOf(value, "auth", ["issuer", "jwks", "audience", "userClaim", "required"])
+  if (typeof auth.issuer !== "string" || auth.issuer === "" || auth.issuer.length > 512) {
+    refuse("auth.issuer must be the provider's iss, a non-empty string")
+  }
+  if (typeof auth.jwks !== "string" || !ACTION_URL.test(auth.jwks)) {
+    refuse("auth.jwks must be https://…, or http://localhost or http://127.0.0.1 for development")
+  }
+  if (auth.audience !== undefined && (typeof auth.audience !== "string" || auth.audience === "")) {
+    refuse("auth.audience must be a non-empty string")
+  }
+  if (auth.userClaim !== undefined && (typeof auth.userClaim !== "string" || auth.userClaim === "" || auth.userClaim.length > 256)) {
+    refuse("auth.userClaim must be a claim name")
+  }
+  if (auth.required !== undefined && typeof auth.required !== "boolean") refuse("auth.required must be a boolean")
+  return {
+    issuer: auth.issuer,
+    jwks: auth.jwks,
+    ...(auth.audience !== undefined ? { audience: auth.audience as string } : {}),
+    userClaim: (auth.userClaim as string | undefined) ?? "sub",
+    required: auth.required === true,
   }
 }
 
@@ -363,6 +406,17 @@ export function visitorDbOf(appId: string, visitor: string): { db: string; sub: 
   return { db: `app-${appId}-u-${sub}`, sub }
 }
 
+/**
+ * A signed-in user's database: the same for one account on every browser and device. `sub` is a
+ * hash rather than the provider's id because other visitors see it as `author`, and the app id is
+ * in it so one person's `author` differs between apps. Visitor ids cannot hold a NUL, so no
+ * visitor's hash is ever an account's.
+ */
+export function accountDbOf(appId: string, issuer: string, user: string): { db: string; sub: string } {
+  const sub = createHash("sha256").update(`bql-account\0${appId}\0${issuer}\0${user}`).digest("hex").slice(0, 16)
+  return { db: `app-${appId}-u-${sub}`, sub }
+}
+
 function newKey(): string {
   return `pk_${toBase64Url(crypto.getRandomValues(new Uint8Array(24)))}`
 }
@@ -397,6 +451,17 @@ export class NewVisitorLimiter {
 }
 
 const limiters = new WeakMap<object, NewVisitorLimiter>()
+const verifiers = new WeakMap<object, JwtVerifier>()
+
+/** One verifier, so one JWKS cache, per server. */
+function verifierFor(ctx: RouteContext): JwtVerifier {
+  let verifier = verifiers.get(ctx.runtime)
+  if (!verifier) {
+    verifier = new JwtVerifier()
+    verifiers.set(ctx.runtime, verifier)
+  }
+  return verifier
+}
 
 function limiterFor(ctx: RouteContext): NewVisitorLimiter {
   let limiter = limiters.get(ctx.runtime)
@@ -502,7 +567,7 @@ function expOf(token: string): number {
 }
 
 export const createSession: Handler = async (ctx) => {
-  const body = await readJson<{ key?: unknown; visitor?: unknown }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+  const body = await readJson<{ key?: unknown; visitor?: unknown; jwt?: unknown }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
   if (typeof body.key !== "string" || !body.key.startsWith("pk_")) {
     throw BqlError.unauthenticated("a session needs an app key (pk_…)")
   }
@@ -513,13 +578,45 @@ export const createSession: Handler = async (ctx) => {
   if (!originAllowed(config.origins, ctx.request.headers.get("origin"))) {
     throw BqlError.notAuthorized("this origin is not in the app's origins")
   }
-  if (typeof body.visitor !== "string" || !VISITOR.test(body.visitor)) {
+  if (body.visitor !== undefined && (typeof body.visitor !== "string" || !VISITOR.test(body.visitor))) {
     throw BqlError.badRequest("visitor must be 22 to 128 characters of [A-Za-z0-9_-]")
+  }
+  const visitor = body.visitor as string | undefined
+
+  let db: string
+  let sub: string
+  let anonymous: { db: string; sub: string } | null = null
+  if (body.jwt !== undefined) {
+    if (typeof body.jwt !== "string") throw BqlError.badRequest("jwt must be a string")
+    if (!config.auth) throw BqlError.badRequest("this app takes no sign-in: its config has no auth")
+    const claims = await verifierFor(ctx).verify(body.jwt, config.auth)
+    const raw = claims[config.auth.userClaim]
+    const user = typeof raw === "number" && Number.isSafeInteger(raw) ? String(raw) : raw
+    if (typeof user !== "string" || user === "" || user.length > 512) {
+      throw BqlError.unauthenticated(`jwt: claim ${config.auth.userClaim} is not a user id`)
+    }
+    ;({ db, sub } = accountDbOf(app.id, config.auth.issuer, user))
+    // The same browser's anonymous database, offered to the page to copy from (`db.anonymous`).
+    // Only one with a table in it: `adopt()` drops what it copied, and then there is nothing to offer.
+    if (visitor !== undefined) {
+      const before = visitorDbOf(app.id, visitor)
+      if (ctx.runtime.registry.has(before.db)) {
+        const tenant = ctx.runtime.tenant(before.db)
+        const holds =
+          tenant.txid !== 0n &&
+          (await tenant.read((db) => db.query("select 1 from sqlite_schema where type = 'table' limit 1").get() !== null))
+        if (holds) anonymous = before
+      }
+    }
+  } else {
+    if (config.auth?.required) throw BqlError.unauthenticated("this app requires sign-in: send jwt")
+    if (visitor === undefined) throw BqlError.badRequest("visitor must be 22 to 128 characters of [A-Za-z0-9_-]")
+    ;({ db, sub } = visitorDbOf(app.id, visitor))
   }
   requirePrimary(ctx)
 
-  const { db, sub } = visitorDbOf(app.id, body.visitor)
   if (!ctx.runtime.registry.has(db)) {
+    // Accounts count too: anonymous sign-in and unverified signups make them free to make.
     const wait = limiterFor(ctx).take(`${app.id}|${clientIp(ctx)}`, config.session.newVisitorsPerMinute)
     if (wait > 0) {
       throw new BqlError("TOO_MANY_REQUESTS", "too many new visitors from this address", 429, {
@@ -558,7 +655,21 @@ export const createSession: Handler = async (ctx) => {
     catalog.setAppSwept(app.id, nowMs)
     sweepUnusedVisitors(ctx, app.id, nowMs)
   }
-  return json({ private: { db, token: privateToken }, shared, exp: expOf(privateToken) }, 201)
+  return json(
+    {
+      private: { db, token: privateToken },
+      shared,
+      exp: expOf(privateToken),
+      ...(body.jwt !== undefined
+        ? {
+            anonymous: anonymous
+              ? { db: anonymous.db, token: await ctx.runtime.auth.mint({ ...base, sub: anonymous.sub, rw: [anonymous.db] }) }
+              : null,
+          }
+        : {}),
+    },
+    201,
+  )
 }
 
 /**

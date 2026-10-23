@@ -30,6 +30,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | SQL actions | app config, one transaction | **built**: `server/web.ts` `runAction`, `db.action()` |
 | Form endpoint | `a` tables | **built**: `server/web.ts` `submitForm`, `bql app table --form` |
 | Action proxy | Ed25519 keys | **built**: `server/web.ts` `proxyAction`, `/.well-known/jwks.json`, `bql.sh/actions` |
+| Accounts (bring-your-own JWT) | WebCrypto, `/v1/session` | **built**: `server/jwt.ts`, `server/web.ts`, `connect(key, { jwt })`, `db.anonymous.adopt()` |
 
 ## Decisions
 
@@ -106,8 +107,96 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 - `Origin` must match `config.origins` (`*` wildcard in host or port). A missing `Origin` is refused.
 - Rate limit: new visitors per IP per minute, a token bucket in memory, refused with `429` and
   `Retry-After`. The server has no per-IP limiter today; this one is new.
-- Later, not in this track: `{ key, jwt }` for Clerk/Supabase/Better-Auth, which needs RS256/ES256
-  and JWKS fetching, since `auth.ts` verifies only its own Ed25519 keys.
+- `{ key, jwt }` for a signed-in user: see Accounts below.
+
+## Accounts (bring-your-own JWT)
+
+A visitor id lives in one browser's `localStorage`, so clearing it or switching device means a new,
+empty database. An app that already signs people in (Clerk, Supabase, Better-Auth, Auth0) can hand
+`/v1/session` the provider's JWT instead, and the same account gets the same database everywhere.
+
+```json
+"auth": {
+  "issuer": "https://clerk.acme.app",
+  "jwks": "https://clerk.acme.app/.well-known/jwks.json",
+  "audience": "acme",
+  "userClaim": "sub",
+  "required": false
+}
+```
+
+- `issuer` and `jwks` are required, `https://` (or `http://localhost`/`127.0.0.1` in development,
+  as for a url action). `audience` is optional because Clerk's session tokens carry none; when set,
+  `aud` must equal it or, as an array, contain it. `userClaim` defaults to `sub`. One provider per app.
+- `POST /v1/session { key, jwt, visitor? }`. The verifier (`server/jwt.ts`, WebCrypto only, no
+  dependency) takes RS256/384/512, ES256/384 and EdDSA (Better-Auth's JWT plugin signs EdDSA by
+  default); `none` and HS* are refused, since an HMAC secret would have to be shared with us.
+  `exp` is required; `exp`, `nbf` and `iat` get 30 s of skew; `iss` must equal `issuer`.
+- JWKS: fetched on first use per URL and kept 10 minutes, per node. A `kid` the cached set lacks
+  refetches once, at most once per 30 s per URL, so tokens with made-up `kid`s cannot make the
+  server hammer the provider. A token without `kid` is tried against every key of the right type.
+  Fetch: 5 s timeout, 256 KiB cap. Unreachable keys are `503 IDP_UNAVAILABLE`; a bad token is
+  `401 UNAUTHENTICATED` naming the check that failed.
+- Database: `app-<id>-u-<first 16 hex of sha256("bql-account" NUL app NUL iss NUL user)>`, and
+  `sub` is that same hex. A hash, not the provider's id, because `sub` is shown to other visitors
+  as `author`; the app id is in it so one person's `author` differs between apps. Visitor ids
+  cannot contain NUL, so a visitor hash and an account hash never collide by construction.
+  Everything downstream (`bql_sub()`, `:user`, `call.user`, `db.author`) keys off `sub` and is
+  unchanged. The provider's id is not stored anywhere.
+- The session lasts `session.ttlMs`, not the JWT's own `exp` (Clerk's live 60 s). Signing out at
+  the provider stops new sessions; an open one runs to its end. An app that cares lowers `ttlMs`.
+- `auth.required: true` refuses `{ key, visitor }` with `401 UNAUTHENTICATED`. Default false: a
+  page can be used signed out and keep working after sign-in.
+- The new-database limit (`session.newVisitorsPerMinute`, per app and IP) applies to accounts too.
+  Supabase anonymous sign-in and unverified email signup make accounts free, so a JWT is not proof
+  of cost. A returning account, like a returning visitor, is never limited.
+- `{ key, jwt }` to an app with no `auth` is `400`.
+
+Linking: a visitor used the page signed out, then signs in. The anonymous database is left alone
+by the server; the page decides. When the session request carries the stored `visitor` too and
+that database exists with a write in it, the answer adds `anonymous: { db, token }`, a token on it
+(`sub` = the visitor hash, so it is that visitor's own). The bundle exposes it as `db.anonymous`
+with `sql` and `adopt()`: copy each table into the account's database (`create table if not
+exists` from the stored DDL, then `insert or ignore` over the columns both sides have, so the
+account's rows win on a key clash and a second `adopt()` is harmless), drop the copied tables from
+the anonymous database, and forget the visitor id so the next signed-out visit starts empty. A
+page that never calls `adopt()` gets "left as it was", and signing out shows the old data again.
+Not done server side: copying arbitrary schemas is a page decision (which rows win, whether to
+merge at all), and doing it in the bundle needs no new route or admin rights.
+
+Bundle: `connect(key, { jwt })`, where `jwt` is a string or a function returning one (sync or
+async). A function is called for every session request, the first, the timed renewal and the
+renewal after a `401`, so it should return the provider's current token (`clerk.session.getToken()`,
+`supabase.auth.getSession()`). Identity is fixed for a connection: on sign-in or sign-out the
+page calls `close()` and `connect()` again. `db.visitor` is null for an account session;
+`db.signedIn` is true.
+
+As built, where the plan was wrong or silent:
+
+- "Offered when the anonymous database has a write in it" was wrong: `adopt()` drops the tables
+  but the txid stays above 0, so the same database was offered again on the next sign-in. The
+  server now offers it when it has at least one table.
+- The forced JWKS read for an unknown `kid` is also skipped when the cached set was read less than
+  the cooldown ago, so the first token with a new `kid` does not read the set twice in a row.
+- A failed refetch falls back to the cached set: a provider outage does not lock out users whose
+  keys this node already holds.
+- `adopt()` skips virtual tables and their shadow tables (`pragma_table_list` types them), and
+  copies only the columns both sides have. A connection still holding a live query on a table
+  `adopt()` drops gets `no such table`; the page is expected to have closed its signed-out
+  connection before signing in.
+- Not built: passing the provider's user id to a url action's function. The function sees
+  `call.user`, the hash; a page that needs the provider id there sends the JWT as an input.
+- Browser check: one page served on `localhost:<port>` and `127.0.0.1:<port>` (two origins, so two
+  `localStorage`s and two visitor ids), each signed out first, then signed in as one user from a
+  stand-in IdP. Both landed in one database, each `adopt()` moved its own signed-out row in, a row
+  inserted in one tab reached the other's live list, and both origins' `localStorage` ended empty.
+
+Tests: the verifier with keys generated in the test and a local JWKS server (good RS256, ES256 and
+EdDSA, bad signature, wrong issuer, wrong audience, expired, not yet valid, `alg: none`, unknown
+`kid` then rotated, the refetch cooldown); the server (two "devices" with different visitor ids
+and one account land in one database, author and actions see the account `sub`, `required`
+refuses visitors, the limiter, `anonymous` offered only with the visitor id); the bundle (`jwt`
+getter on refresh and 401, `adopt()` moving rows).
 
 ## Browser bundle
 

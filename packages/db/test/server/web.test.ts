@@ -6,6 +6,7 @@ import { ActionVerifyError, verifyAction } from "../../src/actions/index.ts"
 import { createClient } from "../../src/client/index.ts"
 import type { RouteContext } from "../../src/server/routes.ts"
 import {
+  accountDbOf,
   NewVisitorLimiter,
   originAllowed,
   parseAppConfig,
@@ -15,6 +16,7 @@ import {
 } from "../../src/server/web.ts"
 import { createTableSql, sharedTableSql } from "../../src/web/table.ts"
 import { startTestServer, stopAll, type TestServer } from "./harness.ts"
+import { TestIdp } from "./idp.ts"
 
 let server: TestServer
 const ORIGIN = "https://acme.test"
@@ -633,5 +635,114 @@ describe("NewVisitorLimiter", () => {
     expect(limiter.take("k", 1, 0)).toBe(0)
     expect(limiter.take("k", 1, 30_000)).toBe(30)
     expect(limiter.take("k", 1, 60_000)).toBe(0)
+  })
+})
+
+describe("accounts", () => {
+  const ISSUER = "https://idp.acme.test"
+  let idp: TestIdp
+  let signin: App
+
+  interface AccountSession extends Session {
+    anonymous?: { db: string; token: string } | null
+  }
+
+  function signIn(key: string, body: Record<string, unknown>): Promise<Response> {
+    return server.fetch("/v1/session", { method: "POST", token: null, headers: { origin: ORIGIN }, body: JSON.stringify({ key, ...body }) })
+  }
+
+  beforeAll(async () => {
+    idp = await TestIdp.start(ISSUER)
+    signin = await createApp("signin", {
+      origins: [ORIGIN],
+      auth: { issuer: ISSUER, jwks: idp.jwksUrl, audience: "acme" },
+      tables: { msgs: { mode: "rw" } },
+      actions: { whoami: { run: [{ sql: "select :user as user, bql_sub() as sub" }] } },
+      session: { newVisitorsPerMinute: 100 },
+    })
+    await server.fetch(`/v1/db/${signin.sharedDb}/batch`, {
+      method: "POST",
+      body: JSON.stringify({ statements: sharedTableSql("msgs").map((sql) => ({ sql })) }),
+    })
+  })
+  afterAll(() => idp.stop())
+
+  test("parseAppConfig fills auth's defaults and takes its own output unchanged", () => {
+    const parsed = parseAppConfig({ auth: { issuer: ISSUER, jwks: "https://idp.acme.test/jwks" } })
+    expect(parsed.auth).toEqual({ issuer: ISSUER, jwks: "https://idp.acme.test/jwks", userClaim: "sub", required: false })
+    expect(parseAppConfig(parsed)).toEqual(parsed)
+    expect(() => parseAppConfig({ auth: { issuer: ISSUER, jwks: "http://idp.acme.test/jwks" } })).toThrow(/auth.jwks must be https/)
+    expect(() => parseAppConfig({ auth: { issuer: ISSUER, jwks: "https://x.test", secret: "s" } })).toThrow(/auth.secret is not supported/)
+  })
+
+  test("one account gets one database from two devices, and author and actions see its sub", async () => {
+    const jwt = await idp.sign({ sub: "user_ann", aud: "acme" })
+    const laptop = (await (await signIn(signin.key, { jwt, visitor: visitor(60) })).json()) as AccountSession
+    const phone = (await (await signIn(signin.key, { jwt: await idp.sign({ sub: "user_ann", aud: "acme" }, { alg: "RS256" }) })).json()) as AccountSession
+    const { db, sub } = accountDbOf("signin", ISSUER, "user_ann")
+    expect(laptop.private.db).toBe(db)
+    expect(phone.private.db).toBe(db)
+
+    expect((await run(db, "create table notes(text text)", laptop.private.token)).status).toBe(200)
+    expect((await run(db, "insert into notes values ('from the laptop')", laptop.private.token)).status).toBe(200)
+    const seen = await run(db, "select text from notes", phone.private.token)
+    expect(((await seen.json()) as { rows: unknown[][] }).rows).toEqual([["from the laptop"]])
+
+    const made = await run(signin.sharedDb, "insert into msgs(id, data) values ('a1', '{}') returning author", phone.shared?.token)
+    expect(((await made.json()) as { rows: unknown[][] }).rows).toEqual([[sub]])
+
+    const action = await server.fetch("/v1/session/action", {
+      method: "POST",
+      token: phone.private.token,
+      headers: { origin: ORIGIN },
+      body: JSON.stringify({ key: signin.key, name: "whoami" }),
+    })
+    expect(((await action.json()) as { results: { rows: unknown[] }[] }).results[0]?.rows).toEqual([{ user: sub, sub }])
+  })
+
+  test("a bad token, a wrong audience and a jwt to an app without auth are refused", async () => {
+    expect((await signIn(signin.key, { jwt: "a.b.c" })).status).toBe(401)
+    expect((await signIn(signin.key, { jwt: await idp.sign({ sub: "u", aud: "other" }) })).status).toBe(401)
+    expect((await signIn(signin.key, { jwt: await idp.sign({ aud: "acme", sub: undefined }) })).status).toBe(401)
+    expect((await signIn(app.key, { jwt: await idp.sign({ sub: "u" }) })).status).toBe(400)
+  })
+
+  test("auth.required refuses anonymous sessions", async () => {
+    const closed = await createApp("members", {
+      origins: [ORIGIN],
+      auth: { issuer: ISSUER, jwks: idp.jwksUrl, required: true },
+    })
+    const refused = await signIn(closed.key, { visitor: visitor(61) })
+    expect(refused.status).toBe(401)
+    expect((await signIn(closed.key, { jwt: await idp.sign({ sub: "u" }) })).status).toBe(201)
+  })
+
+  test("the anonymous database is offered once it holds data, and only with its visitor id", async () => {
+    const before = (await (await signIn(signin.key, { visitor: visitor(62) })).json()) as Session
+    const jwt = await idp.sign({ sub: "user_bob", aud: "acme" })
+    const empty = (await (await signIn(signin.key, { jwt, visitor: visitor(62) })).json()) as AccountSession
+    expect(empty.anonymous).toBeNull()
+
+    expect((await run(before.private.db, "create table todos(title text)", before.private.token)).status).toBe(200)
+    const offered = (await (await signIn(signin.key, { jwt, visitor: visitor(62) })).json()) as AccountSession
+    expect(offered.anonymous?.db).toBe(before.private.db)
+    expect((await run(before.private.db, "select * from todos", offered.anonymous?.token)).status).toBe(200)
+    // The anonymous token is that visitor's own: it reaches nothing else.
+    expect((await run(offered.private.db, "select 1", offered.anonymous?.token)).status).toBe(403)
+
+    const without = (await (await signIn(signin.key, { jwt })).json()) as AccountSession
+    expect(without.anonymous).toBeNull()
+  })
+
+  test("new accounts count against the new-database limit; a returning one does not", async () => {
+    const limited = await createApp("limitedauth", {
+      origins: [ORIGIN],
+      auth: { issuer: ISSUER, jwks: idp.jwksUrl },
+      session: { newVisitorsPerMinute: 1 },
+    })
+    const first = await idp.sign({ sub: "first" })
+    expect((await signIn(limited.key, { jwt: first })).status).toBe(201)
+    expect((await signIn(limited.key, { jwt: await idp.sign({ sub: "second" }) })).status).toBe(429)
+    expect((await signIn(limited.key, { jwt: first })).status).toBe(201)
   })
 })
