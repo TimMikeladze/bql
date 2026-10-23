@@ -20,6 +20,7 @@ Built by `site/`, a private Bun workspace (`bql-site`), following the landing-pa
   same `db` in process or served, zero runtime dependencies.
 - The split demo is the README's Getting started: `bun client.ts` and its captured live-query diffs on
   the left, `client.ts` on the right. `# ` lines in a run block render as output, not prompts.
+- Split-demo and showcase code frames scroll instead of clipping, so every line is readable.
 - A first capability, *Embedded first, served later*, pairs `app.ts` with its `bun app.ts` run.
 - The figures row is gone. It held repo counts; the skill allows only adoption numbers, and bql.sh
   had 54 weekly npm downloads and no stars on 2026-10-23. The boundaries block is gone too.
