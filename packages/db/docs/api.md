@@ -288,6 +288,7 @@ server: the database's SQLite lacks sqlite-vec, the geo functions, FTS5 or R*Tre
 | `DELETE /v1/apps/:id` | delete it; its databases stay | admin |
 | `POST /v1/apps/:id/rotate` | a new `pk_` key | admin |
 | `POST /v1/session` | a visitor's tokens for an app | `pk_` key in the body, `Origin` |
+| `POST /v1/session/action` | run one of the app's actions as the visitor | session token, `pk_` key, `Origin` |
 | `GET /v1/ws` | WebSocket upgrade, sub-protocol `bql.v1` | any |
 | `GET /v2`, `GET /v3` | Hrana version probe | none |
 | `POST /v2/pipeline`, `POST /v3/pipeline` | Hrana pipeline, database from `x-namespace`/`Host`/`default` | `ro`, `rw` when it writes |
@@ -930,6 +931,47 @@ anonymous visitor gets.
 
 Apps live in the node's catalog. In a cluster, create the app on the node that serves its
 databases; sessions are refused on a replica.
+
+#### Actions
+
+An action is SQL in the app's config that a visitor can run but could not write themselves: the
+statements are the owner's and run with the server's rights, and the visitor supplies only values.
+
+```json
+"actions": {
+  "submitScore": {
+    "input": { "score": { "type": "int", "min": 0, "max": 1000000 },
+               "name": { "type": "text", "minLength": 1, "maxLength": 20 } },
+    "run": [
+      { "sql": "insert into scores(user, name, score) select :user, :name, :score where not exists (select 1 from scores where user = :user)",
+        "expect": 1, "error": "you already have a score" },
+      { "sql": "select count(*) as n from scores" }
+    ]
+  }
+}
+```
+
+```http
+POST /v1/session/action
+Authorization: Bearer <the session's private token>
+Origin: https://acme.app
+{ "key": "pk_…", "name": "submitScore", "input": { "score": 4200, "name": "ann" } }
+→ 200 { "results": [ { "rows": [], "rowsAffected": 1 }, { "rows": [ { "n": 1 } ], "rowsAffected": 0 } ], "txid": 7 }
+```
+
+`input` is checked before anything runs: each field has a `type` (`int`, `number`, `text`,
+`bool`), optional `min`/`max` or `minLength`/`maxLength`, and is required unless `optional`.
+Unknown fields are a `400`. Values are bound by name (`:score`); `:user` is the caller's `sub`
+and cannot be an input. `db` is `"shared"` (the default) or `"private"`, the caller's own
+database; an action runs on one database only, since a WAL commit is atomic per file. The
+statements run in one transaction with no table ACL, so an action can write a table whose mode is
+`r` for visitors. `bql_sub()` is the caller inside an action too, so author columns and their
+triggers still hold. `expect` is the number of rows a statement must change; any other count rolls
+the whole action back with `409 CONFLICT` and the statement's `error`. A statement must start with
+`insert`, `update`, `delete`, `select`, `with` or `replace`, at most 20 of them.
+
+The caller is proved by the session's private token, which is `rw` on exactly the database named
+after its `sub`. There is no rate limit on actions yet beyond the server's own limits.
 
 #### The author column
 

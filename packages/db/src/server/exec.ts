@@ -119,7 +119,7 @@ export function assertStatement(value: unknown, where: string): StatementRequest
   return value as StatementRequest
 }
 
-interface Stepped {
+export interface Stepped {
   rows: SqliteValue[][]
   stmt: Statement
   writes: boolean
@@ -186,7 +186,7 @@ function valueWeight(value: unknown): number {
  * still reads it. A statement that calls `last_insert_rowid()` itself takes the counter as an
  * input and is never zeroed under it; there the older "did the number move" test is all there is.
  */
-function step(runtime: ServerRuntime, db: Database, request: StatementRequest, timeoutMs: number, options: ResolvedOptions): Stepped {
+export function step(runtime: ServerRuntime, db: Database, request: StatementRequest, timeoutMs: number, options: ResolvedOptions): Stepped {
   return runtime.withStatementBoundary(db, () => stepUnchecked(db, request, timeoutMs, options))
 }
 
@@ -243,7 +243,7 @@ function stepUnchecked(
   }
 }
 
-function toResult(stepped: Stepped, mode: RowsMode, txid: bigint, startedNs: number): QueryResult {
+export function toResult(stepped: Stepped, mode: RowsMode, txid: bigint, startedNs: number): QueryResult {
   const encoded = encodeRows(stepped.stmt, stepped.rows, mode)
   const rowid = stepped.lastInsertRowid
   return {

@@ -86,7 +86,7 @@ describe("app config", () => {
   })
 
   test("unknown keys and bad modes are refused, and planned keys say so", () => {
-    expect(() => parseAppConfig({ actions: {} })).toThrow(/actions is not supported yet/)
+    expect(() => parseAppConfig({ form: {} })).toThrow(/form is not supported yet/)
     expect(() => parseAppConfig({ tables: { t: { mode: "w" } } })).toThrow(/mode must be/)
     expect(() => parseAppConfig({ origins: ["acme.test"] })).toThrow(/must look like/)
   })
@@ -254,6 +254,116 @@ describe("the author column", () => {
     expect(kept.body.rows).toEqual([[author, '{"x":2}']])
     // The admin is NULL to bql_sub(), passes every check, and names the author itself.
     expect((await run(own.sharedDb, "insert into msgs(id, author, data) values ('m3', 'owner', '{}')")).status).toBe(200)
+  })
+})
+
+describe("actions", () => {
+  const actions = {
+    submitScore: {
+      input: { score: { type: "int", min: 0, max: 1_000_000 }, name: { type: "text", minLength: 1, maxLength: 20 } },
+      run: [
+        {
+          // One score a visitor; the check and the write are one statement, so they cannot race.
+          sql: "insert into scores(user, name, score) select :user, :name, :score where not exists (select 1 from scores where user = :user)",
+          expect: 1,
+          error: "you already have a score",
+        },
+        { sql: "select count(*) as n from scores" },
+      ],
+    },
+    note: { db: "private", input: { text: { type: "text" } }, run: [{ sql: "insert into notes(text) values (:text) returning id" }] },
+    post: { input: { text: { type: "text" } }, run: [{ sql: "insert into msgs(id, data) values (lower(hex(randomblob(8))), json_object('text', :text)) returning author" }] },
+  }
+  let game: App
+
+  async function act(key: string, token: string | undefined, name: string, input: unknown) {
+    const response = await server.fetch("/v1/session/action", {
+      method: "POST",
+      token: token ?? null,
+      headers: { origin: ORIGIN },
+      body: JSON.stringify({ key, name, input }),
+    })
+    return { status: response.status, body: (await response.json()) as { results?: { rows: Record<string, unknown>[]; rowsAffected: number }[]; error?: { code: string; message: string } } }
+  }
+
+  beforeAll(async () => {
+    game = await createApp("game", {
+      origins: [ORIGIN],
+      tables: { scores: { mode: "r" }, msgs: { mode: "r" } },
+      actions,
+      session: { newVisitorsPerMinute: 100 },
+    })
+    expect((await run(game.sharedDb, "create table scores(user text, name text, score integer)")).status).toBe(200)
+    await server.fetch(`/v1/db/${game.sharedDb}/batch`, {
+      method: "POST",
+      body: JSON.stringify({ statements: sharedTableSql("msgs").map((sql) => ({ sql })) }),
+    })
+  })
+
+  test("runs the owner's statements with the server's rights, as the caller", async () => {
+    const who = (await (await session(game.key, visitor(40))).json()) as Session
+    // The token alone may only read `scores`.
+    expect((await run(game.sharedDb, "insert into scores values ('x', 'x', 1)", who.shared?.token)).status).toBe(403)
+
+    const first = await act(game.key, who.private.token, "submitScore", { score: 4200, name: "ann" })
+    expect(first.status).toBe(200)
+    expect(first.body.results?.[0]?.rowsAffected).toBe(1)
+    expect(first.body.results?.[1]?.rows).toEqual([{ n: 1 }])
+    const stored = await run(game.sharedDb, "select user, name, score from scores", who.shared?.token)
+    expect(((await stored.json()) as { rows: unknown[][] }).rows).toEqual([[visitorDbOf("game", visitor(40)).sub, "ann", 4200]])
+  })
+
+  test("an expect that does not match rolls the whole action back with its error", async () => {
+    const who = (await (await session(game.key, visitor(41))).json()) as Session
+    expect((await act(game.key, who.private.token, "submitScore", { score: 1, name: "bob" })).status).toBe(200)
+    const again = await act(game.key, who.private.token, "submitScore", { score: 2, name: "bob" })
+    expect(again.status).toBe(409)
+    expect(again.body.error?.message).toBe("you already have a score")
+    const count = await run(game.sharedDb, "select count(*) from scores where name = 'bob'")
+    expect(((await count.json()) as { rows: unknown[][] }).rows).toEqual([[1]])
+  })
+
+  test("input is checked against the schema before anything runs", async () => {
+    const who = (await (await session(game.key, visitor(42))).json()) as Session
+    for (const input of [
+      { score: -1, name: "x" },
+      { score: 1.5, name: "x" },
+      { score: 1, name: "" },
+      { score: 1, name: "x".repeat(21) },
+      { score: 1 },
+      { score: 1, name: "x", user: "someone else" },
+    ]) {
+      expect((await act(game.key, who.private.token, "submitScore", input)).status).toBe(400)
+    }
+    expect((await act(game.key, who.private.token, "nope", {})).status).toBe(404)
+  })
+
+  test("the caller is proved by a session token of this app", async () => {
+    const who = (await (await session(game.key, visitor(43))).json()) as Session
+    expect((await act(game.key, undefined, "submitScore", { score: 1, name: "x" })).status).toBe(401)
+    const other = (await (await session(app.key, visitor(43))).json()) as Session
+    expect((await act(game.key, other.private.token, "submitScore", { score: 1, name: "x" })).status).toBe(403)
+    // The shared token is not `rw` on the visitor's database, so it does not identify a caller.
+    expect((await act(game.key, who.shared?.token, "submitScore", { score: 1, name: "x" })).status).toBe(403)
+  })
+
+  test("a private action runs on the caller's own database", async () => {
+    const who = (await (await session(game.key, visitor(44))).json()) as Session
+    expect((await run(who.private.db, "create table notes(id integer primary key, text text)", who.private.token)).status).toBe(200)
+    const done = await act(game.key, who.private.token, "note", { text: "mine" })
+    expect(done.body.results?.[0]?.rows).toEqual([{ id: 1 }])
+  })
+
+  test("bql_sub() is the caller inside an action, so the author column holds", async () => {
+    const who = (await (await session(game.key, visitor(45))).json()) as Session
+    const posted = await act(game.key, who.private.token, "post", { text: "via an action" })
+    expect(posted.body.results?.[0]?.rows).toEqual([{ author: visitorDbOf("game", visitor(45)).sub }])
+  })
+
+  test("the config refuses schema changes and a :user input", () => {
+    expect(() => parseAppConfig({ actions: { bad: { run: [{ sql: "drop table scores" }] } } })).toThrow(/must be one insert/)
+    expect(() => parseAppConfig({ actions: { bad: { run: [{ sql: "attach 'x' as y" }] } } })).toThrow(/must be one insert/)
+    expect(() => parseAppConfig({ actions: { bad: { input: { user: { type: "text" } }, run: [{ sql: "select 1" }] } } })).toThrow(/reserved/)
   })
 })
 

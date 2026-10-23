@@ -56,6 +56,15 @@ beforeAll(async () => {
     body: JSON.stringify({ id: "page", config: {
         origins: [ORIGIN],
         tables: { guestbook: { mode: "a" }, posts: { mode: "rw" } },
+        actions: {
+          sign: {
+            input: { message: { type: "text", maxLength: 40 } },
+            run: [
+              { sql: "insert into guestbook(message) select :message where length(:message) > 0", expect: 1, error: "say something" },
+              { sql: "select count(*) as n from guestbook" },
+            ],
+          },
+        },
         // Every test is a new visitor from 127.0.0.1; the default 10 a minute would refuse them.
         session: { newVisitorsPerMinute: 1000 },
       } }),
@@ -297,6 +306,23 @@ describe("shared.table", () => {
     await Bun.sleep(50)
     await bob.shared.table<Post>("posts").insert({ text })
     expect(((await seen)[0] as SharedRow<Post>).author).toBe(bob.author)
+  })
+})
+
+describe("db.action", () => {
+  test("runs an action and returns each statement's rows", async () => {
+    const db = await visit()
+    const done = await db.action<{ n: number }>("sign", { message: "via an action" })
+    expect(done.results[0]?.rowsAffected).toBe(1)
+    expect(done.results[1]?.rows[0]?.n).toBeGreaterThan(0)
+  })
+
+  test("rejects with the server's code and the action's error", async () => {
+    const db = await visit()
+    const failed = await db.action("sign", { message: "" }).catch((err) => err)
+    expect(failed.code).toBe("CONFLICT")
+    expect(failed.message).toBe("say something")
+    expect((await db.action("sign", { message: "x".repeat(41) }).catch((err) => err)).code).toBe("BAD_REQUEST")
   })
 })
 

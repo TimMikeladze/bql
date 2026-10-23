@@ -789,7 +789,27 @@ export interface AppConfig {
   origins?: string[]
   /** Shared-database tables visitors see. `read: false` keeps one out of their tokens. */
   tables?: Record<string, { mode: TableScope; read?: boolean }>
+  /** Named SQL a visitor runs with the server's rights; `docs/api.md`, "Actions". */
+  actions?: Record<string, AppAction>
   session?: { ttlMs?: number; newVisitorsPerMinute?: number }
+}
+
+export interface AppAction {
+  /** Default `"shared"`. */
+  db?: "shared" | "private"
+  input?: Record<
+    string,
+    {
+      type: "int" | "number" | "text" | "bool"
+      min?: number
+      max?: number
+      minLength?: number
+      maxLength?: number
+      optional?: boolean
+    }
+  >
+  /** Bound by name from `input`; `:user` is the caller's sub. */
+  run: { sql: string; expect?: number; error?: string }[]
 }
 
 export interface AppInfo {

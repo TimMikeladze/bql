@@ -196,6 +196,18 @@ export class Statement {
     return this.#types
   }
 
+  /** The named parameters as written in the SQL (`:id`, `@id`, `$id`), in slot order. */
+  get paramNames(): string[] {
+    this.#assertLive()
+    const s = this.#host.lib.symbols
+    const names: string[] = []
+    for (let i = 1; i <= this.paramsCount; i++) {
+      const name = cstr(s.sqlite3_bind_parameter_name(this.#handle, i))
+      if (name) names.push(name)
+    }
+    return names
+  }
+
   /** Number of bindable parameters, i.e. the largest parameter index. */
   get paramsCount(): number {
     this.#assertLive()

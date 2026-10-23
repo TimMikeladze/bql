@@ -74,6 +74,12 @@ export interface SharedDb {
   table<T extends Doc = Doc>(name: string): Table<T>
 }
 
+export interface ActionResult<T = JsRow> {
+  /** One entry per statement in the action's `run`, in order. */
+  results: { rows: T[]; rowsAffected: number }[]
+  txid: number
+}
+
 export interface WebDb {
   /** The id this browser is known by. */
   readonly visitor: string
@@ -92,6 +98,12 @@ export interface WebDb {
    * id, safe to show. Compare a row's `author` with it to tell your rows from others'.
    */
   readonly author: string
+  /**
+   * Runs one of the app's actions: SQL from the app's config, run by the server with its own
+   * rights, given `input` checked against the action's schema. Resolves with each statement's rows;
+   * rejects with the server's `code` (`CONFLICT` and the action's `error` when an `expect` fails).
+   */
+  action<T = JsRow>(name: string, input?: Record<string, unknown>): Promise<ActionResult<T>>
   /** Fetches a new session now. Live queries carry on over the new tokens. */
   refresh(): Promise<void>
   /** Stops refreshing and closes every connection and live query. */
@@ -244,6 +256,27 @@ class Connection implements WebDb {
         this.#refreshing = null
       })
     return this.#refreshing
+  }
+
+  async action<T = JsRow>(name: string, input: Record<string, unknown> = {}): Promise<ActionResult<T>> {
+    const once = async (): Promise<ActionResult<T>> => {
+      const doFetch = this.#options.fetch ?? fetch
+      const response = await doFetch(`${this.#url}/v1/session/action`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.#session.private.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ key: this.#key, name, input }),
+      })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) throw errorFrom(response.status, body)
+      return body as ActionResult<T>
+    }
+    try {
+      return await once()
+    } catch (err) {
+      if (codeOf(err) !== "UNAUTHENTICATED" || this.#closed) throw err
+      await this.refresh()
+      return once()
+    }
   }
 
   close(): void {

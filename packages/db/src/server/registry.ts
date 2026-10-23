@@ -883,6 +883,26 @@ const SPECS: Spec[] = [
     errors: [...COMMON, "TOO_MANY_REQUESTS", "NOT_PRIMARY", "TOO_MANY_OPEN"],
     handler: web.createSession,
   },
+  {
+    id: "runAction",
+    method: "post",
+    path: "/v1/session/action",
+    summary: "Run one of the app's actions as the calling visitor",
+    description:
+      "Bearer: the session's private token. The statements come from the app's config and run in " +
+      "one transaction with the server's rights; the request supplies only `input`, checked " +
+      "against the action's schema and bound by name. `:user` and `bql_sub()` are the caller's " +
+      "sub. A statement whose `expect` does not match rolls the action back with a `409`.",
+    tags: ["apps"],
+    security: "none",
+    body: s.object({ key: s.string(), name: s.string(), input: s.record(s.unknown()).optional() }),
+    response: s.object({
+      results: s.array(s.object({ rows: s.array(s.record(s.unknown())), rowsAffected: s.int() })),
+      txid: s.int(),
+    }),
+    errors: [...ON_STATEMENT, "NOT_FOUND", "CONFLICT"],
+    handler: web.runAction,
+  },
 
   // ── operations ──────────────────────────────────────────────────────────────────────────────
   {

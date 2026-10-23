@@ -221,6 +221,14 @@ posts.orderBy("createdAt", "desc").limit(50).live(render)
 ```
 
 `db.shared.sql` and `db.shared.live` reach the same tables with raw SQL.
+
+A write a visitor must not make directly, such as a score, goes through an action: SQL in the
+app's config that the server runs with its own rights, given checked input.
+
+```js
+await db.action("submitScore", { score: 4200, name: "ann" })
+// rejects with code CONFLICT and the action's error when its `expect` does not hold
+```
 [packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next

@@ -10,7 +10,9 @@
 
 import { createHash } from "node:crypto"
 import type { AppRow } from "../tenant/catalog.ts"
-import type { TableScope, TokenGrant } from "./auth.ts"
+import { setSubject } from "../tenant/subject.ts"
+import { ADMIN, applyPolicy, type TableScope, type TokenGrant } from "./auth.ts"
+import { resolveOptions, step, toResult } from "./exec.ts"
 import { BqlError } from "./errors.ts"
 import { toBase64Url } from "./json.ts"
 import {
@@ -32,10 +34,40 @@ export interface AppTable {
   read: boolean
 }
 
+export type InputType = "int" | "number" | "text" | "bool"
+
+export interface ActionInput {
+  type: InputType
+  /** Numbers: inclusive bounds. */
+  min?: number
+  max?: number
+  /** Text: inclusive bounds on its length. */
+  minLength?: number
+  maxLength?: number
+  /** Absent from the request binds NULL. Default false: absent is a 400. */
+  optional: boolean
+}
+
+export interface ActionStatement {
+  sql: string
+  /** The rows the statement must change; any other count rolls the action back with `error`. */
+  expect?: number
+  error?: string
+}
+
+export interface AppAction {
+  /** Where it runs: the shared database (default) or the calling visitor's own. */
+  db: "shared" | "private"
+  input: Record<string, ActionInput>
+  run: ActionStatement[]
+}
+
 export interface AppConfig {
   /** `https://acme.app`, `https://*.acme.app`, `http://localhost:*`, or `*` for any origin. */
   origins: string[]
   tables: Record<string, AppTable>
+  /** Named SQL a visitor can run with the server's rights (`POST /v1/session/action`). */
+  actions: Record<string, AppAction>
   session: {
     ttlMs: number
     /** New visitor databases one IP may create per minute. */
@@ -64,8 +96,8 @@ function keysOf(value: unknown, where: string, allowed: readonly string[]): Reco
   const record = value as Record<string, unknown>
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) {
-      // `actions` and `form` are in the plan and not built; saying so beats a silent no-op.
-      refuse(`${where}.${key} is not supported${key === "actions" || key === "form" ? " yet" : ""}`)
+      // `form` is in the plan and not built; saying so beats a silent no-op.
+      refuse(`${where}.${key} is not supported${key === "form" ? " yet" : ""}`)
     }
   }
   return record
@@ -81,7 +113,7 @@ function intIn(value: unknown, where: string, min: number, max: number, fallback
 
 /** Validates a `bql.json` and fills in its defaults. Unknown keys are refused, not ignored. */
 export function parseAppConfig(input: unknown = {}): AppConfig {
-  const root = keysOf(input, "config", ["origins", "tables", "session"])
+  const root = keysOf(input, "config", ["origins", "tables", "actions", "session"])
   let origins = DEFAULT_ORIGINS
   if (root.origins !== undefined) {
     if (!Array.isArray(root.origins) || root.origins.length === 0) {
@@ -109,10 +141,19 @@ export function parseAppConfig(input: unknown = {}): AppConfig {
       tables[name] = { mode: table.mode, read: table.read !== false }
     }
   }
+  const actions: Record<string, AppAction> = {}
+  if (root.actions !== undefined) {
+    const raw = keysOf(root.actions, "actions", Object.keys(root.actions as object))
+    for (const [name, value] of Object.entries(raw)) {
+      if (!TABLE.test(name)) refuse(`action name ${JSON.stringify(name)} is not a plain identifier`)
+      actions[name] = parseAction(value, `actions.${name}`)
+    }
+  }
   const session = keysOf(root.session ?? {}, "session", ["ttlMs", "newVisitorsPerMinute"])
   return {
     origins,
     tables,
+    actions,
     session: {
       ttlMs: intIn(session.ttlMs, "session.ttlMs", 60_000, 86_400_000, DEFAULT_TTL_MS),
       newVisitorsPerMinute: intIn(
@@ -124,6 +165,101 @@ export function parseAppConfig(input: unknown = {}): AppConfig {
       ),
     },
   }
+}
+
+/** What a statement in an action may start with: data, never schema, `ATTACH` or `PRAGMA`. */
+const ACTION_SQL = /^\s*(?:--[^\n]*\n\s*)*(insert|update|delete|select|with|replace)\b/i
+const MAX_ACTION_STATEMENTS = 20
+const MAX_ACTION_INPUTS = 32
+
+function parseAction(value: unknown, where: string): AppAction {
+  const action = keysOf(value, where, ["db", "input", "run"])
+  if (action.db !== undefined && action.db !== "shared" && action.db !== "private") {
+    refuse(`${where}.db must be "shared" or "private"`)
+  }
+  const input: Record<string, ActionInput> = {}
+  const rawInput = action.input === undefined ? {} : keysOf(action.input, `${where}.input`, Object.keys(action.input as object))
+  if (Object.keys(rawInput).length > MAX_ACTION_INPUTS) refuse(`${where}.input has more than ${MAX_ACTION_INPUTS} fields`)
+  for (const [field, spec] of Object.entries(rawInput)) {
+    if (!TABLE.test(field)) refuse(`${where}.input.${field} is not a plain identifier`)
+    // `:user` is the caller's sub, bound by the server; an input must not be able to set it.
+    if (field === "user") refuse(`${where}.input.user is reserved: :user is the caller`)
+    const one = keysOf(spec, `${where}.input.${field}`, ["type", "min", "max", "minLength", "maxLength", "optional"])
+    if (one.type !== "int" && one.type !== "number" && one.type !== "text" && one.type !== "bool") {
+      refuse(`${where}.input.${field}.type must be "int", "number", "text" or "bool"`)
+    }
+    for (const bound of ["min", "max", "minLength", "maxLength"] as const) {
+      if (one[bound] !== undefined && typeof one[bound] !== "number") refuse(`${where}.input.${field}.${bound} must be a number`)
+    }
+    if (one.optional !== undefined && typeof one.optional !== "boolean") refuse(`${where}.input.${field}.optional must be a boolean`)
+    input[field] = {
+      type: one.type,
+      ...(one.min !== undefined ? { min: one.min as number } : {}),
+      ...(one.max !== undefined ? { max: one.max as number } : {}),
+      ...(one.minLength !== undefined ? { minLength: one.minLength as number } : {}),
+      ...(one.maxLength !== undefined ? { maxLength: one.maxLength as number } : {}),
+      optional: one.optional === true,
+    }
+  }
+  if (!Array.isArray(action.run) || action.run.length === 0 || action.run.length > MAX_ACTION_STATEMENTS) {
+    refuse(`${where}.run must be 1 to ${MAX_ACTION_STATEMENTS} statements`)
+  }
+  const run = (action.run as unknown[]).map((raw, i) => {
+    const statement = keysOf(raw, `${where}.run[${i}]`, ["sql", "expect", "error"])
+    if (typeof statement.sql !== "string" || !ACTION_SQL.test(statement.sql)) {
+      refuse(`${where}.run[${i}].sql must be one insert, update, delete, select, with or replace statement`)
+    }
+    if (statement.expect !== undefined && (!Number.isInteger(statement.expect) || (statement.expect as number) < 0)) {
+      refuse(`${where}.run[${i}].expect must be a non-negative integer`)
+    }
+    if (statement.error !== undefined && typeof statement.error !== "string") refuse(`${where}.run[${i}].error must be a string`)
+    return {
+      sql: statement.sql,
+      ...(statement.expect !== undefined ? { expect: statement.expect as number } : {}),
+      ...(statement.error !== undefined ? { error: statement.error as string } : {}),
+    }
+  })
+  return { db: action.db === "private" ? "private" : "shared", input, run }
+}
+
+/** Checks a request's input against the action's schema; returns the values to bind by name. */
+export function bindInput(action: AppAction, input: unknown): Record<string, string | number | null> {
+  const raw = input === undefined ? {} : input
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw BqlError.badRequest("input must be an object")
+  const given = raw as Record<string, unknown>
+  for (const key of Object.keys(given)) {
+    if (!(key in action.input)) throw BqlError.badRequest(`input.${key} is not an input of this action`)
+  }
+  const out: Record<string, string | number | null> = {}
+  for (const [field, spec] of Object.entries(action.input)) {
+    const value = given[field]
+    if (value === undefined || value === null) {
+      if (!spec.optional) throw BqlError.badRequest(`input.${field} is required`)
+      out[field] = null
+      continue
+    }
+    const fail = (what: string): never => {
+      throw BqlError.badRequest(`input.${field} ${what}`)
+    }
+    if (spec.type === "bool") {
+      if (typeof value !== "boolean") fail("must be true or false")
+      out[field] = value ? 1 : 0
+    } else if (spec.type === "text") {
+      if (typeof value !== "string") fail("must be text")
+      const text = value as string
+      if (spec.minLength !== undefined && text.length < spec.minLength) fail(`must be at least ${spec.minLength} characters`)
+      if (spec.maxLength !== undefined && text.length > spec.maxLength) fail(`must be at most ${spec.maxLength} characters`)
+      out[field] = text
+    } else {
+      if (typeof value !== "number" || !Number.isFinite(value)) fail("must be a number")
+      if (spec.type === "int" && !Number.isSafeInteger(value)) fail("must be an integer")
+      const n = value as number
+      if (spec.min !== undefined && n < spec.min) fail(`must be at least ${spec.min}`)
+      if (spec.max !== undefined && n > spec.max) fail(`must be at most ${spec.max}`)
+      out[field] = n
+    }
+  }
+  return out
 }
 
 /** Whether a request's `Origin` header is one the app allows. A missing `Origin` never is. */
@@ -386,4 +522,81 @@ export function sweepUnusedVisitors(ctx: RouteContext, appId: string, nowMs: num
     }
   }
   return deleted
+}
+
+// ── actions ────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /v1/session/action`: runs one of the app's actions for the visitor whose session token
+ * comes with it. The statements are the owner's, from the config, and run in one transaction
+ * with the server's rights: no table ACL, so an action can write a table the visitor can only
+ * read. The visitor supplies only `input`, which is checked against the action's schema and bound
+ * by name; `:user` is bound to the caller's sub, and `bql_sub()` returns it too, so author columns
+ * and their triggers hold inside an action as they do outside it.
+ */
+export const runAction: Handler = async (ctx) => {
+  const body = await readJson<{ key?: unknown; name?: unknown; input?: unknown }>(ctx, ctx.runtime.config.limits.maxBodyBytes)
+  if (typeof body.key !== "string" || !body.key.startsWith("pk_")) {
+    throw BqlError.unauthenticated("an action needs the app key (pk_…)")
+  }
+  const app = ctx.runtime.registry.catalog.getAppByKey(body.key)
+  if (!app) throw BqlError.unauthenticated("unknown app key")
+  const config = parseAppConfig(app.config)
+  if (!originAllowed(config.origins, ctx.request.headers.get("origin"))) {
+    throw BqlError.notAuthorized("this origin is not in the app's origins")
+  }
+  // The session's own token proves which visitor is asking: it is `rw` on exactly the database
+  // named after its sub, and no other app's session can be.
+  const principal = await principalOf(ctx)
+  const sub = principal.kind === "token" ? principal.claims.sub : undefined
+  if (principal.kind !== "token" || !sub) throw BqlError.unauthenticated("an action needs a session token")
+  const visitorDb = `app-${app.id}-u-${sub}`
+  if (principal.scopeFor(visitorDb) !== "rw") throw BqlError.notAuthorized("this token is not a session of this app")
+  if (typeof body.name !== "string") throw BqlError.badRequest("an action needs a name")
+  const action = config.actions[body.name]
+  if (!action) throw new BqlError("NOT_FOUND", `no action ${body.name}`, 404)
+  const values = bindInput(action, body.input)
+  requirePrimary(ctx)
+
+  const dbName = action.db === "private" ? visitorDb : sharedDbOf(app.id)
+  const tenant = ctx.runtime.tenant(dbName)
+  ctx.runtime.assertWritable(dbName)
+  const options = resolveOptions(undefined, null, ctx.runtime.config)
+  const startedNs = Bun.nanoseconds()
+  const written = tenant.write((db) => {
+    const handle = applyPolicy(db, ctx.runtime.hubFor(db), ADMIN, dbName)
+    // After the policy, which clears it for the admin.
+    setSubject(db, sub)
+    try {
+      return action.run.map((statement, i) => {
+        const names = db.prepare(statement.sql).paramNames
+        const args: Record<string, string | number | null> = {}
+        for (const name of names) {
+          const bare = name.slice(1)
+          if (bare === "user") args[name] = sub
+          else if (bare in values) args[name] = values[bare] ?? null
+          else throw BqlError.badRequest(`action ${body.name}: ${name} in run[${i}] is neither an input nor :user`)
+        }
+        const stepped = step(ctx.runtime, db, { sql: statement.sql, args }, options.writeTimeoutMs, options)
+        if (statement.expect !== undefined && stepped.rowsAffected !== statement.expect) {
+          throw new BqlError(
+            "CONFLICT",
+            statement.error ?? `action ${body.name}: run[${i}] changed ${stepped.rowsAffected} rows, expected ${statement.expect}`,
+            409,
+          )
+        }
+        return stepped
+      })
+    } finally {
+      handle.release()
+    }
+  })
+  ctx.txid = Number(written.txid)
+  return json({
+    results: written.result.map((one) => {
+      const result = toResult(one, "object", written.txid, startedNs)
+      return { rows: result.rows, rowsAffected: result.rowsAffected }
+    }),
+    txid: Number(written.txid),
+  })
 }

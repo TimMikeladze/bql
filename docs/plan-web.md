@@ -27,7 +27,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | Browser bundle | `bql.sh/client` | **built**: `packages/db/src/web/`, `packages/db/dist/web.js` |
 | `table()` and `state()` | `sql`, `db.live` | **`table()` built**: `bql.sh/web`; `state()` not yet |
 | Author column (`bql_sub()`) | new driver function binding | **built**: `Database.function`, `tenant/subject.ts`, `bql app table`, `db.shared.table()` |
-| SQL actions | app config, one transaction | server routes |
+| SQL actions | app config, one transaction | **built**: `server/web.ts` `runAction`, `db.action()` |
 | Form endpoint | `a` tables | server routes |
 | Action proxy | Ed25519 keys | server routes |
 
@@ -176,7 +176,10 @@ create table scores(
 
 ## SQL actions
 
-`POST /v1/session/action { name, input }` with the shared token.
+`POST /v1/session/action { key, name, input }`. As built it takes the session's **private** token,
+not the shared one: the private token is `rw` on exactly `app-<id>-u-<sub>`, which proves both the
+app and the visitor, and an app with no shared tables has no shared token at all. `bql_sub()` is
+set to the caller inside the action, so author columns hold there too.
 
 - `input` is checked against the action's schema (`int`, `number`, `text` with `min`/`max`/`maxLength`,
   `bool`); unknown keys are refused. `:user` is bound from the token's `sub`, never from input.
