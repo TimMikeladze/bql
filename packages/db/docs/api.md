@@ -46,8 +46,12 @@ The claim shape is libsql's, so the same token will work through a future Hrana 
   "jti": "…", "exp": 1789000000, "iat": 1786408000 }
 ```
 
-`ns` entries are globs. `t` is the per-table ACL: `r`, `w` or `rw`, and a table the map does not
-name is invisible to that token. `jti` drives the revocation list (`DELETE /v1/tokens/{jti}`),
+`ns` entries are globs. `t` is the per-table ACL: `r` (read), `a` (append: read and insert) or
+`rw`, and a table the map does not name is invisible to that token. `a` refuses `UPDATE`, `DELETE`,
+upserts and REPLACE, including a table declared `ON CONFLICT REPLACE`, so a row stays as it was
+written; a guestbook or a scores table is `a`. With a table ACL, a trigger body runs as its author:
+an insert into `scores` may update a `best` table the token can only read. A view gets no such
+pass, so it cannot widen what a token reads. `jti` drives the revocation list (`DELETE /v1/tokens/{jti}`),
 `kid` selects the verifying key. Read-only tokens are safe to hand to a browser.
 
 `EventSource` and browser `WebSocket` cannot set headers, so `/v1/db/{db}/changes`,
@@ -1838,7 +1842,7 @@ bql backup generations <db>
 bql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
 bql promote <db> [--force]
 bql cluster
-bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
+bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,posts:a,users:rw']
 bql exec <db> --sql "select 1"
 bql shell <db>
 ```

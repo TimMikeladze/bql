@@ -167,7 +167,7 @@ export function parseTtlMs(text: string): number {
   }
 }
 
-/** `todos:r,users:rw` — the table ACL of design §6, in the two scopes a token can carry. */
+/** `todos:r,posts:a,users:rw` — the table ACL of design §6, in the three scopes a token can carry. */
 export function parseTables(text: string): Record<string, TableScope> {
   const out: Record<string, TableScope> = {}
   for (const entry of text.split(",")) {
@@ -177,8 +177,8 @@ export function parseTables(text: string): Record<string, TableScope> {
     if (colon <= 0) throw new CliError(`--tables wants name:scope entries, got ${trimmed}`)
     const table = trimmed.slice(0, colon)
     const scope = trimmed.slice(colon + 1)
-    if (scope !== "r" && scope !== "rw") {
-      throw new CliError(`table scope must be r or rw, got ${scope}`)
+    if (scope !== "r" && scope !== "a" && scope !== "rw") {
+      throw new CliError(`table scope must be r, a or rw, got ${scope}`)
     }
     out[table] = scope
   }

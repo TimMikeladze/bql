@@ -756,8 +756,8 @@ export interface ClusterView {
   dbs: ClusterPlacement[]
 }
 
-/** Per-table narrowing of a token, beyond its database scope. */
-export type TableScope = "r" | "rw"
+/** Per-table narrowing of a token, beyond its database scope: read, append (read and insert), or read and write. */
+export type TableScope = "r" | "a" | "rw"
 
 export interface TokenOptions {
   /** Database globs. `db` is the one-database spelling of the same thing. */

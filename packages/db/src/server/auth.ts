@@ -50,8 +50,11 @@ import { fromBase64, toBase64Url } from "./json.ts"
 
 // ── Claims (design §6: libsql's shape, extended with `t` and a real `jti`/`kid`) ────────────────
 
-/** Access to one table: read, or read and write. */
-export type TableScope = "r" | "rw"
+/**
+ * Access to one table: read (`r`), read and insert (`a`, append), or read and write (`rw`). `a`
+ * refuses update, delete, upsert and REPLACE, so a row once written stays as it was written.
+ */
+export type TableScope = "r" | "a" | "rw"
 
 /** Access to a database as a whole. */
 export type Scope = "rw" | "ro"
@@ -850,6 +853,12 @@ export interface AuthorizerRules {
    * into `docs_fts`) and never a token writing `docs_fts_data` by hand. `applyPolicy` sets both.
    */
   shadowWrites?: boolean
+  /**
+   * True when `name` is a trigger in the schema. With a per-table ACL, everything a trigger body
+   * does is allowed (see `buildAuthorizer`). Must not touch the connection; `isTriggerLookup`
+   * builds it.
+   */
+  isTrigger?: (name: string) => boolean
 }
 
 /** Lower-cases the ACL keys once, so lookups can be case-insensitive like SQLite identifiers. */
@@ -887,7 +896,7 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
     return owner === undefined ? undefined : tables?.get(owner)
   }
 
-  return (action, arg1, arg2) => {
+  return (action, arg1, arg2, _dbName, trigger) => {
     switch (action) {
       case SQLITE_ATTACH:
       case SQLITE_DETACH:
@@ -905,6 +914,11 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
 
     if (tables) {
       if (DDL_ACTIONS.has(action)) return SQLITE_DENY
+      // A trigger body runs as its author: a table-scoped token cannot create triggers (DDL is
+      // denied just above), so every trigger came with the schema, and the token could only fire
+      // it with a write it was allowed. The fifth argument also names a view, which must not
+      // widen what a token reads, hence the lookup rather than `trigger !== null`.
+      if (trigger !== null && rules.isTrigger?.(trigger) === true) return SQLITE_OK
       const name = arg1?.toLowerCase() ?? ""
       if (action === SQLITE_READ) {
         // The schema and SQLite's own bookkeeping tables stay readable: the query planner and
@@ -914,7 +928,12 @@ export function buildAuthorizer(rules: AuthorizerRules): Authorizer {
       }
       if (action === SQLITE_INSERT || action === SQLITE_UPDATE || action === SQLITE_DELETE) {
         if (name.startsWith("sqlite_")) return name === "sqlite_sequence" ? SQLITE_OK : SQLITE_DENY
-        if (aclOf(name, true) !== "rw") return SQLITE_DENY
+        const acl = aclOf(name, true)
+        if (acl === "rw") return SQLITE_OK
+        // REPLACE deletes the conflicting row without an authorizer DELETE; the driver asks for one
+        // separately (`ProgramFacts.replaces`), so append refusing DELETE covers it too.
+        if (acl === "a" && action === SQLITE_INSERT) return SQLITE_OK
+        return SQLITE_DENY
       }
     }
 
@@ -1014,7 +1033,7 @@ export function applyPolicy(
   const tableAcl = principal.kind !== "admin" && principal.tables !== undefined
   // Refreshed even when the policy itself is unchanged: the closure below reads the map by
   // connection, so a virtual table created since the last request is seen without re-scoping.
-  const shadowOf = tableAcl ? shadowLookup(db, hub) : undefined
+  const shadowOf = tableAcl ? shadowLookup(db, hub) : undefined // also refreshes the trigger names
   // A table ACL runs defensive, so a grant on `docs_fts` reaches its storage only through the
   // module. Everyone else gets the connection's own setting back.
   const hardened = defend(db, tableAcl)
@@ -1034,7 +1053,7 @@ export function applyPolicy(
     buildAuthorizer({
       scope,
       ...(principal.tables ? { tables: principal.tables } : {}),
-      ...(shadowOf ? { shadowOf, shadowWrites: hardened } : {}),
+      ...(shadowOf ? { shadowOf, shadowWrites: hardened, isTrigger: isTriggerLookup(db) } : {}),
       ...(options.reportEveryDelete ? { reportEveryDelete: true } : {}),
     }),
   )
@@ -1069,8 +1088,11 @@ function defend(db: Database, want: boolean): boolean {
   return target === 1
 }
 
-/** Shadow table → owning virtual table (both lower-cased), per connection, as of `cookie`. */
-const shadowMaps = new WeakMap<Database, { cookie: number; map: Map<string, string> }>()
+/** Shadow table → owning virtual table, and the trigger names (all lower-cased), per connection, as of `cookie`. */
+const shadowMaps = new WeakMap<
+  Database,
+  { cookie: number; map: Map<string, string>; triggers: Set<string> }
+>()
 
 /**
  * Brings this connection's shadow map up to date with its schema and returns the lookup the
@@ -1098,9 +1120,18 @@ export function shadowLookup(db: Database, hub: PolicySlot): (name: string) => s
         if (owner !== null) map.set(name.toLowerCase(), owner.toLowerCase())
       }
     }
-    shadowMaps.set(db, { cookie, map })
+    const triggers = new Set<string>()
+    for (const row of db.prepare("select name from sqlite_schema where type = 'trigger'").all()) {
+      if (typeof row.name === "string") triggers.add(row.name.toLowerCase())
+    }
+    shadowMaps.set(db, { cookie, map, triggers })
   })
   return (name) => shadowMaps.get(db)?.map.get(name)
+}
+
+/** The trigger names `shadowLookup` last read for this connection, as `AuthorizerRules.isTrigger`. */
+export function isTriggerLookup(db: Database): (name: string) => boolean {
+  return (name) => shadowMaps.get(db)?.triggers.has(name.toLowerCase()) === true
 }
 
 function setQueryOnly(db: Database, on: boolean): void {

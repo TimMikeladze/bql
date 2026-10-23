@@ -163,7 +163,8 @@ BQL_ADMIN_KEY=<the admin key> bun token.ts
 # NOT_AUTHORIZED not authorized
 ```
 
-`scope` is `ro` or `rw`, `dbs` takes globs (`app-*`), and `tables` narrows a token to single tables.
+`scope` is `ro` or `rw`, `dbs` takes globs (`app-*`), and `tables` narrows a token to single tables:
+`r`, `a` (append: read and insert, never update or delete) or `rw`.
 
 ### Next
 

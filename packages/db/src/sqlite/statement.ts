@@ -57,6 +57,13 @@ export interface ProgramFacts {
    * about them on a cache hit, because a cached statement is never compiled again.
    */
   readonly guarded?: readonly GuardedAction[] | null
+  /**
+   * Tables whose rows the statement's own program deletes while it inserts: REPLACE conflict
+   * resolution, spelled in the SQL (`INSERT OR REPLACE`, `REPLACE INTO`) or in the schema
+   * (`PRIMARY KEY ON CONFLICT REPLACE`). SQLite authorizes those deletes as a plain INSERT, so
+   * `Database.prepare` asks the authorizer about each one as a DELETE. Null when there are none.
+   */
+  readonly replaces?: readonly string[] | null
 }
 
 /** One authorizer action `ProgramFacts.guarded` keeps, with the arguments the guard is asked. */
@@ -214,6 +221,11 @@ export class Statement {
   /** The guarded actions the program performs (`ProgramFacts.guarded`), or null. */
   get guarded(): readonly GuardedAction[] | null {
     return this.#facts.guarded ?? null
+  }
+
+  /** Tables a REPLACE in this program deletes rows from (`ProgramFacts.replaces`), or null. */
+  get replaces(): readonly string[] | null {
+    return this.#facts.replaces ?? null
   }
 
   /**
@@ -622,5 +634,36 @@ export function prepareStatement(
   }
   // Taken here, while the compile that produced `handle` is still the last one the connection
   // authorized: the facts belong to this statement and to no other.
-  return new Statement(host, sql, handle, host.takeProgramFacts())
+  const facts = host.takeProgramFacts()
+  if (!facts.inserts) return new Statement(host, sql, handle, facts)
+  const replaces = conflictDeletes(host, handle)
+  return new Statement(host, sql, handle, replaces === null ? facts : { ...facts, replaces })
+}
+
+/**
+ * Reads the statement's own bytecode (`sqlite3_stmt_explain`, no recompile) for `Delete` opcodes
+ * naming a table. In an inserting statement's main program those come only from REPLACE: the
+ * rowid-only case still emits one (as a no-op that fires the preupdate hook), so it is not missed.
+ * Trigger subprograms are listed after the main program with their addresses starting again at
+ * zero; the scan stops there, since a trigger's deletes are its author's, not the caller's.
+ */
+function conflictDeletes(host: StatementHost, handle: number): string[] | null {
+  const s = host.lib.symbols
+  if (s.sqlite3_stmt_explain(handle, 1) !== SQLITE_OK) return null
+  let tables: string[] | null = null
+  try {
+    let last = -1
+    while (s.sqlite3_step(handle) === SQLITE_ROW) {
+      const addr = Number(s.sqlite3_column_int64(handle, 0))
+      if (addr < last) break
+      last = addr
+      if (cstr(s.sqlite3_column_text(handle, 1)) !== "Delete") continue
+      const table = cstr(s.sqlite3_column_text(handle, 5))
+      if (table !== null && !(tables ??= []).includes(table)) tables.push(table)
+    }
+  } finally {
+    s.sqlite3_reset(handle)
+    s.sqlite3_stmt_explain(handle, 0)
+  }
+  return tables
 }

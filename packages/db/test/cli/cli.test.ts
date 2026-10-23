@@ -153,7 +153,7 @@ describe("flag parsing", () => {
   })
 
   test("a table ACL is name:scope pairs", () => {
-    expect(parseTables("todos:r,users:rw")).toEqual({ todos: "r", users: "rw" })
+    expect(parseTables("todos:r,posts:a,users:rw")).toEqual({ todos: "r", posts: "a", users: "rw" })
     expect(() => parseTables("todos")).toThrow()
     expect(() => parseTables("todos:x")).toThrow()
   })

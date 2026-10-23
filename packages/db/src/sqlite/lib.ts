@@ -92,6 +92,7 @@ const CORE = {
   sqlite3_reset: { args: [T.ptr], returns: T.i32 },
   sqlite3_clear_bindings: { args: [T.ptr], returns: T.i32 },
   sqlite3_stmt_readonly: { args: [T.ptr], returns: T.i32 },
+  sqlite3_stmt_explain: { args: [T.ptr, T.i32], returns: T.i32 },
   sqlite3_stmt_busy: { args: [T.ptr], returns: T.i32 },
   sqlite3_stmt_status: { args: [T.ptr, T.i32, T.i32], returns: T.i32 },
   sqlite3_sql: { args: [T.ptr], returns: T.cstring },
@@ -258,6 +259,7 @@ export interface CoreSymbols {
   sqlite3_reset(stmt: Ptr): number
   sqlite3_clear_bindings(stmt: Ptr): number
   sqlite3_stmt_readonly(stmt: Ptr): number
+  sqlite3_stmt_explain(stmt: Ptr, mode: number): number
   sqlite3_stmt_busy(stmt: Ptr): number
   sqlite3_stmt_status(stmt: Ptr, op: number, reset: number): number
   sqlite3_sql(stmt: Ptr): CString

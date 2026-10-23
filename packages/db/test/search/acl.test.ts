@@ -70,8 +70,9 @@ describe.if(features.vec && features.geo && features.fts5 && features.rtree)("pe
     as(db, hub, { posts: "rw" })
     expect(() => db.prepare("select * from posts_fts_data").all()).toThrow(DENIED)
     expect(() => db.prepare("select * from posts_vec_vector_chunks00").all()).toThrow(DENIED)
-    // The triggers write an index the token was not granted.
-    expect(() => db.run("insert into posts(body) values ('x')")).toThrow(DENIED)
+    // The triggers run as their author, but the index's own writes to its storage are still
+    // judged by the grant, so the insert is refused while the module runs.
+    expect(() => db.run("insert into posts(body) values ('x')")).toThrow(/authorization denied/)
     db.close()
   })
 

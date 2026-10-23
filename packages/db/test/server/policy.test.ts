@@ -306,6 +306,97 @@ describe("table ACL", () => {
   })
 })
 
+describe("append", () => {
+  function board(): Database {
+    const db = Database.open(tempDb())
+    db.exec(`
+      create table scores(id integer primary key, player text unique, score integer);
+      create table best(player text primary key, score integer);
+      create table kept(id integer primary key on conflict replace, body text);
+      create table secrets(id integer primary key, value text);
+      create view leaked as select value from secrets;
+      create trigger keep_best after insert on scores begin
+        insert into best values (new.player, new.score)
+          on conflict(player) do update set score = max(score, excluded.score);
+      end;
+      insert into scores(player, score) values ('ann', 10);
+      insert into secrets(value) values ('hunter2');
+    `)
+    return db
+  }
+  const append = (tables: Record<string, "r" | "a" | "rw">): Principal =>
+    tokenPrincipal(claimsFor({ rw: ["acme"], tables }))
+
+  test("reads and inserts, but never changes a row once written", () => {
+    const db = board()
+    policyFor(db, append({ scores: "a" }), "acme")
+    db.run("insert into scores(player, score) values ('bob', 20)")
+    expect(db.prepare("select count(*) from scores").values()).toEqual([[2]])
+    expect(statusOf(() => db.run("update scores set score = 99"))).toBe(403)
+    expect(statusOf(() => db.run("delete from scores"))).toBe(403)
+    db.close()
+  })
+
+  test("an upsert is an update, so it is refused; ON CONFLICT DO NOTHING is not", () => {
+    const db = board()
+    policyFor(db, append({ scores: "a" }), "acme")
+    const upsert =
+      "insert into scores(player, score) values ('ann', 99) on conflict(player) do update set score = 99"
+    expect(statusOf(() => db.run(upsert))).toBe(403)
+    db.run("insert into scores(player, score) values ('ann', 99) on conflict do nothing")
+    expect(db.prepare("select score from scores where player = 'ann'").values()).toEqual([[10]])
+    db.close()
+  })
+
+  test("REPLACE is refused however it is spelled, because it deletes the row it replaces", () => {
+    const db = board()
+    policyFor(db, append({ scores: "a", kept: "a" }), "acme")
+    for (const sql of [
+      "insert or replace into scores(player, score) values ('ann', 99)",
+      "replace into scores(player, score) values ('ann', 99)",
+      "insert or replace into scores(id, player, score) values (1, 'eve', 99)",
+      // The conflict clause lives in the schema, not the statement.
+      "insert into kept(id, body) values (1, 'x')",
+    ]) {
+      expect(codeOf(() => db.run(sql))).toBe("SQLITE_AUTH")
+    }
+    expect(db.prepare("select player, score from scores").values()).toEqual([["ann", 10]])
+    db.close()
+  })
+
+  test("REPLACE still works for rw, and a cached REPLACE is re-asked when the token changes", () => {
+    const db = board()
+    const replace = "insert or replace into scores(id, player, score) values (1, 'ann', 50)"
+    const handle = policyFor(db, append({ scores: "rw" }), "acme")
+    db.run(replace)
+    expect(db.prepare("select score from scores").values()).toEqual([[50]])
+    handle.release()
+    policyFor(db, append({ scores: "a" }), "acme")
+    expect(codeOf(() => db.prepare(replace))).toBe("SQLITE_AUTH")
+    db.close()
+  })
+
+  test("a trigger writes where the token cannot, but the token still cannot write there itself", () => {
+    const db = board()
+    policyFor(db, append({ scores: "a", best: "r" }), "acme")
+    db.run("insert into scores(player, score) values ('bob', 20)")
+    expect(db.prepare("select player, score from best order by player").values()).toEqual([
+      ["ann", 10],
+      ["bob", 20],
+    ])
+    expect(statusOf(() => db.run("insert into best values ('eve', 1)"))).toBe(403)
+    expect(statusOf(() => db.run("update best set score = 0"))).toBe(403)
+    db.close()
+  })
+
+  test("a view does not widen what a token can read", () => {
+    const db = board()
+    policyFor(db, append({ scores: "a", leaked: "r" }), "acme")
+    expect(codeOf(() => db.prepare("select value from leaked"))).toBe("SQLITE_AUTH")
+    db.close()
+  })
+})
+
 describe("admin", () => {
   test("runs with no authorizer at all", () => {
     const db = fresh()

@@ -27,6 +27,8 @@ import {
   SQLITE_PREPARE_PERSISTENT,
   SQLITE_ATTACH,
   SQLITE_AUTH,
+  SQLITE_DELETE,
+  SQLITE_DENY,
   SQLITE_DETACH,
   SQLITE_FUNCTION,
   SQLITE_INSERT,
@@ -338,6 +340,7 @@ export class Database implements StatementHost {
     if (hit && !hit.finalized) {
       // A cached statement is never compiled again, so the guard is asked here instead.
       if (this.#guard !== null && hit.guarded !== null) this.#recheckGuard(hit.guarded)
+      if (this.#onAuth !== null && hit.replaces !== null) this.#authorizeReplaces(hit.replaces)
       // Refresh recency.
       this.#cache.delete(sql)
       this.#cache.set(sql, hit)
@@ -354,6 +357,14 @@ export class Database implements StatementHost {
       stmt = prepareStatement(this, sql, SQLITE_PREPARE_PERSISTENT)
     } finally {
       this.#probing = false
+    }
+    if (this.#onAuth !== null && stmt.replaces !== null) {
+      try {
+        this.#authorizeReplaces(stmt.replaces)
+      } catch (err) {
+        stmt.finalize()
+        throw err
+      }
     }
     this.#cache.set(sql, stmt)
     if (this.#cache.size > this.#cacheLimit) {
@@ -593,6 +604,24 @@ export class Database implements StatementHost {
         rc = 1
       }
       if (rc !== SQLITE_OK) throw new SqliteError("not authorized", SQLITE_AUTH)
+    }
+  }
+
+  /**
+   * Asks the authorizer about the rows a REPLACE deletes (`Statement.replaces`) as the DELETE
+   * SQLite never reports for them, on compile and on every cache hit, since the verdict depends
+   * on the authorizer of the moment. Only DENY refuses; IGNORE has nothing to ignore here.
+   */
+  #authorizeReplaces(tables: readonly string[]): void {
+    const fn = this.#onAuth as Authorizer
+    for (const table of tables) {
+      let rc: number
+      try {
+        rc = fn(SQLITE_DELETE, table, null, "main", null) | 0
+      } catch {
+        rc = SQLITE_DENY
+      }
+      if (rc === SQLITE_DENY) throw new SqliteError("not authorized", SQLITE_AUTH)
     }
   }
 

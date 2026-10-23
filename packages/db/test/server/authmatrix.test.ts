@@ -111,6 +111,20 @@ describe("scope", () => {
     ).toBe(403)
   })
 
+  test("an append table in the ACL takes inserts but not updates, deletes or REPLACE", async () => {
+    const { token } = await server.token({
+      dbs: ["acme"],
+      scope: "rw",
+      tables: { todos: "a" },
+    })
+    const status = async (sql: string) => (await ask("/v1/db/acme/query", sql, token)).status
+    expect(await status("select title from todos")).toBe(200)
+    expect(await status("insert into todos(title) values ('appended')")).toBe(200)
+    expect(await status("update todos set title = 'no'")).toBe(403)
+    expect(await status("delete from todos")).toBe(403)
+    expect(await status("insert or replace into todos(id, title) values (1, 'no')")).toBe(403)
+  })
+
   test("no token may reach another database through ATTACH", async () => {
     const { token } = await server.token({ dbs: ["acme"], scope: "rw" })
     const response = await ask("/v1/db/acme/query", "attach database ':memory:' as m", token)
