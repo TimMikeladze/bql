@@ -29,7 +29,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | Author column (`bql_sub()`) | new driver function binding | **built**: `Database.function`, `tenant/subject.ts`, `bql app table`, `db.shared.table()` |
 | SQL actions | app config, one transaction | **built**: `server/web.ts` `runAction`, `db.action()` |
 | Form endpoint | `a` tables | **built**: `server/web.ts` `submitForm`, `bql app table --form` |
-| Action proxy | Ed25519 keys | server routes |
+| Action proxy | Ed25519 keys | **built**: `server/web.ts` `proxyAction`, `/.well-known/jwks.json`, `bql.sh/actions` |
 
 ## Decisions
 
@@ -210,6 +210,15 @@ The original plan: `POST /f/:app/:table`, `application/x-www-form-urlencoded` or
 - The same per-IP limiter as `/v1/session`.
 
 ## Action proxy
+
+As built: the signature is over `bql-action:` + the body (domain-separated from JWT signing
+inputs, since it reuses the token signing key), the body carries the URL it was signed for and a
+60 s `exp`, and the token is `rw` on both the shared and the caller's private database with
+`sub` = the caller, so author columns hold for the function's writes too. Building it found that
+the catalog stores the parsed config and parsing it again refused a url action's own `run: []`;
+`parseAppConfig` is now tested to take its own output unchanged.
+
+The plan:
 
 An action with `"url"` instead of `"run"` is POSTed to the user's function with a signed body
 (EdDSA over the request, key id in the header, public keys at `/.well-known/jwks.json`) and a

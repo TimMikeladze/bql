@@ -2,6 +2,7 @@
 // out are used against a real listener, because the claim is about what SQLite then lets them do.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { ActionVerifyError, verifyAction } from "../../src/actions/index.ts"
 import { createClient } from "../../src/client/index.ts"
 import type { RouteContext } from "../../src/server/routes.ts"
 import {
@@ -364,6 +365,145 @@ describe("actions", () => {
     expect(() => parseAppConfig({ actions: { bad: { run: [{ sql: "drop table scores" }] } } })).toThrow(/must be one insert/)
     expect(() => parseAppConfig({ actions: { bad: { run: [{ sql: "attach 'x' as y" }] } } })).toThrow(/must be one insert/)
     expect(() => parseAppConfig({ actions: { bad: { input: { user: { type: "text" } }, run: [{ sql: "select 1" }] } } })).toThrow(/reserved/)
+  })
+})
+
+describe("url actions", () => {
+  let fn: ReturnType<typeof Bun.serve>
+  let fnUrl: string
+  let proxied: App
+  const seen: { path: string; call?: unknown; error?: string }[] = []
+
+  beforeAll(async () => {
+    fn = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        const path = new URL(request.url).pathname
+        if (path === "/slow") {
+          await Bun.sleep(1000)
+          return Response.json({ late: true })
+        }
+        if (path === "/text") return new Response("not json")
+        try {
+          const call = await verifyAction(request, { bql: server.url, url: `${fnUrl}${path}` })
+          seen.push({ path, call })
+          if (path === "/refuse") return Response.json({ error: { message: "sold out" } }, { status: 409 })
+          // The function writes as the caller, with the token it was given.
+          const client = createClient({ url: server.url, token: call.token })
+          const [row] = await client.db(call.dbs.shared).sql`insert into posts(id, data) values (${call.nonce}, ${JSON.stringify({ text: call.input.text })}) returning author`
+          client.close()
+          return Response.json({ ok: true, author: row?.author, input: call.input })
+        } catch (err) {
+          seen.push({ path, error: String(err) })
+          return Response.json({ error: String(err) }, { status: err instanceof ActionVerifyError ? 401 : 500 })
+        }
+      },
+    })
+    fnUrl = `http://127.0.0.1:${fn.port}`
+    proxied = await createApp("proxied", {
+      origins: [ORIGIN],
+      tables: { posts: { mode: "r" } },
+      actions: {
+        post: { input: { text: { type: "text", maxLength: 40 } }, url: `${fnUrl}/post` },
+        refuse: { url: `${fnUrl}/refuse` },
+        slow: { url: `${fnUrl}/slow`, timeoutMs: 200 },
+        text: { url: `${fnUrl}/text` },
+      },
+      session: { newVisitorsPerMinute: 100 },
+    })
+    await server.fetch(`/v1/db/${proxied.sharedDb}/batch`, {
+      method: "POST",
+      body: JSON.stringify({ statements: sharedTableSql("posts").map((sql) => ({ sql })) }),
+    })
+  })
+  afterAll(() => fn.stop(true))
+
+  async function call(token: string, name: string, input: unknown = {}) {
+    const response = await server.fetch("/v1/session/action", {
+      method: "POST",
+      token,
+      headers: { origin: ORIGIN },
+      body: JSON.stringify({ key: proxied.key, name, input }),
+    })
+    return { status: response.status, body: (await response.json()) as { result?: Record<string, unknown>; error?: { code: string; message: string } } }
+  }
+
+  test("the function gets checked input, the caller and a token, and its answer comes back", async () => {
+    const who = (await (await session(proxied.key, visitor(50))).json()) as Session
+    const done = await call(who.private.token, "post", { text: "via my function" })
+    expect(done.status).toBe(200)
+    const sub = visitorDbOf("proxied", visitor(50)).sub
+    // The token's sub is the caller, so the author column took them, not the function.
+    expect(done.body.result).toEqual({ ok: true, author: sub, input: { text: "via my function" } })
+    expect((await call(who.private.token, "post", { text: "x".repeat(41) })).status).toBe(400)
+  })
+
+  test("a refusal keeps its status and message; a slow or non-JSON function is a 502", async () => {
+    const who = (await (await session(proxied.key, visitor(51))).json()) as Session
+    const refused = await call(who.private.token, "refuse")
+    expect(refused.status).toBe(409)
+    expect(refused.body.error).toMatchObject({ code: "ACTION_FAILED", message: "sold out" })
+    expect((await call(who.private.token, "slow")).status).toBe(502)
+    expect((await call(who.private.token, "text")).status).toBe(502)
+  })
+
+  test("verifyAction refuses a tampered body, another URL and an expired call", async () => {
+    // An echo function keeps the signed request bql.sh sent it, to replay against verifyAction.
+    let headers: Record<string, string> = {}
+    let body = ""
+    const echo = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        headers = { "bql-signature": request.headers.get("bql-signature") ?? "", "bql-key-id": request.headers.get("bql-key-id") ?? "" }
+        body = await request.text()
+        return Response.json({})
+      },
+    })
+    const echoUrl = `http://127.0.0.1:${echo.port}/echo`
+    const echoApp = await createApp("echo", { origins: [ORIGIN], actions: { echo: { url: echoUrl } }, session: { newVisitorsPerMinute: 100 } })
+    const who = (await (await session(echoApp.key, visitor(53))).json()) as Session
+    await server.fetch("/v1/session/action", {
+      method: "POST",
+      token: who.private.token,
+      headers: { origin: ORIGIN },
+      body: JSON.stringify({ key: echoApp.key, name: "echo", input: {} }),
+    })
+    echo.stop(true)
+
+    const check = (sent: string, url = echoUrl, now?: number) =>
+      verifyAction(new Request(url, { method: "POST", headers, body: sent }), { bql: server.url, url, ...(now ? { now } : {}) }).then(
+        (call) => `ok ${call.action}`,
+        (err) => (err as Error).message,
+      )
+    expect(await check(body)).toBe("ok echo")
+    expect(await check(body.replace('"action":"echo"', '"action":"other"'))).toContain("signature does not match")
+    expect(await check(body, `${fnUrl}/post`)).toContain("signed for")
+    expect(await check(body, echoUrl, Math.floor(Date.now() / 1000) + 3600)).toContain("expired")
+    const unsigned = new Request(echoUrl, { method: "POST", body })
+    expect(await verifyAction(unsigned, { bql: server.url }).catch((err) => err)).toBeInstanceOf(ActionVerifyError)
+    expect((await server.json<{ keys: unknown[] }>("/.well-known/jwks.json", { token: null })).keys.length).toBeGreaterThan(0)
+  })
+
+  test("parsing a parsed config gives it back unchanged, since that is what the catalog stores", () => {
+    const config = {
+      origins: [ORIGIN],
+      tables: { posts: { mode: "rw" }, signups: { mode: "a", form: { fields: { email: { type: "email" } } } } },
+      actions: {
+        sql: { input: { n: { type: "int", min: 0 } }, run: [{ sql: "select :n", expect: 0, error: "x" }] },
+        fn: { input: { text: { type: "text" } }, url: "https://fn.acme.app/x", timeoutMs: 500 },
+      },
+      session: { ttlMs: 120_000 },
+    }
+    const once = parseAppConfig(config)
+    expect(parseAppConfig(once)).toEqual(once)
+  })
+
+  test("the config takes run or url, and url is https or this machine", () => {
+    expect(() => parseAppConfig({ actions: { a: { url: "https://fn.acme.app/x", run: [{ sql: "select 1" }] } } })).toThrow(/one or the other/)
+    expect(() => parseAppConfig({ actions: { a: { url: "http://fn.acme.app/x" } } })).toThrow(/https/)
+    expect(parseAppConfig({ actions: { a: { url: "https://fn.acme.app/x" } } }).actions.a?.timeoutMs).toBe(10_000)
   })
 })
 

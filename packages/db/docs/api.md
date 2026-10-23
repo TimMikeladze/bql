@@ -290,6 +290,7 @@ server: the database's SQLite lacks sqlite-vec, the geo functions, FTS5 or R*Tre
 | `POST /v1/session` | a visitor's tokens for an app | `pk_` key in the body, `Origin` |
 | `POST /v1/session/action` | run one of the app's actions as the visitor | session token, `pk_` key, `Origin` |
 | `POST /v1/forms/:app/:table` | an HTML form post into a form table | `Origin` |
+| `GET /.well-known/jwks.json` | the public keys tokens and action requests are signed with | none |
 | `GET /v1/ws` | WebSocket upgrade, sub-protocol `bql.v1` | any |
 | `GET /v2`, `GET /v3` | Hrana version probe | none |
 | `POST /v2/pipeline`, `POST /v3/pipeline` | Hrana pipeline, database from `x-namespace`/`Host`/`default` | `ro`, `rw` when it writes |
@@ -973,6 +974,38 @@ the whole action back with `409 CONFLICT` and the statement's `error`. A stateme
 
 The caller is proved by the session's private token, which is `rw` on exactly the database named
 after its `sub`. There is no rate limit on actions yet beyond the server's own limits.
+
+An action with `url` instead of `run` sends the checked input to the owner's own function, for
+work that needs a secret or a `fetch` (a payment, an AI call):
+
+```json
+"checkout": { "input": { "plan": { "type": "text" } }, "url": "https://fn.acme.app/checkout", "timeoutMs": 10000 }
+```
+
+```ts
+// the function, anywhere that runs WebCrypto: Bun, Node 20+, Deno, Workers
+import { verifyAction } from "bql.sh/actions"
+
+export default async function (request: Request) {
+  const call = await verifyAction(request, { bql: "https://db.acme.app" })
+  // call.input, call.user (the caller's sub), call.token: rw on call.dbs.shared and
+  // call.dbs.private, no table ACL, sub = call.user, valid 60 s
+  return Response.json({ url: "https://pay.example/…" })
+}
+```
+
+bql.sh POSTs `{ v, app, action, input, user, url, iat, exp, nonce, token, dbs }` with
+`bql-signature` (Ed25519 over `bql-action:` and the body) and `bql-key-id`. `verifyAction` reads
+the server's keys from `GET /.well-known/jwks.json` (cached five minutes, re-read once for an
+unknown `kid`), checks the signature, `exp` (60 s) and that `url` is the URL it was received at
+(pass `url` when a proxy rewrites it), and throws `ActionVerifyError` otherwise. The function
+holds no bql.sh secret. A call can be replayed within its minute to the same URL; a function that
+must not run twice keeps the `nonce`.
+
+The function's JSON comes back to the page as `{ "result": … }`. A 4xx keeps its status with code
+`ACTION_FAILED` and the function's `error.message`; a 5xx, a timeout, an answer that is not JSON or
+is over 64 KiB is `502 ACTION_FAILED`. `url` is `https://`, or `http://localhost` and
+`http://127.0.0.1` for development: the request carries a token.
 
 #### `bql mcp`
 

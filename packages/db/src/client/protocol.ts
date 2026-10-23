@@ -815,8 +815,15 @@ export interface AppAction {
   /** Default `"shared"`. */
   db?: "shared" | "private"
   input?: Record<string, InputSpec>
-  /** Bound by name from `input`; `:user` is the caller's sub. */
-  run: { sql: string; expect?: number; error?: string }[]
+  /** Bound by name from `input`; `:user` is the caller's sub. Leave out for a `url` action. */
+  run?: { sql: string; expect?: number; error?: string }[]
+  /**
+   * The owner's function instead of SQL: POSTed a request signed by the server, which
+   * `verifyAction` from `bql.sh/actions` checks. `https://`, or `http://localhost` in development.
+   */
+  url?: string
+  /** For a `url` action. Default 10000, at most 30000. */
+  timeoutMs?: number
 }
 
 export interface AppInfo {

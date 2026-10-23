@@ -69,7 +69,12 @@ export interface AppAction {
   /** Where it runs: the shared database (default) or the calling visitor's own. */
   db: "shared" | "private"
   input: Record<string, ActionInput>
+  /** SQL the server runs. Empty when the action is a `url`. */
   run: ActionStatement[]
+  /** The owner's function, POSTed a signed request instead of running SQL (`proxyAction`). */
+  url?: string
+  /** How long the function may take. Default 10 s, at most 30 s. */
+  timeoutMs?: number
 }
 
 export interface AppConfig {
@@ -225,16 +230,41 @@ function parseInputs(value: unknown, where: string): Record<string, ActionInput>
 /** What a statement in an action may start with: data, never schema, `ATTACH` or `PRAGMA`. */
 const ACTION_SQL = /^\s*(?:--[^\n]*\n\s*)*(insert|update|delete|select|with|replace)\b/i
 const MAX_ACTION_STATEMENTS = 20
+/**
+ * Where a `url` action may point. Plain http only to this machine: the function receives a token,
+ * and the request crosses the network otherwise.
+ */
+const ACTION_URL = /^(https:\/\/[^\s]+|http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/[^\s]*)?)$/
 /** Enough to catch a typo, not a proof the address exists: one @, something on each side, a dot after. */
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_ACTION_INPUTS = 32
 
 function parseAction(value: unknown, where: string): AppAction {
-  const action = keysOf(value, where, ["db", "input", "run"])
+  const action = keysOf(value, where, ["db", "input", "run", "url", "timeoutMs"])
   if (action.db !== undefined && action.db !== "shared" && action.db !== "private") {
     refuse(`${where}.db must be "shared" or "private"`)
   }
   const input = action.input === undefined ? {} : parseInputs(action.input, `${where}.input`)
+  if (action.url !== undefined) {
+    // The stored config is this function's own output, so `run: []` and `db: "shared"` are what a
+    // url action reads back as: parsing must take its own result unchanged.
+    const hasRun = action.run !== undefined && !(Array.isArray(action.run) && action.run.length === 0)
+    if (hasRun) refuse(`${where} has both run and url; an action is one or the other`)
+    if (action.db !== undefined && action.db !== "shared") {
+      refuse(`${where}.db does not apply to a url action; its token reaches both databases`)
+    }
+    if (typeof action.url !== "string" || !ACTION_URL.test(action.url)) {
+      refuse(`${where}.url must be https://…, or http://localhost or http://127.0.0.1 for development`)
+    }
+    return {
+      db: "shared",
+      input,
+      run: [],
+      url: action.url,
+      timeoutMs: intIn(action.timeoutMs, `${where}.timeoutMs`, 100, 30_000, 10_000),
+    }
+  }
+  if (action.timeoutMs !== undefined) refuse(`${where}.timeoutMs applies only to a url action`)
   if (!Array.isArray(action.run) || action.run.length === 0 || action.run.length > MAX_ACTION_STATEMENTS) {
     refuse(`${where}.run must be 1 to ${MAX_ACTION_STATEMENTS} statements`)
   }
@@ -591,6 +621,7 @@ export const runAction: Handler = async (ctx) => {
   const action = config.actions[body.name]
   if (!action) throw new BqlError("NOT_FOUND", `no action ${body.name}`, 404)
   const values = bindInput(action, body.input)
+  if (action.url) return proxyAction(ctx, app.id, body.name, action, values, sub, visitorDb)
   requirePrimary(ctx)
 
   const dbName = action.db === "private" ? visitorDb : sharedDbOf(app.id)
@@ -796,3 +827,110 @@ export const submitForm: Handler = async (ctx) => {
   target.searchParams.set("bql", "ok")
   return new Response(null, { status: 303, headers: { location: target.toString() } })
 }
+
+// ── the action proxy ───────────────────────────────────────────────────────────────────────────
+
+/** What a `url` action's function receives, signed. `bql.sh/actions` checks and returns it. */
+export interface ActionCall {
+  v: 1
+  app: string
+  action: string
+  /** The checked input, as `bindInput` returned it (a bool is 0 or 1). */
+  input: Record<string, string | number | null>
+  /** The caller's sub: their rows' `author`, their database's suffix. */
+  user: string
+  /** The URL this request was signed for, so it cannot be replayed at another function. */
+  url: string
+  /** Seconds since the epoch. */
+  iat: number
+  exp: number
+  nonce: string
+  /** `rw` on both, no table ACL, `sub` = `user`, expiring with the call. */
+  token: string
+  dbs: { shared: string; private: string }
+}
+
+/** Domain separation: no JWT signing input starts with this, so neither signature passes for the other. */
+export const ACTION_SIGNATURE_PREFIX = "bql-action:"
+const ACTION_TTL_S = 60
+const MAX_FUNCTION_REPLY = 64 * 1024
+
+async function proxyAction(
+  ctx: RouteContext,
+  appId: string,
+  name: string,
+  action: AppAction,
+  values: Record<string, string | number | null>,
+  sub: string,
+  visitorDb: string,
+): Promise<Response> {
+  const url = action.url as string
+  const now = Math.floor(Date.now() / 1000)
+  const shared = sharedDbOf(appId)
+  const token = await ctx.runtime.auth.mint({ rw: [shared, visitorDb], sub, ttlMs: ACTION_TTL_S * 1000 })
+  const call: ActionCall = {
+    v: 1,
+    app: appId,
+    action: name,
+    input: values,
+    user: sub,
+    url,
+    iat: now,
+    exp: now + ACTION_TTL_S,
+    nonce: crypto.randomUUID(),
+    token,
+    dbs: { shared, private: visitorDb },
+  }
+  const body = JSON.stringify(call)
+  const key = ctx.runtime.auth.keys.signing
+  const signature = new Uint8Array(
+    await crypto.subtle.sign("Ed25519", key.privateKey as CryptoKey, new TextEncoder().encode(ACTION_SIGNATURE_PREFIX + body)),
+  )
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "bql-signature": toBase64Url(signature),
+        "bql-key-id": key.kid,
+      },
+      body,
+      redirect: "manual",
+      signal: AbortSignal.timeout(action.timeoutMs ?? 10_000),
+    })
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === "TimeoutError"
+    throw new BqlError("ACTION_FAILED", `action ${name}: ${timedOut ? "the function did not answer in time" : "the function could not be reached"}`, 502)
+  }
+  const text = (await response.text()).slice(0, MAX_FUNCTION_REPLY + 1)
+  if (text.length > MAX_FUNCTION_REPLY) throw new BqlError("ACTION_FAILED", `action ${name}: the function's answer is over 64 KiB`, 502)
+  let parsed: unknown = null
+  try {
+    parsed = text === "" ? null : JSON.parse(text)
+  } catch {
+    if (response.ok) throw new BqlError("ACTION_FAILED", `action ${name}: the function did not answer JSON`, 502)
+  }
+  if (!response.ok) {
+    const error = (parsed as { error?: unknown } | null)?.error
+    const message =
+      typeof error === "string" ? error : typeof (error as { message?: unknown })?.message === "string" ? (error as { message: string }).message : text || `the function answered ${response.status}`
+    // A 4xx is the function saying no, and the visitor should see that; anything else is ours.
+    const status = response.status >= 400 && response.status < 500 ? response.status : 502
+    throw new BqlError("ACTION_FAILED", message, status)
+  }
+  return json({ result: parsed })
+}
+
+/** `GET /.well-known/jwks.json`: the keys a function verifies action requests (and tokens) with. */
+export const jwks: Handler = (ctx) =>
+  json({
+    keys: ctx.runtime.auth.keys.list().map((key) => ({
+      kty: "OKP",
+      crv: "Ed25519",
+      alg: "EdDSA",
+      use: "sig",
+      kid: key.kid,
+      x: toBase64Url(key.rawPublicKey),
+    })),
+  })

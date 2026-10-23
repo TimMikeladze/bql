@@ -77,9 +77,11 @@ export interface SharedDb {
 }
 
 export interface ActionResult<T = JsRow> {
-  /** One entry per statement in the action's `run`, in order. */
-  results: { rows: T[]; rowsAffected: number }[]
-  txid: number
+  /** A SQL action: one entry per statement in its `run`, in order. */
+  results?: { rows: T[]; rowsAffected: number }[]
+  txid?: number
+  /** A `url` action: the function's JSON answer. */
+  result?: unknown
 }
 
 export interface WebDb {

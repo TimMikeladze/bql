@@ -62,6 +62,7 @@
     "./bus": "./packages/bus/src/index.ts",
     "./bus/client": "./packages/bus/src/client/bus.ts",
     "./web": "./packages/db/src/web/index.ts",
+    "./actions": "./packages/db/src/actions/index.ts",
     "./package.json": "./package.json"
   },
   "files": [

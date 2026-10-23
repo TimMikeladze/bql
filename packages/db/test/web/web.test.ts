@@ -313,8 +313,8 @@ describe("db.action", () => {
   test("runs an action and returns each statement's rows", async () => {
     const db = await visit()
     const done = await db.action<{ n: number }>("sign", { message: "via an action" })
-    expect(done.results[0]?.rowsAffected).toBe(1)
-    expect(done.results[1]?.rows[0]?.n).toBeGreaterThan(0)
+    expect(done.results?.[0]?.rowsAffected).toBe(1)
+    expect(done.results?.[1]?.rows[0]?.n).toBeGreaterThan(0)
   })
 
   test("rejects with the server's code and the action's error", async () => {

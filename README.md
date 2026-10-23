@@ -243,6 +243,10 @@ await db.action("submitScore", { score: 4200, name: "ann" })
 // rejects with code CONFLICT and the action's error when its `expect` does not hold
 ```
 
+An action can also be a function of your own, given `"url"` in place of `"run"`: bql.sh POSTs it the
+checked input and a short-lived token, signed, and `verifyAction` from `bql.sh/actions` checks the
+signature against the server's public keys, so the function holds no bql.sh secret.
+
 A waitlist needs no JavaScript at all. `bunx bql app table demo signups --form` makes a table HTML
 forms post into:
 

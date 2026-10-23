@@ -896,12 +896,31 @@ const SPECS: Spec[] = [
     tags: ["apps"],
     security: "none",
     body: s.object({ key: s.string(), name: s.string(), input: s.record(s.unknown()).optional() }),
-    response: s.object({
-      results: s.array(s.object({ rows: s.array(s.record(s.unknown())), rowsAffected: s.int() })),
-      txid: s.int(),
-    }),
-    errors: [...ON_STATEMENT, "NOT_FOUND", "CONFLICT"],
+    response: s.union([
+      s.object({
+        results: s.array(s.object({ rows: s.array(s.record(s.unknown())), rowsAffected: s.int() })),
+        txid: s.int(),
+      }),
+      s.object({ result: s.unknown().describe("A `url` action: the function's JSON answer.") }),
+    ]),
+    errors: [...ON_STATEMENT, "NOT_FOUND", "CONFLICT", "ACTION_FAILED"],
     handler: web.runAction,
+  },
+  {
+    id: "jwks",
+    method: "get",
+    path: "/.well-known/jwks.json",
+    summary: "The public keys tokens and action requests are signed with",
+    description:
+      "Open: public keys only. A `url` action's function verifies its request against these " +
+      "(`bql.sh/actions`), so it holds no bql.sh secret.",
+    tags: ["apps"],
+    security: "none",
+    response: s.object({
+      keys: s.array(s.object({ kty: s.string(), crv: s.string(), alg: s.string(), use: s.string(), kid: s.string(), x: s.string() })),
+    }),
+    errors: [],
+    handler: web.jwks,
   },
   {
     id: "submitForm",

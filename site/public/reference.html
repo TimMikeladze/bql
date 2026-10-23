@@ -501,6 +501,7 @@ posts.<span class="t-f">orderBy</span>(<span class="t-s">&quot;createdAt&quot;</
 <p>A write a visitor must not make directly, such as a score, goes through an action: SQL in the app's config that the server runs with its own rights, given checked input.</p>
 <pre class="code" data-lang="js"><code><span class="t-k">await</span> db.<span class="t-f">action</span>(<span class="t-s">&quot;submitScore&quot;</span>, { score: <span class="t-n">4200</span>, name: <span class="t-s">&quot;ann&quot;</span> })
 <span class="t-c">// rejects with code CONFLICT and the action's error when its `expect` does not hold</span></code></pre>
+<p>An action can also be a function of your own, given <code>&quot;url&quot;</code> in place of <code>&quot;run&quot;</code>: bql.sh POSTs it the checked input and a short-lived token, signed, and <code>verifyAction</code> from <code>bql.sh/actions</code> checks the signature against the server's public keys, so the function holds no bql.sh secret.</p>
 <p>A waitlist needs no JavaScript at all. <code>bunx bql app table demo signups --form</code> makes a table HTML forms post into:</p>
 <pre class="code" data-lang="html"><code>&lt;form method=<span class="t-s">&quot;post&quot;</span> action=<span class="t-s">&quot;http://localhost:4321/v1/forms/demo/signups&quot;</span>&gt;
   &lt;input name=<span class="t-s">&quot;email&quot;</span> <span class="t-k">type</span>=<span class="t-s">&quot;email&quot;</span> required&gt;

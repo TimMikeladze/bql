@@ -43,6 +43,11 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   NO_REPLICAS: 503,
   /** The primary never answered a forwarded write. */
   FORWARD_TIMEOUT: 504,
+  /**
+   * An action's function (`url` in the app config) refused it or could not be reached. The status
+   * is the function's own for a 4xx refusal, 502 otherwise (docs/plan-web.md).
+   */
+  ACTION_FAILED: 502,
   REPLICATION_DISABLED: 403,
   /** `GET /v1/cluster` on a node with no `[cluster]` section enabled. */
   CLUSTER_DISABLED: 503,
