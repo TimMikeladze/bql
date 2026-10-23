@@ -20,6 +20,8 @@ export type Demo =
   /** Two artefacts side by side, usually the code and what it printed. A table in a pair stacks. */
   | { kind: "pair"; items: [Frame, Frame] }
   | { kind: "variants"; items: { line: string; label: string; caption: string; where: Where }[] }
+  /** A notebook cell: a code block with the run that executed it attached underneath. */
+  | { kind: "cell"; code: { line: string; label: string; where: Where }; run: { cmd: string; where: Where } }
 
 export type Chapter = "start" | "db" | "bus"
 
@@ -73,11 +75,12 @@ export const site = {
     note: "MIT, Bun 1.4+",
   },
 
-  // The hero's split demo: a live query and the diffs it printed, from the README's Getting started.
-  split: {
-    left: { cmd: "BQL_ADMIN_KEY=<the admin key> bun client.ts", where: root, label: "terminal" },
-    right: { line: "const live = db.live`select id, title from todos where done = 0`.key(\"id\")", where: root, label: "client.ts" },
-  },
+  // The hero demo: a live query and the diffs it printed, from the README's Getting started.
+  hero: {
+    kind: "cell",
+    code: { line: "const live = db.live`select id, title from todos where done = 0`.key(\"id\")", label: "client.ts", where: root },
+    run: { cmd: "BQL_ADMIN_KEY=<the admin key> bun client.ts", where: root },
+  } satisfies Demo,
 
   why: {
     title: "Why bql.sh",
@@ -102,10 +105,19 @@ export const site = {
   },
 
   chapters: {
-    start: { id: "start", pkg: "bun add bql.sh", title: "Getting started", href: "/reference#root-getting-started" },
-    db: { id: "database", pkg: "bql.sh", title: "The database", href: "/reference#db" },
-    bus: { id: "bus", pkg: "bql.sh/bus", title: "The bus", href: "/reference#bus" },
-  } satisfies Record<Chapter, { id: string; pkg: string; title: string; href: string }>,
+    start: {
+      id: "start", pkg: "bun add bql.sh", title: "Getting started", href: "/reference#root-getting-started",
+      body: "From an empty directory to a deployed server. Each output below was captured against the published `bql.sh` package.",
+    },
+    db: {
+      id: "database", pkg: "bql.sh", title: "The database", href: "/reference#db",
+      body: "What the server does on top of SQL. Pick a feature to see its code and what it printed.",
+    },
+    bus: {
+      id: "bus", pkg: "bql.sh/bus", title: "The bus", href: "/reference#bus",
+      body: "`bql.sh/bus` keeps its messages in a bql.sh database, so it replicates and backs up the same way your data does.",
+    },
+  } satisfies Record<Chapter, { id: string; pkg: string; title: string; href: string; body: string }>,
 
   capabilities: [
     // ---- getting started, in the order you do it ----
@@ -122,11 +134,9 @@ export const site = {
       title: "Run it in your process",
       body: "`Bql.open()` is the whole engine with no server in front. Every write returns the `txid` it committed in.",
       demo: {
-        kind: "pair",
-        items: [
-          { kind: "snippet", line: "const bq = await Bql.open({ dir: \"./data\" })", label: "app.ts", where: root },
-          { kind: "terminal", cmd: "bun app.ts", where: root },
-        ],
+        kind: "cell",
+        code: { line: "const bq = await Bql.open({ dir: \"./data\" })", label: "app.ts", where: root },
+        run: { cmd: "bun app.ts", where: root },
       },
     },
     {
@@ -142,11 +152,9 @@ export const site = {
       title: "Give the browser a token",
       body: "Never ship the admin key to a browser. `admin.mintToken` makes a token scoped to databases, tables and `ro` or `rw`, and anything outside it answers `NOT_AUTHORIZED`.",
       demo: {
-        kind: "pair",
-        items: [
-          { kind: "snippet", line: "const { token } = await admin.mintToken({ dbs: [\"acme\"], scope: \"ro\", ttlMs: 3_600_000 })", label: "token.ts", where: root },
-          { kind: "terminal", cmd: "BQL_ADMIN_KEY=<the admin key> bun token.ts", where: root },
-        ],
+        kind: "cell",
+        code: { line: "const { token } = await admin.mintToken({ dbs: [\"acme\"], scope: \"ro\", ttlMs: 3_600_000 })", label: "token.ts", where: root },
+        run: { cmd: "BQL_ADMIN_KEY=<the admin key> bun token.ts", where: root },
       },
     },
     {

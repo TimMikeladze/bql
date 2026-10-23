@@ -42,6 +42,7 @@ export type ResolvedDemo =
   | ResolvedFrame
   | { kind: "pair"; items: [ResolvedFrame, ResolvedFrame] }
   | { kind: "variants"; items: { label: string; caption: string; block: Block }[] }
+  | { kind: "cell"; label: string; code: Block; cmd: string; run: Block }
 
 function resolveFrame(d: Frame, p: Parsed): ResolvedFrame {
   switch (d.kind) {
@@ -67,14 +68,21 @@ export function resolveDemo(d: Demo, p: Parsed = source()): ResolvedDemo {
         kind: "variants",
         items: d.items.map((i) => ({ label: i.label, caption: i.caption, block: resolveSnippet(i.line, i.where, p) })),
       }
+    case "cell":
+      return {
+        kind: "cell",
+        label: d.code.label,
+        code: resolveSnippet(d.code.line, d.code.where, p),
+        cmd: d.run.cmd,
+        run: resolveTerminal(d.run.cmd, d.run.where, p),
+      }
   }
 }
 
 export function resolveModel(p: Parsed = source()) {
   return {
     humans: resolveTerminal(site.install.humans.cmd, site.install.humans.where, p),
-    splitLeft: resolveTerminal(site.split.left.cmd, site.split.left.where, p),
-    splitRight: resolveSnippet(site.split.right.line, site.split.right.where, p),
+    hero: resolveDemo(site.hero, p) as Extract<ResolvedDemo, { kind: "cell" }>,
     measuredFigures: site.measured.figures.map((f) => figureValue(f, p)),
     measuredTables: site.measured.tables.map((t) => resolveTable(t.header, t.where, p)),
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
@@ -218,10 +226,40 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .out-line { color: var(--ink); }
 .cont-line::before { content: "  "; }
 
-.split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
-.split { align-items: stretch; }
-.split .frame { display: flex; flex-direction: column; }
-.split .frame pre { flex: 1; }
+/* a notebook cell: code, then the run that executed it */
+.cell .run { border-top: 1px solid var(--line); background: var(--band); }
+.cell .run-bar { display: flex; align-items: center; gap: .6rem; padding: .5rem 1.1rem 0; font: .72rem/1.3 var(--mono); color: var(--soft); text-transform: uppercase; letter-spacing: .08em; }
+.cell .run pre { padding-top: .5rem; }
+.hero-cell { max-width: 880px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; text-align: left; }
+.hero-cell .frame > pre { max-height: none; }
+
+/* getting started */
+.sec-intro { max-width: 46rem; }
+.sec-intro h2 { font-size: clamp(1.8rem, 3.6vw, 2.6rem); letter-spacing: -.035em; line-height: 1.1; }
+.sec-intro .explain { margin-top: .8rem; font-size: 1.05rem; }
+.steps { list-style: none; margin: 3rem 0 0; padding: 0; counter-reset: step; }
+.step { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 2.5rem; padding-block: 2.5rem; border-top: 1px solid var(--line-soft); scroll-margin-top: 4.5rem; }
+.step-text { position: sticky; top: 5.5rem; align-self: start; }
+.step-n { display: inline-grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: 999px; border: 1px solid var(--line); background: var(--raise); font: 600 .8rem/1 var(--mono); color: var(--ink); }
+.step h3 { margin-top: .9rem; font-size: 1.3rem; letter-spacing: -.02em; }
+.step .explain { margin-top: .5rem; }
+.step-demo { min-width: 0; }
+
+/* feature explorers */
+.explorer { margin-top: 2.5rem; display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 2.5rem; }
+.ex-nav { position: sticky; top: 5rem; align-self: start; display: flex; flex-direction: column; gap: .15rem; }
+.ex-nav a { padding: .5rem .75rem; border-radius: .5rem; color: var(--soft); text-decoration: none; font-size: .92rem; border: 1px solid transparent; transition: color .14s ease, background .14s ease; }
+.ex-nav a:hover { color: var(--ink); }
+.panel { min-width: 0; scroll-margin-top: 5rem; }
+.panel h3 { font-size: 1.45rem; letter-spacing: -.025em; }
+.panel .explain { margin-top: .6rem; }
+.panel .pair { grid-template-columns: minmax(0, 1fr); }
+.panel .variants { grid-template-columns: minmax(0, 1fr); }
+@supports selector(:has(*)) {
+  .panel { display: none; }
+  .panel:target, .explorer:not(:has(.panel:target)) .panel:first-child { display: block; }
+  .explorer:not(:has(.panel:target)) .ex-nav a:first-child { color: var(--ink); background: var(--raise); border-color: var(--line); }
+}
 
 /* sections */
 .section { padding-block: clamp(3.5rem, 7vw, 6rem); scroll-margin-top: 4.5rem; }
@@ -231,14 +269,10 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .demo { margin-top: 1.6rem; }
 .sec-head { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: .6rem 2.5rem; align-items: baseline; }
 .sec-head .explain { margin-top: 0; max-width: 60ch; }
-.cap { padding-block: clamp(2.5rem, 5vw, 3.75rem); }
-.cap + .cap { border-top: 1px solid var(--line-soft); }
-.chapter { background: var(--band); border-block: 1px solid var(--line); padding-block: 1.1rem; scroll-margin-top: 3.75rem; }
-.chapter .shell { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
-.chapter span { font-weight: 650; font-size: 1.15rem; color: var(--ink); letter-spacing: -.02em; }
-.chapter code { font-size: .8rem; color: var(--soft); background: none; padding: 0; }
-.chapter a { margin-left: auto; font-size: .85rem; color: var(--soft); text-decoration: none; transition: color .14s ease; }
-.chapter a:hover { color: var(--ink); }
+details.more { margin-top: 2rem; }
+details.more summary { cursor: pointer; color: var(--soft); font-size: .9rem; }
+details.more summary:hover { color: var(--ink); }
+details.more[open] summary { margin-bottom: 1.2rem; }
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
 .pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
 .pair > .frame { display: flex; flex-direction: column; }
@@ -359,13 +393,18 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .cols { grid-template-columns: repeat(3, 1fr); }
   .showcase { grid-template-columns: minmax(0, 1fr); }
   .sec-head { grid-template-columns: minmax(0, 1fr); }
+  .step { grid-template-columns: minmax(0, 1fr); gap: 1.2rem; }
+  .step-text { position: static; }
+  .explorer { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+  .ex-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: .4rem; }
+  .ex-nav a { border-color: var(--line); padding: .35rem .7rem; font-size: .85rem; }
   .guides, .variants { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
   .shell { width: calc(100% - 2rem); }
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
-  .split, .principles, .pair { grid-template-columns: minmax(0, 1fr); }
+  .principles, .pair { grid-template-columns: minmax(0, 1fr); }
   .figures.three { grid-template-columns: minmax(0, 1fr); }
   .fig b { font-size: 3rem; }
   .cols { grid-template-columns: repeat(2, 1fr); }
@@ -378,6 +417,12 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .control, .guide:hover { transform: none; }
 }
 `
+
+/** The explorer nav marks the targeted panel's link; one rule per panel. */
+export const EXPLORER_CSS = `@supports selector(:has(*)) {${site.capabilities
+  .filter((c) => c.chapter !== "start")
+  .map((c) => `.explorer:has(#${c.id}:target) .ex-nav a[href="#${c.id}"]{color:var(--ink);background:var(--raise);border-color:var(--line)}`)
+  .join("")}}`
 
 /** Radio-driven tabs need one rule set per tab; generated from the model's tab count. */
 export const TAB_CSS = site.showcase.tabs
@@ -528,19 +573,14 @@ function demoHtml(d: ResolvedDemo): string {
       return `<div class="variants">${d.items
         .map((i) => `<figure>${codeFrame(i.label, i.block)}<figcaption>${esc(i.caption)}</figcaption></figure>`)
         .join("")}</div>`
+    case "cell":
+      return cellHtml(d)
   }
 }
 
-function section(id: string, title: string, body: string, demo: string, cls = ""): string {
-  return `<section class="section cap${cls ? ` ${cls}` : ""}" id="${id}" aria-labelledby="${id}-h"><div class="shell">
-<div class="sec-head"><h2 id="${id}-h">${esc(title)}</h2>
-<p class="explain">${inline(body, linkContext())}</p></div>
-<div class="demo">${demo}</div>
-</div></section>`
-}
-
-function chapterRule(c: { id: string; pkg: string; title: string; href: string }): string {
-  return `<div class="chapter" id="${c.id}"><div class="shell"><span>${esc(c.title)}</span><code>${esc(c.pkg)}</code><a href="${esc(c.href)}">Reference</a></div></div>`
+function cellHtml(d: Extract<ResolvedDemo, { kind: "cell" }>): string {
+  return `<div class="frame cell"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(d.label)}</span>${copyBtn(d.code.code, d.label)}</div><pre><code>${highlight(d.code.code, d.code.lang)}</code></pre>
+<div class="run"><div class="run-bar">${glyph("terminal", 13)}<span>Output</span></div><pre><code>${runLines(d.run.code)}</code></pre></div></div>`
 }
 
 function head(opts: { title: string; description: string; path: string; md: string }): string {
@@ -586,7 +626,7 @@ function head(opts: { title: string; description: string; path: string; md: stri
 <meta name="twitter:image" content="${og}">
 <link rel="icon" href="${favicon}">
 <script>${BOOT}</script>
-<style>${CSS}${TAB_CSS}</style>
+<style>${CSS}${TAB_CSS}${EXPLORER_CSS}</style>
 <script type="application/ld+json">${JSON.stringify(ld).replace(/</g, "\\u003c")}</script>`
 }
 
@@ -607,8 +647,6 @@ ${body}
 // ---- landing ------------------------------------------------------------------------------
 
 export function renderIndex(m: Model = resolveModel()): string {
-  const left = runLines(m.splitLeft.code)
-
   const hero = `<section class="hero shell" aria-labelledby="top-h">
 ${productMark(44)}
 <h1 id="top-h">${esc(site.h1)}</h1>
@@ -621,10 +659,7 @@ ${productMark(44)}
 <div class="agent-links"><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">AGENTS.md</a><button type="button" data-copy-page="/index.md">Copy page as Markdown</button></div></div>
 </div>
 <p class="version">Currently <a href="${esc(site.npm)}" rel="noopener">v${esc(m.version)}</a> · ${esc(site.install.note)}</p>
-<div class="split">
-<div class="frame"><div class="bar">${glyph("terminal", 14)}<span class="label">${esc(site.split.left.label)}</span></div><pre><code>${left}</code></pre></div>
-${codeFrame(site.split.right.label, m.splitRight, false)}
-</div>
+<div class="hero-cell">${cellHtml(m.hero)}</div>
 </section>`
 
   const why = `<section class="section why" id="why" aria-labelledby="why-h"><div class="shell">
@@ -633,13 +668,37 @@ ${codeFrame(site.split.right.label, m.splitRight, false)}
 <div class="principles">${site.why.points.map((p) => `<div><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
 </div></section>`
 
-  const chapter = (c: Chapter) => {
-    const caps = m.capabilities.filter((x) => x.cap.chapter === c)
-    return chapterRule(site.chapters[c]) + caps.map(({ cap, demo }) => section(cap.id, cap.title, cap.body, demoHtml(demo))).join("\n")
+  const intro = (c: Chapter) => {
+    const ch = site.chapters[c]
+    return `<div class="sec-intro"><h2 id="${ch.id}-h">${esc(ch.title)}</h2><p class="explain">${inline(ch.body)} <a href="${esc(ch.href)}">Reference</a>.</p></div>`
+  }
+  const caps = (c: Chapter) => m.capabilities.filter((x) => x.cap.chapter === c)
+
+  // Getting started is a procedure, so its steps are numbered and stay in order.
+  const start = `<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
+${intro("start")}
+<ol class="steps">${caps("start")
+    .map(({ cap, demo }, i) => `<li class="step" id="${cap.id}" aria-labelledby="${cap.id}-h"><div class="step-text"><span class="step-n" aria-hidden="true">${i + 1}</span><h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p></div><div class="step-demo">${demoHtml(demo)}</div></li>`)
+    .join("\n")}</ol>
+</div></section>`
+
+  // One feature at a time: the nav targets a panel by id, CSS shows the targeted one (the first by
+  // default). Without :has() or without CSS, every panel shows in order.
+  const explorer = (c: Chapter, cls = "") => {
+    const list = caps(c)
+    return `<section class="section${cls}" id="${site.chapters[c].id}" aria-labelledby="${site.chapters[c].id}-h"><div class="shell">
+${intro(c)}
+<div class="explorer">
+<nav class="ex-nav" aria-label="${esc(site.chapters[c].title)} features">${list.map(({ cap }) => `<a href="#${cap.id}">${esc(cap.title)}</a>`).join("")}</nav>
+<div class="ex-panels">${list
+      .map(({ cap, demo }) => `<article class="panel" id="${cap.id}" aria-labelledby="${cap.id}-h"><h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p><div class="demo">${demoHtml(demo)}</div></article>`)
+      .join("\n")}</div>
+</div>
+</div></section>`
   }
 
   const tabInputs = m.tabs.map((_, i) => `<input type="radio" name="tab" id="tab-${i}"${i === 0 ? " checked" : ""}>`).join("")
-  const showcase = `<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
+  const showcase = `<section class="section" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
 <div>
 <h2 id="showcase-h">${esc(site.showcase.title)}</h2>
 <p class="explain">${inline(site.showcase.body)}</p>
@@ -666,7 +725,7 @@ ${m.tabs
 <div class="sec-head"><h2 id="benchmarks-h">${esc(site.measured.title)}</h2>
 <p class="explain">${inline(site.measured.body)}</p></div>
 <div class="demo">${figs(m.measuredFigures)}</div>
-<div class="demo">${m.measuredTables.map((t) => renderTable(t.header, t.rows)).join("")}</div>
+<details class="more"><summary>Every operation and replication leg</summary>${m.measuredTables.map((t) => renderTable(t.header, t.rows)).join("")}</details>
 </div></section>`
 
   const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
@@ -692,10 +751,10 @@ ${m.tabs
 <main id="main">
 ${hero}
 ${why}
-${chapter("start")}
+${start}
 ${showcase}
-${chapter("db")}
-${chapter("bus")}
+${explorer("db", " band")}
+${explorer("bus")}
 ${measured}
 ${eco}
 ${today}
@@ -758,6 +817,8 @@ function demoMd(d: ResolvedDemo): string {
       return d.items.map(frameMd).join("\n\n")
     case "variants":
       return d.items.map((i) => `${i.caption}:\n\n${fence(i.block)}`).join("\n\n")
+    case "cell":
+      return `${fence(d.code)}\n\n${fence(d.run)}`
   }
 }
 
@@ -778,9 +839,7 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     "",
     "```sh\n" + site.install.humans.cmd + "\n```",
     "",
-    fence(m.splitRight),
-    "",
-    fence(m.splitLeft),
+    demoMd(m.hero),
     "",
     `## ${site.why.title}`,
     "",
@@ -868,7 +927,7 @@ export function renderAgents(m: Model = resolveModel()): string {
     "",
     demoMd(by("serve")),
     "",
-    fence(m.splitRight),
+    demoMd(m.hero),
     "",
     "## Scoped tokens",
     "",

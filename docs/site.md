@@ -23,6 +23,19 @@ The page was rebuilt around what a new reader has to do, in the order they do it
 - Copy rules: one fact per sentence, the option in inline code, no em dashes, no slogans, no
   bold-led bullet lists, no decorative numbering.
 
+## Layout (2026-10-23, second pass)
+
+- **Notebook cells.** Code and the run that executed it are one frame: the file, then an Output
+  strip with the captured lines. Used in the hero and in Getting started.
+- **Getting started is a stepper.** An ordered list; the step's text stays sticky on the left while
+  its cell scrolls on the right. Numbers appear only here, because the order matters.
+- **Database and bus are explorers.** A feature list on the left, one panel on the right. Links
+  target panels by id and CSS shows the targeted one (the first by default), so every feature is
+  deep-linkable with no script. Without `:has()` or without CSS every panel shows in order. On a
+  phone the list becomes a row of chips above the panel.
+- **Benchmarks** show three figures; the full tables sit in a `<details>`.
+- Sections alternate paper and band backgrounds, so no two banded sections touch.
+
 ## What ships
 
 - **`/`** the landing page, **`/reference`** the three READMEs in full behind a contents column.

@@ -79,6 +79,12 @@ await Bun.sleep(100)
 client.close()
 ```
 
+```sh
+BQL_ADMIN_KEY=<the admin key> bun client.ts
+# diff {"added":[{"id":1,"title":"write it"}],"removed":[]}
+# diff {"added":[],"removed":[{"id":1}]}
+```
+
 ## Scoped tokens
 
 Give browsers and untrusted callers a minted token, never the admin key.

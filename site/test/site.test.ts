@@ -111,15 +111,27 @@ test("head metadata", () => {
   expect(ld.softwareVersion).toBe(m.version)
 })
 
-test("every capability section has id, h2, 1–3 sentences with inline code", () => {
+test("every capability has an id, a heading, 1 to 3 sentences with inline code", () => {
   for (const c of site.capabilities) {
-    const sec = new RegExp(`<section[^>]*id="${c.id}" aria-labelledby="${c.id}-h">[\\s\\S]*?<h2 id="${c.id}-h">[\\s\\S]*?<p class="explain">([\\s\\S]*?)</p>`).exec(index)
+    const tag = c.chapter === "start" ? "li" : "article"
+    const sec = new RegExp(`<${tag} class="(?:step|panel)" id="${c.id}" aria-labelledby="${c.id}-h">[\\s\\S]*?<h3 id="${c.id}-h">[\\s\\S]*?<p class="explain">([\\s\\S]*?)</p>`).exec(index)
     expect(sec).toBeTruthy()
     const sentences = sec![1]!.replace(/<code>.*?<\/code>/g, "x").split(/[.](\s|$)/).filter((s) => s.trim().length > 1)
     expect(sentences.length).toBeGreaterThanOrEqual(1)
     expect(sentences.length).toBeLessThanOrEqual(3)
     expect(sec![1]).toContain("<code>")
   }
+})
+
+test("getting started is an ordered list; each explorer links to every one of its panels", () => {
+  expect(index).toMatch(/<ol class="steps">/)
+  for (const ch of ["db", "bus"] as const) {
+    const nav = new RegExp(`<nav class="ex-nav" aria-label="${site.chapters[ch].title} features">([\\s\\S]*?)</nav>`).exec(index)![1]!
+    const ids = site.capabilities.filter((c) => c.chapter === ch).map((c) => c.id)
+    expect([...nav.matchAll(/href="#([^"]+)"/g)].map((x) => x[1])).toEqual(ids)
+  }
+  // Without :has(), every panel stays visible.
+  expect(CSS).toMatch(/@supports selector\(:has\(\*\)\) \{\s*\.panel \{ display: none; \}/)
 })
 
 test("agent files exist and the sitemap names only built files", () => {
@@ -167,17 +179,23 @@ test("New pills carry a release date within 90 days", () => {
   }
 })
 
-test("chapter rules open each group, and the nav anchors land on them", () => {
-  for (const c of Object.values(site.chapters)) expect(index).toContain(`<div class="chapter" id="${c.id}">`)
+test("each chapter section precedes its capabilities, and the nav anchors land", () => {
+  for (const c of Object.values(site.chapters)) expect(index).toContain(`id="${c.id}" aria-labelledby="${c.id}-h"`)
   for (const [, id] of index.matchAll(/href="\/#([^"]+)"/g)) expect(index).toContain(`id="${id}"`)
   const order = site.capabilities.map((c) => index.indexOf(`id="${c.id}"`))
   expect(order).toEqual([...order].sort((a, b) => a - b))
   for (const c of site.capabilities) expect(index.indexOf(`id="${site.chapters[c.chapter].id}"`)).toBeLessThan(index.indexOf(`id="${c.id}"`))
 })
 
-test("pairs render both artefacts", () => {
+test("pairs render both artefacts; cells render code and its output", () => {
+  for (const { cap, demo } of m.capabilities) if (demo.kind === "cell") {
+    const sec = new RegExp(`id="${cap.id}"[\\s\\S]*?</(?:article|li)>`).exec(index)![0]
+    expect(sec).toContain('class="frame cell"')
+    expect(sec).toContain(`>${esc(demo.label)}<`)
+    expect(sec).toContain('<div class="run">')
+  }
   for (const { cap, demo } of m.capabilities) if (demo.kind === "pair") {
-    const sec = new RegExp(`id="${cap.id}"[\\s\\S]*?</section>`).exec(index)![0]
+    const sec = new RegExp(`id="${cap.id}"[\\s\\S]*?</(?:article|li)>`).exec(index)![0]
     expect(sec).toContain('class="pair')
     for (const f of demo.items) expect(sec).toContain(f.kind === "terminal" ? `$ ${esc(f.cmd)}` : f.kind === "snippet" ? `>${esc(f.label)}<` : "<table")
   }

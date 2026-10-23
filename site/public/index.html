@@ -146,10 +146,40 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .out-line { color: var(--ink); }
 .cont-line::before { content: "  "; }
 
-.split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
-.split { align-items: stretch; }
-.split .frame { display: flex; flex-direction: column; }
-.split .frame pre { flex: 1; }
+/* a notebook cell: code, then the run that executed it */
+.cell .run { border-top: 1px solid var(--line); background: var(--band); }
+.cell .run-bar { display: flex; align-items: center; gap: .6rem; padding: .5rem 1.1rem 0; font: .72rem/1.3 var(--mono); color: var(--soft); text-transform: uppercase; letter-spacing: .08em; }
+.cell .run pre { padding-top: .5rem; }
+.hero-cell { max-width: 880px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; text-align: left; }
+.hero-cell .frame > pre { max-height: none; }
+
+/* getting started */
+.sec-intro { max-width: 46rem; }
+.sec-intro h2 { font-size: clamp(1.8rem, 3.6vw, 2.6rem); letter-spacing: -.035em; line-height: 1.1; }
+.sec-intro .explain { margin-top: .8rem; font-size: 1.05rem; }
+.steps { list-style: none; margin: 3rem 0 0; padding: 0; counter-reset: step; }
+.step { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 2.5rem; padding-block: 2.5rem; border-top: 1px solid var(--line-soft); scroll-margin-top: 4.5rem; }
+.step-text { position: sticky; top: 5.5rem; align-self: start; }
+.step-n { display: inline-grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: 999px; border: 1px solid var(--line); background: var(--raise); font: 600 .8rem/1 var(--mono); color: var(--ink); }
+.step h3 { margin-top: .9rem; font-size: 1.3rem; letter-spacing: -.02em; }
+.step .explain { margin-top: .5rem; }
+.step-demo { min-width: 0; }
+
+/* feature explorers */
+.explorer { margin-top: 2.5rem; display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: 2.5rem; }
+.ex-nav { position: sticky; top: 5rem; align-self: start; display: flex; flex-direction: column; gap: .15rem; }
+.ex-nav a { padding: .5rem .75rem; border-radius: .5rem; color: var(--soft); text-decoration: none; font-size: .92rem; border: 1px solid transparent; transition: color .14s ease, background .14s ease; }
+.ex-nav a:hover { color: var(--ink); }
+.panel { min-width: 0; scroll-margin-top: 5rem; }
+.panel h3 { font-size: 1.45rem; letter-spacing: -.025em; }
+.panel .explain { margin-top: .6rem; }
+.panel .pair { grid-template-columns: minmax(0, 1fr); }
+.panel .variants { grid-template-columns: minmax(0, 1fr); }
+@supports selector(:has(*)) {
+  .panel { display: none; }
+  .panel:target, .explorer:not(:has(.panel:target)) .panel:first-child { display: block; }
+  .explorer:not(:has(.panel:target)) .ex-nav a:first-child { color: var(--ink); background: var(--raise); border-color: var(--line); }
+}
 
 /* sections */
 .section { padding-block: clamp(3.5rem, 7vw, 6rem); scroll-margin-top: 4.5rem; }
@@ -159,14 +189,10 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .demo { margin-top: 1.6rem; }
 .sec-head { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: .6rem 2.5rem; align-items: baseline; }
 .sec-head .explain { margin-top: 0; max-width: 60ch; }
-.cap { padding-block: clamp(2.5rem, 5vw, 3.75rem); }
-.cap + .cap { border-top: 1px solid var(--line-soft); }
-.chapter { background: var(--band); border-block: 1px solid var(--line); padding-block: 1.1rem; scroll-margin-top: 3.75rem; }
-.chapter .shell { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
-.chapter span { font-weight: 650; font-size: 1.15rem; color: var(--ink); letter-spacing: -.02em; }
-.chapter code { font-size: .8rem; color: var(--soft); background: none; padding: 0; }
-.chapter a { margin-left: auto; font-size: .85rem; color: var(--soft); text-decoration: none; transition: color .14s ease; }
-.chapter a:hover { color: var(--ink); }
+details.more { margin-top: 2rem; }
+details.more summary { cursor: pointer; color: var(--soft); font-size: .9rem; }
+details.more summary:hover { color: var(--ink); }
+details.more[open] summary { margin-bottom: 1.2rem; }
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
 .pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
 .pair > .frame { display: flex; flex-direction: column; }
@@ -287,13 +313,18 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .cols { grid-template-columns: repeat(3, 1fr); }
   .showcase { grid-template-columns: minmax(0, 1fr); }
   .sec-head { grid-template-columns: minmax(0, 1fr); }
+  .step { grid-template-columns: minmax(0, 1fr); gap: 1.2rem; }
+  .step-text { position: static; }
+  .explorer { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+  .ex-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: .4rem; }
+  .ex-nav a { border-color: var(--line); padding: .35rem .7rem; font-size: .85rem; }
   .guides, .variants { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
   .shell { width: calc(100% - 2rem); }
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
-  .split, .principles, .pair { grid-template-columns: minmax(0, 1fr); }
+  .principles, .pair { grid-template-columns: minmax(0, 1fr); }
   .figures.three { grid-template-columns: minmax(0, 1fr); }
   .fig b { font-size: 3rem; }
   .cols { grid-template-columns: repeat(2, 1fr); }
@@ -308,7 +339,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 #tab-0:checked ~ .tabrow label[for="tab-0"]{background:var(--raise);color:var(--ink)}#tab-0:checked ~ .p-0{display:block}#tab-0:focus-visible ~ .tabrow label[for="tab-0"]{outline:2px solid var(--accent)}#tab-0:checked ~ .pager i:nth-child(1){background:var(--ink)}
 #tab-1:checked ~ .tabrow label[for="tab-1"]{background:var(--raise);color:var(--ink)}#tab-1:checked ~ .p-1{display:block}#tab-1:focus-visible ~ .tabrow label[for="tab-1"]{outline:2px solid var(--accent)}#tab-1:checked ~ .pager i:nth-child(2){background:var(--ink)}
 #tab-2:checked ~ .tabrow label[for="tab-2"]{background:var(--raise);color:var(--ink)}#tab-2:checked ~ .p-2{display:block}#tab-2:focus-visible ~ .tabrow label[for="tab-2"]{outline:2px solid var(--accent)}#tab-2:checked ~ .pager i:nth-child(3){background:var(--ink)}
-#tab-3:checked ~ .tabrow label[for="tab-3"]{background:var(--raise);color:var(--ink)}#tab-3:checked ~ .p-3{display:block}#tab-3:focus-visible ~ .tabrow label[for="tab-3"]{outline:2px solid var(--accent)}#tab-3:checked ~ .pager i:nth-child(4){background:var(--ink)}</style>
+#tab-3:checked ~ .tabrow label[for="tab-3"]{background:var(--raise);color:var(--ink)}#tab-3:checked ~ .p-3{display:block}#tab-3:focus-visible ~ .tabrow label[for="tab-3"]{outline:2px solid var(--accent)}#tab-3:checked ~ .pager i:nth-child(4){background:var(--ink)}@supports selector(:has(*)) {.explorer:has(#realtime:target) .ex-nav a[href="#realtime"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#replicas:target) .ex-nav a[href="#replicas"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#failover:target) .ex-nav a[href="#failover"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#backup:target) .ex-nav a[href="#backup"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#branches:target) .ex-nav a[href="#branches"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#search:target) .ex-nav a[href="#search"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#orms:target) .ex-nav a[href="#orms"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#rest:target) .ex-nav a[href="#rest"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#outbox:target) .ex-nav a[href="#outbox"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#queue:target) .ex-nav a[href="#queue"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#exactly-once:target) .ex-nav a[href="#exactly-once"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#schedules:target) .ex-nav a[href="#schedules"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#sinks:target) .ex-nav a[href="#sinks"]{color:var(--ink);background:var(--raise);border-color:var(--line)}.explorer:has(#schemas:target) .ex-nav a[href="#schemas"]{color:var(--ink);background:var(--raise);border-color:var(--line)}}</style>
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"bql.sh","description":"bql.sh is a SQLite database server for Bun, with replicas, S3 backup, branches, live queries and search, plus a durable message bus.","url":"https://bql.sh/","codeRepository":"https://github.com/TimMikeladze/bql","applicationCategory":"DeveloperApplication","programmingLanguage":"TypeScript","runtimePlatform":"Bun","softwareVersion":"0.5.0","license":"https://opensource.org/licenses/MIT","author":{"@type":"Person","name":"linesofcode","url":"https://x.com/linesofcode"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
@@ -331,11 +362,22 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 <div class="agent-links"><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">AGENTS.md</a><button type="button" data-copy-page="/index.md">Copy page as Markdown</button></div></div>
 </div>
 <p class="version">Currently <a href="https://www.npmjs.com/package/bql.sh" rel="noopener">v0.5.0</a> · MIT, Bun 1.4+</p>
-<div class="split">
-<div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">terminal</span></div><pre><code><span class="prompt-line">BQL_ADMIN_KEY=&lt;the admin key&gt; bun client.ts</span>
-<span class="out-line">diff {&quot;added&quot;:[{&quot;id&quot;:1,&quot;title&quot;:&quot;write it&quot;}],&quot;removed&quot;:[]}</span>
-<span class="out-line">diff {&quot;added&quot;:[],&quot;removed&quot;:[{&quot;id&quot;:1}]}</span></code></pre></div>
-<div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span class="label">client.ts</span></div><pre><code><span class="t-c">// client.ts</span>
+<div class="hero-cell"><div class="frame cell"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">client.ts</span><button type="button" class="copy" data-copy="// client.ts
+import { createClient } from &quot;bql.sh/client&quot;
+
+const client = createClient({ url: &quot;http://localhost:4321&quot;, token: process.env.BQL_ADMIN_KEY! })
+await client.admin.create(&quot;acme&quot;)
+const db = client.db(&quot;acme&quot;)
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+
+const live = db.live`select id, title from todos where done = 0`.key(&quot;id&quot;)
+live.on(&quot;diff&quot;, (e) =&gt; console.log(&quot;diff&quot;, JSON.stringify({ added: e.added, removed: e.removed })))
+await new Promise((resolve) =&gt; live.on(&quot;rows&quot;, resolve))   // the first result; diffs follow
+
+await db.sql`insert into todos(title) values (${&quot;write it&quot;})`.run()
+await db.sql`update todos set done = 1 where id = ${1}`.run()
+await Bun.sleep(100)
+client.close()" aria-label="Copy client.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-c">// client.ts</span>
 <span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/client&quot;</span>
 
 <span class="t-k">const</span> client = createClient({ url: <span class="t-s">&quot;http://localhost:4321&quot;</span>, token: process.env.BQL_ADMIN_KEY! })
@@ -350,24 +392,32 @@ live.on(<span class="t-s">&quot;diff&quot;</span>, (e) =&gt; console.log(<span c
 <span class="t-k">await</span> db.sql<span class="t-s">`insert into todos(title) values (${&quot;write it&quot;})`</span>.run()
 <span class="t-k">await</span> db.sql<span class="t-s">`update todos set done = 1 where id = ${1}`</span>.run()
 <span class="t-k">await</span> Bun.sleep(<span class="t-n">100</span>)
-client.close()</code></pre></div>
-</div>
+client.close()</code></pre>
+<div class="run"><div class="run-bar"><svg class="glyph" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span>Output</span></div><pre><code><span class="prompt-line">BQL_ADMIN_KEY=&lt;the admin key&gt; bun client.ts</span>
+<span class="out-line">diff {&quot;added&quot;:[{&quot;id&quot;:1,&quot;title&quot;:&quot;write it&quot;}],&quot;removed&quot;:[]}</span>
+<span class="out-line">diff {&quot;added&quot;:[],&quot;removed&quot;:[{&quot;id&quot;:1}]}</span></code></pre></div></div></div>
 </section>
 <section class="section why" id="why" aria-labelledby="why-h"><div class="shell">
 <div class="centre"><h2 id="why-h">Why bql.sh</h2>
 <p class="explain">SQLite is fast and runs anywhere, but it's a library: no network access, no replicas, no backups and no way to subscribe to a query. bql.sh adds those and leaves every database a SQLite file.</p></div>
 <div class="principles"><div><h3>Still SQLite</h3><p>Replication ships the pages SQLite wrote, not statements, so triggers, FTS5, JSON and <code>random()</code> replicate exactly.</p></div><div><h3>In process or served</h3><p><code>Bql.open()</code> runs the engine inside your app. <code>bq.serve()</code> puts HTTP in front of it later, and code written against <code>db</code> doesn't change.</p></div><div><h3>As many as you need</h3><p>One process keeps up to <code>[data] maxOpen</code> databases open, 1024 by default, and closes idle ones. A fork is a reflink copy, so a database per customer or pull request costs a directory.</p></div></div>
 </div></section>
-<div class="chapter" id="start"><div class="shell"><span>Getting started</span><code>bun add bql.sh</code><a href="/reference#root-getting-started">Reference</a></div></div><section class="section cap" id="install" aria-labelledby="install-h"><div class="shell">
-<div class="sec-head"><h2 id="install-h">Install</h2>
-<p class="explain">Add <code>bql.sh</code>, then build the libsqlite3 its driver loads. The driver needs the preupdate hook and the session extension, so the package compiles its own SQLite once, in about 15 seconds, with any C compiler.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bun add bql.sh</span>
-<span class="prompt-line">bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts</span></code></pre></div></div>
-</div></section>
-<section class="section cap" id="embedded" aria-labelledby="embedded-h"><div class="shell">
-<div class="sec-head"><h2 id="embedded-h">Run it in your process</h2>
-<p class="explain"><code>Bql.open()</code> is the whole engine with no server in front. Every write returns the <code>txid</code> it committed in.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">app.ts</span></div><pre><code><span class="t-c">// app.ts</span>
+<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
+<div class="sec-intro"><h2 id="start-h">Getting started</h2><p class="explain">From an empty directory to a deployed server. Each output below was captured against the published <code>bql.sh</code> package. <a href="/reference#root-getting-started">Reference</a>.</p></div>
+<ol class="steps"><li class="step" id="install" aria-labelledby="install-h"><div class="step-text"><span class="step-n" aria-hidden="true">1</span><h3 id="install-h">Install</h3><p class="explain">Add <code>bql.sh</code>, then build the libsqlite3 its driver loads. The driver needs the preupdate hook and the session extension, so the package compiles its own SQLite once, in about 15 seconds, with any C compiler.</p></div><div class="step-demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bun add bql.sh</span>
+<span class="prompt-line">bun run node_modules/bql.sh/packages/db/scripts/sqlite.ts</span></code></pre></div></div></li>
+<li class="step" id="embedded" aria-labelledby="embedded-h"><div class="step-text"><span class="step-n" aria-hidden="true">2</span><h3 id="embedded-h">Run it in your process</h3><p class="explain"><code>Bql.open()</code> is the whole engine with no server in front. Every write returns the <code>txid</code> it committed in.</p></div><div class="step-demo"><div class="frame cell"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">app.ts</span><button type="button" class="copy" data-copy="// app.ts
+import { Bql } from &quot;bql.sh&quot;
+
+const bq = await Bql.open({ dir: &quot;./data&quot; })
+const db = await bq.create(&quot;acme&quot;)
+
+await db.sql`create table todos(id integer primary key, title text, done integer default 0)`.run()
+const written = await db.sql`insert into todos(title) values (${&quot;write it&quot;})`.run()
+console.log(&quot;txid&quot;, written.txid)
+console.log(await db.sql`select * from todos`)
+
+await bq.close()" aria-label="Copy app.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-c">// app.ts</span>
 <span class="t-k">import</span> { Bql } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh&quot;</span>
 
 <span class="t-k">const</span> bq = <span class="t-k">await</span> Bql.open({ dir: <span class="t-s">&quot;./data&quot;</span> })
@@ -378,7 +428,8 @@ client.close()</code></pre></div>
 console.log(<span class="t-s">&quot;txid&quot;</span>, written.txid)
 console.log(<span class="t-k">await</span> db.sql<span class="t-s">`select * from todos`</span>)
 
-<span class="t-k">await</span> bq.close()</code></pre></div><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bun app.ts</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bun app.ts</span>
+<span class="t-k">await</span> bq.close()</code></pre>
+<div class="run"><div class="run-bar"><svg class="glyph" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span>Output</span></div><pre><code><span class="prompt-line">bun app.ts</span>
 <span class="out-line">txid 2</span>
 <span class="out-line">[</span>
 <span class="out-line">  {</span>
@@ -388,21 +439,23 @@ console.log(<span class="t-k">await</span> db.sql<span class="t-s">`select * fro
 <span class="out-line">  }, count: 1, command: &quot;SELECT&quot;, lastInsertRowid: null, affectedRows: 0, txid: 2,</span>
 <span class="out-line">  columns: [ &quot;id&quot;, &quot;title&quot;, &quot;done&quot; ], types: [ &quot;INTEGER&quot;, &quot;TEXT&quot;, &quot;INTEGER&quot; ], durationUs: 97,</span>
 <span class="out-line">  vmSteps: 11</span>
-<span class="out-line">]</span></code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="serve" aria-labelledby="serve-h"><div class="shell">
-<div class="sec-head"><h2 id="serve-h">Start a server</h2>
-<p class="explain"><code>bql serve</code> prints an admin key the first time it starts and saves it to <code>keys.json</code>. The CLI and the client use it as <code>BQL_ADMIN_KEY</code>.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bunx bql serve --dir ./srv --port 4321</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bunx bql serve --dir ./srv --port <span class="t-n">4321</span></span>
+<span class="out-line">]</span></code></pre></div></div></div></li>
+<li class="step" id="serve" aria-labelledby="serve-h"><div class="step-text"><span class="step-n" aria-hidden="true">3</span><h3 id="serve-h">Start a server</h3><p class="explain"><code>bql serve</code> prints an admin key the first time it starts and saves it to <code>keys.json</code>. The CLI and the client use it as <code>BQL_ADMIN_KEY</code>.</p></div><div class="step-demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bunx bql serve --dir ./srv --port 4321</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bunx bql serve --dir ./srv --port <span class="t-n">4321</span></span>
 <span class="out-line">bql: generated an admin key and wrote it to ./srv/keys.json</span>
 <span class="out-line">bql: admin key: &lt;43 url-safe base64 characters, printed this once and never again&gt;</span>
 <span class="out-line">bql http://localhost:4321  node=bql-77779295  data=./srv</span>
-<span class="out-line">bql: 0 database(s), maxOpen 1024, ack fsync</span></code></pre></div></div>
-</div></section>
-<section class="section cap" id="token" aria-labelledby="token-h"><div class="shell">
-<div class="sec-head"><h2 id="token-h">Give the browser a token</h2>
-<p class="explain">Never ship the admin key to a browser. <code>admin.mintToken</code> makes a token scoped to databases, tables and <code>ro</code> or <code>rw</code>, and anything outside it answers <code>NOT_AUTHORIZED</code>.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">token.ts</span></div><pre><code><span class="t-c">// token.ts</span>
+<span class="out-line">bql: 0 database(s), maxOpen 1024, ack fsync</span></code></pre></div></div></li>
+<li class="step" id="token" aria-labelledby="token-h"><div class="step-text"><span class="step-n" aria-hidden="true">4</span><h3 id="token-h">Give the browser a token</h3><p class="explain">Never ship the admin key to a browser. <code>admin.mintToken</code> makes a token scoped to databases, tables and <code>ro</code> or <code>rw</code>, and anything outside it answers <code>NOT_AUTHORIZED</code>.</p></div><div class="step-demo"><div class="frame cell"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">token.ts</span><button type="button" class="copy" data-copy="// token.ts
+import { createClient } from &quot;bql.sh/client&quot;
+
+const url = &quot;http://localhost:4321&quot;
+const admin = createClient({ url, token: process.env.BQL_ADMIN_KEY! }).admin
+const { token } = await admin.mintToken({ dbs: [&quot;acme&quot;], scope: &quot;ro&quot;, ttlMs: 3_600_000 })
+
+// Hand `token` to the browser. It can read acme and nothing else.
+const db = createClient({ url, token }).db(&quot;acme&quot;)
+console.log(JSON.stringify(await db.sql`select id, title, done from todos`))
+await db.sql`delete from todos`.run().catch((err) =&gt; console.log(err.code, err.message))" aria-label="Copy token.ts"><svg class="glyph" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div><pre><code><span class="t-c">// token.ts</span>
 <span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/client&quot;</span>
 
 <span class="t-k">const</span> url = <span class="t-s">&quot;http://localhost:4321&quot;</span>
@@ -412,21 +465,18 @@ console.log(<span class="t-k">await</span> db.sql<span class="t-s">`select * fro
 <span class="t-c">// Hand `token` to the browser. It can read acme and nothing else.</span>
 <span class="t-k">const</span> db = createClient({ url, token }).db(<span class="t-s">&quot;acme&quot;</span>)
 console.log(JSON.stringify(<span class="t-k">await</span> db.sql<span class="t-s">`select id, title, done from todos`</span>))
-<span class="t-k">await</span> db.sql<span class="t-s">`delete from todos`</span>.run().catch((err) =&gt; console.log(err.code, err.message))</code></pre></div><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ BQL_ADMIN_KEY=&lt;the admin key&gt; bun token.ts</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">BQL_ADMIN_KEY=&lt;the admin key&gt; bun token.ts</span>
+<span class="t-k">await</span> db.sql<span class="t-s">`delete from todos`</span>.run().catch((err) =&gt; console.log(err.code, err.message))</code></pre>
+<div class="run"><div class="run-bar"><svg class="glyph" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span>Output</span></div><pre><code><span class="prompt-line">BQL_ADMIN_KEY=&lt;the admin key&gt; bun token.ts</span>
 <span class="out-line">[{&quot;id&quot;:1,&quot;title&quot;:&quot;write it&quot;,&quot;done&quot;:1}]</span>
-<span class="out-line">NOT_AUTHORIZED not authorized</span></code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="deploy" aria-labelledby="deploy-h"><div class="shell">
-<div class="sec-head"><h2 id="deploy-h">Deploy it</h2>
-<p class="explain"><code>bql deploy</code> provisions a server on Fly, Vercel or Cloudflare through the provider CLI you're already logged in to, then saves the connection so <code>bql db list</code> talks to it. Vercel and Cloudflare are experimental and keep data in Blob or R2.</p></div>
-<div class="demo"><div class="pair stacked"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql deploy init --provider vercel --scope my-team</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">mkdir bql-preview</span>
+<span class="out-line">NOT_AUTHORIZED not authorized</span></code></pre></div></div></div></li>
+<li class="step" id="deploy" aria-labelledby="deploy-h"><div class="step-text"><span class="step-n" aria-hidden="true">5</span><h3 id="deploy-h">Deploy it</h3><p class="explain"><code>bql deploy</code> provisions a server on Fly, Vercel or Cloudflare through the provider CLI you're already logged in to, then saves the connection so <code>bql db list</code> talks to it. Vercel and Cloudflare are experimental and keep data in Blob or R2.</p></div><div class="step-demo"><div class="pair stacked"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql deploy init --provider vercel --scope my-team</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">mkdir bql-preview</span>
 <span class="prompt-line">cd bql-preview</span>
 <span class="prompt-line">bql deploy init --provider vercel --scope my-team</span>
 <span class="prompt-line">bql deploy plan</span>
 <span class="prompt-line">bql deploy apply</span>
-<span class="prompt-line">bql deploy status</span></code></pre></div><div class="table-wrap"><table><thead><tr><th scope="col">Provider</th><th scope="col">Compute</th><th scope="col">Durable data</th><th scope="col">Default region</th><th scope="col">Status</th></tr></thead><tbody><tr><td>Vercel</td><td>Bun container</td><td>Private Vercel Blob</td><td><code>iad1</code></td><td>Experimental object mode</td></tr><tr><td>Cloudflare</td><td>Worker + named Bun container</td><td>Private R2 bucket</td><td><code>wnam</code> bucket location hint</td><td>Experimental object mode</td></tr><tr><td>Fly</td><td>Bun machine</td><td>Encrypted persistent volume at <code>/data</code></td><td><code>sjc</code></td><td>Persistent-disk server</td></tr></tbody></table></div></div></div>
+<span class="prompt-line">bql deploy status</span></code></pre></div><div class="table-wrap"><table><thead><tr><th scope="col">Provider</th><th scope="col">Compute</th><th scope="col">Durable data</th><th scope="col">Default region</th><th scope="col">Status</th></tr></thead><tbody><tr><td>Vercel</td><td>Bun container</td><td>Private Vercel Blob</td><td><code>iad1</code></td><td>Experimental object mode</td></tr><tr><td>Cloudflare</td><td>Worker + named Bun container</td><td>Private R2 bucket</td><td><code>wnam</code> bucket location hint</td><td>Experimental object mode</td></tr><tr><td>Fly</td><td>Bun machine</td><td>Encrypted persistent volume at <code>/data</code></td><td><code>sjc</code></td><td>Persistent-disk server</td></tr></tbody></table></div></div></div></li></ol>
 </div></section>
-<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
+<section class="section" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
 <div>
 <h2 id="showcase-h">The same db, four ways in</h2>
 <p class="explain"><code>createClient()</code> over HTTP, <code>Bql.open()</code> in your process, <code>@libsql/client</code> over Hrana, or the <code>bun:ffi</code> driver on its own. The first two hand back the same <code>db</code>, so code moves between them unchanged.</p>
@@ -542,10 +592,11 @@ db.close()</code></pre></div></div>
 <div class="pager" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 </div>
 </div></section>
-<div class="chapter" id="database"><div class="shell"><span>The database</span><code>bql.sh</code><a href="/reference#db">Reference</a></div></div><section class="section cap" id="realtime" aria-labelledby="realtime-h"><div class="shell">
-<div class="sec-head"><h2 id="realtime-h">Live queries</h2>
-<p class="explain"><code>db.live</code> runs a query and sends the <code>added</code>, <code>removed</code> and <code>updated</code> rows whenever a commit changes its result. <code>/changes</code> streams every commit as SSE. Both run off SQLite's <code>preupdate</code> hook, so there are no triggers to install.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">live.ts</span></div><pre><code><span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/client&quot;</span>
+<section class="section band" id="database" aria-labelledby="database-h"><div class="shell">
+<div class="sec-intro"><h2 id="database-h">The database</h2><p class="explain">What the server does on top of SQL. Pick a feature to see its code and what it printed. <a href="/reference#db">Reference</a>.</p></div>
+<div class="explorer">
+<nav class="ex-nav" aria-label="The database features"><a href="#realtime">Live queries</a><a href="#replicas">Replicas</a><a href="#failover">Failover</a><a href="#backup">Backups to S3</a><a href="#branches">A database per pull request</a><a href="#search">Vector, full-text and geo search</a><a href="#orms">Your ORM already works</a><a href="#rest">REST, OpenAPI and GraphQL</a><a href="#outbox">Row changes onto the bus</a></nav>
+<div class="ex-panels"><article class="panel" id="realtime" aria-labelledby="realtime-h"><h3 id="realtime-h">Live queries</h3><p class="explain"><code>db.live</code> runs a query and sends the <code>added</code>, <code>removed</code> and <code>updated</code> rows whenever a commit changes its result. <code>/changes</code> streams every commit as SSE. Both run off SQLite's <code>preupdate</code> hook, so there are no triggers to install.</p><div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">live.ts</span></div><pre><code><span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/client&quot;</span>
 
 <span class="t-k">const</span> db = createClient({ url: <span class="t-s">&quot;http://localhost:4321&quot;</span>, token }).db(<span class="t-s">&quot;acme&quot;</span>)
 
@@ -561,12 +612,8 @@ live.on(<span class="t-s">&quot;diff&quot;</span>, (e) =&gt; patch(e.added, e.re
 <span class="out-line"></span>
 <span class="out-line">id: 3</span>
 <span class="out-line">event: change</span>
-<span class="out-line">data: {&quot;txid&quot;:3,&quot;changes&quot;:[{&quot;table&quot;:&quot;todos&quot;,&quot;op&quot;:&quot;insert&quot;,&quot;rowid&quot;:2,&quot;pk&quot;:{&quot;id&quot;:2},&quot;row&quot;:{…}}]}</span></code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="replicas" aria-labelledby="replicas-h"><div class="shell">
-<div class="sec-head"><h2 id="replicas-h">Replicas</h2>
-<p class="explain">Start a second server with <code>--replica-of</code>. It follows every database on the primary, serves reads locally and forwards writes, answering with the primary's txid.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ curl -sD- -H &quot;authorization: Bearer $KEY&quot; -H 'content-type: application/json' \</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">curl -sD- -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> -H <span class="t-s">'content-type: application/json'</span> \</span>
+<span class="out-line">data: {&quot;txid&quot;:3,&quot;changes&quot;:[{&quot;table&quot;:&quot;todos&quot;,&quot;op&quot;:&quot;insert&quot;,&quot;rowid&quot;:2,&quot;pk&quot;:{&quot;id&quot;:2},&quot;row&quot;:{…}}]}</span></code></pre></div></div></div></article>
+<article class="panel" id="replicas" aria-labelledby="replicas-h"><h3 id="replicas-h">Replicas</h3><p class="explain">Start a second server with <code>--replica-of</code>. It follows every database on the primary, serves reads locally and forwards writes, answering with the primary's txid.</p><div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ curl -sD- -H &quot;authorization: Bearer $KEY&quot; -H 'content-type: application/json' \</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">curl -sD- -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> -H <span class="t-s">'content-type: application/json'</span> \</span>
 <span class="cont-line">     -d <span class="t-s">'{&quot;sql&quot;:&quot;insert into notes (body) values (@1)&quot;,&quot;args&quot;:[&quot;through the replica&quot;]}'</span> \</span>
 <span class="cont-line">     http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>/v1/db/acme/query</span>
 <span class="out-line">BQL-Role: replica</span>
@@ -574,30 +621,18 @@ live.on(<span class="t-s">&quot;diff&quot;</span>, (e) =&gt; patch(e.added, e.re
 <span class="out-line">BQL-Txid: 2</span>
 
 <span class="prompt-line">curl -s -H <span class="t-s">&quot;authorization: Bearer $KEY&quot;</span> http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>/v1/db/acme/replication</span>
-<span class="out-line">{&quot;role&quot;:&quot;replica&quot;,&quot;connected&quot;:true,&quot;applied&quot;:2,&quot;lagTxid&quot;:0,&quot;bootstrapping&quot;:false,...}</span></code></pre></div></div>
-</div></section>
-<section class="section cap" id="failover" aria-labelledby="failover-h"><div class="shell">
-<div class="sec-head"><h2 id="failover-h">Failover</h2>
-<p class="explain"><code>bql promote acme</code> moves a database to a replica and fences the old primary by epoch. With <code>[cluster]</code> on, Raft does it when the primary's lease runs out. Write with <code>ack: &quot;replica&quot;</code> and a failover loses no acknowledged write.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql promote acme --url http://127.0.0.1:4502</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql promote acme --url http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>        <span class="t-c"># addresses the candidate, not the cluster</span></span>
+<span class="out-line">{&quot;role&quot;:&quot;replica&quot;,&quot;connected&quot;:true,&quot;applied&quot;:2,&quot;lagTxid&quot;:0,&quot;bootstrapping&quot;:false,...}</span></code></pre></div></div></article>
+<article class="panel" id="failover" aria-labelledby="failover-h"><h3 id="failover-h">Failover</h3><p class="explain"><code>bql promote acme</code> moves a database to a replica and fences the old primary by epoch. With <code>[cluster]</code> on, Raft does it when the primary's lease runs out. Write with <code>ack: &quot;replica&quot;</code> and a failover loses no acknowledged write.</p><div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql promote acme --url http://127.0.0.1:4502</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql promote acme --url http://<span class="t-n">127.0.0.1</span>:<span class="t-n">4502</span>        <span class="t-c"># addresses the candidate, not the cluster</span></span>
 <span class="out-line">acme promoted on http://127.0.0.1:4502: epoch 4, txid 918</span>
-<span class="out-line">n2 takes acme at epoch 4, fencing n1</span></code></pre></div></div>
-</div></section>
-<section class="section cap" id="backup" aria-labelledby="backup-h"><div class="shell">
-<div class="sec-head"><h2 id="backup-h">Backups to S3</h2>
-<p class="explain">Pass <code>--s3</code> and every commit ships to the bucket in the background; a slow bucket never slows a write. <code>bql restore</code> rebuilds a database at any txid or timestamp on a node that has never seen it.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql backup status acme</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…</span>
+<span class="out-line">n2 takes acme at epoch 4, fencing n1</span></code></pre></div></div></article>
+<article class="panel" id="backup" aria-labelledby="backup-h"><h3 id="backup-h">Backups to S3</h3><p class="explain">Pass <code>--s3</code> and every commit ships to the bucket in the background; a slow bucket never slows a write. <code>bql restore</code> rebuilds a database at any txid or timestamp on a node that has never seen it.</p><div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql backup status acme</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">export BQL_S3_ACCESS_KEY_ID=… BQL_S3_SECRET_ACCESS_KEY=…</span>
 <span class="prompt-line">bun run src/cli.ts serve --dir ./data --s3 s3://backups/prod --s3-endpoint https://…</span>
 
 <span class="prompt-line">bql backup status acme</span>
 <span class="out-line">acme → s3://backups/prod  shipped txid 4812  0 pending  caught up  2 snapshot(s), 31 segment(s)</span>
 
-<span class="prompt-line">bql restore acme --from s3://backups/prod --at <span class="t-n">2026</span>-<span class="t-n">09</span>-11T10:<span class="t-n">00</span>:00Z --into acme-recovered</span></code></pre></div></div>
-</div></section>
-<section class="section cap" id="branches" aria-labelledby="branches-h"><div class="shell">
-<div class="sec-head"><h2 id="branches-h">A database per pull request</h2>
-<p class="explain"><code>bql db branch</code> forks a database and records its parent. The <code>bql-branch</code> GitHub Action creates one when a pull request opens and deletes it when it closes.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql db branch pr-42 --from main</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql db branch pr-<span class="t-n">42</span> --from main             <span class="t-c"># --from main@4812 or @2026-09-11T10:00:00Z also work</span></span>
+<span class="prompt-line">bql restore acme --from s3://backups/prod --at <span class="t-n">2026</span>-<span class="t-n">09</span>-11T10:<span class="t-n">00</span>:00Z --into acme-recovered</span></code></pre></div></div></article>
+<article class="panel" id="branches" aria-labelledby="branches-h"><h3 id="branches-h">A database per pull request</h3><p class="explain"><code>bql db branch</code> forks a database and records its parent. The <code>bql-branch</code> GitHub Action creates one when a pull request opens and deletes it when it closes.</p><div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql db branch pr-42 --from main</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql db branch pr-<span class="t-n">42</span> --from main             <span class="t-c"># --from main@4812 or @2026-09-11T10:00:00Z also work</span></span>
 <span class="prompt-line">bql db branches main                        <span class="t-c"># main's children; bare `branches` lists every branch</span></span>
 <span class="prompt-line">bql db diff main pr-<span class="t-n">42</span>                      <span class="t-c"># schema and row counts; --json for the structure</span></span>
 <span class="prompt-line">bql db reset pr-<span class="t-n">42</span>                          <span class="t-c"># back to main's head, same name</span></span></code></pre></div><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">db-branch.yml</span></div><pre><code><span class="t-c"># .github/workflows/db-branch.yml</span>
@@ -616,12 +651,8 @@ jobs:
           source: main
           action: ${{ github.event.action == <span class="t-s">'closed'</span> &amp;&amp; <span class="t-s">'delete'</span> || <span class="t-s">'create'</span> }}
           on-exists: keep            <span class="t-c"># or `reset`: back to main's head on every push</span>
-      - run: echo <span class="t-s">&quot;database ${{ steps.db.outputs.name }}&quot;</span></code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="search" aria-labelledby="search-h"><div class="shell">
-<div class="sec-head"><h2 id="search-h">Vector, full-text and geo search</h2>
-<p class="explain"><code>bql.sh/search</code> builds sqlite-vec, FTS5 and R*Tree queries out of plain SQL. <code>hybridSearch</code> fuses bm25 and vector rank in one statement, and it all runs on a primary, a replica or in your process.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">search.ts</span></div><pre><code><span class="t-k">import</span> { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/search&quot;</span>
+      - run: echo <span class="t-s">&quot;database ${{ steps.db.outputs.name }}&quot;</span></code></pre></div></div></div></article>
+<article class="panel" id="search" aria-labelledby="search-h"><h3 id="search-h">Vector, full-text and geo search</h3><p class="explain"><code>bql.sh/search</code> builds sqlite-vec, FTS5 and R*Tree queries out of plain SQL. <code>hybridSearch</code> fuses bm25 and vector rank in one statement, and it all runs on a primary, a replica or in your process.</p><div class="demo"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">search.ts</span></div><pre><code><span class="t-k">import</span> { ftsIndex, ftsQuote, geoIndex, hybridSearch, vectorIndex } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/search&quot;</span>
 
 <span class="t-c">// Full-text: an external-content FTS5 index kept in step with `posts` by three triggers.</span>
 <span class="t-k">const</span> fts = ftsIndex(db, { table: <span class="t-s">&quot;posts_fts&quot;</span>, source: <span class="t-s">&quot;posts&quot;</span>, columns: [<span class="t-s">&quot;title&quot;</span>, <span class="t-s">&quot;body&quot;</span>], tokenizer: <span class="t-s">&quot;porter unicode61&quot;</span> })
@@ -643,12 +674,8 @@ jobs:
 <span class="t-k">const</span> geo = geoIndex(db, { table: <span class="t-s">&quot;shops_geo&quot;</span>, source: <span class="t-s">&quot;shops&quot;</span> })
 <span class="t-k">await</span> geo.create()
 <span class="t-k">await</span> geo.near(<span class="t-n">51.5033</span>, -<span class="t-n">0.1196</span>, <span class="t-n">2_000</span>, { limit: <span class="t-n">20</span> })              <span class="t-c">// → [{ id, lat, lon, distance /* m */ }]</span>
-<span class="t-k">await</span> geo.within({ minLat: <span class="t-n">51.4</span>, maxLat: <span class="t-n">51.6</span>, minLon: -<span class="t-n">0.3</span>, maxLon: <span class="t-n">0.1</span> })</code></pre></div></div>
-</div></section>
-<section class="section cap" id="orms" aria-labelledby="orms-h"><div class="shell">
-<div class="sec-head"><h2 id="orms-h">Your ORM already works</h2>
-<p class="explain">The server speaks libsql's Hrana protocol, so <code>@libsql/client</code> connects as is. <code>bql.sh/kysely</code> and <code>bql.sh/drizzle</code> run transactions and migrations on bql.sh's own routes.</p></div>
-<div class="demo"><div class="variants"><figure><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">libsql.ts</span></div><pre><code><span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;@libsql/client&quot;</span>
+<span class="t-k">await</span> geo.within({ minLat: <span class="t-n">51.4</span>, maxLat: <span class="t-n">51.6</span>, minLon: -<span class="t-n">0.3</span>, maxLon: <span class="t-n">0.1</span> })</code></pre></div></div></article>
+<article class="panel" id="orms" aria-labelledby="orms-h"><h3 id="orms-h">Your ORM already works</h3><p class="explain">The server speaks libsql's Hrana protocol, so <code>@libsql/client</code> connects as is. <code>bql.sh/kysely</code> and <code>bql.sh/drizzle</code> run transactions and migrations on bql.sh's own routes.</p><div class="demo"><div class="variants"><figure><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">libsql.ts</span></div><pre><code><span class="t-k">import</span> { createClient } <span class="t-k">from</span> <span class="t-s">&quot;@libsql/client&quot;</span>
 
 <span class="t-c">// The trailing slash matters: the client resolves `v2/pipeline` relative to this URL.</span>
 <span class="t-k">const</span> primary = createClient({ url: <span class="t-s">&quot;http://127.0.0.1:4501/v1/db/acme/&quot;</span>, authToken: KEY })
@@ -690,21 +717,13 @@ jobs:
 <span class="t-k">const</span> [written] = <span class="t-k">await</span> db.insert(todos).values({ title: <span class="t-s">&quot;write it&quot;</span> }).returning()
 <span class="t-k">await</span> db.transaction(<span class="t-k">async</span> (tx) =&gt; {
   <span class="t-k">await</span> tx.update(todos).set({ done: <span class="t-n">1</span> }).where(eq(todos.id, written.id))
-})</code></pre></div><figcaption>bql.sh/drizzle, drizzle()</figcaption></figure></div></div>
-</div></section>
-<section class="section cap" id="rest" aria-labelledby="rest-h"><div class="shell">
-<div class="sec-head"><h2 id="rest-h">REST, OpenAPI and GraphQL</h2>
-<p class="explain">Every database gets a REST API and an OpenAPI 3.1 document generated from its own tables, and GraphQL once the optional <code>graphql</code> peer is installed. Requests go through the same token checks, row cap and write forwarding as SQL.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">routes.http</span></div><pre><code>GET    /v1/db/acme/api/users?name=like.ann*&amp;order=name.asc&amp;limit=<span class="t-n">20</span>
+})</code></pre></div><figcaption>bql.sh/drizzle, drizzle()</figcaption></figure></div></div></article>
+<article class="panel" id="rest" aria-labelledby="rest-h"><h3 id="rest-h">REST, OpenAPI and GraphQL</h3><p class="explain">Every database gets a REST API and an OpenAPI 3.1 document generated from its own tables, and GraphQL once the optional <code>graphql</code> peer is installed. Requests go through the same token checks, row cap and write forwarding as SQL.</p><div class="demo"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">routes.http</span></div><pre><code>GET    /v1/db/acme/api/users?name=like.ann*&amp;order=name.asc&amp;limit=<span class="t-n">20</span>
 POST   /v1/db/acme/api/users          { <span class="t-s">&quot;name&quot;</span>: <span class="t-s">&quot;ann&quot;</span> }
 GET    /v1/db/acme/openapi.json       that database's OpenAPI <span class="t-n">3.1</span> document
 POST   /v1/db/acme/graphql            { <span class="t-s">&quot;query&quot;</span>: <span class="t-s">&quot;{ listUsers { id name } }&quot;</span> }
-GET    /v1/openapi.json               this server's own API</code></pre></div></div>
-</div></section>
-<section class="section cap" id="outbox" aria-labelledby="outbox-h"><div class="shell">
-<div class="sec-head"><h2 id="outbox-h">Row changes onto the bus</h2>
-<p class="explain">An <code>[[outbox.rules]]</code> entry publishes every committed row change to a bus subject. It reads the durable log and moves its cursor only after the bus acknowledged, so a crash neither loses nor repeats a change.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bql.toml</span></div><pre><code>[replication]
+GET    /v1/openapi.json               this server's own API</code></pre></div></div></article>
+<article class="panel" id="outbox" aria-labelledby="outbox-h"><h3 id="outbox-h">Row changes onto the bus</h3><p class="explain">An <code>[[outbox.rules]]</code> entry publishes every committed row change to a bus subject. It reads the durable log and moves its cursor only after the bus acknowledged, so a crash neither loses nor repeats a change.</p><div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">bql.toml</span></div><pre><code>[replication]
 logicalChanges = <span class="t-s">&quot;row&quot;</span>
 
 [[outbox.rules]]
@@ -715,12 +734,14 @@ subject = <span class="t-s">&quot;db.{db}.{table}&quot;</span>    <span class="t
 include = <span class="t-s">&quot;row&quot;</span>                <span class="t-c"># &quot;pk&quot; | &quot;row&quot; | &quot;row+old&quot;, at most what logicalChanges records</span></code></pre></div><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus subscribe cdc 'db.app-1.&gt;'</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus subscribe cdc <span class="t-s">'db.app-1.&gt;'</span></span>
 <span class="out-line">{&quot;db&quot;:&quot;app-1&quot;,&quot;table&quot;:&quot;users&quot;,&quot;op&quot;:&quot;insert&quot;,&quot;txid&quot;:42,&quot;seq&quot;:0,&quot;i&quot;:0,&quot;rowid&quot;:7,</span>
 <span class="out-line"> &quot;pk&quot;:{&quot;id&quot;:7},&quot;row&quot;:{&quot;id&quot;:7,&quot;email&quot;:&quot;a@b.c&quot;},&quot;committedAt&quot;:1790640000000}</span>
-<span class="prompt-line">bql bus sink webhook --subscription cdc --to https://example.com/hook --secret <span class="t-s">&quot;$HOOK_SECRET&quot;</span></span></code></pre></div></div></div>
+<span class="prompt-line">bql bus sink webhook --subscription cdc --to https://example.com/hook --secret <span class="t-s">&quot;$HOOK_SECRET&quot;</span></span></code></pre></div></div></div></article></div>
+</div>
 </div></section>
-<div class="chapter" id="bus"><div class="shell"><span>The bus</span><code>bql.sh/bus</code><a href="/reference#bus">Reference</a></div></div><section class="section cap" id="queue" aria-labelledby="queue-h"><div class="shell">
-<div class="sec-head"><h2 id="queue-h">Queue, pub/sub and request/reply</h2>
-<p class="explain">Publish to a subject, and each subscription reads it with its own cursor, leases, retries and a dead-letter subject. <code>bql bus consume --exec</code> turns any script into a consumer: the message arrives on stdin.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus publish work.resize '{&quot;src&quot;:&quot;a.png&quot;}'</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus serve &amp;</span>
+<section class="section" id="bus" aria-labelledby="bus-h"><div class="shell">
+<div class="sec-intro"><h2 id="bus-h">The bus</h2><p class="explain"><code>bql.sh/bus</code> keeps its messages in a bql.sh database, so it replicates and backs up the same way your data does. <a href="/reference#bus">Reference</a>.</p></div>
+<div class="explorer">
+<nav class="ex-nav" aria-label="The bus features"><a href="#queue">Queue, pub/sub and request/reply</a><a href="#exactly-once">Exactly-once, three ways</a><a href="#schedules">Cron schedules</a><a href="#sinks">Sinks to webhooks, S3 and ClickHouse</a><a href="#schemas">Schemas on subjects</a></nav>
+<div class="ex-panels"><article class="panel" id="queue" aria-labelledby="queue-h"><h3 id="queue-h">Queue, pub/sub and request/reply</h3><p class="explain">Publish to a subject, and each subscription reads it with its own cursor, leases, retries and a dead-letter subject. <code>bql bus consume --exec</code> turns any script into a consumer: the message arrives on stdin.</p><div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus publish work.resize '{&quot;src&quot;:&quot;a.png&quot;}'</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus serve &amp;</span>
 <span class="prompt-line">bql bus subscribe work <span class="t-s">'work.&gt;'</span></span>
 <span class="prompt-line">bql bus consume work --exec ./handle.sh &amp;</span>
 <span class="prompt-line">bql bus publish work.resize <span class="t-s">'{&quot;src&quot;:&quot;a.png&quot;}'</span></span></code></pre></div><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">consumer.ts</span></div><pre><code><span class="t-k">import</span> { BusClient, BusConsumer, FatalError } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus/client&quot;</span>;
@@ -737,12 +758,8 @@ include = <span class="t-s">&quot;row&quot;</span>                <span class="t
     <span class="t-k">await</span> api.extend();               <span class="t-c">// renew the lease from a long handler</span>
     <span class="t-k">return</span> { ok: <span class="t-k">true</span> };              <span class="t-c">// a returned value answers a request</span>
   },
-}).start();</code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="exactly-once" aria-labelledby="exactly-once-h"><div class="shell">
-<div class="sec-head"><h2 id="exactly-once-h">Exactly-once, three ways</h2>
-<p class="explain">Delivery is at-least-once by default. <code>api.emit</code> publishes in the same commit as the ack, and <code>api.effect</code> records an outside call so a redelivery replays the result instead of repeating the call.</p></div>
-<div class="demo"><div class="pair stacked"><div class="table-wrap"><table><thead><tr><th scope="col">Tier</th><th scope="col">Guarantee</th><th scope="col">Requires</th></tr></thead><tbody><tr><td><strong>Transactional ack</strong></td><td>Exactly-once <em>processing</em> — the handler's writes and the ack are one SQLite transaction</td><td>Embedded mode (<code>createBus</code>), a synchronous handler</td></tr><tr><td><strong>Atomic read-process-write</strong></td><td>Exactly-once <em>within the bus</em> — <code>ack(id, { publish: [...] })</code> commits both or neither</td><td>Nothing; it is an option on <code>ack</code></td></tr><tr><td><strong>Fenced, ledgered effects</strong></td><td>Tight effectively-once against the outside world</td><td>A destination with a conditional write, or an idempotent one</td></tr></tbody></table></div><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">handler.ts</span></div><pre><code><span class="t-k">async</span> handle({ message }, api) {
+}).start();</code></pre></div></div></div></article>
+<article class="panel" id="exactly-once" aria-labelledby="exactly-once-h"><h3 id="exactly-once-h">Exactly-once, three ways</h3><p class="explain">Delivery is at-least-once by default. <code>api.emit</code> publishes in the same commit as the ack, and <code>api.effect</code> records an outside call so a redelivery replays the result instead of repeating the call.</p><div class="demo"><div class="pair stacked"><div class="table-wrap"><table><thead><tr><th scope="col">Tier</th><th scope="col">Guarantee</th><th scope="col">Requires</th></tr></thead><tbody><tr><td><strong>Transactional ack</strong></td><td>Exactly-once <em>processing</em> — the handler's writes and the ack are one SQLite transaction</td><td>Embedded mode (<code>createBus</code>), a synchronous handler</td></tr><tr><td><strong>Atomic read-process-write</strong></td><td>Exactly-once <em>within the bus</em> — <code>ack(id, { publish: [...] })</code> commits both or neither</td><td>Nothing; it is an option on <code>ack</code></td></tr><tr><td><strong>Fenced, ledgered effects</strong></td><td>Tight effectively-once against the outside world</td><td>A destination with a conditional write, or an idempotent one</td></tr></tbody></table></div><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">handler.ts</span></div><pre><code><span class="t-k">async</span> handle({ message }, api) {
   <span class="t-c">// Committed with the ack, not before it: a crash cannot produce this message</span>
   <span class="t-c">// without also finishing the one that caused it.</span>
   api.emit({ subject: <span class="t-s">&quot;thumbnails.ready&quot;</span>, body: { id: message.body.id } });
@@ -755,21 +772,13 @@ include = <span class="t-s">&quot;row&quot;</span>                <span class="t
 
   <span class="t-c">// This attempt, for a conditional write at the destination.</span>
   <span class="t-k">await</span> store.put(key, bytes, { ifMatch: api.fence });
-}</code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="schedules" aria-labelledby="schedules-h"><div class="shell">
-<div class="sec-head"><h2 id="schedules-h">Cron schedules</h2>
-<p class="explain"><code>bql bus schedule add</code> publishes an ordinary message on each fire, once per slot, in any IANA time zone. <code>catchUp</code> decides what happens to slots missed while the bus was down.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus schedule add nightly '30 2 * * *' reports.nightly '{&quot;kind&quot;:&quot;daily&quot;}' --tz America/New_York</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus schedule add nightly <span class="t-s">'30 2 * * *'</span> reports.nightly <span class="t-s">'{&quot;kind&quot;:&quot;daily&quot;}'</span> --tz America/New_York</span>
+}</code></pre></div></div></div></article>
+<article class="panel" id="schedules" aria-labelledby="schedules-h"><h3 id="schedules-h">Cron schedules</h3><p class="explain"><code>bql bus schedule add</code> publishes an ordinary message on each fire, once per slot, in any IANA time zone. <code>catchUp</code> decides what happens to slots missed while the bus was down.</p><div class="demo"><div class="pair"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus schedule add nightly '30 2 * * *' reports.nightly '{&quot;kind&quot;:&quot;daily&quot;}' --tz America/New_York</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus schedule add nightly <span class="t-s">'30 2 * * *'</span> reports.nightly <span class="t-s">'{&quot;kind&quot;:&quot;daily&quot;}'</span> --tz America/New_York</span>
 <span class="prompt-line">bql bus schedule list            <span class="t-c"># --json for machines</span></span>
 <span class="prompt-line">bql bus schedule run nightly     <span class="t-c"># fire once now; does not move the next fire</span></span>
 <span class="prompt-line">bql bus schedule pause nightly · resume nightly · remove nightly</span></code></pre></div><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">schedule.ts</span></div><pre><code><span class="t-k">await</span> bus.putSchedule({ name: <span class="t-s">&quot;nightly&quot;</span>, cron: <span class="t-s">&quot;30 2 * * *&quot;</span>, tz: <span class="t-s">&quot;America/New_York&quot;</span>,
-  subject: <span class="t-s">&quot;reports.nightly&quot;</span>, body: { kind: <span class="t-s">&quot;daily&quot;</span> }, catchUp: <span class="t-s">&quot;latest&quot;</span> });</code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="sinks" aria-labelledby="sinks-h"><div class="shell">
-<div class="sec-head"><h2 id="sinks-h">Sinks to webhooks, S3 and ClickHouse</h2>
-<p class="explain"><code>bql bus sink</code> writes a subscription in batches and acks only once the destination took the batch. With the outbox in front, committed rows reach a warehouse with no code.</p></div>
-<div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">sinks.sh</span></div><pre><code>bql bus sink webhook    --subscription cdc --subject <span class="t-s">'db.&gt;'</span> --to https://example.com/hook --secret <span class="t-s">&quot;$SECRET&quot;</span>
+  subject: <span class="t-s">&quot;reports.nightly&quot;</span>, body: { kind: <span class="t-s">&quot;daily&quot;</span> }, catchUp: <span class="t-s">&quot;latest&quot;</span> });</code></pre></div></div></div></article>
+<article class="panel" id="sinks" aria-labelledby="sinks-h"><h3 id="sinks-h">Sinks to webhooks, S3 and ClickHouse</h3><p class="explain"><code>bql bus sink</code> writes a subscription in batches and acks only once the destination took the batch. With the outbox in front, committed rows reach a warehouse with no code.</p><div class="demo"><div class="pair"><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">sinks.sh</span></div><pre><code>bql bus sink webhook    --subscription cdc --subject <span class="t-s">'db.&gt;'</span> --to https://example.com/hook --secret <span class="t-s">&quot;$SECRET&quot;</span>
 bql bus sink s3         --subscription lake --bucket events --prefix cdc/ --endpoint-url https://…
 bql bus sink clickhouse --subscription olap --to http://clickhouse:<span class="t-n">8123</span> --table analytics.users --shape row</code></pre></div><div class="frame"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">sink.ts</span></div><pre><code><span class="t-k">import</span> { BusClient, SinkRunner, webhookSink } <span class="t-k">from</span> <span class="t-s">&quot;bql.sh/bus&quot;</span>;
 
@@ -778,20 +787,17 @@ bql bus sink clickhouse --subscription olap --to http://clickhouse:<span class="
   id: <span class="t-s">&quot;hook-1&quot;</span>,
   subscription: <span class="t-s">&quot;cdc&quot;</span>,
   writer: webhookSink({ url: <span class="t-s">&quot;https://example.com/hook&quot;</span>, secret: process.env.HOOK_SECRET }),
-}).start();</code></pre></div></div></div>
-</div></section>
-<section class="section cap" id="schemas" aria-labelledby="schemas-h"><div class="shell">
-<div class="sec-head"><h2 id="schemas-h">Schemas on subjects</h2>
-<p class="explain">Register a JSON Schema with <code>--compat backward</code> and bind it to a subject pattern in <code>warn</code> mode, then <code>enforce</code>. A version that breaks the declared compatibility is refused with the failing pointer.</p></div>
-<div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus schema register order ./order.json --compat backward</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus schema register order ./order.json --compat backward</span>
+}).start();</code></pre></div></div></div></article>
+<article class="panel" id="schemas" aria-labelledby="schemas-h"><h3 id="schemas-h">Schemas on subjects</h3><p class="explain">Register a JSON Schema with <code>--compat backward</code> and bind it to a subject pattern in <code>warn</code> mode, then <code>enforce</code>. A version that breaks the declared compatibility is refused with the failing pointer.</p><div class="demo"><div class="frame"><div class="bar"><svg class="glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 7l4 5-4 5M12 17h7"/></svg><span class="label">$ bql bus schema register order ./order.json --compat backward</span><span class="chip">captured output</span></div><pre><code><span class="prompt-line">bql bus schema register order ./order.json --compat backward</span>
 <span class="prompt-line">bql bus schema bind <span class="t-s">'orders.&gt;'</span> order --mode warn      <span class="t-c"># then --mode enforce</span></span>
-<span class="prompt-line">bql bus schema check order ./order-v2.json            <span class="t-c"># dry-run the compat check</span></span></code></pre></div></div>
+<span class="prompt-line">bql bus schema check order ./order-v2.json            <span class="t-c"># dry-run the compat check</span></span></code></pre></div></div></article></div>
+</div>
 </div></section>
 <section class="section band" id="benchmarks" aria-labelledby="benchmarks-h"><div class="shell">
 <div class="sec-head"><h2 id="benchmarks-h">Benchmarks</h2>
 <p class="explain"><code>bun run bench</code> on an M5 Pro with SQLite 3.53.4. The driver is compared with <code>bun:sqlite</code> as a ratio; the replication legs are two servers on loopback.</p></div>
 <div class="demo"><div class="figures three"><div class="fig" data-source="db README /\| point read by primary key \| ([\d.]+ \u2013 [\d.]+x) \|/"><b>1.02 – 1.14x</b><span>point read vs bun:sqlite</span></div><div class="fig" data-source="db README /\| 100-row scan to objects \| ([\d.]+ \u2013 [\d.]+x) \|/"><b>1.17 – 1.39x</b><span>100-row scan vs bun:sqlite</span></div><div class="fig" data-source="db README /\| commit \u2192 applied on the replica \| (\d+ \u00B5s) \|/"><b>265 µs</b><span>p50 commit to replica</span></div></div></div>
-<div class="demo"><div class="table-wrap"><table><thead><tr><th scope="col">op</th><th scope="col">bql vs <code>bun:sqlite</code></th></tr></thead><tbody><tr><td>point read by primary key</td><td>1.02 – 1.14x</td></tr><tr><td>100-row scan to objects</td><td>1.17 – 1.39x</td></tr><tr><td>insert inside a transaction</td><td>0.84 – 0.95x</td></tr><tr><td>the same insert with an update hook installed</td><td>not available in <code>bun:sqlite</code></td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th scope="col">leg</th><th scope="col">p50</th><th scope="col">p90</th></tr></thead><tbody><tr><td>write on the primary over HTTP</td><td>374 µs</td><td>492 µs</td></tr><tr><td>commit → applied on the replica</td><td>265 µs</td><td>323 µs</td></tr><tr><td>write forwarded through the replica</td><td>404 µs</td><td>494 µs</td></tr><tr><td>write, <code>ack: &quot;replica&quot;</code></td><td>379 µs</td><td>442 µs</td></tr><tr><td>write, <code>ack: &quot;quorum&quot;</code></td><td>359 µs</td><td>417 µs</td></tr></tbody></table></div></div>
+<details class="more"><summary>Every operation and replication leg</summary><div class="table-wrap"><table><thead><tr><th scope="col">op</th><th scope="col">bql vs <code>bun:sqlite</code></th></tr></thead><tbody><tr><td>point read by primary key</td><td>1.02 – 1.14x</td></tr><tr><td>100-row scan to objects</td><td>1.17 – 1.39x</td></tr><tr><td>insert inside a transaction</td><td>0.84 – 0.95x</td></tr><tr><td>the same insert with an update hook installed</td><td>not available in <code>bun:sqlite</code></td></tr></tbody></table></div><div class="table-wrap"><table><thead><tr><th scope="col">leg</th><th scope="col">p50</th><th scope="col">p90</th></tr></thead><tbody><tr><td>write on the primary over HTTP</td><td>374 µs</td><td>492 µs</td></tr><tr><td>commit → applied on the replica</td><td>265 µs</td><td>323 µs</td></tr><tr><td>write forwarded through the replica</td><td>404 µs</td><td>494 µs</td></tr><tr><td>write, <code>ack: &quot;replica&quot;</code></td><td>379 µs</td><td>442 µs</td></tr><tr><td>write, <code>ack: &quot;quorum&quot;</code></td><td>359 µs</td><td>417 µs</td></tr></tbody></table></div></details>
 </div></section>
 <section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">Works with what you run</h2>
