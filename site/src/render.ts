@@ -73,6 +73,7 @@ export function resolveModel(p: Parsed = source()) {
   return {
     humans: resolveTerminal(site.install.humans.cmd, site.install.humans.where, p),
     hero: resolveDemo(site.hero, p) as Extract<ResolvedDemo, { kind: "cell" }>,
+    compare: resolveTable(site.compare.table.header, site.compare.table.where, p),
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
     capabilities: site.capabilities.map((c) => ({ cap: c as Capability, demo: resolveDemo(c.demo, p) })),
     buildToday: resolveTerminal(site.buildToday.cmd, site.buildToday.where, p),
@@ -220,6 +221,14 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .cell .run pre { padding-top: .5rem; }
 .hero-cell { max-width: 880px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; text-align: left; }
 .hero-cell .frame > pre { max-height: none; }
+
+/* comparison: rows are prose, the last column is the product */
+.compare table { font-size: .92rem; }
+.compare th:not(:first-child), .compare td:not(:first-child) { width: 27%; }
+.compare tbody th { text-align: left; font: 500 .92rem/1.5 var(--sans); color: var(--body); text-transform: none; letter-spacing: 0; padding: .7rem .8rem .7rem 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.compare td:first-of-type { font-family: var(--sans); font-size: .92rem; color: var(--body); }
+.compare td:last-child, .compare th:last-child { color: var(--ink); }
+.compare th:last-child { font-weight: 700; }
 
 /* getting started */
 .sec-intro { max-width: 46rem; }
@@ -386,6 +395,12 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .ref { grid-template-columns: minmax(0, 1fr); }
   .toc { position: static; max-height: 18rem; border: 1px solid var(--line); border-radius: .6rem; padding: .5rem 1rem 1rem; }
   .today .acts { width: 100%; }
+  .compare thead { display: none; }
+  .compare table, .compare tbody, .compare tr, .compare th, .compare td { display: block; width: auto; }
+  .compare tr { padding-block: .9rem; border-bottom: 1px solid var(--line-soft); }
+  .compare tbody th { border: 0; padding: 0 0 .4rem; color: var(--ink); font-weight: 600; }
+  .compare td, .compare td:not(:first-child) { width: auto; border: 0; padding: .2rem 0; display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .8rem; }
+  .compare td::before { content: attr(data-label); color: var(--soft); font: .75rem/1.6 var(--mono); }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
@@ -553,6 +568,16 @@ function demoHtml(d: ResolvedDemo): string {
   }
 }
 
+/** The comparison as a table that stacks into labelled rows on a phone instead of scrolling. */
+function compareTable(t: Table): string {
+  const label = (c: string) => esc(c.replace(/`/g, ""))
+  const th = t.header.map((c) => `<th scope="col">${inline(c)}</th>`).join("")
+  const tr = t.rows
+    .map((r) => `<tr>${r.map((c, i) => (i === 0 ? `<th scope="row">${inline(c)}</th>` : `<td data-label="${label(t.header[i]!)}"><span>${inline(c)}</span></td>`)).join("")}</tr>`)
+    .join("")
+  return `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`
+}
+
 function cellHtml(d: Extract<ResolvedDemo, { kind: "cell" }>): string {
   return `<div class="frame cell"><div class="bar"><span class="dots"><i></i><i></i><i></i></span><span class="label">${esc(d.label)}</span>${copyBtn(d.code.code, d.label)}</div><pre><code>${highlight(d.code.code, d.code.lang)}</code></pre>
 <div class="run"><div class="run-bar">${glyph("terminal", 13)}<span>Output</span></div><pre><code>${runLines(d.run.code)}</code></pre></div></div>`
@@ -643,6 +668,11 @@ ${productMark(44)}
 <div class="principles">${site.why.points.map((p) => `<div><h3>${esc(p.title)}</h3><p>${inline(p.body)}</p></div>`).join("")}</div>
 </div></section>`
 
+  const compare = `<section class="section band" id="compare" aria-labelledby="compare-h"><div class="shell">
+<div class="sec-intro"><h2 id="compare-h">${esc(site.compare.title)}</h2><p class="explain">${inline(site.compare.body)}</p></div>
+<div class="demo compare">${compareTable(m.compare)}</div>
+</div></section>`
+
   const intro = (c: Chapter) => {
     const ch = site.chapters[c]
     return `<div class="sec-intro"><h2 id="${ch.id}-h">${esc(ch.title)}</h2><p class="explain">${inline(ch.body)} <a href="${esc(ch.href)}">Reference</a>.</p></div>`
@@ -650,7 +680,7 @@ ${productMark(44)}
   const caps = (c: Chapter) => m.capabilities.filter((x) => x.cap.chapter === c)
 
   // Getting started is a procedure, so its steps are numbered and stay in order.
-  const start = `<section class="section band" id="start" aria-labelledby="start-h"><div class="shell">
+  const start = `<section class="section" id="start" aria-labelledby="start-h"><div class="shell">
 ${intro("start")}
 <ol class="steps">${caps("start")
     .map(({ cap, demo }, i) => `<li class="step" id="${cap.id}" aria-labelledby="${cap.id}-h"><div class="step-text"><span class="step-n" aria-hidden="true">${i + 1}</span><h3 id="${cap.id}-h">${esc(cap.title)}</h3><p class="explain">${inline(cap.body, linkContext())}</p></div><div class="step-demo">${demoHtml(demo)}</div></li>`)
@@ -673,7 +703,7 @@ ${intro(c)}
   }
 
   const tabInputs = m.tabs.map((_, i) => `<input type="radio" name="tab" id="tab-${i}"${i === 0 ? " checked" : ""}>`).join("")
-  const showcase = `<section class="section" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
+  const showcase = `<section class="section band" id="showcase" aria-labelledby="showcase-h"><div class="shell showcase">
 <div>
 <h2 id="showcase-h">${esc(site.showcase.title)}</h2>
 <p class="explain">${inline(site.showcase.body)}</p>
@@ -693,18 +723,18 @@ ${m.tabs
 </div>
 </div></section>`
 
-  const eco = `<section class="section band eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
 <p class="explain">${inline(site.ecosystem.lede)}</p>
 <div class="marks">${site.ecosystem.marks.map((k) => `<a href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`).join("")}</div>
 </div></section>`
 
-  const today = `<section class="section" id="today" aria-labelledby="today-h"><div class="shell today">
+  const today = `<section class="section band" id="today" aria-labelledby="today-h"><div class="shell today">
 <h2 id="today-h">${esc(site.buildToday.title)}</h2>
 <div class="acts"><a class="control control--solid round" href="/reference">${glyph("book", 15)}Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.buildToday.cmd)}</code>${copyBtn(site.buildToday.cmd, "server command")}</span></div>
 </div></section>`
 
-  const guides = `<section class="section band" id="guides" aria-labelledby="guides-h"><div class="shell">
+  const guides = `<section class="section" id="guides" aria-labelledby="guides-h"><div class="shell">
 <div class="sec-head"><h2 id="guides-h">Guides</h2>
 <p class="explain">Design notes for the parts worth understanding before you run them in production.</p></div>
 <div class="demo guides">${m.guides
@@ -716,10 +746,11 @@ ${m.tabs
 <main id="main">
 ${hero}
 ${why}
+${compare}
 ${start}
 ${showcase}
-${explorer("db", " band")}
-${explorer("bus")}
+${explorer("db")}
+${explorer("bus", " band")}
 ${eco}
 ${today}
 ${guides}
@@ -810,6 +841,12 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     site.why.body,
     "",
     ...site.why.points.flatMap((p) => [`### ${p.title}`, "", p.body, ""]),
+    `## ${site.compare.title}`,
+    "",
+    site.compare.body,
+    "",
+    tableMd(m.compare),
+    "",
     ...chapter("start"),
     `## ${site.showcase.title}`,
     "",

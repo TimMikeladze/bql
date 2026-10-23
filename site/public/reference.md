@@ -34,6 +34,26 @@ no way to subscribe to a query. bql.sh adds those and leaves every database a SQ
 - `bql.sh/bus` is a message bus stored in a bql.sh database: subjects, consumer groups, leases,
   retries, a dead-letter subject and cron schedules. The outbox publishes committed row changes to it.
 
+## How it compares
+
+| | SQLite (`bun:sqlite`) | SQLite + Litestream | bql.sh |
+| --- | --- | --- | --- |
+| Where it runs | In your process | In your process, plus a `litestream` sidecar | In your process (`Bql.open()`) or as a server (`bql serve`) |
+| Clients over the network | No | No | HTTP, WebSockets, libsql's Hrana |
+| Continuous backup to S3 | No | Yes | Yes |
+| Restore to a txid or timestamp | No | Yes | Yes |
+| Read replicas | No | Read-only VFS over the bucket (experimental) | Live replicas over a WebSocket that forward writes |
+| Failover | No | No | `bql promote`, or automatic with `[cluster]` |
+| Live queries and a change feed | No | No | `db.live` and `/changes` |
+| Branches | Copy the file | Restore into a new file | `bql db branch`, a reflink copy |
+| Access control | File permissions | File permissions | Tokens scoped to databases, tables and `ro` or `rw` |
+| Message bus | No | No | `bql.sh/bus` |
+
+Plain SQLite is enough when one process owns the file and nothing else needs to reach it.
+[Litestream](https://litestream.io) adds continuous backup to that setup without changing your code.
+bql.sh is for when other processes, browsers or machines need the database, or you want replicas and
+live queries; backup is one of the things the server does.
+
 ## Getting started
 
 Bun 1.4 or newer, and a C compiler once. Install the package, then build the libsqlite3 the driver

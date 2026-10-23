@@ -214,3 +214,9 @@ test("authored copy has no em dashes", () => {
   for (const g of guides) strings.push(g.title, g.body)
   for (const s of strings) expect(s).not.toContain("—")
 })
+
+test("the comparison table comes from the README and names all three options", () => {
+  expect(m.compare.header.slice(1)).toEqual(["SQLite (`bun:sqlite`)", "SQLite + Litestream", "bql.sh"])
+  const sec = /<section[^>]*id="compare"[\s\S]*?<\/section>/.exec(index)![0]
+  for (const row of m.compare.rows) expect(sec).toContain(esc(row[0]!))
+})

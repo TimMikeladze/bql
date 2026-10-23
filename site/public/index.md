@@ -49,6 +49,23 @@ Replication ships the pages SQLite wrote, not statements, so triggers, FTS5, JSO
 
 One process keeps up to `[data] maxOpen` databases open, 1024 by default, and closes idle ones. A fork is a reflink copy, so a database per customer or pull request costs a directory.
 
+## How it compares
+
+Plain SQLite is enough when one process owns the file. [Litestream](https://litestream.io) adds continuous backup to that setup without changing your code. bql.sh is for when other processes, browsers or machines need the database, or you want replicas and live queries.
+
+|  | SQLite (`bun:sqlite`) | SQLite + Litestream | bql.sh |
+| --- | --- | --- | --- |
+| Where it runs | In your process | In your process, plus a `litestream` sidecar | In your process (`Bql.open()`) or as a server (`bql serve`) |
+| Clients over the network | No | No | HTTP, WebSockets, libsql's Hrana |
+| Continuous backup to S3 | No | Yes | Yes |
+| Restore to a txid or timestamp | No | Yes | Yes |
+| Read replicas | No | Read-only VFS over the bucket (experimental) | Live replicas over a WebSocket that forward writes |
+| Failover | No | No | `bql promote`, or automatic with `[cluster]` |
+| Live queries and a change feed | No | No | `db.live` and `/changes` |
+| Branches | Copy the file | Restore into a new file | `bql db branch`, a reflink copy |
+| Access control | File permissions | File permissions | Tokens scoped to databases, tables and `ro` or `rw` |
+| Message bus | No | No | `bql.sh/bus` |
+
 ## Getting started
 
 ### Install

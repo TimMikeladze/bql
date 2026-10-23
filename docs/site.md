@@ -14,6 +14,10 @@ The page was rebuilt around what a new reader has to do, in the order they do it
   captured live-query diffs.
 - **Why bql.sh.** SQLite is a library with no server; bql.sh adds one. Three columns: still SQLite,
   in process or served, as many databases as you need. Each names a command or option.
+- **How it compares.** bql.sh against plain SQLite (`bun:sqlite`) and SQLite + Litestream, as a
+  table resolved from the root README's *How it compares*. Litestream facts checked against
+  litestream.io on 2026-10-23 (v0.5: S3 streaming, `restore -txid`/`-timestamp`, experimental
+  read-only VFS replicas, sidecar process). On a phone the table stacks into labelled rows.
 - **Getting started** is its own chapter, in procedure order: install and build the engine, run it
   in your process, start a server, mint a browser token, deploy. Every step's artefact is a run from
   the root README's Getting started, made against the published package in an empty directory.

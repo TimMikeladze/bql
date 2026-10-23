@@ -87,6 +87,12 @@ export const site = {
     ],
   },
 
+  compare: {
+    title: "How it compares",
+    body: "Plain SQLite is enough when one process owns the file. [Litestream](https://litestream.io) adds continuous backup to that setup without changing your code. bql.sh is for when other processes, browsers or machines need the database, or you want replicas and live queries.",
+    table: { header: "SQLite + Litestream", where: root },
+  },
+
   showcase: {
     title: "The same db, four ways in",
     body: "`createClient()` over HTTP, `Bql.open()` in your process, `@libsql/client` over Hrana, or the `bun:ffi` driver on its own. The first two hand back the same `db`, so code moves between them unchanged.",
@@ -356,6 +362,7 @@ export const site = {
 
   nav: [
     { label: "Getting started", href: "/#start" },
+    { label: "Compare", href: "/#compare" },
     { label: "Database", href: "/#database" },
     { label: "Bus", href: "/#bus" },
     { label: "Reference", href: "/reference" },
