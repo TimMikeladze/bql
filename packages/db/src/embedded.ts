@@ -38,6 +38,7 @@ import {
   Query,
   fromArgs,
   fromTemplate,
+  liveRequest,
   toResult,
   type QueryArgs,
   type Result,
@@ -238,8 +239,8 @@ class LocalDb implements EmbeddedDb {
     this.sql = ((strings, ...values) =>
       new Query(this.#runner(), fromTemplate(strings, values), this.#intMode)) as SqlTag
     this.stmt = ((strings, ...values) => fromTemplate(strings, values)) as StmtTag
-    this.live = ((strings, ...values) => {
-      const request = fromTemplate(strings, values)
+    this.live = ((first: TemplateStringsArray | string, ...rest: unknown[]) => {
+      const request = liveRequest(first, rest)
       return new LiveQuery((sink, options) => this.#startLive(sink, request, options.key))
     }) as LiveTag
     this.sync = this.#syncSurface()

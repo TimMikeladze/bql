@@ -211,6 +211,23 @@ describe("live", () => {
     }
   })
 
+  test("live takes a SQL string with named arguments, over the socket and over SSE", async () => {
+    const sse = createClient({ url: fixture.server.url, token: fixture.server.adminKey, WebSocket: null })
+    const db = fixture.client.db("acme")
+    await db.sql`create table live_args(id integer primary key, v text)`.run()
+    await db.sql`insert into live_args(v) values ('a'), ('b')`.run()
+    try {
+      for (const target of [db, sse.db("acme")]) {
+        const live = target.live("select v from live_args where v = :v", { v: "b" })
+        const rows = await new Promise<unknown[]>((resolve) => live.on("rows", (event) => resolve(event.rows)))
+        live.close()
+        expect(rows).toEqual([{ v: "b" }])
+      }
+    } finally {
+      sse.close()
+    }
+  })
+
   test("key() after the subscription started is refused", async () => {
     const db = fixture.client.db("acme")
     const live = db.live`select 1 as one`

@@ -78,6 +78,11 @@ export function fromTemplate(
   return args.length > 0 ? { sql, args } : { sql }
 }
 
+/** A live query's statement, from either form the `live` tag accepts. */
+export function liveRequest(first: TemplateStringsArray | string, rest: readonly unknown[]): StatementRequest {
+  return typeof first === "string" ? fromArgs(first, rest[0] as QueryArgs | undefined) : fromTemplate(first, rest)
+}
+
 /** Builds `{sql, args}` from a string and whatever arguments came with it. */
 export function fromArgs(sql: string, args?: QueryArgs): StatementRequest {
   const encoded = encodeAnyArgs(args as readonly unknown[] | Record<string, unknown> | undefined)

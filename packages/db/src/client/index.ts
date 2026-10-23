@@ -51,6 +51,7 @@ import {
   Query,
   fromArgs,
   fromTemplate,
+  liveRequest,
   toResult,
   type QueryArgs,
   type Result,
@@ -89,8 +90,10 @@ export interface StmtTag {
   (strings: TemplateStringsArray, ...values: unknown[]): StatementRequest
 }
 
+/** The tag of design §9.1, or a SQL string with its arguments, the way `execute` takes them. */
 export interface LiveTag {
   <T = JsRow>(strings: TemplateStringsArray, ...values: unknown[]): LiveQuery<T>
+  <T = JsRow>(sql: string, args?: QueryArgs): LiveQuery<T>
 }
 
 /** Options a single statement may carry (design §6, "common request options"). */
@@ -217,8 +220,8 @@ class RemoteDb implements Db {
     this.sql = ((strings, ...values) =>
       new Query(this.#httpRunner(), fromTemplate(strings, values), core.options.intMode)) as SqlTag
     this.stmt = ((strings, ...values) => fromTemplate(strings, values)) as StmtTag
-    this.live = ((strings, ...values) => {
-      const request = fromTemplate(strings, values)
+    this.live = ((first: TemplateStringsArray | string, ...rest: unknown[]) => {
+      const request = liveRequest(first, rest)
       return new LiveQuery((sink, options) => this.#startLive(sink, request, options.key))
     }) as LiveTag
   }
