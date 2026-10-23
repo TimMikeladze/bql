@@ -214,13 +214,15 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .dots { display: flex; gap: .35rem; flex: none; }
 .dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--raise); border: 1px solid var(--line); }
 .chip { margin-left: auto; flex: none; font: .7rem/1 var(--mono); color: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .5rem; }
-.frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.6 var(--mono); color: var(--body); overflow-x: auto; }
+.frame pre { margin: 0; padding: 1rem 1.1rem; font: .8rem/1.6 var(--mono); color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
 .t-k { color: var(--t-k); } .t-s { color: var(--t-s); } .t-c { color: var(--t-c); } .t-n { color: var(--t-n); }
 .prompt-line::before { content: "$ "; color: var(--soft); }
 .out-line { color: var(--ink); }
 
 .split { max-width: 1100px; margin: clamp(3rem, 6vw, 4.5rem) auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; text-align: left; }
-.split .frame pre { height: 17.5rem; overflow: auto; white-space: pre; }
+.split { align-items: stretch; }
+.split .frame { display: flex; flex-direction: column; }
+.split .frame pre { flex: 1; }
 
 /* sections */
 .section { padding-block: clamp(3.5rem, 7vw, 6rem); scroll-margin-top: 4.5rem; }
@@ -232,7 +234,6 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .sec-head .explain { margin-top: 0; max-width: 60ch; }
 .cap { padding-block: clamp(2.5rem, 5vw, 3.75rem); }
 .cap + .cap { border-top: 1px solid var(--line-soft); }
-.cap .frame pre { max-height: 28rem; }
 .chapter { background: var(--band); border-block: 1px solid var(--line); padding-block: 1.1rem; scroll-margin-top: 3.75rem; }
 .chapter .shell { display: flex; align-items: baseline; gap: .9rem; flex-wrap: wrap; }
 .chapter code { background: none; padding: 0; font: 600 1.15rem/1.2 var(--mono); letter-spacing: -.02em; }
@@ -283,13 +284,13 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .tabrow label { cursor: pointer; font-size: .85rem; color: var(--soft); padding: .35rem .75rem; border-radius: .5rem; transition: color .14s ease; }
 .tabpanel { display: none; }
 .tabpanel .bar .label { margin-inline: auto; }
-.tabpanel pre { max-height: 22rem; overflow: auto; white-space: pre; }
+
 .pager { display: flex; gap: .4rem; justify-content: center; margin-top: .8rem; }
 .pager i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
 
 .variants { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
 .variants figure { margin: 0; min-width: 0; }
-.variants pre { height: 15rem; overflow: auto; }
+
 .variants figcaption { margin-top: .5rem; font: .75rem/1.4 var(--mono); color: var(--soft); }
 
 .table-wrap { overflow-x: auto; }
@@ -367,8 +368,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
   .split, .principles, .start, .pair { grid-template-columns: minmax(0, 1fr); }
-  .split .frame pre { height: 16rem; }
-  .split .frame:first-child pre { height: auto; }
   .figures.three { grid-template-columns: minmax(0, 1fr); }
   .fig b { font-size: 3rem; }
   .cols { grid-template-columns: repeat(2, 1fr); }
