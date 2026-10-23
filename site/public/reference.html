@@ -314,7 +314,7 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 #tab-1:checked ~ .tabrow label[for="tab-1"]{background:var(--raise);color:var(--ink)}#tab-1:checked ~ .p-1{display:block}#tab-1:focus-visible ~ .tabrow label[for="tab-1"]{outline:2px solid var(--accent)}#tab-1:checked ~ .pager i:nth-child(2){background:var(--ink)}
 #tab-2:checked ~ .tabrow label[for="tab-2"]{background:var(--raise);color:var(--ink)}#tab-2:checked ~ .p-2{display:block}#tab-2:focus-visible ~ .tabrow label[for="tab-2"]{outline:2px solid var(--accent)}#tab-2:checked ~ .pager i:nth-child(3){background:var(--ink)}
 #tab-3:checked ~ .tabrow label[for="tab-3"]{background:var(--raise);color:var(--ink)}#tab-3:checked ~ .p-3{display:block}#tab-3:focus-visible ~ .tabrow label[for="tab-3"]{outline:2px solid var(--accent)}#tab-3:checked ~ .pager i:nth-child(4){background:var(--ink)}</style>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"bql.sh","description":"bql.sh serves thousands of SQLite databases from one Bun process, with replicas, S3 backup, realtime and search, beside a durable message bus.","url":"https://bql.sh/","codeRepository":"https://github.com/TimMikeladze/bql","applicationCategory":"DeveloperApplication","programmingLanguage":"TypeScript","runtimePlatform":"Bun","softwareVersion":"0.4.0","license":"https://opensource.org/licenses/MIT","author":{"@type":"Person","name":"linesofcode","url":"https://x.com/linesofcode"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"bql.sh","description":"bql.sh serves thousands of SQLite databases from one Bun process, with replicas, S3 backup, realtime and search, beside a durable message bus.","url":"https://bql.sh/","codeRepository":"https://github.com/TimMikeladze/bql","applicationCategory":"DeveloperApplication","programmingLanguage":"TypeScript","runtimePlatform":"Bun","softwareVersion":"0.5.0","license":"https://opensource.org/licenses/MIT","author":{"@type":"Person","name":"linesofcode","url":"https://x.com/linesofcode"},"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -998,7 +998,9 @@ bun test              <span class="t-c"># 1496 across 125 files; BQL_WAL_NATIVE=
 bun run typecheck
 bun run bytes         <span class="t-c"># no raw control bytes in source</span>
 bun run routes:check  <span class="t-c"># docs/api.md covers every route</span>
-bun run bench         <span class="t-c"># every benchmark, then the design §10 table (--quick for fewer rounds)</span></code></pre>
+bun run bench         <span class="t-c"># every benchmark three times, then the design §10 table (--quick: one round)</span>
+bun run bench --save  <span class="t-c"># also write bench/results/&lt;date&gt;-&lt;sha&gt;.json</span>
+bun run bench:compare bench/results/a.json bench/results/b.json  <span class="t-c"># what moved, and what is noise</span></code></pre>
 <p><code>test/e2e/scenario.test.ts</code> is the single-node story end to end; <code>test/e2e/phase1.test.ts</code> is the cluster one — a primary, two replicas, a bucket and a <code>@libsql/client</code> over real sockets. CI runs all of it on <code>macos-latest</code> (arm64), <code>ubuntu-latest</code> (x64) and <code>windows-latest</code> (x64) for every push and pull request to <code>main</code>. All three gate; none is advisory.</p></div>
 <div class="doc" data-doc="bus"><h1 id="bus">bql.sh/bus</h1>
 <p>A durable message bus for agents and ordinary work. Bun, SQLite, no runtime dependencies.</p>

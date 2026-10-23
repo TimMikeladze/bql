@@ -1,6 +1,6 @@
 {
   "name": "bql.sh",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "SQLite as a multi-tenant database server for Bun \u2014 WAL shipping, hook-driven realtime, an FFI driver \u2014 and the durable bus that runs work against it.",
   "license": "MIT",
