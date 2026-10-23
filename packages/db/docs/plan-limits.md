@@ -45,14 +45,14 @@ misbehaving.
 | --- | --- | --- |
 | `[limits] maxResultBytes` | `67108864` (64 MB) | bytes accumulated for one result, checked while stepping |
 | `[limits] maxQueuedWrites` | `256` | `writeQueued` entries waiting on one tenant |
-| `[limits] maxQueuedWriteBytes` | `8388608` (8 MB) | SQL + bound args waiting on one tenant |
+| `[limits] maxQueuedWriteBytes` | `67108864` (64 MB) | SQL + bound args waiting on one tenant |
 | `[limits] queueWaitMs` | `5000` | how long a queued write waits before it is refused |
 | `[limits] maxPinnedPerPrincipal` | `64` | databases one principal can hold open with subscriptions |
 | `[data] maxOpen` | `1024`, **now node-wide** | open tenants across every worker, not per worker |
 | `[durability] fsyncSweep` | `"shared"` | `"shared"` or `"per-db"` (the current behaviour, the back-out) |
 | `[storage] maxConcurrentUploads` | `8` | in-flight S3 requests across every shipper on a thread |
 
-`maxRows` keeps its meaning and its default (`10000`). What changes is *when* it is enforced (L1).
+`maxRows` keeps its meaning; its default is `100000` (it was `10000` until `maxResultBytes` became the memory bound). What changes is *when* it is enforced (L1).
 
 ## New error codes
 

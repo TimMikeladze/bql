@@ -87,7 +87,7 @@ Accepted as body fields on every statement-bearing request, and two of them as h
 | option | header | values | default |
 |---|---|---|---|
 | `rows` | — | `"array"`, `"object"` | `"array"` |
-| `maxRows` | — | positive integer; the request fails at the row that would cross it | `[limits] maxRows`, 10000 |
+| `maxRows` | — | positive integer; the request fails at the row that would cross it | `[limits] maxRows`, 100000 |
 | `timeoutMs` | — | positive integer, clamped to the configured limit | `[limits] queryTimeoutMs` |
 | `ack` | `BQL-Ack` | `"local"`, `"fsync"`, `"replica"`, `"quorum"` | `[durability] defaultAck`, `fsync` |
 | `minTxid` | `BQL-Min-Txid` | integer; the request waits up to 2 s, then `425` | none |
@@ -2176,15 +2176,15 @@ the canonical one wins when both are set.
 | `[limits] queryTimeoutMs` | `10000` | `BQL_LIMITS_QUERY_TIMEOUT_MS` | `BQL_QUERY_TIMEOUT_MS` |
 | `[limits] writeTimeoutMs` | `30000` | `BQL_LIMITS_WRITE_TIMEOUT_MS` | `BQL_WRITE_TIMEOUT_MS` |
 | `[limits] txIdleTimeoutMs` | `5000` | `BQL_LIMITS_TX_IDLE_TIMEOUT_MS` | `BQL_TX_IDLE_TIMEOUT_MS` |
-| `[limits] maxRows` | `10000` | `BQL_LIMITS_MAX_ROWS` | `BQL_MAX_ROWS` |
+| `[limits] maxRows` | `100000` | `BQL_LIMITS_MAX_ROWS` | `BQL_MAX_ROWS` |
 | `[limits] maxResultBytes` | `67108864` | `BQL_LIMITS_MAX_RESULT_BYTES` | `BQL_MAX_RESULT_BYTES` |
 | `[limits] maxOpenTx` | `1` | `BQL_LIMITS_MAX_OPEN_TX` | `BQL_MAX_OPEN_TX` |
 | `[limits] txWaitMs` | `5000` | `BQL_LIMITS_TX_WAIT_MS` | `BQL_TX_WAIT_MS` |
-| `[limits] maxBodyBytes` | `8388608` | `BQL_LIMITS_MAX_BODY_BYTES` | `BQL_MAX_BODY_BYTES` |
+| `[limits] maxBodyBytes` | `33554432` | `BQL_LIMITS_MAX_BODY_BYTES` | `BQL_MAX_BODY_BYTES` |
 | `[limits] maxImportBytes` | `1073741824` | `BQL_LIMITS_MAX_IMPORT_BYTES` | `BQL_MAX_IMPORT_BYTES` |
 | `[limits] groupCommit` | `true` | `BQL_LIMITS_GROUP_COMMIT` | — |
 | `[limits] maxQueuedWrites` | `256` | `BQL_LIMITS_MAX_QUEUED_WRITES` | — |
-| `[limits] maxQueuedWriteBytes` | `8388608` | `BQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
+| `[limits] maxQueuedWriteBytes` | `67108864` | `BQL_LIMITS_MAX_QUEUED_WRITE_BYTES` | — |
 | `[limits] queueWaitMs` | `5000` | `BQL_LIMITS_QUEUE_WAIT_MS` | — |
 | `[limits] maxPinnedPerPrincipal` | `64` | `BQL_LIMITS_MAX_PINNED_PER_PRINCIPAL` | — |
 | `[durability] fsyncSweep` | `"per-db"` | `BQL_DURABILITY_FSYNC_SWEEP` | — |

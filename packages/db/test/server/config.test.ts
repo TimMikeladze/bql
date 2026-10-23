@@ -21,7 +21,7 @@ describe("loadConfig", () => {
     expect(config.limits.queryTimeoutMs).toBe(10_000)
     expect(config.limits.writeTimeoutMs).toBe(30_000)
     expect(config.limits.txIdleTimeoutMs).toBe(5_000)
-    expect(config.limits.maxRows).toBe(10_000)
+    expect(config.limits.maxRows).toBe(100_000)
     expect(config.realtime.ringBytes).toBe(10_000_000)
     expect(config.realtime.maxLiveQueries).toBe(1000)
     expect(config.realtime.maxRowsPerLive).toBe(1000)

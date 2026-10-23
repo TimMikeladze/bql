@@ -627,16 +627,19 @@ export const DEFAULT_CONFIG: ServerConfig = {
     queryTimeoutMs: 10_000,
     writeTimeoutMs: 30_000,
     txIdleTimeoutMs: 5_000,
-    maxRows: 10_000,
+    // maxResultBytes is the memory bound, enforced while a result is built; the row cap only stops
+    // a runaway shape, so it sits well above what a legitimate scan returns.
+    maxRows: 100_000,
     maxResultBytes: 67_108_864,
     maxOpenTx: 1,
     txWaitMs: 5000,
-    maxBodyBytes: 8 * 1024 * 1024,
+    maxBodyBytes: 32 * 1024 * 1024,
     maxImportBytes: 1024 * 1024 * 1024,
     groupCommit: true,
     groupCommitMax: 64,
     maxQueuedWrites: 256,
-    maxQueuedWriteBytes: 8 * 1024 * 1024,
+    // Two max-size bodies, so one large write never fills a tenant's queue on its own.
+    maxQueuedWriteBytes: 64 * 1024 * 1024,
     queueWaitMs: 5000,
     maxPinnedPerPrincipal: 64,
     maxReadTx: 16,
