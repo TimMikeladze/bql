@@ -17,7 +17,7 @@ The page was rebuilt around what a new reader has to do, in the order they do it
 - **Getting started** is its own chapter, in procedure order: install and build the engine, run it
   in your process, start a server, mint a browser token, deploy. Every step's artefact is a run from
   the root README's Getting started, made against the published package in an empty directory.
-- **The database**, **the bus**, then **benchmarks**, the ecosystem band, build today, guides.
+- **The database**, **the bus**, then the ecosystem band, build today, guides. No benchmarks section.
 - The page is for people using bql.sh. Nothing about how the site is built, what was left out or
   what is missing appears on it: no figures row of repo counts, no limits section, no build notes.
 - Copy rules: one fact per sentence, the option in inline code, no em dashes, no slogans, no
@@ -33,7 +33,6 @@ The page was rebuilt around what a new reader has to do, in the order they do it
   target panels by id and CSS shows the targeted one (the first by default), so every feature is
   deep-linkable with no script. Without `:has()` or without CSS every panel shows in order. On a
   phone the list becomes a row of chips above the panel.
-- **Benchmarks** show three figures; the full tables sit in a `<details>`.
 - Sections alternate paper and band backgrounds, so no two banded sections touch.
 
 ## What ships
@@ -45,7 +44,7 @@ The page was rebuilt around what a new reader has to do, in the order they do it
 ## How it stays honest
 
 - Examples live in the READMEs. `terminal(cmd)` and `snippet(line)` resolve against their fenced
-  blocks at build time; zero or two matches throws. Measured figures are regexes over those blocks.
+  blocks at build time; zero or two matches throws.
 - A README run block's `# ` lines are the captured output and render as output.
 - Origin `https://bql.sh`; one `url(path)` helper derives every absolute URL, with clean URLs.
 - Self-contained: one inline stylesheet, system fonts, brand marks inlined from `simple-icons`

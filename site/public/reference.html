@@ -189,10 +189,6 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .demo { margin-top: 1.6rem; }
 .sec-head { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: .6rem 2.5rem; align-items: baseline; }
 .sec-head .explain { margin-top: 0; max-width: 60ch; }
-details.more { margin-top: 2rem; }
-details.more summary { cursor: pointer; color: var(--soft); font-size: .9rem; }
-details.more summary:hover { color: var(--ink); }
-details.more[open] summary { margin-bottom: 1.2rem; }
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
 .pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
 .pair > .frame { display: flex; flex-direction: column; }
@@ -200,12 +196,6 @@ details.more[open] summary { margin-bottom: 1.2rem; }
 .centre { text-align: center; }
 .centre .explain, .centre h2 { margin-inline: auto; }
 
-.figures { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2rem; }
-.figures.three { grid-template-columns: repeat(3, 1fr); }
-.fig b { display: block; font-size: clamp(3rem, 7vw, 5.5rem); font-weight: 500; letter-spacing: -.06em; line-height: 1; color: var(--ink); white-space: nowrap; }
-.figures.three .fig b { font-size: clamp(2.2rem, 4.6vw, 3.6rem); }
-.fig span { display: block; margin-top: .6rem; font-size: 1.05rem; color: var(--body); }
-.fig small { display: block; font-size: .75rem; color: var(--soft); font-family: var(--mono); margin-top: .2rem; }
 
 .eco h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.04em; }
 .eco .explain { color: var(--soft); max-width: 60ch; }
@@ -219,7 +209,7 @@ details.more[open] summary { margin-bottom: 1.2rem; }
 .principles h3 { font-size: 1.25rem; font-weight: 500; }
 .principles p { margin-top: .5rem; color: var(--soft); max-width: 34ch; }
 
-.showcase > *, .guides > *, .principles > *, .figures > * { min-width: 0; }
+.showcase > *, .guides > *, .principles > * { min-width: 0; }
 .showcase { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3rem; align-items: start; }
 .showcase h2 { font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.03em; }
 .control { display: inline-flex; align-items: center; gap: .5rem; padding: .62rem .85rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--raise); color: var(--ink); font: 500 .9rem/1.15 var(--sans); text-decoration: none; transition: background .14s ease, border-color .14s ease; }
@@ -309,7 +299,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 .prose pre.code { margin: 0 0 1.2rem; padding: 1rem 1.1rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--band); font: .8rem/1.6 var(--mono); overflow-x: auto; }
 
 @media (max-width: 1000px) {
-  .figures { grid-template-columns: repeat(2, 1fr); }
   .cols { grid-template-columns: repeat(3, 1fr); }
   .showcase { grid-template-columns: minmax(0, 1fr); }
   .sec-head { grid-template-columns: minmax(0, 1fr); }
@@ -325,8 +314,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
   .principles, .pair { grid-template-columns: minmax(0, 1fr); }
-  .figures.three { grid-template-columns: minmax(0, 1fr); }
-  .fig b { font-size: 3rem; }
   .cols { grid-template-columns: repeat(2, 1fr); }
   .ref { grid-template-columns: minmax(0, 1fr); }
   .toc { position: static; max-height: 18rem; border: 1px solid var(--line); border-radius: .6rem; padding: .5rem 1rem 1rem; }

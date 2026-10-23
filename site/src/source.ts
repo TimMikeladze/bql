@@ -157,16 +157,6 @@ export function resolveTable(headerCell: string, w: Where, p: Parsed = source())
   )
 }
 
-/** A figure read out of one doc by regex; it must match exactly once. */
-export function resolveFigure(re: RegExp, doc: DocId, p: Parsed = source()): string {
-  const text = p.docs.find((d) => d.id === doc)!.text
-  const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g")
-  const all = [...text.matchAll(g)]
-  const m = only(all, `figure ${re} in ${doc}`)
-  if (m[1] === undefined) throw new Error(`figure ${re} has no capture group`)
-  return m[1]
-}
-
 /** The one published version: `bql.sh` ships both halves, so there is one number to state. */
 export function version(root = ROOT): string {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version as string

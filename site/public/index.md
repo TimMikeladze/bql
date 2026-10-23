@@ -562,25 +562,6 @@ bql bus schema bind 'orders.>' order --mode warn      # then --mode enforce
 bql bus schema check order ./order-v2.json            # dry-run the compat check
 ```
 
-## Benchmarks
-
-`bun run bench` on an M5 Pro with SQLite 3.53.4. The driver is compared with `bun:sqlite` as a ratio; the replication legs are two servers on loopback.
-
-| op | bql vs `bun:sqlite` |
-| --- | --- |
-| point read by primary key | 1.02 – 1.14x |
-| 100-row scan to objects | 1.17 – 1.39x |
-| insert inside a transaction | 0.84 – 0.95x |
-| the same insert with an update hook installed | not available in `bun:sqlite` |
-
-| leg | p50 | p90 |
-| --- | --- | --- |
-| write on the primary over HTTP | 374 µs | 492 µs |
-| commit → applied on the replica | 265 µs | 323 µs |
-| write forwarded through the replica | 404 µs | 494 µs |
-| write, `ack: "replica"` | 379 µs | 442 µs |
-| write, `ack: "quorum"` | 359 µs | 417 µs |
-
 ## Works with what you run
 
 Drizzle, Kysely and `@libsql/client` connect over Hrana. Backups go to S3, R2 or Tigris. Sinks write to webhooks and ClickHouse, and `bql deploy` targets Fly, Vercel and Cloudflare.

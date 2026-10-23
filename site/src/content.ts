@@ -2,7 +2,7 @@
 // table. No markup; render.ts owns that. Examples are references into the READMEs (see source.ts),
 // never text written here.
 
-import type { DocId, Where } from "./source.ts"
+import type { Where } from "./source.ts"
 
 export type IconName =
   | "github" | "x" | "linkedin" | "discord"
@@ -32,11 +32,6 @@ export interface Capability {
   /** Inline Markdown, 1 to 3 sentences, at least one `code`. */
   body: string
   demo: Demo
-}
-
-export interface Figure {
-  label: string
-  from: { kind: "regex"; doc: DocId; re: RegExp }
 }
 
 export interface Link {
@@ -322,20 +317,6 @@ export const site = {
       demo: { kind: "terminal", cmd: "bql bus schema register order ./order.json --compat backward", where: bus },
     },
   ] satisfies Capability[],
-
-  measured: {
-    title: "Benchmarks",
-    body: "`bun run bench` on an M5 Pro with SQLite 3.53.4. The driver is compared with `bun:sqlite` as a ratio; the replication legs are two servers on loopback.",
-    figures: [
-      { label: "point read vs bun:sqlite", from: { kind: "regex", doc: "db", re: /\| point read by primary key \| ([\d.]+ – [\d.]+x) \|/ } },
-      { label: "100-row scan vs bun:sqlite", from: { kind: "regex", doc: "db", re: /\| 100-row scan to objects \| ([\d.]+ – [\d.]+x) \|/ } },
-      { label: "p50 commit to replica", from: { kind: "regex", doc: "db", re: /\| commit → applied on the replica \| (\d+ µs) \|/ } },
-    ] satisfies Figure[],
-    tables: [
-      { header: "bql vs `bun:sqlite`", where: db },
-      { header: "leg", where: db },
-    ],
-  },
 
   ecosystem: {
     title: "Works with what you run",

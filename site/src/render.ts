@@ -2,11 +2,11 @@
 // the reference page, their Markdown twins and the agent/SEO artefacts. No copy lives here —
 // markup, styles, icons and the two small scripts do.
 
-import { site, type Capability, type Chapter, type Demo, type Figure, type Frame, type IconName } from "./content.ts"
+import { site, type Capability, type Chapter, type Demo, type Frame, type IconName } from "./content.ts"
 import { brand, faviconSvg, glyph, productMark } from "./icons.ts"
 import { esc, highlight, inline, renderDoc, renderTable, slug, type LinkContext } from "./markdown.ts"
 import {
-  DOCS, resolveFigure, resolveSnippet, resolveTable, resolveTerminal, source, version,
+  DOCS, resolveSnippet, resolveTable, resolveTerminal, source, version,
   type Block, type Parsed, type Table,
 } from "./source.ts"
 
@@ -22,16 +22,6 @@ export const repoHref = (href: string) => (href === "repo" ? site.repo : href)
 const isExternal = (href: string) => /^https?:/.test(repoHref(href))
 
 // ---- resolution ---------------------------------------------------------------------------
-
-export interface ResolvedFigure {
-  label: string
-  value: string
-  source: string
-}
-
-export function figureValue(f: Figure, p: Parsed = source()): ResolvedFigure {
-  return { label: f.label, value: resolveFigure(f.from.re, f.from.doc, p), source: `${f.from.doc} README ${f.from.re}` }
-}
 
 export type ResolvedFrame =
   | { kind: "terminal"; cmd: string; block: Block }
@@ -83,8 +73,6 @@ export function resolveModel(p: Parsed = source()) {
   return {
     humans: resolveTerminal(site.install.humans.cmd, site.install.humans.where, p),
     hero: resolveDemo(site.hero, p) as Extract<ResolvedDemo, { kind: "cell" }>,
-    measuredFigures: site.measured.figures.map((f) => figureValue(f, p)),
-    measuredTables: site.measured.tables.map((t) => resolveTable(t.header, t.where, p)),
     tabs: site.showcase.tabs.map((t) => ({ ...t, block: resolveSnippet(t.line, t.where, p) })),
     capabilities: site.capabilities.map((c) => ({ cap: c as Capability, demo: resolveDemo(c.demo, p) })),
     buildToday: resolveTerminal(site.buildToday.cmd, site.buildToday.where, p),
@@ -269,10 +257,6 @@ pre code { background: none; padding: 0; color: inherit; border-radius: 0; font-
 .demo { margin-top: 1.6rem; }
 .sec-head { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: .6rem 2.5rem; align-items: baseline; }
 .sec-head .explain { margin-top: 0; max-width: 60ch; }
-details.more { margin-top: 2rem; }
-details.more summary { cursor: pointer; color: var(--soft); font-size: .9rem; }
-details.more summary:hover { color: var(--ink); }
-details.more[open] summary { margin-bottom: 1.2rem; }
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; align-items: stretch; }
 .pair.stacked { grid-template-columns: minmax(0, 1fr); gap: 1.6rem; }
 .pair > .frame { display: flex; flex-direction: column; }
@@ -280,12 +264,6 @@ details.more[open] summary { margin-bottom: 1.2rem; }
 .centre { text-align: center; }
 .centre .explain, .centre h2 { margin-inline: auto; }
 
-.figures { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2rem; }
-.figures.three { grid-template-columns: repeat(3, 1fr); }
-.fig b { display: block; font-size: clamp(3rem, 7vw, 5.5rem); font-weight: 500; letter-spacing: -.06em; line-height: 1; color: var(--ink); white-space: nowrap; }
-.figures.three .fig b { font-size: clamp(2.2rem, 4.6vw, 3.6rem); }
-.fig span { display: block; margin-top: .6rem; font-size: 1.05rem; color: var(--body); }
-.fig small { display: block; font-size: .75rem; color: var(--soft); font-family: var(--mono); margin-top: .2rem; }
 
 .eco h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.04em; }
 .eco .explain { color: var(--soft); max-width: 60ch; }
@@ -299,7 +277,7 @@ details.more[open] summary { margin-bottom: 1.2rem; }
 .principles h3 { font-size: 1.25rem; font-weight: 500; }
 .principles p { margin-top: .5rem; color: var(--soft); max-width: 34ch; }
 
-.showcase > *, .guides > *, .principles > *, .figures > * { min-width: 0; }
+.showcase > *, .guides > *, .principles > * { min-width: 0; }
 .showcase { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3rem; align-items: start; }
 .showcase h2 { font-size: clamp(1.7rem, 3vw, 2.2rem); letter-spacing: -.03em; }
 .control { display: inline-flex; align-items: center; gap: .5rem; padding: .62rem .85rem; border-radius: .6rem; border: 1px solid var(--line); background: var(--raise); color: var(--ink); font: 500 .9rem/1.15 var(--sans); text-decoration: none; transition: background .14s ease, border-color .14s ease; }
@@ -389,7 +367,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
 .prose pre.code { margin: 0 0 1.2rem; padding: 1rem 1.1rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--band); font: .8rem/1.6 var(--mono); overflow-x: auto; }
 
 @media (max-width: 1000px) {
-  .figures { grid-template-columns: repeat(2, 1fr); }
   .cols { grid-template-columns: repeat(3, 1fr); }
   .showcase { grid-template-columns: minmax(0, 1fr); }
   .sec-head { grid-template-columns: minmax(0, 1fr); }
@@ -405,8 +382,6 @@ td:first-child { font-family: var(--mono); font-size: .85rem; color: var(--ink);
   .nav { display: none; }
   .hero h1 { font-size: 2.6rem; }
   .principles, .pair { grid-template-columns: minmax(0, 1fr); }
-  .figures.three { grid-template-columns: minmax(0, 1fr); }
-  .fig b { font-size: 3rem; }
   .cols { grid-template-columns: repeat(2, 1fr); }
   .ref { grid-template-columns: minmax(0, 1fr); }
   .toc { position: static; max-height: 18rem; border: 1px solid var(--line); border-radius: .6rem; padding: .5rem 1rem 1rem; }
@@ -718,28 +693,18 @@ ${m.tabs
 </div>
 </div></section>`
 
-  const figs = (list: ResolvedFigure[]) =>
-    `<div class="figures three">${list.map((f) => `<div class="fig" data-source="${esc(f.source)}"><b>${esc(f.value)}</b><span>${esc(f.label)}</span></div>`).join("")}</div>`
-
-  const measured = `<section class="section band" id="benchmarks" aria-labelledby="benchmarks-h"><div class="shell">
-<div class="sec-head"><h2 id="benchmarks-h">${esc(site.measured.title)}</h2>
-<p class="explain">${inline(site.measured.body)}</p></div>
-<div class="demo">${figs(m.measuredFigures)}</div>
-<details class="more"><summary>Every operation and replication leg</summary>${m.measuredTables.map((t) => renderTable(t.header, t.rows)).join("")}</details>
-</div></section>`
-
-  const eco = `<section class="section eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
+  const eco = `<section class="section band eco centre" id="ecosystem" aria-labelledby="ecosystem-h"><div class="shell">
 <h2 id="ecosystem-h">${esc(site.ecosystem.title)}</h2>
 <p class="explain">${inline(site.ecosystem.lede)}</p>
 <div class="marks">${site.ecosystem.marks.map((k) => `<a href="${esc(k.href)}" rel="noopener" aria-label="${esc(k.label)}" title="${esc(k.label)}">${brand(k.icon, 40)}</a>`).join("")}</div>
 </div></section>`
 
-  const today = `<section class="section band" id="today" aria-labelledby="today-h"><div class="shell today">
+  const today = `<section class="section" id="today" aria-labelledby="today-h"><div class="shell today">
 <h2 id="today-h">${esc(site.buildToday.title)}</h2>
 <div class="acts"><a class="control control--solid round" href="/reference">${glyph("book", 15)}Documentation</a><span class="outline"><span class="prompt" aria-hidden="true">$</span><code>${esc(site.buildToday.cmd)}</code>${copyBtn(site.buildToday.cmd, "server command")}</span></div>
 </div></section>`
 
-  const guides = `<section class="section" id="guides" aria-labelledby="guides-h"><div class="shell">
+  const guides = `<section class="section band" id="guides" aria-labelledby="guides-h"><div class="shell">
 <div class="sec-head"><h2 id="guides-h">Guides</h2>
 <p class="explain">Design notes for the parts worth understanding before you run them in production.</p></div>
 <div class="demo guides">${m.guides
@@ -755,7 +720,6 @@ ${start}
 ${showcase}
 ${explorer("db", " band")}
 ${explorer("bus")}
-${measured}
 ${eco}
 ${today}
 ${guides}
@@ -854,11 +818,6 @@ export function renderIndexMd(m: Model = resolveModel()): string {
     ...m.tabs.flatMap((t) => [`### ${t.label}`, "", fence(t.block), ""]),
     ...chapter("db"),
     ...chapter("bus"),
-    `## ${site.measured.title}`,
-    "",
-    site.measured.body,
-    "",
-    ...m.measuredTables.flatMap((t) => [tableMd(t), ""]),
     `## ${site.ecosystem.title}`,
     "",
     site.ecosystem.lede,

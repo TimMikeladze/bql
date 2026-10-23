@@ -7,7 +7,7 @@ import { esc, renderDoc } from "../src/markdown.ts"
 import {
   BOOT, CSS, TOKENS_DARK, TOKENS_LIGHT, PAGES, linkContext, renderIndex, renderReference, resolveModel, url,
 } from "../src/render.ts"
-import { parse, resolveFigure, resolveSnippet, resolveTerminal, source } from "../src/source.ts"
+import { parse, resolveSnippet, resolveTerminal, source } from "../src/source.ts"
 
 const m = resolveModel()
 const index = renderIndex(m)
@@ -24,13 +24,6 @@ describe("references", () => {
     const p = parse([{ id: "db", path: "x", title: "x", text: "```sh\nfoo\n```\n\n```sh\nfoo\n```\n" }])
     expect(() => resolveTerminal("bar", { doc: "db" }, p)).toThrow(/did not resolve/)
     expect(() => resolveSnippet("foo", { doc: "db" }, p)).toThrow(/ambiguous/)
-  })
-  test("figures match their sources", () => {
-    site.measured.figures.forEach((f, i) => {
-      const want = resolveFigure(f.from.re, f.from.doc)
-      expect(m.measuredFigures[i]!.value).toBe(want)
-      expect(index).toContain(`<b>${esc(want)}</b>`)
-    })
   })
   test("showcase tabs and guides are resolved snippets", () => {
     for (const t of m.tabs) expect(index).toContain(esc(t.block.code.split("\n")[0]!))
@@ -201,8 +194,8 @@ test("pairs render both artefacts; cells render code and its output", () => {
   }
 })
 
-test("no figures row of repo counts, and no section listing weaknesses", () => {
-  expect(index).not.toContain('id="figures"')
+test("no figures, benchmarks or limits sections", () => {
+  expect(index).not.toMatch(/id="(figures|benchmarks|measured)"/)
   expect(index).not.toMatch(/id="(boundaries|limits|limitations|not-yet)"/)
 })
 
