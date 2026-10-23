@@ -7,6 +7,10 @@
 // changing a token underneath an open socket. A refresh runs at 80% of the token's life, and
 // again whenever a request comes back `UNAUTHENTICATED`, which is what a tab that slept through
 // its timer sees first.
+//
+// With `jwt` (an app with `auth` in its config) the session is the signed-in account's instead of
+// this browser's, so the same person gets the same database on every device. Every session request
+// asks the `jwt` function again, so a renewal carries the provider's current token.
 
 import { createClient, type Client, type Db } from "../client/index.ts"
 import type { JsRow } from "../client/values.ts"
@@ -26,6 +30,12 @@ export interface ConnectOptions {
    * that visitor's data, so treat it like a password if you pass your own.
    */
   visitor?: string
+  /**
+   * The signed-in user's JWT from the app's provider (Clerk, Supabase, Better-Auth), or a function
+   * returning the current one. A function is called for every session request, renewals included.
+   * The connection stays that account's: on sign-in or sign-out, `close()` and `connect()` again.
+   */
+  jwt?: string | (() => string | null | undefined | Promise<string | null | undefined>)
   fetch?: typeof fetch
   /** A `WebSocket` for runtimes without one on the global object. */
   WebSocket?: unknown
@@ -37,6 +47,8 @@ export interface SessionInfo {
   private: { db: string; token: string }
   shared: { db: string; token: string } | null
   exp: number
+  /** With `jwt`: this browser's anonymous database, when it holds data. */
+  anonymous?: { db: string; token: string } | null
 }
 
 /** Runs one statement on a database the session can reach; returns the rows. */
@@ -76,6 +88,19 @@ export interface SharedDb {
   table<T extends Doc = Doc>(name: string): Table<T>
 }
 
+/** This browser's anonymous database, offered once the visitor signs in. */
+export interface AnonymousDb {
+  readonly db: string
+  readonly sql: SqlRunner
+  /**
+   * Moves the anonymous data into the account's database: every table is created there if missing
+   * and its rows copied with `insert or ignore`, so the account's rows win on a key clash and a
+   * second run is harmless. The copied tables are then dropped from the anonymous database and
+   * this browser's visitor id forgotten, so the next signed-out visit starts empty.
+   */
+  adopt(): Promise<{ tables: string[]; rows: number }>
+}
+
 export interface ActionResult<T = JsRow> {
   /** A SQL action: one entry per statement in its `run`, in order. */
   results?: { rows: T[]; rowsAffected: number }[]
@@ -85,8 +110,15 @@ export interface ActionResult<T = JsRow> {
 }
 
 export interface WebDb {
-  /** The id this browser is known by. */
-  readonly visitor: string
+  /** The id this browser is known by; null for a signed-in session. */
+  readonly visitor: string | null
+  /** True when the session is a signed-in account's (`jwt`), the same database on every device. */
+  readonly signedIn: boolean
+  /**
+   * With `jwt`: the database this browser used before signing in, when it holds data, for the page
+   * to copy from or `adopt()`. Null otherwise. Left alone, it is there again after sign-out.
+   */
+  readonly anonymous: AnonymousDb | null
   /** The visitor's own database, `app-<id>-u-<hash>`. */
   readonly db: string
   /**
@@ -139,16 +171,31 @@ function storage(): { getItem(key: string): string | null; setItem(key: string, 
   }
 }
 
+function storedVisitor(url: string): string | null {
+  try {
+    const stored = storage()?.getItem(`bql:visitor:${url}`)
+    if (stored && VISITOR.test(stored)) return stored
+  } catch {
+    // unreadable storage
+  }
+  return null
+}
+
+function forgetVisitor(url: string, visitor: string): void {
+  try {
+    const store = storage() as Storage | null
+    if (store?.getItem(`bql:visitor:${url}`) === visitor) store.removeItem(`bql:visitor:${url}`)
+  } catch {
+    // nothing stored, or storage blocked
+  }
+}
+
 /** The stored visitor id for this server, or a new one, stored when storage allows it. */
 function visitorFor(url: string): string {
   const key = `bql:visitor:${url}`
   const store = storage()
-  try {
-    const stored = store?.getItem(key)
-    if (stored && VISITOR.test(stored)) return stored
-  } catch {
-    // unreadable storage: fall through to a new id for this page load
-  }
+  const stored = storedVisitor(url)
+  if (stored) return stored
   const fresh = base64url(crypto.getRandomValues(new Uint8Array(16)))
   try {
     store?.setItem(key, fresh)
@@ -170,6 +217,20 @@ function errorFrom(status: number, body: unknown): Error {
   })
 }
 
+type Which = "private" | "shared" | "anonymous"
+
+function ident(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`
+}
+
+/** A statement with no values: `Statement` is template parts, so a literal is one part. */
+function text(sql: string): Statement {
+  return { strings: [sql], values: [] }
+}
+
+const ADOPT_PAGE = 500
+const ADOPT_CHUNK = 100
+
 interface LiveHandle {
   statement: Statement
   db: "private" | "shared"
@@ -181,13 +242,15 @@ interface LiveHandle {
 }
 
 class Connection implements WebDb {
-  readonly visitor: string
+  /** Sent with every session request; with `jwt` it only names the anonymous database to offer. */
+  #visitor: string | null
   readonly #key: string
   readonly #url: string
   readonly #options: ConnectOptions
   #session!: SessionInfo
   #private!: Client
   #sharedClient: Client | null = null
+  #anonymousClient: Client | null = null
   #timer: ReturnType<typeof setTimeout> | null = null
   #refreshing: Promise<void> | null = null
   #closed = false
@@ -198,10 +261,10 @@ class Connection implements WebDb {
   readonly #sharedSql: SqlRunner
   readonly #sharedLive: LiveRunner
 
-  constructor(key: string, url: string, visitor: string, options: ConnectOptions) {
+  constructor(key: string, url: string, visitor: string | null, options: ConnectOptions) {
     this.#key = key
     this.#url = url
-    this.visitor = visitor
+    this.#visitor = visitor
     this.#options = options
     this.sql = ((strings: TemplateStringsArray, ...values: unknown[]) =>
       this.#run("private", { strings: [...strings], values })) as SqlRunner
@@ -215,6 +278,25 @@ class Connection implements WebDb {
 
   get db(): string {
     return this.#session.private.db
+  }
+
+  get visitor(): string | null {
+    return this.signedIn ? null : this.#visitor
+  }
+
+  get signedIn(): boolean {
+    return this.#options.jwt !== undefined
+  }
+
+  get anonymous(): AnonymousDb | null {
+    const anonymous = this.#session.anonymous
+    if (!anonymous) return null
+    return {
+      db: anonymous.db,
+      sql: ((strings: TemplateStringsArray, ...values: unknown[]) =>
+        this.#run("anonymous", { strings: [...strings], values })) as SqlRunner,
+      adopt: () => this.#adopt(),
+    }
   }
 
   get shared(): WebDb["shared"] {
@@ -312,15 +394,25 @@ class Connection implements WebDb {
     this.#live.clear()
     this.#private?.close()
     this.#sharedClient?.close()
+    this.#anonymousClient?.close()
   }
 
   async #fetchSession(): Promise<SessionInfo> {
     const doFetch = this.#options.fetch ?? fetch
+    const request: { key: string; visitor?: string; jwt?: string } = { key: this.#key }
+    if (this.#visitor !== null) request.visitor = this.#visitor
+    if (this.#options.jwt !== undefined) {
+      const jwt = typeof this.#options.jwt === "function" ? await this.#options.jwt() : this.#options.jwt
+      if (!jwt) {
+        throw Object.assign(new Error("jwt() returned no token: signed out? close() and connect() again"), { code: "SIGNED_OUT" })
+      }
+      request.jwt = jwt
+    }
     // `text/plain` keeps this a simple request: no CORS preflight before the first byte.
     const response = await doFetch(`${this.#url}/v1/session`, {
       method: "POST",
       headers: { "content-type": "text/plain;charset=UTF-8" },
-      body: JSON.stringify({ key: this.#key, visitor: this.visitor }),
+      body: JSON.stringify(request),
     })
     const body = await response.json().catch(() => null)
     if (!response.ok) throw errorFrom(response.status, body)
@@ -338,10 +430,11 @@ class Connection implements WebDb {
   }
 
   async #swap(session: SessionInfo): Promise<void> {
-    const old = [this.#private, this.#sharedClient]
+    const old = [this.#private, this.#sharedClient, this.#anonymousClient]
     this.#session = session
     this.#private = this.#client(session.private.token)
     this.#sharedClient = session.shared ? this.#client(session.shared.token) : null
+    this.#anonymousClient = session.anonymous ? this.#client(session.anonymous.token) : null
     // New subscriptions first, then the old ones go: the first `rows` on the new client replaces
     // the list wholesale, so a commit between the two is not lost.
     for (const handle of this.#live) {
@@ -364,14 +457,19 @@ class Connection implements WebDb {
     ;(this.#timer as { unref?: () => void }).unref?.()
   }
 
-  #dbOf(which: "private" | "shared"): Db {
+  #dbOf(which: Which): Db {
     if (which === "private") return this.#private.db(this.#session.private.db)
+    if (which === "anonymous") {
+      const anonymous = this.#session.anonymous
+      if (!anonymous || !this.#anonymousClient) throw new Error("there is no anonymous database to read")
+      return this.#anonymousClient.db(anonymous.db)
+    }
     const shared = this.#session.shared
     if (!shared || !this.#sharedClient) throw new Error("this app has no shared tables")
     return this.#sharedClient.db(shared.db)
   }
 
-  async #run(which: "private" | "shared", statement: Statement): Promise<JsRow[]> {
+  async #run(which: Which, statement: Statement): Promise<JsRow[]> {
     const once = async () =>
       [...(await this.#dbOf(which).sql(statement.strings as unknown as TemplateStringsArray, ...statement.values))] as JsRow[]
     try {
@@ -381,6 +479,52 @@ class Connection implements WebDb {
       await this.refresh()
       return once()
     }
+  }
+
+  async #adopt(): Promise<{ tables: string[]; rows: number }> {
+    const from = (statement: Statement) => this.#run("anonymous", statement)
+    const to = (statement: Statement) => this.#run("private", statement)
+    // `pragma_table_list` tells shadow tables (FTS5's `_data`, `_idx`) and virtual tables apart
+    // from plain ones; copying either would be wrong, and the virtual table's own DDL is not copied.
+    const tables = (await from(
+      text(`select l.name, s.sql from pragma_table_list as l join sqlite_schema as s on s.name = l.name
+            where l.schema = 'main' and l.type = 'table' and substr(l.name, 1, 7) <> 'sqlite_'`),
+    )) as { name: string; sql: string }[]
+    const columns = async (run: typeof from, table: string) =>
+      ((await run({ strings: ["select name from pragma_table_info(", ")"], values: [table] })) as { name: string }[]).map((c) => c.name)
+    let rows = 0
+    for (const { name, sql } of tables) {
+      // The stored DDL always starts `CREATE TABLE `, with any `IF NOT EXISTS` already removed.
+      await to(text(sql.replace(/^CREATE TABLE /i, "CREATE TABLE IF NOT EXISTS ")))
+      const theirs = new Set(await columns(to, name))
+      const shared = (await columns(from, name)).filter((column) => theirs.has(column))
+      if (shared.length === 0) continue
+      const list = shared.map(ident).join(", ")
+      for (let offset = 0; ; offset += ADOPT_PAGE) {
+        const page = await from({ strings: [`select ${list} from ${ident(name)} limit ${ADOPT_PAGE} offset ${offset}`], values: [] })
+        for (let i = 0; i < page.length; i += ADOPT_CHUNK) {
+          const chunk = page.slice(i, i + ADOPT_CHUNK)
+          const strings = [`insert or ignore into ${ident(name)} (${list}) values (`]
+          const values: unknown[] = []
+          chunk.forEach((row, r) => {
+            shared.forEach((column, c) => {
+              values.push(row[column])
+              strings.push(c < shared.length - 1 ? ", " : r < chunk.length - 1 ? "), (" : ")")
+            })
+          })
+          await to({ strings, values })
+        }
+        rows += page.length
+        if (page.length < ADOPT_PAGE) break
+      }
+    }
+    for (const { name } of tables) await from(text(`drop table if exists ${ident(name)}`))
+    if (this.#visitor !== null) forgetVisitor(this.#url, this.#visitor)
+    this.#visitor = null
+    this.#session = { ...this.#session, anonymous: null }
+    this.#anonymousClient?.close()
+    this.#anonymousClient = null
+    return { tables: tables.map((one) => one.name), rows }
   }
 
   #ensure(table: string): Promise<void> {
@@ -471,9 +615,10 @@ class Connection implements WebDb {
 }
 
 /**
- * Opens a session for this browser on the app the `pk_` key names. Rejects with the server's
- * error (`code` is `NOT_AUTHORIZED` for an origin the app does not list, `TOO_MANY_REQUESTS` past
- * the new-visitor limit).
+ * Opens a session for this browser, or with `jwt` for the signed-in account, on the app the `pk_`
+ * key names. Rejects with the server's error (`code` is `NOT_AUTHORIZED` for an origin the app does
+ * not list, `TOO_MANY_REQUESTS` past the new-visitor limit, `UNAUTHENTICATED` for a JWT the app's
+ * provider did not sign or an app that requires sign-in).
  */
 export async function connect(key: string, options: ConnectOptions = {}): Promise<WebDb> {
   const origin = (globalThis as { location?: { origin?: string } }).location?.origin
@@ -482,7 +627,9 @@ export async function connect(key: string, options: ConnectOptions = {}): Promis
   if (options.visitor !== undefined && !VISITOR.test(options.visitor)) {
     throw new TypeError("visitor must be 22 to 128 characters of [A-Za-z0-9_-]")
   }
-  const connection = new Connection(key, url, options.visitor ?? visitorFor(url), options)
+  // Signed in, the stored id is sent only to find the anonymous database, and none is made up.
+  const visitor = options.visitor ?? (options.jwt !== undefined ? storedVisitor(url) : visitorFor(url))
+  const connection = new Connection(key, url, visitor, options)
   await connection.open()
   return connection
 }

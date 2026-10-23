@@ -509,6 +509,18 @@ posts.<span class="t-f">orderBy</span>(<span class="t-s">&quot;createdAt&quot;</
   &lt;button&gt;<span class="t-t">Join</span>&lt;/button&gt;
 &lt;/form&gt;
 &lt;!-- the server sends the visitor back to this page with ?bql=ok or ?bql=error&amp;reason=email --&gt;</code></pre>
+<p>A page whose visitors sign in (Clerk, Supabase, Better-Auth, Auth0) hands <code>connect()</code> the provider's JWT instead, and one account gets one database on every browser and device. The app's config names the provider:</p>
+<pre class="code" data-lang="json"><code>{
+  <span class="t-s">&quot;origins&quot;</span>: [<span class="t-s">&quot;http://localhost:*&quot;</span>],
+  <span class="t-s">&quot;auth&quot;</span>: { <span class="t-s">&quot;issuer&quot;</span>: <span class="t-s">&quot;https://clerk.acme.app&quot;</span>, <span class="t-s">&quot;jwks&quot;</span>: <span class="t-s">&quot;https://clerk.acme.app/.well-known/jwks.json&quot;</span> }
+}</code></pre>
+<pre class="code" data-lang="js"><code><span class="t-k">const</span> account = <span class="t-k">await</span> <span class="t-f">connect</span>(<span class="t-s">&quot;pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0&quot;</span>, {
+  url: <span class="t-s">&quot;http://localhost:4321&quot;</span>,
+  jwt: () =&gt; <span class="t-t">Clerk</span>.session.<span class="t-f">getToken</span>(), <span class="t-c">// asked again for every renewal</span>
+})
+<span class="t-c">// what this browser saved before signing in, moved into the account once</span>
+<span class="t-k">if</span> (account.anonymous) <span class="t-k">await</span> account.anonymous.<span class="t-f">adopt</span>()</code></pre>
+<p>The server checks the JWT against the provider's keys (RS256, ES256 or EdDSA) and names the database after a hash of the issuer and user id; the same hash is the <code>author</code> other visitors see, never the provider's id. <code>adopt()</code> copies the tables made while signed out and empties the old database. Without it, that data stays with the browser and is back after sign-out. <code>&quot;required&quot;: true</code> in <code>auth</code> refuses visitors who are not signed in. On sign-in or sign-out, <code>close()</code> and <code>connect()</code> again.</p>
 <p><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/api.md#apps-and-sessions" rel="noopener">packages/db/docs/api.md</a> has the config and the limits.</p>
 <h3 id="root-next">Next</h3>
 <ul><li><a href="#db">packages/db</a> is the database's full documentation: replicas, promotion, S3, branches, search, the driver, the measured numbers.</li><li><a href="#bus">packages/bus</a> starts the bus with <code>bunx bql bus serve</code>.</li><li><a href="#root-deploying-to-vercel-cloudflare-or-fly">Deploying to Vercel, Cloudflare, or Fly</a> puts a server on a provider you're already logged in to.</li><li><a href="https://github.com/TimMikeladze/bql/blob/main/packages/db/docs/api.md" rel="noopener">packages/db/docs/api.md</a> is every route, config key and CLI flag.</li></ul>

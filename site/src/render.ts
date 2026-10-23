@@ -938,6 +938,10 @@ function webAppMd(p: Parsed = source()): string[] {
     "",
     block('<form method="post" action='),
     "",
+    "A page whose visitors sign in hands `connect()` the provider's JWT (Clerk, Supabase, Better-Auth) and the app config names the provider's `issuer` and `jwks`. One account then gets one database on every browser and device; `adopt()` moves what the browser saved before sign-in into it.",
+    "",
+    block("jwt: () => Clerk.session.getToken()"),
+    "",
   ]
 }
 

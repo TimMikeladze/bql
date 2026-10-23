@@ -499,6 +499,17 @@ A waitlist needs no JavaScript: a form table takes plain HTML posts.
 <!-- the server sends the visitor back to this page with ?bql=ok or ?bql=error&reason=email -->
 ```
 
+A page whose visitors sign in hands `connect()` the provider's JWT (Clerk, Supabase, Better-Auth) and the app config names the provider's `issuer` and `jwks`. One account then gets one database on every browser and device; `adopt()` moves what the browser saved before sign-in into it.
+
+```js
+const account = await connect("pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0", {
+  url: "http://localhost:4321",
+  jwt: () => Clerk.session.getToken(), // asked again for every renewal
+})
+// what this browser saved before signing in, moved into the account once
+if (account.anonymous) await account.anonymous.adopt()
+```
+
 ## Links
 
 - [Reference](https://bql.sh/reference): the full README of each package

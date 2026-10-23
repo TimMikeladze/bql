@@ -258,6 +258,34 @@ forms post into:
 </form>
 <!-- the server sends the visitor back to this page with ?bql=ok or ?bql=error&reason=email -->
 ```
+
+A page whose visitors sign in (Clerk, Supabase, Better-Auth, Auth0) hands `connect()` the
+provider's JWT instead, and one account gets one database on every browser and device. The app's
+config names the provider:
+
+```json
+{
+  "origins": ["http://localhost:*"],
+  "auth": { "issuer": "https://clerk.acme.app", "jwks": "https://clerk.acme.app/.well-known/jwks.json" }
+}
+```
+
+```js
+const account = await connect("pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0", {
+  url: "http://localhost:4321",
+  jwt: () => Clerk.session.getToken(), // asked again for every renewal
+})
+// what this browser saved before signing in, moved into the account once
+if (account.anonymous) await account.anonymous.adopt()
+```
+
+The server checks the JWT against the provider's keys (RS256, ES256 or EdDSA) and names the
+database after a hash of the issuer and user id; the same hash is the `author` other visitors see,
+never the provider's id. `adopt()` copies the tables made while signed out and empties the old
+database. Without it, that data stays with the browser and is back after sign-out. `"required":
+true` in `auth` refuses visitors who are not signed in. On sign-in or sign-out, `close()` and
+`connect()` again.
+
 [packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next

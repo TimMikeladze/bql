@@ -4,7 +4,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { connect, type Row, type WebDb } from "../../src/web/index.ts"
 import { compareRows, selectSql, sharedTableSql, uuidv7, type SharedRow } from "../../src/web/table.ts"
+import { accountDbOf } from "../../src/server/web.ts"
 import { startTestServer, stopAll, type TestServer } from "../server/harness.ts"
+import { TestIdp } from "../server/idp.ts"
 
 const ORIGIN = "https://page.test"
 let server: TestServer
@@ -395,6 +397,99 @@ describe("db.state", () => {
     expect(() => {
       ;(app as unknown as Record<string, unknown>).$hidden = 1
     }).toThrow(TypeError)
+  })
+})
+
+describe("accounts", () => {
+  const ISSUER = "https://idp.page.test"
+  let idp: TestIdp
+  let signedKey: string
+
+  beforeAll(async () => {
+    idp = await TestIdp.start(ISSUER)
+    const app = await server.json<{ key: string }>("/v1/apps", {
+      method: "POST",
+      body: JSON.stringify({
+        id: "signed",
+        config: { origins: [ORIGIN], auth: { issuer: ISSUER, jwks: idp.jwksUrl }, session: { newVisitorsPerMinute: 1000 } },
+      }),
+    })
+    signedKey = app.key
+  })
+  afterAll(() => idp.stop())
+
+  async function signIn(user: string, visitor?: string, calls = { n: 0 }): Promise<WebDb> {
+    const db = await connect(signedKey, {
+      url: server.url,
+      fetch: pageFetch,
+      ...(visitor ? { visitor } : {}),
+      jwt: async () => {
+        calls.n++
+        return idp.sign({ sub: user })
+      },
+    })
+    open.push(db)
+    return db
+  }
+
+  test("two devices signed in as one user share one database", async () => {
+    const laptop = await signIn("user_ann", "laptop-visitor-000000000")
+    const phone = await signIn("user_ann", "phone-visitor-0000000000")
+    const { db, sub } = accountDbOf("signed", ISSUER, "user_ann")
+    expect(laptop.db).toBe(db)
+    expect(phone.db).toBe(db)
+    expect(laptop.signedIn).toBe(true)
+    expect(laptop.visitor).toBeNull()
+    expect(laptop.author).toBe(sub)
+    await laptop.table<Todo>("todos").insert({ title: "from the laptop", done: false })
+    expect((await phone.table<Todo>("todos").list()).map((t) => t.title)).toEqual(["from the laptop"])
+  })
+
+  test("renewal and a 401 retry both ask jwt() for a fresh token", async () => {
+    const calls = { n: 0 }
+    const db = await signIn("user_bob", undefined, calls)
+    expect(calls.n).toBe(1)
+    await db.refresh()
+    expect(calls.n).toBe(2)
+    spoil = true
+    await db.sql`select 1`
+    expect(calls.n).toBe(3)
+  })
+
+  test("a jwt() that returns nothing fails the renewal with SIGNED_OUT", async () => {
+    let token: string | null = await idp.sign({ sub: "user_cat" })
+    const db = await connect(signedKey, { url: server.url, fetch: pageFetch, jwt: () => token })
+    open.push(db)
+    token = null
+    expect((await db.refresh().catch((err) => err)).code).toBe("SIGNED_OUT")
+  })
+
+  test("adopt() moves the anonymous database's tables into the account", async () => {
+    const visitor = "before-sign-in-000000000"
+    const before = await connect(signedKey, { url: server.url, fetch: pageFetch, visitor })
+    open.push(before)
+    await before.table<Todo>("todos").insert({ title: "made signed out", done: false })
+    const state = await before.state({ theme: "dark" })
+    state.theme = "light"
+    await state.$saved
+
+    // Signing in replaces the signed-out connection.
+    before.close()
+    const after = await signIn("user_dee", visitor)
+    await after.table<Todo>("todos").insert({ title: "made signed in", done: false })
+    expect(after.anonymous?.db).toBe(before.db)
+    const moved = await after.anonymous!.adopt()
+    expect(moved.tables.sort()).toEqual(["bql_state", "todos"])
+    expect(after.anonymous).toBeNull()
+    expect((await after.table<Todo>("todos").orderBy("title").list()).map((t) => t.title)).toEqual(["made signed in", "made signed out"])
+    expect((await after.state({ theme: "dark" })).theme).toBe("light")
+
+    // The anonymous database is empty now, and is no longer offered.
+    const signedOut = await connect(signedKey, { url: server.url, fetch: pageFetch, visitor })
+    open.push(signedOut)
+    expect(await signedOut.sql`select name from sqlite_schema where type = 'table'`).toEqual([])
+    const again = await signIn("user_dee", visitor)
+    expect(again.anonymous).toBeNull()
   })
 })
 
