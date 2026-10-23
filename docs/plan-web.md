@@ -25,7 +25,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | Apps and `pk_` keys | catalog, token minting | **built**: catalog, `server/web.ts`, `client.admin`, `bql app` |
 | `/v1/session` | `mintToken`, create | **built**: `server/web.ts` |
 | Browser bundle | `bql.sh/client` | **built**: `packages/db/src/web/`, `packages/db/dist/web.js` |
-| `table()` and `state()` | `sql`, `db.live` | **`table()` built**: `bql.sh/web`; `state()` not yet |
+| `table()` and `state()` | `sql`, `db.live` | **built**: `bql.sh/web` (`web/table.ts`, `web/state.ts`) |
 | Author column (`bql_sub()`) | new driver function binding | **built**: `Database.function`, `tenant/subject.ts`, `bql app table`, `db.shared.table()` |
 | SQL actions | app config, one transaction | **built**: `server/web.ts` `runAction`, `db.action()` |
 | Form endpoint | `a` tables | **built**: `server/web.ts` `submitForm`, `bql app table --form` |
@@ -140,7 +140,12 @@ create table if not exists todos(
   `limit`, `list()`, `live(cb)` over `db.live` keyed on `id`. Rows come back as `{ id, ...data }`.
 - In the shared database the table must already exist with this shape plus the author column; the
   bundle never runs DDL there, and the token could not.
-- `state(defaults)` stores one row per top-level key in a `state` table. Proxy traps become atomic
+- As built, `db.state(defaults)` (a method, not a standalone `state(key, defaults)`) uses a table
+  named `bql_state`, not `state`, so it cannot collide with a page's own table. A key with no row
+  yet is created from its default before any nested write or push; creating it from the local
+  value double-counted the batch's pushes. A key with a write in flight ignores live echoes and is
+  re-read once the write lands, so another tab's concurrent change is not lost.
+- Planned: `state(defaults)` stores one row per top-level key in a `state` table. Proxy traps become atomic
   JSON operations on the server: assignment is `json_set`, `push` is `json_insert(…, '$[#]', ?)`,
   `delete` is `json_remove`. Writes are batched per microtask. `$ready`, `$saved` and
   `$on("change")` are on the root. Removing by array index is racy across devices; the docs say to
@@ -217,7 +222,9 @@ short-lived token scoped to the shared database. The function needs no stored bq
 3. The author column, then `db.shared.table()`.
 4. SQL actions.
 5. The form endpoint.
-6. `state()`, `llms.txt` and the MCP tools.
+6. `state()`, `llms.txt` and the MCP tools. Built: `llms.txt` and `AGENTS.md` gain a section
+   generated from the README's static-page blocks; `bql mcp` is a stdio MCP server with
+   `list_apps`, `create_app`, `create_shared_table`, `update_app_config`, `run_sql` and `get_snippet`.
 7. The action proxy.
 
 ## Not planned

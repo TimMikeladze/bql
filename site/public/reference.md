@@ -165,7 +165,98 @@ BQL_ADMIN_KEY=<the admin key> bun token.ts
 # NOT_AUTHORIZED not authorized
 ```
 
-`scope` is `ro` or `rw`, `dbs` takes globs (`app-*`), and `tables` narrows a token to single tables.
+`scope` is `ro` or `rw`, `dbs` takes globs (`app-*`), and `tables` narrows a token to single tables:
+`r`, `a` (append: read and insert, never update or delete) or `rw`.
+
+### A static page with no server
+
+An app gives a page a public `pk_` key. The page trades it for a database of its own per visitor:
+
+```sh
+echo '{ "origins": ["http://localhost:*"] }' > bql.json
+bunx bql app create demo --config bql.json
+# demo  pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0  shared=app-demo-shared
+```
+
+```html
+<script type="module">
+  import { connect } from "https://cdn.jsdelivr.net/npm/bql.sh/packages/db/dist/web.js"
+
+  const db = await connect("pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0", { url: "http://localhost:4321" })
+
+  // The visitor's own database: the page runs its own DDL there.
+  await db.sql`create table if not exists todos(
+    id integer primary key,
+    title text not null check (length(title) between 1 and 200),
+    done integer not null default 0
+  ) strict`
+
+  await db.sql`insert into todos(title) values (${"write it"})`
+  db.live`select id, title, done from todos order by id`.on("rows", render)
+</script>
+```
+
+`connect()` generates a visitor id once and keeps it in `localStorage`, so the same browser gets
+the same database (`app-demo-u-<hash>`) back. Every `${}` in `db.sql` and `db.live` is a bound
+parameter. `db.sql` returns the rows. `db.live` calls `rows` with the whole result now and after
+every commit that changes it; with `.key("id")` it sends `diff`s after the first `rows` instead.
+A failed CHECK rejects with `code` `SQLITE_CONSTRAINT_CHECK`. Tokens are renewed before they
+expire, and live queries carry on across the renewal, starting again with a full `rows`.
+
+`db.state()` keeps one object in sync instead, for a page that holds its data in one place:
+
+```js
+const app = await db.state({ todos: [], theme: "dark" })
+app.todos.push({ title: "write it", done: false })   // one json_insert on the server
+app.$on("change", render)                              // after this tab's changes and other tabs'
+```
+
+It is one row per top-level key in the visitor's `bql_state` table. `push` becomes
+`json_insert(…, '$[#]')`, so two tabs pushing at once both land; assigning a field is `json_set` and
+`delete` is `json_remove`. Any other array change (splice, sort) writes that array whole, last
+writer wins. `await app.$saved` waits for every write so far.
+
+`db.table("todos")` is the shortcut for a page that does not want a schema: JSON documents in
+a table it creates itself, with `insert`, `get`, `update`, `delete`, and
+`where(...).orderBy(...).limit(...)` ending in `list()` or `live(cb)`. Raw SQL against it reads the
+document through `json_extract(data, '$.title')`.
+
+The app's shared database, `app-demo-shared`, holds what visitors see of each other. The owner
+creates a table there with an author column and gives it a mode (`r`, `a` append-only, `rw`):
+
+```sh
+bunx bql app table demo posts --mode rw
+```
+
+```js
+const posts = db.shared.table("posts")
+await posts.insert({ text: "hello" })                 // author is filled in by the server
+posts.orderBy("createdAt", "desc").limit(50).live(render)
+// row.author === db.author for your own rows; only the author can update or delete a row
+```
+
+`db.shared.sql` and `db.shared.live` reach the same tables with raw SQL.
+
+A write a visitor must not make directly, such as a score, goes through an action: SQL in the
+app's config that the server runs with its own rights, given checked input.
+
+```js
+await db.action("submitScore", { score: 4200, name: "ann" })
+// rejects with code CONFLICT and the action's error when its `expect` does not hold
+```
+
+A waitlist needs no JavaScript at all. `bunx bql app table demo signups --form` makes a table HTML
+forms post into:
+
+```html
+<form method="post" action="http://localhost:4321/v1/forms/demo/signups">
+  <input name="email" type="email" required>
+  <input name="_gotcha" tabindex="-1" autocomplete="off" style="display:none">
+  <button>Join</button>
+</form>
+<!-- the server sends the visitor back to this page with ?bql=ok or ?bql=error&reason=email -->
+```
+[packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
 
 ### Next
 
@@ -190,6 +281,7 @@ BQL_ADMIN_KEY=<the admin key> bun token.ts
 | `bql.sh/tenant`, `/wal`, `/realtime`, `/core`, `/http`, `/openapi`, `/dataapi`, `/graphql`, `/protocol` | The layers underneath, each reachable on its own |
 | **[`bql.sh/bus`](packages/bus)** | A durable message bus — subjects, consumer groups, leases, retries, a dead-letter path, three tiers of exactly-once |
 | `bql.sh/bus/client` | Its client and consumer |
+| `bql.sh/web` | For a page with no server: `connect()` with an app's `pk_` key, then `sql`, `live` and `table()` on the visitor's own database. Built to `packages/db/dist/web.js` for a script tag |
 
 Two binaries: `bql` for the database, `bql bus` for the bus. Both use `BQL_URL` for the server URL
 and `BQL_ADMIN_KEY` for its admin key (or `BQL_TOKEN` for a scoped token; it takes precedence over

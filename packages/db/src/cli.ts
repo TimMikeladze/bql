@@ -22,6 +22,7 @@ import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
 import { diffSchema, formatSchemaDiff } from "./client/diff.ts"
 import { createTableSql, sharedTableSql } from "./web/table.ts"
+import { serveMcp } from "./cli/mcp.ts"
 import type {
   AppConfig,
   AppInfo,
@@ -76,6 +77,7 @@ bql — SQLite as a multi-tenant database server (design §9.3)
   bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
   bql app table <id> <table> [--mode a|r|rw]   a shared table with an author column (default a)
   bql app table <id> <table> --form            a table HTML forms post into (POST /v1/forms/<id>/<table>)
+  bql mcp             an MCP server on stdio: apps, shared tables, actions and the page snippet for an agent
   bql exec <db> --sql "select 1"
   bql shell <db>
   bql bus <command>   the message bus — \`bql bus help\` lists its commands
@@ -1060,6 +1062,12 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 0
       case "app":
         await app(args, remote)
+        return 0
+      case "mcp":
+        // stdout carries the protocol and nothing else; the URL and key come from the usual places.
+        await serveMcp(remote.client, remote.url, VERSION, Bun.stdin.stream(), (line) => {
+          process.stdout.write(`${line}\n`)
+        })
         return 0
       case "shell":
         await shell(args, remote)

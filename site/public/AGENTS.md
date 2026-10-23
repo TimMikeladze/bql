@@ -109,6 +109,71 @@ BQL_ADMIN_KEY=<the admin key> bun token.ts
 # NOT_AUTHORIZED not authorized
 ```
 
+## A static page with no server
+
+An app gives a static HTML/JS page a public `pk_` key. The page trades it for a database of its own per visitor, kept in `localStorage` by visitor id, with no backend and no auth to write. `bql mcp` exposes the same setup as MCP tools.
+
+```sh
+echo '{ "origins": ["http://localhost:*"] }' > bql.json
+bunx bql app create demo --config bql.json
+# demo  pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0  shared=app-demo-shared
+```
+
+Every `${}` in `db.sql` and `db.live` is a bound parameter. `db.live` calls `rows` with the whole result now and after every commit that changes it.
+
+```html
+<script type="module">
+  import { connect } from "https://cdn.jsdelivr.net/npm/bql.sh/packages/db/dist/web.js"
+
+  const db = await connect("pk_IH99cNv0gXDTkOOhkhweB3VWhA0kCUo0", { url: "http://localhost:4321" })
+
+  // The visitor's own database: the page runs its own DDL there.
+  await db.sql`create table if not exists todos(
+    id integer primary key,
+    title text not null check (length(title) between 1 and 200),
+    done integer not null default 0
+  ) strict`
+
+  await db.sql`insert into todos(title) values (${"write it"})`
+  db.live`select id, title, done from todos order by id`.on("rows", render)
+</script>
+```
+
+Or keep one object in sync: `push` is an atomic `json_insert` on the server, so two tabs pushing at once both land.
+
+```js
+const app = await db.state({ todos: [], theme: "dark" })
+app.todos.push({ title: "write it", done: false })   // one json_insert on the server
+app.$on("change", render)                              // after this tab's changes and other tabs'
+```
+
+Shared tables hold what visitors see of each other. Rows carry an author the server fills in and checks; only the author can update or delete a row.
+
+```js
+const posts = db.shared.table("posts")
+await posts.insert({ text: "hello" })                 // author is filled in by the server
+posts.orderBy("createdAt", "desc").limit(50).live(render)
+// row.author === db.author for your own rows; only the author can update or delete a row
+```
+
+A write a visitor must not make directly goes through an action: SQL in the app config the server runs with its own rights, given checked input.
+
+```js
+await db.action("submitScore", { score: 4200, name: "ann" })
+// rejects with code CONFLICT and the action's error when its `expect` does not hold
+```
+
+A waitlist needs no JavaScript: a form table takes plain HTML posts.
+
+```html
+<form method="post" action="http://localhost:4321/v1/forms/demo/signups">
+  <input name="email" type="email" required>
+  <input name="_gotcha" tabindex="-1" autocomplete="off" style="display:none">
+  <button>Join</button>
+</form>
+<!-- the server sends the visitor back to this page with ?bql=ok or ?bql=error&reason=email -->
+```
+
 ## Bus consumer
 
 ```ts

@@ -904,6 +904,43 @@ export function renderReferenceMd(p: Parsed = source()): string {
   return p.docs.map((d) => `<!-- ${d.path} -->\n\n${d.text.trim()}\n`).join("\n---\n\n")
 }
 
+/**
+ * A page with no server, from the root README's own blocks: what an agent writing a static
+ * HTML/JS app needs, SQL first, the way that section leads.
+ */
+function webAppMd(p: Parsed = source()): string[] {
+  const where = { doc: "root", section: "A static page with no server" } as const
+  const block = (line: string) => fence(resolveSnippet(line, where, p))
+  return [
+    "## A static page with no server",
+    "",
+    "An app gives a static HTML/JS page a public `pk_` key. The page trades it for a database of its own per visitor, kept in `localStorage` by visitor id, with no backend and no auth to write. `bql mcp` exposes the same setup as MCP tools.",
+    "",
+    block("bunx bql app create demo --config bql.json"),
+    "",
+    "Every `${}` in `db.sql` and `db.live` is a bound parameter. `db.live` calls `rows` with the whole result now and after every commit that changes it.",
+    "",
+    block("const db = await connect("),
+    "",
+    "Or keep one object in sync: `push` is an atomic `json_insert` on the server, so two tabs pushing at once both land.",
+    "",
+    block("const app = await db.state("),
+    "",
+    "Shared tables hold what visitors see of each other. Rows carry an author the server fills in and checks; only the author can update or delete a row.",
+    "",
+    block('const posts = db.shared.table("posts")'),
+    "",
+    "A write a visitor must not make directly goes through an action: SQL in the app config the server runs with its own rights, given checked input.",
+    "",
+    block('await db.action("submitScore"'),
+    "",
+    "A waitlist needs no JavaScript: a form table takes plain HTML posts.",
+    "",
+    block('<form method="post" action='),
+    "",
+  ]
+}
+
 export function renderLlms(m: Model = resolveModel()): string {
   return [
     `# ${site.name}`,
@@ -915,6 +952,7 @@ export function renderLlms(m: Model = resolveModel()): string {
     `Currently \`bql.sh\` v${m.version}, ${site.install.note}. Install with \`${site.install.humans.cmd}\`.`,
     "",
     ...m.capabilities.flatMap(({ cap, demo }) => [`## ${cap.title}`, "", cap.body, "", demoMd(demo), ""]),
+    ...webAppMd(),
     "## Links",
     "",
     `- [Reference](${url("/reference")}): the full README of each package`,
@@ -962,6 +1000,7 @@ export function renderAgents(m: Model = resolveModel()): string {
     "",
     demoMd(by("token")),
     "",
+    ...webAppMd(),
     "## Bus consumer",
     "",
     fence(consumer),

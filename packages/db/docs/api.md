@@ -974,6 +974,18 @@ the whole action back with `409 CONFLICT` and the statement's `error`. A stateme
 The caller is proved by the session's private token, which is `rw` on exactly the database named
 after its `sub`. There is no rate limit on actions yet beyond the server's own limits.
 
+#### `bql mcp`
+
+`bql mcp` is a Model Context Protocol server on stdio for an agent setting up an app: tools
+`list_apps`, `create_app`, `create_shared_table`, `update_app_config` (merges top-level keys),
+`run_sql` and `get_snippet`. It connects like every other remote command, with `BQL_URL` and
+`BQL_ADMIN_KEY` or a saved context. A tool that fails returns its error as text with `isError`.
+
+```json
+{ "mcpServers": { "bql": { "command": "bunx", "args": ["bql", "mcp"],
+                           "env": { "BQL_URL": "http://localhost:4321", "BQL_ADMIN_KEY": "…" } } } }
+```
+
 #### Forms
 
 A table with `form` in the config takes posts from a plain HTML `<form>`, with no JavaScript and
@@ -2016,6 +2028,7 @@ bql app create <id> [--config bql.json]
 bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
 bql app table <id> <table> [--mode a|r|rw]
 bql app table <id> <table> --form
+bql mcp
 bql exec <db> --sql "select 1"
 bql shell <db>
 ```
