@@ -99,7 +99,7 @@ export function json(body: unknown, status = 200, headers?: Record<string, strin
   })
 }
 
-async function readJson<T>(ctx: RouteContext, max: number): Promise<T> {
+export async function readJson<T>(ctx: RouteContext, max: number): Promise<T> {
   // The mounted path: core has the operation's published body schema and enforces it here, with
   // the same `maxBodyBytes` the fallback below uses. An absent body an operation does not require
   // reads as `{}`, exactly as it always has, so a handler that defaults its fields is unchanged.
@@ -121,11 +121,11 @@ async function readJson<T>(ctx: RouteContext, max: number): Promise<T> {
 }
 
 /** The principal behind the request, from `Authorization` or `?token=` (design §6.4). */
-function principalOf(ctx: RouteContext): Promise<Principal> {
+export function principalOf(ctx: RouteContext): Promise<Principal> {
   return ctx.runtime.auth.authenticate(ctx.request)
 }
 
-function requireAdmin(principal: Principal): void {
+export function requireAdmin(principal: Principal): void {
   if (principal.kind !== "admin") {
     throw BqlError.notAuthorized("this route needs the admin key")
   }
@@ -148,7 +148,7 @@ function requireAdmin(principal: Principal): void {
  * Node-local maintenance (`snapshot`, `checkpoint`) and every read route stay open: they act on
  * the replica's copy on purpose.
  */
-function requirePrimary(ctx: RouteContext): void {
+export function requirePrimary(ctx: RouteContext): void {
   if (ctx.runtime.role !== "replica") return
   throw BqlError.notPrimary(ctx.runtime.primaryUrl ?? undefined)
 }

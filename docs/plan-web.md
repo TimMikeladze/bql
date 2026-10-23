@@ -22,8 +22,8 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 | Piece | Built on | Lands in |
 |---|---|---|
 | Append table scope (`a`) | authorizer, `sqlite3_stmt_explain` | **built**: `server/auth.ts`, `sqlite/statement.ts` |
-| Apps and `pk_` keys | catalog, token minting | catalog, `/v1/apps`, `client.admin`, CLI |
-| `/v1/session` | `mintToken`, fork | server routes |
+| Apps and `pk_` keys | catalog, token minting | **built**: catalog, `server/web.ts`, `client.admin`, `bql app` |
+| `/v1/session` | `mintToken`, create | **built**: `server/web.ts` |
 | Browser bundle | `bql.sh/client` | `packages/db/src/web/`, `packages/db/dist/web.js` |
 | `table()` and `state()` | `sql`, `db.live` | `bql.sh/web` |
 | Author column (`bql_sub()`) | new driver function binding | `sqlite/`, `server/auth.ts` |
@@ -54,8 +54,8 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 
 ## Apps and `pk_` keys
 
-- Catalog table `apps(id, name, key, origins, shared_db, config, created_at)`. `key` is
-  `pk_<24 random bytes, base64url>`, stored hashed like token `jti`s.
+- Catalog table `apps(id, key, config, created_at, swept_at)`. `key` is
+  `pk_<24 random bytes, base64url>`, stored as is: it is public, and the admin listing shows it.
 - `config` is the app's `bql.json`, validated on write:
 
 ```json
@@ -84,7 +84,7 @@ in `docs/w<n>-*.md` per piece, as with the other tracks.
 
 - `"read": false` keeps the table out of the visitor's token entirely; only the form endpoint and
   actions write it, and the owner reads it with the admin key.
-- Admin routes: `POST /v1/apps`, `GET/PATCH/DELETE /v1/apps/:id`, `POST /v1/apps/:id/rotate`.
+- Admin routes: `POST /v1/apps`, `GET/PUT/DELETE /v1/apps/:id`, `POST /v1/apps/:id/rotate`.
   CLI: `bql app create|list|push <bql.json>|rotate`. The shared database (`app-<id>-shared`) is
   created with the app. The owner creates its tables with the admin key; config never runs DDL.
 

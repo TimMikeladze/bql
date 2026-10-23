@@ -30,6 +30,12 @@ export interface ServerSection {
   /** Answer CORS preflights and echo the origin, so browser tokens work from anywhere. */
   cors: boolean
   /**
+   * Header holding the client's address when a proxy sits in front (`fly-client-ip`,
+   * `x-forwarded-for`; the first entry is used). Empty, the default, uses the socket's peer. Only
+   * `/v1/session`'s per-IP limit reads it, so set it only when the proxy overwrites the header.
+   */
+  clientIpHeader: string
+  /**
    * Worker threads to shard databases over (`docs/c4-workers.md`). 1, the default, is a single
    * thread and exactly the process this has always been — no worker is spawned and no channel
    * exists. 0 means one per core, capped at 8.
@@ -591,6 +597,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
     node: "bql",
     tenantFromHost: false,
     cors: true,
+    clientIpHeader: "",
     workers: 1,
   },
   data: { storageMode: "disk", deploymentId: "", dir: "./data", maxOpen: 1024, readers: 2, pageSize: 4096, quotaBytes: 0 },

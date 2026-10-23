@@ -103,6 +103,15 @@ export interface PendingReset {
   position: Omit<RecorderPosition, "epoch">
 }
 
+export interface AppRow {
+  id: string
+  /** The public `pk_` key. Not a secret: it is in every page that connects. */
+  key: string
+  config: unknown
+  createdAtMs: number
+  sweptAtMs: number
+}
+
 export interface SnapshotRow {
   db: string
   txid: bigint
@@ -154,6 +163,17 @@ create table if not exists tokens (
   expires_at integer,
   revoked_at integer,
   claims     text
+) strict;
+
+-- Web track: one row per app a static page connects to with its public \`pk_\` key.
+-- \`config\` is the app's validated \`bql.json\`; \`swept_at\` is when its unused visitor
+-- databases were last looked for.
+create table if not exists apps (
+  id         text primary key,
+  key        text not null unique,
+  config     text not null,
+  created_at integer not null,
+  swept_at   integer not null default 0
 ) strict;
 
 create table if not exists snapshots (
@@ -211,6 +231,16 @@ function toRow(raw: RawTenant): TenantRow {
         : null,
     parent: raw.parent,
     forkedAt: raw.forked_at === null ? null : BigInt(raw.forked_at),
+  }
+}
+
+function toAppRow(raw: Record<string, unknown>): AppRow {
+  return {
+    id: raw.id as string,
+    key: raw.key as string,
+    config: JSON.parse(raw.config as string),
+    createdAtMs: raw.created_at as number,
+    sweptAtMs: raw.swept_at as number,
   }
 }
 
@@ -589,6 +619,57 @@ export class Catalog implements RevocationList {
   removeSnapshotRow(db: string, txid: bigint): void {
     this.#assertOpen()
     this.db.run("delete from snapshots where db = ? and txid = ?", [db, txid.toString()])
+  }
+
+  // ── apps (web track) ─────────────────────────────────────────────────────────────────────────
+
+  createApp(app: { id: string; key: string; config: unknown; createdAtMs?: number }): AppRow {
+    this.#assertOpen()
+    const createdAtMs = app.createdAtMs ?? Date.now()
+    this.db.run("insert into apps (id, key, config, created_at) values (?, ?, ?, ?)", [
+      app.id,
+      app.key,
+      JSON.stringify(app.config),
+      createdAtMs,
+    ])
+    return { id: app.id, key: app.key, config: app.config, createdAtMs, sweptAtMs: 0 }
+  }
+
+  getApp(id: string): AppRow | null {
+    this.#assertOpen()
+    const raw = this.db.prepare("select * from apps where id = ?").get(id)
+    return raw ? toAppRow(raw) : null
+  }
+
+  getAppByKey(key: string): AppRow | null {
+    this.#assertOpen()
+    const raw = this.db.prepare("select * from apps where key = ?").get(key)
+    return raw ? toAppRow(raw) : null
+  }
+
+  listApps(): AppRow[] {
+    this.#assertOpen()
+    return this.db.prepare("select * from apps order by id").all().map(toAppRow)
+  }
+
+  setAppConfig(id: string, config: unknown): void {
+    this.#assertOpen()
+    this.db.run("update apps set config = ? where id = ?", [JSON.stringify(config), id])
+  }
+
+  setAppKey(id: string, key: string): void {
+    this.#assertOpen()
+    this.db.run("update apps set key = ? where id = ?", [key, id])
+  }
+
+  setAppSwept(id: string, atMs: number): void {
+    this.#assertOpen()
+    this.db.run("update apps set swept_at = ? where id = ?", [atMs, id])
+  }
+
+  deleteApp(id: string): boolean {
+    this.#assertOpen()
+    return Number(this.db.run("delete from apps where id = ?", [id]).changes) > 0
   }
 
   // ── tokens ───────────────────────────────────────────────────────────────────────────────────

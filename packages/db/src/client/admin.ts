@@ -17,6 +17,8 @@ import { BqlClientError } from "./errors.ts"
 import { HttpClient, readJson, type RawBody } from "./http.ts"
 import { HEADERS } from "./protocol.ts"
 import type {
+  AppConfig,
+  AppInfo,
   BackupGenerations,
   BackupStatus,
   BackupVerification,
@@ -242,5 +244,34 @@ export class Admin {
     return this.#http.json<RevokedToken>(`/v1/tokens/${encodeURIComponent(jti)}`, {
       method: "DELETE",
     })
+  }
+
+  /** Every app on this node. */
+  async apps(): Promise<AppInfo[]> {
+    return (await this.#http.json<{ apps: AppInfo[] }>("/v1/apps")).apps
+  }
+
+  /** An app, its `pk_` key and its shared database `app-{id}-shared`. */
+  createApp(id: string, config: AppConfig = {}): Promise<AppInfo> {
+    return this.#http.json<AppInfo>("/v1/apps", { method: "POST", body: { id, config } })
+  }
+
+  app(id: string): Promise<AppInfo> {
+    return this.#http.json<AppInfo>(`/v1/apps/${seg(id)}`)
+  }
+
+  /** Replaces the config. Sessions already handed out keep their table modes until they expire. */
+  updateApp(id: string, config: AppConfig): Promise<AppInfo> {
+    return this.#http.json<AppInfo>(`/v1/apps/${seg(id)}`, { method: "PUT", body: { config } })
+  }
+
+  /** A new `pk_` key; the old one stops opening sessions at once. */
+  rotateAppKey(id: string): Promise<AppInfo> {
+    return this.#http.json<AppInfo>(`/v1/apps/${seg(id)}/rotate`, { method: "POST" })
+  }
+
+  /** Removes the app and its key. Its databases stay. */
+  deleteApp(id: string): Promise<{ id: string; deleted: boolean }> {
+    return this.#http.json(`/v1/apps/${seg(id)}`, { method: "DELETE" })
   }
 }

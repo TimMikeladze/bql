@@ -27,6 +27,7 @@ import { type Operation, Registry, s, type Schema } from "../core/index.ts"
 import { buildDocument } from "../openapi/index.ts"
 import type { Handler, RouteContext } from "./routes.ts"
 import * as handlers from "./routes.ts"
+import * as web from "./web.ts"
 import type { Surfaces } from "./surfaces.ts"
 import { VERSION } from "./surfaces.ts"
 
@@ -149,6 +150,21 @@ const ChangeEvent = s
     changes: s.array(RowChange),
   })
   .id("ChangeEvent")
+
+/** An app's `bql.json`, checked by `parseAppConfig` rather than here so the message names the key. */
+const AppConfigBody = s
+  .record(s.unknown())
+  .describe("`origins`, `tables` (`{ mode: r|a|rw, read? }` per table) and `session` (`ttlMs`, `newVisitorsPerMinute`).")
+
+const App = s
+  .object({
+    id: s.string(),
+    key: s.string().describe("The public `pk_` key. It goes in the page; it is not a secret."),
+    sharedDb: s.string(),
+    config: s.record(s.unknown()),
+    createdAtMs: s.int(),
+  })
+  .id("App")
 
 /** Errors any authenticated route can produce, before it has done anything of its own. */
 const COMMON = ["BAD_REQUEST", "UNAUTHENTICATED", "NOT_AUTHORIZED"] as const
@@ -768,6 +784,104 @@ const SPECS: Spec[] = [
     response: s.object({ jti: s.string(), revoked: s.boolean() }),
     errors: COMMON,
     handler: handlers.revokeToken,
+  },
+
+  // ── apps and sessions (docs/plan-web.md) ────────────────────────────────────────────────────
+  {
+    id: "createApp",
+    method: "post",
+    path: "/v1/apps",
+    summary: "Create an app and its public pk_ key",
+    description:
+      "Also creates the app's shared database, `app-{id}-shared`, when it does not exist. " +
+      "`config` is the app's `bql.json`; unknown keys are refused.",
+    tags: ["apps"],
+    security: "admin",
+    body: s.object({ id: s.string(), config: AppConfigBody.optional() }),
+    status: 201,
+    response: App,
+    errors: [...COMMON, "CONFLICT", "NOT_PRIMARY"],
+    handler: web.createApp,
+  },
+  {
+    id: "listApps",
+    method: "get",
+    path: "/v1/apps",
+    summary: "List apps",
+    tags: ["apps"],
+    security: "admin",
+    response: s.object({ apps: s.array(App) }),
+    errors: COMMON,
+    handler: web.listApps,
+  },
+  {
+    id: "getApp",
+    method: "get",
+    path: "/v1/apps/:id",
+    summary: "One app",
+    tags: ["apps"],
+    security: "admin",
+    response: App,
+    errors: [...COMMON, "NOT_FOUND"],
+    handler: web.getApp,
+  },
+  {
+    id: "updateApp",
+    method: "put",
+    path: "/v1/apps/:id",
+    summary: "Replace an app's config",
+    description: "Sessions minted from now on carry the new table modes; existing ones keep theirs until they expire.",
+    tags: ["apps"],
+    security: "admin",
+    body: s.object({ config: AppConfigBody }),
+    response: App,
+    errors: [...COMMON, "NOT_FOUND"],
+    handler: web.updateApp,
+  },
+  {
+    id: "rotateAppKey",
+    method: "post",
+    path: "/v1/apps/:id/rotate",
+    summary: "Replace an app's pk_ key",
+    description: "The old key stops opening sessions at once. Tokens it already handed out run to their expiry.",
+    tags: ["apps"],
+    security: "admin",
+    response: App,
+    errors: [...COMMON, "NOT_FOUND"],
+    handler: web.rotateAppKey,
+  },
+  {
+    id: "deleteApp",
+    method: "delete",
+    path: "/v1/apps/:id",
+    summary: "Delete an app",
+    description: "Removes the app and its key. Its shared and visitor databases are left in place.",
+    tags: ["apps"],
+    security: "admin",
+    response: s.object({ id: s.string(), deleted: s.boolean() }),
+    errors: [...COMMON, "NOT_FOUND"],
+    handler: web.deleteApp,
+  },
+  {
+    id: "createSession",
+    method: "post",
+    path: "/v1/session",
+    summary: "Trade an app key and a visitor id for tokens",
+    description:
+      "No bearer token: the `pk_` key in the body is the credential, and `Origin` must match the " +
+      "app's `origins`. Creates the visitor's database on first use, limited per IP by " +
+      "`session.newVisitorsPerMinute`. `shared` is null when the app declares no visible tables.",
+    tags: ["apps"],
+    security: "none",
+    body: s.object({ key: s.string(), visitor: s.string() }),
+    status: 201,
+    response: s.object({
+      private: s.object({ db: s.string(), token: s.string() }),
+      shared: s.union([s.object({ db: s.string(), token: s.string() }), s.null()]),
+      exp: s.int().describe("Expiry of both tokens, seconds since the epoch."),
+    }),
+    errors: [...COMMON, "TOO_MANY_REQUESTS", "NOT_PRIMARY", "TOO_MANY_OPEN"],
+    handler: web.createSession,
   },
 
   // ── operations ──────────────────────────────────────────────────────────────────────────────

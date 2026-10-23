@@ -21,7 +21,14 @@ import { createClient, type Client } from "./client/index.ts"
 import { BqlClientError } from "./client/errors.ts"
 import { decodeRows, type JsRow } from "./client/values.ts"
 import { diffSchema, formatSchemaDiff } from "./client/diff.ts"
-import type { CheckpointMode, QueryResult, Revision, TableScope } from "./client/protocol.ts"
+import type {
+  AppConfig,
+  AppInfo,
+  CheckpointMode,
+  QueryResult,
+  Revision,
+  TableScope,
+} from "./client/protocol.ts"
 import { SocketClient } from "./client/socket.ts"
 import { startServer } from "./server/app.ts"
 import { initializeObjectServer, serveObjectProcess } from "./cloud/startup.ts"
@@ -63,7 +70,9 @@ bql — SQLite as a multi-tenant database server (design §9.3)
   bql checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE]
   bql promote <db> [--force]
   bql cluster [--watch]
-  bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,users:rw']
+  bql token --db <name> [--scope ro|rw] [--ttl 30d] [--tables 'todos:r,posts:a,users:rw']
+  bql app create <id> [--config bql.json]   an app for a static page: a pk_ key and app-<id>-shared
+  bql app list | show <id> | push <id> <bql.json> | rotate <id> | delete <id>
   bql exec <db> --sql "select 1"
   bql shell <db>
   bql bus <command>   the message bus — \`bql bus help\` lists its commands
@@ -761,6 +770,60 @@ async function token(args: ParsedArgs, remote: Remote): Promise<void> {
   out(remote, body, body.token)
 }
 
+/** `docs/plan-web.md`: apps, their `pk_` keys and their `bql.json`. */
+async function app(args: ParsedArgs, remote: Remote): Promise<void> {
+  const [, sub, id, file] = args.positional
+  const admin = remote.client.admin
+  const line = (one: AppInfo) => `${one.id}  ${one.key}  shared=${one.sharedDb}`
+  const readConfig = async (path: string): Promise<AppConfig> => {
+    try {
+      return (await Bun.file(path).json()) as AppConfig
+    } catch (err) {
+      throw new CliError(`cannot read ${path}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  const need = (what: string): string => {
+    if (!id) throw new CliError(`app ${what} needs an app id`)
+    return id
+  }
+  switch (sub) {
+    case "create": {
+      const config = str(args, "config")
+      const created = await admin.createApp(need("create"), config ? await readConfig(config) : {})
+      out(remote, created, line(created))
+      return
+    }
+    case "list": {
+      const apps = await admin.apps()
+      out(remote, { apps }, apps.map(line).join("\n"))
+      return
+    }
+    case "show": {
+      const one = await admin.app(need("show"))
+      out(remote, one, JSON.stringify(one, null, 2))
+      return
+    }
+    case "push": {
+      if (!file) throw new CliError("app push needs <id> <bql.json>")
+      const pushed = await admin.updateApp(need("push"), await readConfig(file))
+      out(remote, pushed, line(pushed))
+      return
+    }
+    case "rotate": {
+      const rotated = await admin.rotateAppKey(need("rotate"))
+      out(remote, rotated, line(rotated))
+      return
+    }
+    case "delete": {
+      const deleted = await admin.deleteApp(need("delete"))
+      out(remote, deleted, `${deleted.id} deleted; its databases are left in place`)
+      return
+    }
+    default:
+      throw new CliError("app takes create, list, show, push, rotate or delete")
+  }
+}
+
 /**
  * The REPL of design §9.3, over the WebSocket protocol of §7. One statement per line; a line that
  * does not end in `;` is continued, so a statement can be typed across several.
@@ -965,6 +1028,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         return 0
       case "token":
         await token(args, remote)
+        return 0
+      case "app":
+        await app(args, remote)
         return 0
       case "shell":
         await shell(args, remote)

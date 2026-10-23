@@ -166,6 +166,31 @@ BQL_ADMIN_KEY=<the admin key> bun token.ts
 `scope` is `ro` or `rw`, `dbs` takes globs (`app-*`), and `tables` narrows a token to single tables:
 `r`, `a` (append: read and insert, never update or delete) or `rw`.
 
+### A static page with no server
+
+An app gives a page a public `pk_` key. `/v1/session` trades it, plus a visitor id the page keeps,
+for a token on that visitor's own database and one on the app's shared tables:
+
+```sh
+echo '{ "origins": ["http://localhost:*"], "tables": { "scores": { "mode": "a" } } }' > bql.json
+bunx bql app create demo --config bql.json
+# demo  pk_ie1VLTyOtKmbrQ1B02WSUumbJGJiqCiJ  shared=app-demo-shared
+bunx bql exec app-demo-shared --sql "create table scores(id integer primary key, score integer)"
+```
+
+```js
+// in the page; the server checks Origin against the app's origins
+const visitor = localStorage.bqlVisitor ??= crypto.randomUUID().replaceAll("-", "")
+const session = await fetch("http://localhost:4321/v1/session", {
+  method: "POST",
+  body: JSON.stringify({ key: "pk_ie1VLTyOtKmbrQ1B02WSUumbJGJiqCiJ", visitor }),
+}).then((r) => r.json())
+// session.private: rw on app-demo-u-<hash>, the page creates its own tables there
+// session.shared:  app-demo-shared, where `scores` is append-only
+```
+
+[packages/db/docs/api.md](packages/db/docs/api.md#apps-and-sessions) has the config and the limits.
+
 ### Next
 
 - [packages/db](packages/db/README.md) is the database's full documentation: replicas, promotion,

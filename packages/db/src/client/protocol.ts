@@ -782,3 +782,21 @@ export interface RevokedToken {
   jti: string
   revoked: boolean
 }
+
+/** An app's `bql.json` (`docs/plan-web.md`). Every field is optional; the server fills defaults. */
+export interface AppConfig {
+  /** `https://acme.app`, `https://*.acme.app`, `http://localhost:*`, or `*`. */
+  origins?: string[]
+  /** Shared-database tables visitors see. `read: false` keeps one out of their tokens. */
+  tables?: Record<string, { mode: TableScope; read?: boolean }>
+  session?: { ttlMs?: number; newVisitorsPerMinute?: number }
+}
+
+export interface AppInfo {
+  id: string
+  /** The public `pk_` key. It goes in the page; it is not a secret. */
+  key: string
+  sharedDb: string
+  config: Required<AppConfig>
+  createdAtMs: number
+}
