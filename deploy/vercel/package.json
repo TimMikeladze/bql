@@ -3,5 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": { "test": "bun test", "storage:smoke": "bun run test/storage-smoke.ts" },
-  "dependencies": { "@vercel/blob": "2.7.0" }
+  "dependencies": { "@vercel/blob": "2.7.0" },
+  "overrides": { "zod": "4.6.7" }
 }
